@@ -1,0 +1,17 @@
+[workspace]
+members = ["crates/lyst"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", default-features = false, features = [
+    "wayland",
+    "x11",
+] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", default-features = false, features = [
+    "wayland",
+    "x11",
+] }
