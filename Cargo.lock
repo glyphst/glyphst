@@ -2150,6 +2150,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-template"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui_platform",
+]
+
+[[package]]
 name = "gpui_linux"
 version = "0.1.0"
 source = "git+https://github.com/zed-industries/zed#6aa90e750ded06c684393ab4cccf159c731f58b6"
@@ -3107,14 +3115,6 @@ dependencies = [
  "float_next_after",
  "lyon_path",
  "num-traits",
-]
-
-[[package]]
-name = "lyst"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "gpui_platform",
 ]
 
 [[package]]

@@ -1,3 +1,65 @@
-# Lyst
+# GPUI Template
 
-Lyst is a GUI file manager that combines the three-column, keyboard-driven workflow of yazi and ranger with integrated AI support, either local or bring-your-own-key (BYOK).
+A small Rust starter project for building desktop applications with
+[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
+
+## Use this template
+
+1. Create a new repository from this template on GitHub.
+2. Rename the package in `crates/app/Cargo.toml`.
+3. Replace the starter UI in `crates/app/src/main.rs`.
+4. Update this README with your application details.
+
+After pushing this repository to GitHub, enable **Settings → General → Template
+repository** so it can be used from the **Use this template** button.
+
+## Prerequisites
+
+- Rust stable with the 2024 edition.
+- Linux GPUI system dependencies. The included `flake.nix` provides these.
+- Optional: Nix for the development shell, which includes the Linux system
+  dependencies and local tooling.
+- Optional without Nix: [`prek`](https://github.com/j178/prek), `cargo-audit`,
+  and the GPUI Linux system dependencies installed manually.
+
+## Getting started
+
+```sh
+# Optional: enter the dev shell
+nix develop
+
+# Run the starter app
+cargo run
+```
+
+## Development workflow
+
+```sh
+cargo fmt --all
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --all-features
+cargo audit
+```
+
+## Pre-commit hooks
+
+Install hooks once, preferably from inside `nix develop`:
+
+```sh
+prek install
+```
+
+The hooks run TOML checks, EOF cleanup, secret detection, Rust formatting,
+Clippy, and `cargo audit`; see `prek.toml`.
+
+## Project structure
+
+```text
+.
+├── .cargo/audit.toml       cargo-audit policy
+├── .github/workflows/ci.yml
+├── Cargo.toml              Cargo workspace
+├── crates/app              Starter GPUI application
+├── flake.nix               Optional Nix development shell
+└── prek.toml               Pre-commit hook configuration
+```

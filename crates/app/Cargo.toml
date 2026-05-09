@@ -1,5 +1,5 @@
 [package]
-name = "lyst"
+name = "gpui-template"
 version.workspace = true
 edition.workspace = true
 

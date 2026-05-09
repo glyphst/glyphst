@@ -4,9 +4,9 @@ use gpui::{
 };
 use gpui_platform::application;
 
-struct HelloWorld;
+struct TemplateApp;
 
-impl Render for HelloWorld {
+impl Render for TemplateApp {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -16,7 +16,7 @@ impl Render for HelloWorld {
             .bg(rgb(0x1f2937))
             .text_color(rgb(0xf9fafb))
             .text_xl()
-            .child("Hello, GPUI!")
+            .child("Welcome to GPUI")
     }
 }
 
@@ -29,7 +29,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| HelloWorld),
+            |_, cx| cx.new(|_| TemplateApp),
         )
         .expect("failed to open window");
 

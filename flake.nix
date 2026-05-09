@@ -61,10 +61,12 @@
         {
           default = pkgs.mkShell {
             packages = with pkgs; [
+              cargo-audit
               clang
               lld
               mold
               pkg-config
+              prek
               rust-analyzer
               rustToolchain
             ];
