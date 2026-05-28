@@ -1,35 +1,30 @@
-use gpui::{
-    App, Bounds, Context, IntoElement, Render, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size,
-};
+use std::path::PathBuf;
+
+use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
 
-struct TemplateApp;
+mod pdf_view;
 
-impl Render for TemplateApp {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .bg(rgb(0x1f2937))
-            .text_color(rgb(0xf9fafb))
-            .text_xl()
-            .child("Welcome to GPUI")
-    }
-}
+use pdf_view::PdfView;
 
 fn main() {
-    application().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(480.0), px(320.0)), cx);
+    let path = std::env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            eprintln!("Usage: cargo run -- <path-to-pdf>");
+            std::process::exit(2);
+        });
+
+    application().run(move |cx: &mut App| {
+        let bounds = Bounds::centered(None, size(px(800.0), px(1000.0)), cx);
 
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| TemplateApp),
+            |_, cx| cx.new(|_| PdfView::open(&path).expect("failed to open PDF")),
         )
         .expect("failed to open window");
 

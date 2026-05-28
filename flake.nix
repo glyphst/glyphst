@@ -54,6 +54,7 @@
             libxfixes
             libxi
             libxrandr
+            mupdf
             vulkan-loader
             wayland
           ];
@@ -69,6 +70,7 @@
               prek
               rust-analyzer
               rustToolchain
+              unzip
             ];
 
             buildInputs = linuxLibraries;

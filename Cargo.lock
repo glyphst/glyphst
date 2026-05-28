@@ -644,6 +644,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.11.1",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.13.0",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 2.1.2",
+ "shlex",
+ "syn",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1209,6 +1227,18 @@ dependencies = [
  "block",
  "cfg-if",
  "core-foundation 0.10.0",
+ "libc",
+]
+
+[[package]]
+name = "core-text"
+version = "20.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9d2790b5c08465d49f8dc05c8bcae9fea467855947db39b0f8145c091aaced5"
+dependencies = [
+ "core-foundation 0.9.4",
+ "core-graphics 0.23.2",
+ "foreign-types",
  "libc",
 ]
 
@@ -1783,6 +1813,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "font-kit"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c7e611d49285d4c4b2e1727b72cf05353558885cc5252f93707b845dfcaf3d3"
+dependencies = [
+ "bitflags 2.11.1",
+ "byteorder",
+ "core-foundation 0.9.4",
+ "core-graphics 0.23.2",
+ "core-text 20.1.0",
+ "dirs",
+ "dwrote",
+ "float-ord",
+ "freetype-sys",
+ "lazy_static",
+ "libc",
+ "log",
+ "pathfinder_geometry",
+ "pathfinder_simd",
+ "walkdir",
+ "winapi",
+ "yeslogic-fontconfig-sys",
+]
+
+[[package]]
 name = "font-types"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2192,7 +2247,7 @@ dependencies = [
  "anyhow",
  "async-channel 2.5.0",
  "async-task",
- "bindgen",
+ "bindgen 0.71.1",
  "bitflags 2.11.1",
  "block",
  "cbindgen",
@@ -2203,7 +2258,7 @@ dependencies = [
  "core-foundation 0.10.0",
  "core-foundation-sys",
  "core-graphics 0.24.0",
- "core-text",
+ "core-text 21.0.0",
  "core-video",
  "ctor",
  "derive_more",
@@ -2267,8 +2322,12 @@ dependencies = [
 name = "gpui-template"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "gpui",
  "gpui_platform",
+ "image",
+ "mupdf",
+ "smallvec",
 ]
 
 [[package]]
@@ -2338,7 +2397,7 @@ dependencies = [
  "core-foundation 0.10.0",
  "core-foundation-sys",
  "core-graphics 0.24.0",
- "core-text",
+ "core-text 21.0.0",
  "core-video",
  "ctor",
  "derive_more",
@@ -3297,7 +3356,7 @@ version = "0.1.0"
 source = "git+https://github.com/zed-industries/zed#58f84cf04101b095ddc02d4fbd511523e39710d6"
 dependencies = [
  "anyhow",
- "bindgen",
+ "bindgen 0.71.1",
  "core-foundation 0.10.0",
  "core-video",
  "ctor",
@@ -3369,6 +3428,33 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "mupdf"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9849d2d052e60be164dc812d1ec78cb79d80fcc25cd35ffee1e0fbee800afc3a"
+dependencies = [
+ "bitflags 2.11.1",
+ "font-kit",
+ "mupdf-sys",
+ "once_cell",
+ "percent-encoding",
+ "zerocopy",
+]
+
+[[package]]
+name = "mupdf-sys"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7de3fc0a27678f61a07fd2d6415fbddf577c417fa5b287f7a7b708183ecba955"
+dependencies = [
+ "bindgen 0.72.1",
+ "cc",
+ "pkg-config",
+ "regex",
+ "zerocopy",
 ]
 
 [[package]]
@@ -7250,7 +7336,7 @@ dependencies = [
  "byteorder",
  "core-foundation 0.10.0",
  "core-graphics 0.24.0",
- "core-text",
+ "core-text 21.0.0",
  "dirs",
  "dwrote",
  "float-ord",
