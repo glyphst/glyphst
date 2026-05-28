@@ -1,3 +1,8 @@
-It is a GPUI starter template and uses the latest GPUI crate from Zed's git repository.
-To see how GPUI can be used to build applications, see Zed's source code at `~/proj/probe/zed`.
-For dependency crate source code, see `~/.cargo`.
+# Project Information
+
+A contracted PDF viewer built using GPUI.
+
+## Reference Projects
+
+You can look into the projects in `probe` directory for inspiration. Currently there are 
+`zed` (for GPUI usage mainly), `sioyek` pdf viewer and `zathura` pdf viewer.
