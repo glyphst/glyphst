@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
     Bounds, ClipboardItem, Context, Corners, FocusHandle, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollWheelEvent,
-    Window, canvas, div, fill, point, prelude::*, px, rgb, rgba, size,
+    Task, Window, canvas, div, fill, point, prelude::*, px, rgb, rgba, size,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
@@ -21,9 +21,12 @@ const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 8.0;
 const ZOOM_STEP: f32 = 1.25;
 const SCROLL_LINE_MULTIPLIER: f32 = 20.0;
+const MAX_CACHED_RENDERS: usize = 5;
 
 struct CachedRender {
     physical_width: u32,
+    render_scale: f32,
+    last_access: u64,
     image: Arc<RenderImage>,
 }
 
@@ -47,7 +50,7 @@ struct Selection {
 }
 
 pub struct PdfView {
-    display_list: mupdf::DisplayList,
+    display_list: Arc<mupdf::DisplayList>,
     page_bounds: mupdf::Rect,
     page_width: f32,
     page_height: f32,
@@ -56,7 +59,10 @@ pub struct PdfView {
     dragging: bool,
     image_bounds: Option<Bounds<Pixels>>,
     focus_handle: FocusHandle,
-    cached: Option<CachedRender>,
+    cached: Vec<CachedRender>,
+    cache_access_counter: u64,
+    pending_render: Option<Task<()>>,
+    pending_physical_width: Option<u32>,
     zoom: f32,
 }
 
@@ -76,7 +82,7 @@ impl PdfView {
         let page_width = page_bounds.x1 - page_bounds.x0;
         let page_height = page_bounds.y1 - page_bounds.y0;
 
-        let display_list = mupdf::DisplayList::new(page_bounds)?;
+        let display_list = Arc::new(mupdf::DisplayList::new(page_bounds)?);
         let device = Device::from_display_list(&display_list)?;
         page.run(&device, &Matrix::IDENTITY)?;
 
@@ -92,7 +98,10 @@ impl PdfView {
             dragging: false,
             image_bounds: None,
             focus_handle,
-            cached: None,
+            cached: Vec::new(),
+            cache_access_counter: 0,
+            pending_render: None,
+            pending_physical_width: None,
             zoom: 1.0,
         })
     }
@@ -127,38 +136,164 @@ impl PdfView {
         Ok(glyphs)
     }
 
-    fn paint_data(&mut self, logical_width: Pixels, scale_factor: f32) -> Result<PaintData> {
+    fn paint_data(
+        &mut self,
+        logical_width: Pixels,
+        scale_factor: f32,
+        cx: &mut Context<Self>,
+    ) -> Result<PaintData> {
         let logical_width = logical_width.as_f32().max(1.0);
         let physical_width = (logical_width * scale_factor).ceil().max(1.0) as u32;
 
-        if self
-            .cached
-            .as_ref()
-            .is_none_or(|cached| cached.physical_width != physical_width)
-        {
-            let image = self.render_first_page(physical_width)?;
-            self.cached = Some(CachedRender {
-                physical_width,
-                image,
+        if let Some(index) = self.exact_cached_render_index(physical_width) {
+            return Ok(PaintData {
+                image: self.touch_cached_render(index),
+                aspect_ratio: self.page_height / self.page_width,
             });
         }
 
-        let image = self
-            .cached
-            .as_ref()
-            .context("render cache was not populated")?
-            .image
-            .clone();
+        if self.cached.is_empty() {
+            let image = Self::render_first_page(
+                &self.display_list,
+                self.page_bounds,
+                self.page_width,
+                self.page_height,
+                physical_width,
+            )?;
+            self.insert_cached_render(physical_width, image);
+        } else {
+            self.start_background_render(physical_width, cx);
+        }
+
+        let index = self
+            .closest_cached_render_index(physical_width)
+            .context("render cache was not populated")?;
 
         Ok(PaintData {
-            image,
+            image: self.touch_cached_render(index),
             aspect_ratio: self.page_height / self.page_width,
         })
     }
 
-    fn render_first_page(&self, physical_width: u32) -> Result<Arc<RenderImage>> {
-        let zoom = physical_width as f32 / self.page_width;
-        let physical_height = (self.page_height * zoom).ceil().max(1.0) as i32;
+    fn exact_cached_render_index(&self, physical_width: u32) -> Option<usize> {
+        self.cached
+            .iter()
+            .position(|cached| cached.physical_width == physical_width)
+    }
+
+    fn closest_cached_render_index(&self, physical_width: u32) -> Option<usize> {
+        let render_scale = physical_width as f32 / self.page_width;
+        self.cached
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                (a.render_scale - render_scale)
+                    .abs()
+                    .total_cmp(&(b.render_scale - render_scale).abs())
+            })
+            .map(|(index, _)| index)
+    }
+
+    fn touch_cached_render(&mut self, index: usize) -> Arc<RenderImage> {
+        let last_access = self.next_cache_access();
+        self.cached[index].last_access = last_access;
+        self.cached[index].image.clone()
+    }
+
+    fn insert_cached_render(&mut self, physical_width: u32, image: Arc<RenderImage>) {
+        let last_access = self.next_cache_access();
+        let render_scale = physical_width as f32 / self.page_width;
+
+        if let Some(index) = self.exact_cached_render_index(physical_width) {
+            self.cached[index] = CachedRender {
+                physical_width,
+                render_scale,
+                last_access,
+                image,
+            };
+        } else {
+            self.cached.push(CachedRender {
+                physical_width,
+                render_scale,
+                last_access,
+                image,
+            });
+        }
+
+        while self.cached.len() > MAX_CACHED_RENDERS {
+            if let Some(index) = self
+                .cached
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, cached)| cached.last_access)
+                .map(|(index, _)| index)
+            {
+                self.cached.remove(index);
+            }
+        }
+    }
+
+    fn next_cache_access(&mut self) -> u64 {
+        self.cache_access_counter = self.cache_access_counter.wrapping_add(1);
+        self.cache_access_counter
+    }
+
+    fn start_background_render(&mut self, physical_width: u32, cx: &mut Context<Self>) {
+        if self.pending_physical_width == Some(physical_width) {
+            return;
+        }
+
+        self.pending_render = None;
+        self.pending_physical_width = Some(physical_width);
+
+        let display_list = self.display_list.clone();
+        let page_bounds = self.page_bounds;
+        let page_width = self.page_width;
+        let page_height = self.page_height;
+
+        self.pending_render = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    Self::render_first_page(
+                        &display_list,
+                        page_bounds,
+                        page_width,
+                        page_height,
+                        physical_width,
+                    )
+                })
+                .await;
+
+            _ = this
+                .update(cx, |this, cx| {
+                    if this.pending_physical_width != Some(physical_width) {
+                        return;
+                    }
+
+                    this.pending_render = None;
+                    this.pending_physical_width = None;
+
+                    match result {
+                        Ok(image) => {
+                            this.insert_cached_render(physical_width, image);
+                            cx.notify();
+                        }
+                        Err(error) => eprintln!("failed to render PDF: {error:#}"),
+                    }
+                })
+                .ok();
+        }));
+    }
+
+    fn render_first_page(
+        display_list: &DisplayList,
+        page_bounds: Rect,
+        page_width: f32,
+        page_height: f32,
+        physical_width: u32,
+    ) -> Result<Arc<RenderImage>> {
+        let zoom = physical_width as f32 / page_width;
+        let physical_height = (page_height * zoom).ceil().max(1.0) as i32;
         let physical_width = physical_width as i32;
 
         let mut pixmap = Pixmap::new_with_w_h(
@@ -174,12 +309,12 @@ impl PdfView {
             0.0,
             0.0,
             zoom,
-            -self.page_bounds.x0 * zoom,
-            -self.page_bounds.y0 * zoom,
+            -page_bounds.x0 * zoom,
+            -page_bounds.y0 * zoom,
         );
         {
             let device = Device::from_pixmap(&pixmap)?;
-            self.display_list
+            display_list
                 .run(&device, &matrix, Rect::INF)
                 .context("failed to render first PDF page")?;
         }
@@ -591,9 +726,13 @@ impl Render for PdfView {
             .child(
                 canvas(
                     move |bounds, window, cx| {
-                        prepaint_view.update(cx, |this, _| {
-                            this.paint_data(bounds.size.width * this.zoom, window.scale_factor())
-                                .expect("failed to render PDF")
+                        prepaint_view.update(cx, |this, cx| {
+                            this.paint_data(
+                                bounds.size.width * this.zoom,
+                                window.scale_factor(),
+                                cx,
+                            )
+                            .expect("failed to render PDF")
                         })
                     },
                     move |bounds, paint_data, window, cx| {
