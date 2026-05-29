@@ -3,17 +3,24 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
     Bounds, ClipboardItem, Context, Corners, FocusHandle, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Point as GpuiPoint, Render, RenderImage, Window, canvas, div, fill,
-    point, prelude::*, px, rgb, rgba, size,
+    MouseMoveEvent, Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollWheelEvent,
+    Window, canvas, div, fill, point, prelude::*, px, rgb, rgba, size,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
 use mupdf::{Colorspace, Device, DisplayList, Matrix, Pixmap, Quad, Rect, TextPageFlags};
 use smallvec::smallvec;
 
-gpui::actions!(pdf_viewer, [CopySelection, SelectAll]);
+gpui::actions!(
+    pdf_viewer,
+    [CopySelection, SelectAll, ZoomIn, ZoomOut, ResetZoom]
+);
 
 const INITIAL_SELECTION_TOLERANCE_PX: f32 = 24.0;
+const MIN_ZOOM: f32 = 0.25;
+const MAX_ZOOM: f32 = 8.0;
+const ZOOM_STEP: f32 = 1.25;
+const SCROLL_LINE_MULTIPLIER: f32 = 20.0;
 
 struct CachedRender {
     physical_width: u32,
@@ -50,6 +57,7 @@ pub struct PdfView {
     image_bounds: Option<Bounds<Pixels>>,
     focus_handle: FocusHandle,
     cached: Option<CachedRender>,
+    zoom: f32,
 }
 
 impl PdfView {
@@ -85,6 +93,7 @@ impl PdfView {
             image_bounds: None,
             focus_handle,
             cached: None,
+            zoom: 1.0,
         })
     }
 
@@ -375,6 +384,49 @@ impl PdfView {
         });
     }
 
+    fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        if (zoom - self.zoom).abs() > f32::EPSILON {
+            self.zoom = zoom;
+            cx.notify();
+        }
+    }
+
+    fn zoom_in(&mut self, cx: &mut Context<Self>) {
+        self.set_zoom(self.zoom * ZOOM_STEP, cx);
+    }
+
+    fn zoom_out(&mut self, cx: &mut Context<Self>) {
+        self.set_zoom(self.zoom / ZOOM_STEP, cx);
+    }
+
+    fn reset_zoom(&mut self, cx: &mut Context<Self>) {
+        self.set_zoom(1.0, cx);
+    }
+
+    fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        if !event.modifiers.control {
+            return;
+        }
+
+        let delta = match event.delta {
+            ScrollDelta::Pixels(pixels) => pixels.y.as_f32(),
+            ScrollDelta::Lines(lines) => lines.y * SCROLL_LINE_MULTIPLIER,
+        };
+
+        if delta == 0.0 {
+            return;
+        }
+
+        let factor = if delta > 0.0 {
+            1.0 + delta.abs() * 0.01
+        } else {
+            1.0 / (1.0 + delta.abs() * 0.01)
+        };
+
+        self.set_zoom(self.zoom * factor, cx);
+    }
+
     fn selection_highlights(&self, image_bounds: Bounds<Pixels>) -> Vec<Bounds<Pixels>> {
         let Some((start, end)) = self.selection_bounds() else {
             return Vec::new();
@@ -481,6 +533,18 @@ impl Render for PdfView {
                 this.select_all();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                this.zoom_in(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                this.zoom_out(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ResetZoom, _, cx| {
+                this.reset_zoom(cx);
+            }))
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                this.handle_scroll_wheel(event, cx);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -528,14 +592,18 @@ impl Render for PdfView {
                 canvas(
                     move |bounds, window, cx| {
                         prepaint_view.update(cx, |this, _| {
-                            this.paint_data(bounds.size.width, window.scale_factor())
+                            this.paint_data(bounds.size.width * this.zoom, window.scale_factor())
                                 .expect("failed to render PDF")
                         })
                     },
                     move |bounds, paint_data, window, cx| {
-                        let image_height = bounds.size.width * paint_data.aspect_ratio;
-                        let image_bounds =
-                            Bounds::new(bounds.origin, size(bounds.size.width, image_height));
+                        let image_width = paint_view.read(cx).zoom * bounds.size.width;
+                        let image_height = image_width * paint_data.aspect_ratio;
+                        let origin = point(
+                            bounds.origin.x + (bounds.size.width - image_width) / 2.0,
+                            bounds.origin.y,
+                        );
+                        let image_bounds = Bounds::new(origin, size(image_width, image_height));
 
                         let highlights = paint_view.update(cx, |this, _| {
                             this.image_bounds = Some(image_bounds);

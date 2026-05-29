@@ -5,7 +5,7 @@ use gpui_platform::application;
 
 mod pdf_view;
 
-use pdf_view::{CopySelection, PdfView, SelectAll};
+use pdf_view::{CopySelection, PdfView, ResetZoom, SelectAll, ZoomIn, ZoomOut};
 
 fn main() {
     let path = std::env::args_os()
@@ -22,6 +22,10 @@ fn main() {
             KeyBinding::new("cmd-c", CopySelection, None),
             KeyBinding::new("ctrl-a", SelectAll, None),
             KeyBinding::new("cmd-a", SelectAll, None),
+            KeyBinding::new("+", ZoomIn, None),
+            KeyBinding::new("shift-=", ZoomIn, None),
+            KeyBinding::new("-", ZoomOut, None),
+            KeyBinding::new("=", ResetZoom, None),
         ]);
 
         let bounds = Bounds::centered(None, size(px(800.0), px(1000.0)), cx);
