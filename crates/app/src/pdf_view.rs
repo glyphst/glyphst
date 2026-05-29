@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
     Bounds, ClipboardItem, Context, Corners, FocusHandle, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollWheelEvent,
-    Task, Window, canvas, div, fill, point, prelude::*, px, rgb, rgba, size,
+    SharedString, Task, Window, canvas, div, fill, point, prelude::*, px, rgb, rgba, size,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
@@ -77,6 +77,7 @@ struct Selection {
 }
 
 pub struct PdfView {
+    file_name: SharedString,
     pages: Vec<PdfPage>,
     max_page_width: f32,
     content_height_doc: f32,
@@ -96,6 +97,14 @@ pub struct PdfView {
 
 impl PdfView {
     pub fn open(path: impl AsRef<std::path::Path>, focus_handle: FocusHandle) -> Result<Self> {
+        let file_name = path
+            .as_ref()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Untitled")
+            .to_string()
+            .into();
+
         let document = mupdf::Document::open(
             path.as_ref()
                 .to_str()
@@ -148,6 +157,7 @@ impl PdfView {
         let page_image_bounds = (0..pages.len()).map(|_| None).collect();
 
         Ok(Self {
+            file_name,
             pages,
             max_page_width,
             content_height_doc,
@@ -743,6 +753,22 @@ impl PdfView {
         self.set_zoom(1.0, cx);
     }
 
+    fn current_page(&self) -> usize {
+        let scale = self.effective_scale();
+        let center_doc = self.scroll_y_doc + self.viewport_height / (2.0 * scale);
+        let mut current = 0;
+
+        for (idx, page) in self.pages.iter().enumerate() {
+            if center_doc >= page.offset_y {
+                current = idx;
+            } else {
+                break;
+            }
+        }
+
+        current + 1
+    }
+
     fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         let delta = match event.delta {
             ScrollDelta::Pixels(pixels) => pixels.y.as_f32(),
@@ -878,6 +904,8 @@ impl Render for PdfView {
 
         div()
             .size_full()
+            .flex()
+            .flex_col()
             .bg(rgb(0x202020))
             .cursor_text()
             .track_focus(&self.focus_handle)
@@ -946,34 +974,64 @@ impl Render for PdfView {
                 }),
             )
             .child(
-                canvas(
-                    move |bounds, window, cx| {
-                        prepaint_view.update(cx, |this, cx| {
-                            this.paint_data(bounds, window.scale_factor(), cx)
-                                .expect("failed to render PDF")
-                        })
-                    },
-                    move |_, paint_data, window, _| {
-                        for page in paint_data.pages {
-                            window.paint_quad(fill(page.bounds, rgba(0xffffffff)));
+                div().flex_1().min_h_0().child(
+                    canvas(
+                        move |bounds, window, cx| {
+                            prepaint_view.update(cx, |this, cx| {
+                                this.paint_data(bounds, window.scale_factor(), cx)
+                                    .expect("failed to render PDF")
+                            })
+                        },
+                        move |_, paint_data, window, _| {
+                            for page in paint_data.pages {
+                                window.paint_quad(fill(page.bounds, rgba(0xffffffff)));
 
-                            if let Some(image) = page.image {
-                                let _ = window.paint_image(
-                                    page.bounds,
-                                    Corners::default(),
-                                    image,
-                                    0,
-                                    false,
-                                );
+                                if let Some(image) = page.image {
+                                    let _ = window.paint_image(
+                                        page.bounds,
+                                        Corners::default(),
+                                        image,
+                                        0,
+                                        false,
+                                    );
+                                }
                             }
-                        }
 
-                        for highlight in paint_data.highlights {
-                            window.paint_quad(fill(highlight, rgba(0x61afef66)));
-                        }
-                    },
-                )
-                .size_full(),
+                            for highlight in paint_data.highlights {
+                                window.paint_quad(fill(highlight, rgba(0x61afef66)));
+                            }
+                        },
+                    )
+                    .size_full(),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .flex_none()
+                    .h(px(26.0))
+                    .px_3()
+                    .border_t(px(1.0))
+                    .border_color(rgb(0x303030))
+                    .bg(rgb(0x181818))
+                    .text_size(px(12.0))
+                    .text_color(rgb(0xaaaaaa))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(self.file_name.clone()),
+                    )
+                    .child(div().flex_none().child(format!(
+                        "{} / {}",
+                        self.current_page(),
+                        self.pages.len()
+                    ))),
             )
     }
 }
