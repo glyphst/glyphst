@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
@@ -21,24 +21,51 @@ const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 8.0;
 const ZOOM_STEP: f32 = 1.25;
 const SCROLL_LINE_MULTIPLIER: f32 = 20.0;
-const MAX_CACHED_RENDERS: usize = 5;
+const PAGE_GAP_DOC: f32 = 24.0;
+const MAX_CACHED_RENDERS: usize = 12;
+
+struct PdfPage {
+    display_list: Arc<DisplayList>,
+    bounds: Rect,
+    width: f32,
+    height: f32,
+    offset_y: f32,
+    glyph_range: Range<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RenderKey {
+    page_idx: usize,
+    physical_width: u32,
+}
 
 struct CachedRender {
-    physical_width: u32,
+    key: RenderKey,
     render_scale: f32,
     last_access: u64,
     image: Arc<RenderImage>,
 }
 
+struct PendingRender {
+    key: RenderKey,
+    _task: Task<()>,
+}
+
+struct PaintPage {
+    bounds: Bounds<Pixels>,
+    image: Option<Arc<RenderImage>>,
+}
+
 struct PaintData {
-    image: Arc<RenderImage>,
-    aspect_ratio: f32,
+    pages: Vec<PaintPage>,
+    highlights: Vec<Bounds<Pixels>>,
 }
 
 #[derive(Clone)]
 struct Glyph {
     c: char,
     quad: Quad,
+    page_idx: usize,
     line_idx: u32,
     block_idx: u32,
 }
@@ -50,20 +77,21 @@ struct Selection {
 }
 
 pub struct PdfView {
-    display_list: Arc<mupdf::DisplayList>,
-    page_bounds: mupdf::Rect,
-    page_width: f32,
-    page_height: f32,
+    pages: Vec<PdfPage>,
+    max_page_width: f32,
+    content_height_doc: f32,
     glyphs: Vec<Glyph>,
     selection: Option<Selection>,
     dragging: bool,
-    image_bounds: Option<Bounds<Pixels>>,
+    page_image_bounds: Vec<Option<Bounds<Pixels>>>,
     focus_handle: FocusHandle,
     cached: Vec<CachedRender>,
     cache_access_counter: u64,
-    pending_render: Option<Task<()>>,
-    pending_physical_width: Option<u32>,
+    pending_renders: Vec<PendingRender>,
     zoom: f32,
+    base_scale: f32,
+    viewport_height: f32,
+    scroll_y_doc: f32,
 }
 
 impl PdfView {
@@ -73,119 +101,254 @@ impl PdfView {
                 .to_str()
                 .ok_or_else(|| anyhow!("PDF path is not valid UTF-8"))?,
         )?;
-        let page = document
-            .pages()?
-            .next()
-            .transpose()?
-            .ok_or_else(|| anyhow!("PDF has no pages"))?;
-        let page_bounds = page.bounds()?;
-        let page_width = page_bounds.x1 - page_bounds.x0;
-        let page_height = page_bounds.y1 - page_bounds.y0;
+        let page_count = document.page_count()?;
+        if page_count == 0 {
+            bail!("PDF has no pages");
+        }
 
-        let display_list = Arc::new(mupdf::DisplayList::new(page_bounds)?);
-        let device = Device::from_display_list(&display_list)?;
-        page.run(&device, &Matrix::IDENTITY)?;
+        let mut pages = Vec::with_capacity(page_count as usize);
+        let mut glyphs = Vec::new();
+        let mut offset_y = 0.0;
+        let mut max_page_width = 0.0_f32;
+        let mut next_line_idx = 0;
+        let mut next_block_idx = 0;
 
-        let glyphs = Self::extract_glyphs(&display_list)?;
+        for page_idx in 0..page_count {
+            let page = document.load_page(page_idx)?;
+            let page_bounds = page.bounds()?;
+            let page_width = page_bounds.x1 - page_bounds.x0;
+            let page_height = page_bounds.y1 - page_bounds.y0;
+
+            let display_list = Arc::new(DisplayList::new(page_bounds)?);
+            let device = Device::from_display_list(&display_list)?;
+            page.run(&device, &Matrix::IDENTITY)?;
+
+            let glyph_range = Self::extract_glyphs(
+                &display_list,
+                page_idx as usize,
+                &mut glyphs,
+                &mut next_line_idx,
+                &mut next_block_idx,
+            )?;
+
+            pages.push(PdfPage {
+                display_list,
+                bounds: page_bounds,
+                width: page_width,
+                height: page_height,
+                offset_y,
+                glyph_range,
+            });
+
+            max_page_width = max_page_width.max(page_width);
+            offset_y += page_height + PAGE_GAP_DOC;
+        }
+
+        let content_height_doc = offset_y - PAGE_GAP_DOC;
+        let page_image_bounds = (0..pages.len()).map(|_| None).collect();
 
         Ok(Self {
-            display_list,
-            page_bounds,
-            page_width,
-            page_height,
+            pages,
+            max_page_width,
+            content_height_doc,
             glyphs,
             selection: None,
             dragging: false,
-            image_bounds: None,
+            page_image_bounds,
             focus_handle,
             cached: Vec::new(),
             cache_access_counter: 0,
-            pending_render: None,
-            pending_physical_width: None,
+            pending_renders: Vec::new(),
             zoom: 1.0,
+            base_scale: 1.0,
+            viewport_height: 0.0,
+            scroll_y_doc: 0.0,
         })
     }
 
-    fn extract_glyphs(display_list: &DisplayList) -> Result<Vec<Glyph>> {
+    fn extract_glyphs(
+        display_list: &DisplayList,
+        page_idx: usize,
+        glyphs: &mut Vec<Glyph>,
+        next_line_idx: &mut u32,
+        next_block_idx: &mut u32,
+    ) -> Result<Range<usize>> {
+        let start = glyphs.len();
         let text_page = display_list
             .to_text_page(TextPageFlags::PRESERVE_WHITESPACE | TextPageFlags::ACCURATE_BBOXES)?;
-        let mut glyphs = Vec::new();
-        let mut line_idx = 0;
 
-        for (block_idx, block) in text_page.blocks().enumerate() {
+        for block in text_page.blocks() {
             if block.r#type() != TextBlockType::Text {
                 continue;
             }
 
+            let block_idx = *next_block_idx;
+            *next_block_idx = next_block_idx.saturating_add(1);
+
             for line in block.lines() {
+                let line_idx = *next_line_idx;
                 for ch in line.chars() {
                     if let Some(c) = ch.char() {
                         glyphs.push(Glyph {
                             c,
                             quad: ch.quad(),
+                            page_idx,
                             line_idx,
-                            block_idx: block_idx as u32,
+                            block_idx,
                         });
                     }
                 }
 
-                line_idx += 1;
+                *next_line_idx = next_line_idx.saturating_add(1);
             }
         }
 
-        Ok(glyphs)
+        Ok(start..glyphs.len())
     }
 
     fn paint_data(
         &mut self,
-        logical_width: Pixels,
+        bounds: Bounds<Pixels>,
         scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> Result<PaintData> {
-        let logical_width = logical_width.as_f32().max(1.0);
-        let physical_width = (logical_width * scale_factor).ceil().max(1.0) as u32;
+        let viewport_width = bounds.size.width.as_f32().max(1.0);
+        self.viewport_height = bounds.size.height.as_f32().max(1.0);
+        self.base_scale = viewport_width / self.max_page_width.max(1.0);
+        self.clamp_scroll();
 
-        if let Some(index) = self.exact_cached_render_index(physical_width) {
-            return Ok(PaintData {
-                image: self.touch_cached_render(index),
-                aspect_ratio: self.page_height / self.page_width,
+        self.page_image_bounds.clear();
+        self.page_image_bounds
+            .resize_with(self.pages.len(), || None);
+
+        let scale = self.effective_scale();
+        let mut visible_pages = Vec::new();
+        let viewport_top = bounds.origin.y.as_f32();
+        let viewport_bottom = viewport_top + self.viewport_height;
+
+        for page_idx in 0..self.pages.len() {
+            let image_bounds = self.image_bounds_for_page(page_idx, bounds, scale);
+            let page_top = image_bounds.origin.y.as_f32();
+            let page_bottom = page_top + image_bounds.size.height.as_f32();
+
+            if page_bottom >= viewport_top && page_top <= viewport_bottom {
+                self.page_image_bounds[page_idx] = Some(image_bounds);
+                visible_pages.push(page_idx);
+            }
+        }
+
+        if let (Some(first), Some(last)) = (visible_pages.first(), visible_pages.last()) {
+            let start = first.saturating_sub(1);
+            let end = (*last + 1).min(self.pages.len().saturating_sub(1));
+            for page_idx in start..=end {
+                let image_bounds = self.image_bounds_for_page(page_idx, bounds, scale);
+                let physical_width = Self::physical_width(image_bounds, scale_factor);
+                self.request_render(page_idx, physical_width, cx);
+            }
+        }
+
+        let mut pages = Vec::with_capacity(visible_pages.len());
+        for page_idx in visible_pages {
+            let image_bounds = self.image_bounds_for_page(page_idx, bounds, scale);
+            let physical_width = Self::physical_width(image_bounds, scale_factor);
+            let image = self.cached_or_request_render(page_idx, physical_width, cx);
+            pages.push(PaintPage {
+                bounds: image_bounds,
+                image,
             });
         }
 
-        if self.cached.is_empty() {
-            let image = Self::render_first_page(
-                &self.display_list,
-                self.page_bounds,
-                self.page_width,
-                self.page_height,
-                physical_width,
-            )?;
-            self.insert_cached_render(physical_width, image);
-        } else {
-            self.start_background_render(physical_width, cx);
+        let highlights = self.selection_highlights();
+
+        Ok(PaintData { pages, highlights })
+    }
+
+    fn image_bounds_for_page(
+        &self,
+        page_idx: usize,
+        bounds: Bounds<Pixels>,
+        scale: f32,
+    ) -> Bounds<Pixels> {
+        let page = &self.pages[page_idx];
+        let image_width = px(page.width * scale);
+        let image_height = px(page.height * scale);
+        let origin = point(
+            bounds.origin.x + (bounds.size.width - image_width) / 2.0,
+            bounds.origin.y + px((page.offset_y - self.scroll_y_doc) * scale),
+        );
+
+        Bounds::new(origin, size(image_width, image_height))
+    }
+
+    fn physical_width(image_bounds: Bounds<Pixels>, scale_factor: f32) -> u32 {
+        (image_bounds.size.width.as_f32() * scale_factor)
+            .ceil()
+            .max(1.0) as u32
+    }
+
+    fn effective_scale(&self) -> f32 {
+        (self.base_scale * self.zoom).max(0.001)
+    }
+
+    fn max_scroll_y_doc(&self) -> f32 {
+        let viewport_height_doc = self.viewport_height / self.effective_scale();
+        (self.content_height_doc - viewport_height_doc).max(0.0)
+    }
+
+    fn clamp_scroll(&mut self) {
+        self.scroll_y_doc = self.scroll_y_doc.clamp(0.0, self.max_scroll_y_doc());
+    }
+
+    fn set_scroll_y_doc(&mut self, scroll_y_doc: f32, cx: &mut Context<Self>) {
+        let previous = self.scroll_y_doc;
+        self.scroll_y_doc = scroll_y_doc;
+        self.clamp_scroll();
+
+        if (self.scroll_y_doc - previous).abs() > f32::EPSILON {
+            cx.notify();
+        }
+    }
+
+    fn request_render(&mut self, page_idx: usize, physical_width: u32, cx: &mut Context<Self>) {
+        let key = RenderKey {
+            page_idx,
+            physical_width,
+        };
+        if self.exact_cached_render_index(key).is_none() {
+            self.start_background_render(key, cx);
+        }
+    }
+
+    fn cached_or_request_render(
+        &mut self,
+        page_idx: usize,
+        physical_width: u32,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<RenderImage>> {
+        let key = RenderKey {
+            page_idx,
+            physical_width,
+        };
+
+        if let Some(index) = self.exact_cached_render_index(key) {
+            return Some(self.touch_cached_render(index));
         }
 
-        let index = self
-            .closest_cached_render_index(physical_width)
-            .context("render cache was not populated")?;
-
-        Ok(PaintData {
-            image: self.touch_cached_render(index),
-            aspect_ratio: self.page_height / self.page_width,
-        })
+        self.start_background_render(key, cx);
+        self.closest_cached_render_index(page_idx, physical_width)
+            .map(|index| self.touch_cached_render(index))
     }
 
-    fn exact_cached_render_index(&self, physical_width: u32) -> Option<usize> {
-        self.cached
-            .iter()
-            .position(|cached| cached.physical_width == physical_width)
+    fn exact_cached_render_index(&self, key: RenderKey) -> Option<usize> {
+        self.cached.iter().position(|cached| cached.key == key)
     }
 
-    fn closest_cached_render_index(&self, physical_width: u32) -> Option<usize> {
-        let render_scale = physical_width as f32 / self.page_width;
+    fn closest_cached_render_index(&self, page_idx: usize, physical_width: u32) -> Option<usize> {
+        let render_scale = physical_width as f32 / self.pages[page_idx].width;
         self.cached
             .iter()
             .enumerate()
+            .filter(|(_, cached)| cached.key.page_idx == page_idx)
             .min_by(|(_, a), (_, b)| {
                 (a.render_scale - render_scale)
                     .abs()
@@ -200,20 +363,20 @@ impl PdfView {
         self.cached[index].image.clone()
     }
 
-    fn insert_cached_render(&mut self, physical_width: u32, image: Arc<RenderImage>) {
+    fn insert_cached_render(&mut self, key: RenderKey, image: Arc<RenderImage>) {
         let last_access = self.next_cache_access();
-        let render_scale = physical_width as f32 / self.page_width;
+        let render_scale = key.physical_width as f32 / self.pages[key.page_idx].width;
 
-        if let Some(index) = self.exact_cached_render_index(physical_width) {
+        if let Some(index) = self.exact_cached_render_index(key) {
             self.cached[index] = CachedRender {
-                physical_width,
+                key,
                 render_scale,
                 last_access,
                 image,
             };
         } else {
             self.cached.push(CachedRender {
-                physical_width,
+                key,
                 render_scale,
                 last_access,
                 image,
@@ -238,54 +401,60 @@ impl PdfView {
         self.cache_access_counter
     }
 
-    fn start_background_render(&mut self, physical_width: u32, cx: &mut Context<Self>) {
-        if self.pending_physical_width == Some(physical_width) {
+    fn start_background_render(&mut self, key: RenderKey, cx: &mut Context<Self>) {
+        if self
+            .pending_renders
+            .iter()
+            .any(|pending| pending.key == key)
+        {
             return;
         }
 
-        self.pending_render = None;
-        self.pending_physical_width = Some(physical_width);
+        let page = &self.pages[key.page_idx];
+        let display_list = page.display_list.clone();
+        let page_bounds = page.bounds;
+        let page_width = page.width;
+        let page_height = page.height;
 
-        let display_list = self.display_list.clone();
-        let page_bounds = self.page_bounds;
-        let page_width = self.page_width;
-        let page_height = self.page_height;
-
-        self.pending_render = Some(cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    Self::render_first_page(
+                    Self::render_page(
                         &display_list,
                         page_bounds,
                         page_width,
                         page_height,
-                        physical_width,
+                        key.physical_width,
                     )
                 })
                 .await;
 
             _ = this
                 .update(cx, |this, cx| {
-                    if this.pending_physical_width != Some(physical_width) {
-                        return;
+                    if let Some(index) = this
+                        .pending_renders
+                        .iter()
+                        .position(|pending| pending.key == key)
+                    {
+                        this.pending_renders.remove(index);
                     }
-
-                    this.pending_render = None;
-                    this.pending_physical_width = None;
 
                     match result {
                         Ok(image) => {
-                            this.insert_cached_render(physical_width, image);
+                            this.insert_cached_render(key, image);
                             cx.notify();
                         }
-                        Err(error) => eprintln!("failed to render PDF: {error:#}"),
+                        Err(error) => eprintln!("failed to render PDF page: {error:#}"),
                     }
                 })
                 .ok();
-        }));
+        });
+
+        self.pending_renders
+            .push(PendingRender { key, _task: task });
     }
 
-    fn render_first_page(
+    fn render_page(
         display_list: &DisplayList,
         page_bounds: Rect,
         page_width: f32,
@@ -316,7 +485,7 @@ impl PdfView {
             let device = Device::from_pixmap(&pixmap)?;
             display_list
                 .run(&device, &matrix, Rect::INF)
-                .context("failed to render first PDF page")?;
+                .context("failed to render PDF page")?;
         }
 
         let width = pixmap.width();
@@ -345,81 +514,102 @@ impl PdfView {
     }
 
     fn point_in_image(&self, point: GpuiPoint<Pixels>) -> bool {
-        let Some(bounds) = self.image_bounds else {
-            return false;
-        };
-
-        let x = point.x.as_f32();
-        let y = point.y.as_f32();
-        let x0 = bounds.origin.x.as_f32();
-        let y0 = bounds.origin.y.as_f32();
-        let x1 = x0 + bounds.size.width.as_f32();
-        let y1 = y0 + bounds.size.height.as_f32();
-
-        x >= x0 && x <= x1 && y >= y0 && y <= y1
+        self.page_at_screen(point).is_some()
     }
 
-    fn screen_to_pdf(&self, point: GpuiPoint<Pixels>) -> Option<mupdf::Point> {
-        let bounds = self.image_bounds?;
-        let scale = bounds.size.width.as_f32() / self.page_width;
+    fn page_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<usize> {
+        self.page_image_bounds
+            .iter()
+            .enumerate()
+            .find_map(|(page_idx, bounds)| {
+                let bounds = bounds.as_ref()?;
+                let x = point.x.as_f32();
+                let y = point.y.as_f32();
+                let x0 = bounds.origin.x.as_f32();
+                let y0 = bounds.origin.y.as_f32();
+                let x1 = x0 + bounds.size.width.as_f32();
+                let y1 = y0 + bounds.size.height.as_f32();
+
+                (x >= x0 && x <= x1 && y >= y0 && y <= y1).then_some(page_idx)
+            })
+    }
+
+    fn screen_to_pdf(&self, page_idx: usize, point: GpuiPoint<Pixels>) -> Option<mupdf::Point> {
+        let bounds = self.page_image_bounds.get(page_idx)?.as_ref()?;
+        let page = &self.pages[page_idx];
+        let scale = bounds.size.width.as_f32() / page.width;
         if scale <= 0.0 {
             return None;
         }
 
         Some(mupdf::Point {
-            x: (point.x.as_f32() - bounds.origin.x.as_f32()) / scale + self.page_bounds.x0,
-            y: (point.y.as_f32() - bounds.origin.y.as_f32()) / scale + self.page_bounds.y0,
+            x: (point.x.as_f32() - bounds.origin.x.as_f32()) / scale + page.bounds.x0,
+            y: (point.y.as_f32() - bounds.origin.y.as_f32()) / scale + page.bounds.y0,
         })
     }
 
     fn glyph_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<usize> {
-        self.screen_to_pdf(point)
-            .and_then(|point| self.glyph_at_pdf(point))
+        let page_idx = self.page_at_screen(point)?;
+        self.screen_to_pdf(page_idx, point)
+            .and_then(|point| self.glyph_at_pdf(page_idx, point))
     }
 
     fn nearby_glyph_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<usize> {
-        let bounds = self.image_bounds?;
-        let scale = bounds.size.width.as_f32() / self.page_width;
+        let page_idx = self.page_at_screen(point)?;
+        let bounds = self.page_image_bounds.get(page_idx)?.as_ref()?;
+        let scale = bounds.size.width.as_f32() / self.pages[page_idx].width;
         if scale <= 0.0 {
             return None;
         }
 
-        let point = self.screen_to_pdf(point)?;
-        self.nearby_glyph_at_pdf(point, INITIAL_SELECTION_TOLERANCE_PX / scale)
+        let point = self.screen_to_pdf(page_idx, point)?;
+        self.nearby_glyph_at_pdf(page_idx, point, INITIAL_SELECTION_TOLERANCE_PX / scale)
     }
 
-    fn exact_glyph_at_pdf(&self, point: mupdf::Point) -> Option<usize> {
-        self.glyphs
+    fn exact_glyph_at_pdf(&self, page_idx: usize, point: mupdf::Point) -> Option<usize> {
+        let range = self.pages[page_idx].glyph_range.clone();
+        self.glyphs[range.clone()]
             .iter()
-            .position(|glyph| Self::quad_rect(&glyph.quad).contains(point.x, point.y))
+            .enumerate()
+            .find_map(|(offset, glyph)| {
+                Self::quad_rect(&glyph.quad)
+                    .contains(point.x, point.y)
+                    .then_some(range.start + offset)
+            })
     }
 
-    fn nearby_glyph_at_pdf(&self, point: mupdf::Point, tolerance: f32) -> Option<usize> {
-        if let Some(ix) = self.exact_glyph_at_pdf(point) {
+    fn nearby_glyph_at_pdf(
+        &self,
+        page_idx: usize,
+        point: mupdf::Point,
+        tolerance: f32,
+    ) -> Option<usize> {
+        if let Some(ix) = self.exact_glyph_at_pdf(page_idx, point) {
             return Some(ix);
         }
 
-        self.glyphs
+        let range = self.pages[page_idx].glyph_range.clone();
+        self.glyphs[range.clone()]
             .iter()
             .enumerate()
-            .filter_map(|(ix, glyph)| {
+            .filter_map(|(offset, glyph)| {
                 let distance = Self::distance_to_rect(point, Self::quad_rect(&glyph.quad));
-                (distance <= tolerance).then_some((ix, distance))
+                (distance <= tolerance).then_some((range.start + offset, distance))
             })
             .min_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(ix, _)| ix)
     }
 
-    fn glyph_at_pdf(&self, point: mupdf::Point) -> Option<usize> {
-        if self.glyphs.is_empty() {
+    fn glyph_at_pdf(&self, page_idx: usize, point: mupdf::Point) -> Option<usize> {
+        if self.pages[page_idx].glyph_range.is_empty() {
             return None;
         }
 
-        if let Some(ix) = self.exact_glyph_at_pdf(point) {
+        if let Some(ix) = self.exact_glyph_at_pdf(page_idx, point) {
             return Some(ix);
         }
 
-        let (_, start, end, line_rect) = self.nearest_line(point)?;
+        let (_, start, end, line_rect) = self.nearest_line(page_idx, point)?;
         if point.x <= line_rect.x0 {
             return Some(start);
         }
@@ -442,16 +632,21 @@ impl PdfView {
         Some(nearest)
     }
 
-    fn nearest_line(&self, point: mupdf::Point) -> Option<(f32, usize, usize, Rect)> {
+    fn nearest_line(
+        &self,
+        page_idx: usize,
+        point: mupdf::Point,
+    ) -> Option<(f32, usize, usize, Rect)> {
+        let range = self.pages[page_idx].glyph_range.clone();
         let mut best = None;
-        let mut start = 0;
+        let mut start = range.start;
 
-        while start < self.glyphs.len() {
+        while start < range.end {
             let line_idx = self.glyphs[start].line_idx;
             let mut end = start;
             let mut rect = Self::quad_rect(&self.glyphs[start].quad);
 
-            while end + 1 < self.glyphs.len() && self.glyphs[end + 1].line_idx == line_idx {
+            while end + 1 < range.end && self.glyphs[end + 1].line_idx == line_idx {
                 end += 1;
                 rect = Self::union_rect(rect, Self::quad_rect(&self.glyphs[end].quad));
             }
@@ -521,10 +716,19 @@ impl PdfView {
 
     fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
         let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-        if (zoom - self.zoom).abs() > f32::EPSILON {
-            self.zoom = zoom;
-            cx.notify();
+        if (zoom - self.zoom).abs() <= f32::EPSILON {
+            return;
         }
+
+        let old_scale = self.effective_scale();
+        let center_doc = self.scroll_y_doc + self.viewport_height / (2.0 * old_scale);
+
+        self.zoom = zoom;
+
+        let new_scale = self.effective_scale();
+        self.scroll_y_doc = center_doc - self.viewport_height / (2.0 * new_scale);
+        self.clamp_scroll();
+        cx.notify();
     }
 
     fn zoom_in(&mut self, cx: &mut Context<Self>) {
@@ -540,10 +744,6 @@ impl PdfView {
     }
 
     fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        if !event.modifiers.control {
-            return;
-        }
-
         let delta = match event.delta {
             ScrollDelta::Pixels(pixels) => pixels.y.as_f32(),
             ScrollDelta::Lines(lines) => lines.y * SCROLL_LINE_MULTIPLIER,
@@ -553,56 +753,79 @@ impl PdfView {
             return;
         }
 
-        let factor = if delta > 0.0 {
-            1.0 + delta.abs() * 0.01
-        } else {
-            1.0 / (1.0 + delta.abs() * 0.01)
-        };
+        if event.modifiers.control {
+            let factor = if delta > 0.0 {
+                1.0 + delta.abs() * 0.01
+            } else {
+                1.0 / (1.0 + delta.abs() * 0.01)
+            };
 
-        self.set_zoom(self.zoom * factor, cx);
+            self.set_zoom(self.zoom * factor, cx);
+        } else {
+            self.set_scroll_y_doc(self.scroll_y_doc - delta / self.effective_scale(), cx);
+        }
     }
 
-    fn selection_highlights(&self, image_bounds: Bounds<Pixels>) -> Vec<Bounds<Pixels>> {
+    fn selection_highlights(&self) -> Vec<Bounds<Pixels>> {
         let Some((start, end)) = self.selection_bounds() else {
             return Vec::new();
         };
 
         let mut highlights = Vec::new();
+        let mut current_page = None;
         let mut current_line = None;
         let mut current_rect = None;
 
         for glyph in &self.glyphs[start..=end] {
             let rect = Self::quad_rect(&glyph.quad);
 
-            match (current_line, current_rect) {
-                (Some(line), Some(existing)) if line == glyph.line_idx => {
+            match (current_page, current_line, current_rect) {
+                (Some(page), Some(line), Some(existing))
+                    if page == glyph.page_idx && line == glyph.line_idx =>
+                {
                     current_rect = Some(Self::union_rect(existing, rect));
                 }
-                (Some(_), Some(existing)) => {
-                    highlights.push(self.pdf_rect_to_screen(existing, image_bounds));
+                (Some(page), Some(_), Some(existing)) => {
+                    self.push_highlight(&mut highlights, page, existing);
+                    current_page = Some(glyph.page_idx);
                     current_line = Some(glyph.line_idx);
                     current_rect = Some(rect);
                 }
                 _ => {
+                    current_page = Some(glyph.page_idx);
                     current_line = Some(glyph.line_idx);
                     current_rect = Some(rect);
                 }
             }
         }
 
-        if let Some(rect) = current_rect {
-            highlights.push(self.pdf_rect_to_screen(rect, image_bounds));
+        if let (Some(page), Some(rect)) = (current_page, current_rect) {
+            self.push_highlight(&mut highlights, page, rect);
         }
 
         highlights
     }
 
-    fn pdf_rect_to_screen(&self, rect: Rect, image_bounds: Bounds<Pixels>) -> Bounds<Pixels> {
-        let scale = image_bounds.size.width.as_f32() / self.page_width;
-        let x0 = image_bounds.origin.x.as_f32() + (rect.x0 - self.page_bounds.x0) * scale;
-        let y0 = image_bounds.origin.y.as_f32() + (rect.y0 - self.page_bounds.y0) * scale;
-        let x1 = image_bounds.origin.x.as_f32() + (rect.x1 - self.page_bounds.x0) * scale;
-        let y1 = image_bounds.origin.y.as_f32() + (rect.y1 - self.page_bounds.y0) * scale;
+    fn push_highlight(&self, highlights: &mut Vec<Bounds<Pixels>>, page_idx: usize, rect: Rect) {
+        let Some(Some(image_bounds)) = self.page_image_bounds.get(page_idx) else {
+            return;
+        };
+
+        highlights.push(self.pdf_rect_to_screen(page_idx, rect, *image_bounds));
+    }
+
+    fn pdf_rect_to_screen(
+        &self,
+        page_idx: usize,
+        rect: Rect,
+        image_bounds: Bounds<Pixels>,
+    ) -> Bounds<Pixels> {
+        let page = &self.pages[page_idx];
+        let scale = image_bounds.size.width.as_f32() / page.width;
+        let x0 = image_bounds.origin.x.as_f32() + (rect.x0 - page.bounds.x0) * scale;
+        let y0 = image_bounds.origin.y.as_f32() + (rect.y0 - page.bounds.y0) * scale;
+        let x1 = image_bounds.origin.x.as_f32() + (rect.x1 - page.bounds.x0) * scale;
+        let y1 = image_bounds.origin.y.as_f32() + (rect.y1 - page.bounds.y0) * scale;
 
         Bounds::new(
             point(px(x0), px(y0)),
@@ -652,7 +875,6 @@ impl Render for PdfView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
         let prepaint_view = view.clone();
-        let paint_view = view.clone();
 
         div()
             .size_full()
@@ -727,37 +949,26 @@ impl Render for PdfView {
                 canvas(
                     move |bounds, window, cx| {
                         prepaint_view.update(cx, |this, cx| {
-                            this.paint_data(
-                                bounds.size.width * this.zoom,
-                                window.scale_factor(),
-                                cx,
-                            )
-                            .expect("failed to render PDF")
+                            this.paint_data(bounds, window.scale_factor(), cx)
+                                .expect("failed to render PDF")
                         })
                     },
-                    move |bounds, paint_data, window, cx| {
-                        let image_width = paint_view.read(cx).zoom * bounds.size.width;
-                        let image_height = image_width * paint_data.aspect_ratio;
-                        let origin = point(
-                            bounds.origin.x + (bounds.size.width - image_width) / 2.0,
-                            bounds.origin.y,
-                        );
-                        let image_bounds = Bounds::new(origin, size(image_width, image_height));
+                    move |_, paint_data, window, _| {
+                        for page in paint_data.pages {
+                            window.paint_quad(fill(page.bounds, rgba(0xffffffff)));
 
-                        let highlights = paint_view.update(cx, |this, _| {
-                            this.image_bounds = Some(image_bounds);
-                            this.selection_highlights(image_bounds)
-                        });
+                            if let Some(image) = page.image {
+                                let _ = window.paint_image(
+                                    page.bounds,
+                                    Corners::default(),
+                                    image,
+                                    0,
+                                    false,
+                                );
+                            }
+                        }
 
-                        let _ = window.paint_image(
-                            image_bounds,
-                            Corners::default(),
-                            paint_data.image,
-                            0,
-                            false,
-                        );
-
-                        for highlight in highlights {
+                        for highlight in paint_data.highlights {
                             window.paint_quad(fill(highlight, rgba(0x61afef66)));
                         }
                     },
