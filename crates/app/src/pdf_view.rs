@@ -1,10 +1,12 @@
 use std::{ops::Range, sync::Arc};
 
+use crate::command_palette::{CommandPalette, PaletteEvent};
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
-    Bounds, ClipboardItem, Context, Corners, FocusHandle, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollWheelEvent,
-    SharedString, Task, Window, canvas, div, fill, point, prelude::*, px, rgb, rgba, size,
+    Bounds, ClipboardItem, Context, Corners, Entity, FocusHandle, Focusable, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point as GpuiPoint, Render, RenderImage,
+    ScrollDelta, ScrollWheelEvent, SharedString, Task, Window, canvas, div, fill, point,
+    prelude::*, px, rgb, rgba, size,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
@@ -13,7 +15,14 @@ use smallvec::smallvec;
 
 gpui::actions!(
     pdf_viewer,
-    [CopySelection, SelectAll, ZoomIn, ZoomOut, ResetZoom]
+    [
+        CopySelection,
+        SelectAll,
+        ZoomIn,
+        ZoomOut,
+        ResetZoom,
+        ToggleCommandPalette
+    ]
 );
 
 const INITIAL_SELECTION_TOLERANCE_PX: f32 = 24.0;
@@ -93,6 +102,7 @@ pub struct PdfView {
     base_scale: f32,
     viewport_height: f32,
     scroll_y_doc: f32,
+    command_palette: Option<Entity<CommandPalette>>,
 }
 
 impl PdfView {
@@ -173,6 +183,7 @@ impl PdfView {
             base_scale: 1.0,
             viewport_height: 0.0,
             scroll_y_doc: 0.0,
+            command_palette: None,
         })
     }
 
@@ -792,6 +803,37 @@ impl PdfView {
         }
     }
 
+    fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette.is_some() {
+            self.close_command_palette(window, cx);
+            return;
+        }
+
+        let actions = window
+            .available_actions(cx)
+            .into_iter()
+            .filter(|action| !action.partial_eq(&ToggleCommandPalette))
+            .collect::<Vec<_>>();
+        let previous_focus_handle = self.focus_handle.clone();
+        let palette = cx.new(|cx| CommandPalette::new(previous_focus_handle.clone(), actions, cx));
+
+        cx.subscribe_in(&palette, window, |this, _, _: &PaletteEvent, window, cx| {
+            this.close_command_palette(window, cx);
+        })
+        .detach();
+
+        palette.focus_handle(cx).focus(window, cx);
+        self.command_palette = Some(palette);
+        cx.notify();
+    }
+
+    fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
     fn selection_highlights(&self) -> Vec<Bounds<Pixels>> {
         let Some((start, end)) = self.selection_bounds() else {
             return Vec::new();
@@ -908,6 +950,7 @@ impl Render for PdfView {
             .flex_col()
             .bg(rgb(0x202020))
             .cursor_text()
+            .key_context("PdfView")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| {
                 if let Some(text) = this.selected_text() {
@@ -926,6 +969,9 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &ResetZoom, _, cx| {
                 this.reset_zoom(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
+                this.toggle_command_palette(window, cx);
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 this.handle_scroll_wheel(event, cx);
@@ -1033,5 +1079,26 @@ impl Render for PdfView {
                         self.pages.len()
                     ))),
             )
+            .when_some(self.command_palette.clone(), |this, palette| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_start()
+                        .justify_center()
+                        .pt(px(96.0))
+                        .bg(rgba(0x00000066))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.close_command_palette(window, cx);
+                            }),
+                        )
+                        .child(palette),
+                )
+            })
     }
 }
