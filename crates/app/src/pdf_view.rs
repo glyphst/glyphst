@@ -47,6 +47,7 @@ struct PdfPage {
 struct RenderKey {
     page_idx: usize,
     physical_width: u32,
+    physical_height: u32,
 }
 
 struct CachedRender {
@@ -255,7 +256,8 @@ impl PdfView {
         let viewport_bottom = viewport_top + self.viewport_height;
 
         for page_idx in 0..self.pages.len() {
-            let image_bounds = self.image_bounds_for_page(page_idx, bounds, scale);
+            let (image_bounds, _) =
+                self.image_bounds_and_render_key(page_idx, bounds, scale, scale_factor);
             let page_top = image_bounds.origin.y.as_f32();
             let page_bottom = page_top + image_bounds.size.height.as_f32();
 
@@ -269,17 +271,21 @@ impl PdfView {
             let start = first.saturating_sub(1);
             let end = (*last + 1).min(self.pages.len().saturating_sub(1));
             for page_idx in start..=end {
-                let image_bounds = self.image_bounds_for_page(page_idx, bounds, scale);
-                let physical_width = Self::physical_width(image_bounds, scale_factor);
-                self.request_render(page_idx, physical_width, cx);
+                if page_idx >= *first && page_idx <= *last {
+                    continue;
+                }
+
+                let (_, key) =
+                    self.image_bounds_and_render_key(page_idx, bounds, scale, scale_factor);
+                self.request_render(key, cx);
             }
         }
 
         let mut pages = Vec::with_capacity(visible_pages.len());
         for page_idx in visible_pages {
-            let image_bounds = self.image_bounds_for_page(page_idx, bounds, scale);
-            let physical_width = Self::physical_width(image_bounds, scale_factor);
-            let image = self.cached_or_request_render(page_idx, physical_width, cx);
+            let (image_bounds, key) =
+                self.image_bounds_and_render_key(page_idx, bounds, scale, scale_factor);
+            let image = self.cached_or_request_render(key, cx);
             pages.push(PaintPage {
                 bounds: image_bounds,
                 image,
@@ -308,10 +314,47 @@ impl PdfView {
         Bounds::new(origin, size(image_width, image_height))
     }
 
-    fn physical_width(image_bounds: Bounds<Pixels>, scale_factor: f32) -> u32 {
-        (image_bounds.size.width.as_f32() * scale_factor)
-            .ceil()
-            .max(1.0) as u32
+    fn image_bounds_and_render_key(
+        &self,
+        page_idx: usize,
+        bounds: Bounds<Pixels>,
+        scale: f32,
+        scale_factor: f32,
+    ) -> (Bounds<Pixels>, RenderKey) {
+        let image_bounds = self.image_bounds_for_page(page_idx, bounds, scale);
+        let key = Self::render_key(page_idx, image_bounds, scale_factor);
+        (
+            Self::pixel_aligned_image_bounds(image_bounds, key, scale_factor),
+            key,
+        )
+    }
+
+    fn render_key(page_idx: usize, image_bounds: Bounds<Pixels>, scale_factor: f32) -> RenderKey {
+        let scale_factor = scale_factor.max(0.001);
+        RenderKey {
+            page_idx,
+            physical_width: (image_bounds.size.width.as_f32() * scale_factor)
+                .ceil()
+                .max(1.0) as u32,
+            physical_height: (image_bounds.size.height.as_f32() * scale_factor)
+                .ceil()
+                .max(1.0) as u32,
+        }
+    }
+
+    fn pixel_aligned_image_bounds(
+        image_bounds: Bounds<Pixels>,
+        key: RenderKey,
+        scale_factor: f32,
+    ) -> Bounds<Pixels> {
+        let scale_factor = scale_factor.max(0.001);
+        Bounds::new(
+            image_bounds.origin,
+            size(
+                px(key.physical_width as f32 / scale_factor),
+                px(key.physical_height as f32 / scale_factor),
+            ),
+        )
     }
 
     fn effective_scale(&self) -> f32 {
@@ -348,11 +391,7 @@ impl PdfView {
         }
     }
 
-    fn request_render(&mut self, page_idx: usize, physical_width: u32, cx: &mut Context<Self>) {
-        let key = RenderKey {
-            page_idx,
-            physical_width,
-        };
+    fn request_render(&mut self, key: RenderKey, cx: &mut Context<Self>) {
         if self.exact_cached_render_index(key).is_none() {
             self.start_background_render(key, cx);
         }
@@ -360,21 +399,15 @@ impl PdfView {
 
     fn cached_or_request_render(
         &mut self,
-        page_idx: usize,
-        physical_width: u32,
+        key: RenderKey,
         cx: &mut Context<Self>,
     ) -> Option<Arc<RenderImage>> {
-        let key = RenderKey {
-            page_idx,
-            physical_width,
-        };
-
         if let Some(index) = self.exact_cached_render_index(key) {
             return Some(self.touch_cached_render(index));
         }
 
         self.start_background_render(key, cx);
-        self.closest_cached_render_index(page_idx, physical_width)
+        self.scaled_fallback_render_index(key)
             .map(|index| self.touch_cached_render(index))
     }
 
@@ -382,12 +415,16 @@ impl PdfView {
         self.cached.iter().position(|cached| cached.key == key)
     }
 
-    fn closest_cached_render_index(&self, page_idx: usize, physical_width: u32) -> Option<usize> {
-        let render_scale = physical_width as f32 / self.pages[page_idx].width;
+    fn scaled_fallback_render_index(&self, key: RenderKey) -> Option<usize> {
+        let render_scale = key.physical_width as f32 / self.pages[key.page_idx].width;
         self.cached
             .iter()
             .enumerate()
-            .filter(|(_, cached)| cached.key.page_idx == page_idx)
+            .filter(|(_, cached)| {
+                cached.key.page_idx == key.page_idx
+                    && cached.key.physical_width <= key.physical_width
+                    && cached.key.physical_height <= key.physical_height
+            })
             .min_by(|(_, a), (_, b)| {
                 (a.render_scale - render_scale)
                     .abs()
@@ -448,6 +485,8 @@ impl PdfView {
         {
             return;
         }
+        self.pending_renders
+            .retain(|pending| pending.key.page_idx != key.page_idx);
 
         let page = &self.pages[key.page_idx];
         let display_list = page.display_list.clone();
@@ -464,19 +503,21 @@ impl PdfView {
                         page_width,
                         page_height,
                         key.physical_width,
+                        key.physical_height,
                     )
                 })
                 .await;
 
             _ = this
                 .update(cx, |this, cx| {
-                    if let Some(index) = this
+                    let Some(index) = this
                         .pending_renders
                         .iter()
                         .position(|pending| pending.key == key)
-                    {
-                        this.pending_renders.remove(index);
-                    }
+                    else {
+                        return;
+                    };
+                    this.pending_renders.remove(index);
 
                     match result {
                         Ok(image) => {
@@ -499,10 +540,12 @@ impl PdfView {
         page_width: f32,
         page_height: f32,
         physical_width: u32,
+        physical_height: u32,
     ) -> Result<Arc<RenderImage>> {
-        let zoom = physical_width as f32 / page_width;
-        let physical_height = (page_height * zoom).ceil().max(1.0) as i32;
+        let zoom_x = physical_width as f32 / page_width;
+        let zoom_y = physical_height as f32 / page_height;
         let physical_width = physical_width as i32;
+        let physical_height = physical_height as i32;
 
         let mut pixmap = Pixmap::new_with_w_h(
             &Colorspace::device_rgb(),
@@ -513,12 +556,12 @@ impl PdfView {
         pixmap.samples_mut().fill(255);
 
         let matrix = Matrix::new(
-            zoom,
+            zoom_x,
             0.0,
             0.0,
-            zoom,
-            -page_bounds.x0 * zoom,
-            -page_bounds.y0 * zoom,
+            zoom_y,
+            -page_bounds.x0 * zoom_x,
+            -page_bounds.y0 * zoom_y,
         );
         {
             let device = Device::from_pixmap(&pixmap)?;
@@ -576,14 +619,15 @@ impl PdfView {
     fn screen_to_pdf(&self, page_idx: usize, point: GpuiPoint<Pixels>) -> Option<mupdf::Point> {
         let bounds = self.page_image_bounds.get(page_idx)?.as_ref()?;
         let page = &self.pages[page_idx];
-        let scale = bounds.size.width.as_f32() / page.width;
-        if scale <= 0.0 {
+        let scale_x = bounds.size.width.as_f32() / page.width;
+        let scale_y = bounds.size.height.as_f32() / page.height;
+        if scale_x <= 0.0 || scale_y <= 0.0 {
             return None;
         }
 
         Some(mupdf::Point {
-            x: (point.x.as_f32() - bounds.origin.x.as_f32()) / scale + page.bounds.x0,
-            y: (point.y.as_f32() - bounds.origin.y.as_f32()) / scale + page.bounds.y0,
+            x: (point.x.as_f32() - bounds.origin.x.as_f32()) / scale_x + page.bounds.x0,
+            y: (point.y.as_f32() - bounds.origin.y.as_f32()) / scale_y + page.bounds.y0,
         })
     }
 
@@ -596,7 +640,9 @@ impl PdfView {
     fn nearby_glyph_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<usize> {
         let page_idx = self.page_at_screen(point)?;
         let bounds = self.page_image_bounds.get(page_idx)?.as_ref()?;
-        let scale = bounds.size.width.as_f32() / self.pages[page_idx].width;
+        let page = &self.pages[page_idx];
+        let scale = (bounds.size.width.as_f32() / page.width)
+            .min(bounds.size.height.as_f32() / page.height);
         if scale <= 0.0 {
             return None;
         }
@@ -947,11 +993,12 @@ impl PdfView {
         image_bounds: Bounds<Pixels>,
     ) -> Bounds<Pixels> {
         let page = &self.pages[page_idx];
-        let scale = image_bounds.size.width.as_f32() / page.width;
-        let x0 = image_bounds.origin.x.as_f32() + (rect.x0 - page.bounds.x0) * scale;
-        let y0 = image_bounds.origin.y.as_f32() + (rect.y0 - page.bounds.y0) * scale;
-        let x1 = image_bounds.origin.x.as_f32() + (rect.x1 - page.bounds.x0) * scale;
-        let y1 = image_bounds.origin.y.as_f32() + (rect.y1 - page.bounds.y0) * scale;
+        let scale_x = image_bounds.size.width.as_f32() / page.width;
+        let scale_y = image_bounds.size.height.as_f32() / page.height;
+        let x0 = image_bounds.origin.x.as_f32() + (rect.x0 - page.bounds.x0) * scale_x;
+        let y0 = image_bounds.origin.y.as_f32() + (rect.y0 - page.bounds.y0) * scale_y;
+        let x1 = image_bounds.origin.x.as_f32() + (rect.x1 - page.bounds.x0) * scale_x;
+        let y1 = image_bounds.origin.y.as_f32() + (rect.y1 - page.bounds.y0) * scale_y;
 
         Bounds::new(
             point(px(x0), px(y0)),
