@@ -87,6 +87,13 @@ struct Selection {
     head: usize,
 }
 
+#[derive(Clone, Copy)]
+struct PanState {
+    pointer_origin: GpuiPoint<Pixels>,
+    scroll_origin_x: f32,
+    scroll_origin_y: f32,
+}
+
 pub struct PdfView {
     file_name: SharedString,
     pages: Vec<PdfPage>,
@@ -95,6 +102,7 @@ pub struct PdfView {
     glyphs: Vec<Glyph>,
     selection: Option<Selection>,
     dragging: bool,
+    panning: Option<PanState>,
     page_image_bounds: Vec<Option<Bounds<Pixels>>>,
     focus_handle: FocusHandle,
     cached: Vec<CachedRender>,
@@ -103,7 +111,9 @@ pub struct PdfView {
     control_down: bool,
     zoom: f32,
     base_scale: f32,
+    viewport_width: f32,
     viewport_height: f32,
+    scroll_x_doc: f32,
     scroll_y_doc: f32,
     command_palette: Option<Entity<CommandPalette>>,
     settings_panel: Option<Entity<SettingsPanel>>,
@@ -182,6 +192,7 @@ impl PdfView {
             glyphs,
             selection: None,
             dragging: false,
+            panning: None,
             page_image_bounds,
             focus_handle,
             cached: Vec::new(),
@@ -190,7 +201,9 @@ impl PdfView {
             control_down: false,
             zoom: settings.default_zoom,
             base_scale: 1.0,
+            viewport_width: 0.0,
             viewport_height: 0.0,
+            scroll_x_doc: 0.0,
             scroll_y_doc: 0.0,
             command_palette: None,
             settings_panel: None,
@@ -244,6 +257,7 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) -> Result<PaintData> {
         let viewport_width = bounds.size.width.as_f32().max(1.0);
+        self.viewport_width = viewport_width;
         self.viewport_height = bounds.size.height.as_f32().max(1.0);
         self.base_scale = viewport_width / self.max_page_width.max(1.0);
         self.clamp_scroll();
@@ -309,7 +323,8 @@ impl PdfView {
         let image_width = px(page.width * scale);
         let image_height = px(page.height * scale);
         let origin = point(
-            bounds.origin.x + (bounds.size.width - image_width) / 2.0,
+            bounds.origin.x + (bounds.size.width - image_width) / 2.0
+                - px(self.scroll_x_doc * scale),
             bounds.origin.y + px((page.offset_y - self.scroll_y_doc) * scale),
         );
 
@@ -368,6 +383,11 @@ impl PdfView {
         (self.content_height_doc - viewport_height_doc).max(0.0)
     }
 
+    fn max_scroll_x_doc(&self) -> f32 {
+        let viewport_width_doc = self.viewport_width / self.effective_scale();
+        ((self.max_page_width - viewport_width_doc) / 2.0).max(0.0)
+    }
+
     fn recompute_layout(&mut self, page_gap: f32) {
         let mut offset_y = 0.0;
         for page in &mut self.pages {
@@ -380,15 +400,21 @@ impl PdfView {
     }
 
     fn clamp_scroll(&mut self) {
+        let max_scroll_x = self.max_scroll_x_doc();
+        self.scroll_x_doc = self.scroll_x_doc.clamp(-max_scroll_x, max_scroll_x);
         self.scroll_y_doc = self.scroll_y_doc.clamp(0.0, self.max_scroll_y_doc());
     }
 
-    fn set_scroll_y_doc(&mut self, scroll_y_doc: f32, cx: &mut Context<Self>) {
-        let previous = self.scroll_y_doc;
+    fn set_scroll_doc(&mut self, scroll_x_doc: f32, scroll_y_doc: f32, cx: &mut Context<Self>) {
+        let previous_x = self.scroll_x_doc;
+        let previous_y = self.scroll_y_doc;
+        self.scroll_x_doc = scroll_x_doc;
         self.scroll_y_doc = scroll_y_doc;
         self.clamp_scroll();
 
-        if (self.scroll_y_doc - previous).abs() > f32::EPSILON {
+        if (self.scroll_x_doc - previous_x).abs() > f32::EPSILON
+            || (self.scroll_y_doc - previous_y).abs() > f32::EPSILON
+        {
             cx.notify();
         }
     }
@@ -866,15 +892,23 @@ impl PdfView {
                 .powf(zoom_delta);
             self.set_zoom(self.zoom * factor, cx);
         } else {
-            let delta = match event.delta {
-                ScrollDelta::Pixels(pixels) => pixels.y.as_f32(),
-                ScrollDelta::Lines(lines) => lines.y * SCROLL_LINE_MULTIPLIER,
+            let (delta_x, delta_y) = match event.delta {
+                ScrollDelta::Pixels(pixels) => (pixels.x.as_f32(), pixels.y.as_f32()),
+                ScrollDelta::Lines(lines) => (
+                    lines.x * SCROLL_LINE_MULTIPLIER,
+                    lines.y * SCROLL_LINE_MULTIPLIER,
+                ),
             };
-            if delta == 0.0 {
+            if delta_x == 0.0 && delta_y == 0.0 {
                 return;
             }
 
-            self.set_scroll_y_doc(self.scroll_y_doc - delta / self.effective_scale(), cx);
+            let scale = self.effective_scale();
+            self.set_scroll_doc(
+                self.scroll_x_doc - delta_x / scale,
+                self.scroll_y_doc - delta_y / scale,
+                cx,
+            );
         }
     }
 
@@ -1065,6 +1099,7 @@ impl Render for PdfView {
             .flex_col()
             .bg(rgb(settings.background))
             .cursor_text()
+            .when(self.panning.is_some(), |this| this.cursor_grabbing())
             .key_context("PdfView")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| {
@@ -1122,7 +1157,32 @@ impl Render for PdfView {
                     cx.notify();
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.focus_handle.focus(window, cx);
+                    this.dragging = false;
+                    this.panning = Some(PanState {
+                        pointer_origin: event.position,
+                        scroll_origin_x: this.scroll_x_doc,
+                        scroll_origin_y: this.scroll_y_doc,
+                    });
+                    cx.notify();
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if let Some(pan) = this.panning {
+                    let scale = this.effective_scale();
+                    let delta_x = (event.position.x - pan.pointer_origin.x).as_f32();
+                    let delta_y = (event.position.y - pan.pointer_origin.y).as_f32();
+                    this.set_scroll_doc(
+                        pan.scroll_origin_x - delta_x / scale,
+                        pan.scroll_origin_y - delta_y / scale,
+                        cx,
+                    );
+                    return;
+                }
+
                 if !this.dragging {
                     return;
                 }
@@ -1138,6 +1198,13 @@ impl Render for PdfView {
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| {
                     this.dragging = false;
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, _, _, cx| {
+                    this.panning = None;
+                    cx.notify();
                 }),
             )
             .child(
