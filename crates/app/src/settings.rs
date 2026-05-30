@@ -8,7 +8,7 @@ use gpui::Global;
 use kdl::{KdlDocument, KdlNode, KdlValue};
 
 pub const DEFAULT_ZOOM: f32 = 1.0;
-pub const DEFAULT_ZOOM_STEP: f32 = 1.25;
+pub const DEFAULT_ZOOM_STEP: f32 = 1.05;
 pub const DEFAULT_PAGE_GAP: f32 = 24.0;
 pub const DEFAULT_BACKGROUND: u32 = 0x202020;
 pub const DEFAULT_SELECTION_HIGHLIGHT: u32 = 0x61afef66;

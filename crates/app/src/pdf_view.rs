@@ -6,9 +6,9 @@ use crate::settings_panel::{PanelEvent, SettingsPanel};
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
     Bounds, ClipboardItem, Context, Corners, Entity, FocusHandle, Focusable, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point as GpuiPoint, Render, RenderImage,
-    ScrollDelta, ScrollWheelEvent, SharedString, Task, Window, canvas, div, fill, point,
-    prelude::*, px, rgb, rgba, size,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point as GpuiPoint,
+    Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Task, Window, canvas, div,
+    fill, point, prelude::*, px, rgb, rgba, size,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
@@ -100,6 +100,7 @@ pub struct PdfView {
     cached: Vec<CachedRender>,
     cache_access_counter: u64,
     pending_renders: Vec<PendingRender>,
+    control_down: bool,
     zoom: f32,
     base_scale: f32,
     viewport_height: f32,
@@ -186,6 +187,7 @@ impl PdfView {
             cached: Vec::new(),
             cache_access_counter: 0,
             pending_renders: Vec::new(),
+            control_down: false,
             zoom: settings.default_zoom,
             base_scale: 1.0,
             viewport_height: 0.0,
@@ -848,24 +850,30 @@ impl PdfView {
     }
 
     fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let delta = match event.delta {
-            ScrollDelta::Pixels(pixels) => pixels.y.as_f32(),
-            ScrollDelta::Lines(lines) => lines.y * SCROLL_LINE_MULTIPLIER,
-        };
-
-        if delta == 0.0 {
-            return;
-        }
-
-        if event.modifiers.control {
-            let factor = if delta > 0.0 {
-                1.0 + delta.abs() * 0.01
-            } else {
-                1.0 / (1.0 + delta.abs() * 0.01)
+        if self.control_down {
+            let zoom_delta = match event.delta {
+                ScrollDelta::Pixels(pixels) => pixels.y.as_f32() / SCROLL_LINE_MULTIPLIER,
+                ScrollDelta::Lines(lines) => lines.y,
             };
+            if zoom_delta == 0.0 {
+                return;
+            }
 
+            let factor = cx
+                .global::<SettingsStore>()
+                .settings
+                .zoom_step
+                .powf(zoom_delta);
             self.set_zoom(self.zoom * factor, cx);
         } else {
+            let delta = match event.delta {
+                ScrollDelta::Pixels(pixels) => pixels.y.as_f32(),
+                ScrollDelta::Lines(lines) => lines.y * SCROLL_LINE_MULTIPLIER,
+            };
+            if delta == 0.0 {
+                return;
+            }
+
             self.set_scroll_y_doc(self.scroll_y_doc - delta / self.effective_scale(), cx);
         }
     }
@@ -1082,6 +1090,9 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.toggle_settings_panel(window, cx);
+            }))
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, _| {
+                this.control_down = event.modifiers.control;
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 this.handle_scroll_wheel(event, cx);
