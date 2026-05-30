@@ -1,6 +1,8 @@
 use std::{ops::Range, sync::Arc};
 
 use crate::command_palette::{CommandPalette, PaletteEvent};
+use crate::settings::{Settings, SettingsStore};
+use crate::settings_panel::{PanelEvent, SettingsPanel};
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
     Bounds, ClipboardItem, Context, Corners, Entity, FocusHandle, Focusable, IntoElement,
@@ -21,16 +23,15 @@ gpui::actions!(
         ZoomIn,
         ZoomOut,
         ResetZoom,
-        ToggleCommandPalette
+        ToggleCommandPalette,
+        OpenSettings
     ]
 );
 
 const INITIAL_SELECTION_TOLERANCE_PX: f32 = 24.0;
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 8.0;
-const ZOOM_STEP: f32 = 1.25;
 const SCROLL_LINE_MULTIPLIER: f32 = 20.0;
-const PAGE_GAP_DOC: f32 = 24.0;
 const MAX_CACHED_RENDERS: usize = 12;
 
 struct PdfPage {
@@ -103,10 +104,15 @@ pub struct PdfView {
     viewport_height: f32,
     scroll_y_doc: f32,
     command_palette: Option<Entity<CommandPalette>>,
+    settings_panel: Option<Entity<SettingsPanel>>,
 }
 
 impl PdfView {
-    pub fn open(path: impl AsRef<std::path::Path>, focus_handle: FocusHandle) -> Result<Self> {
+    pub fn open(
+        path: impl AsRef<std::path::Path>,
+        focus_handle: FocusHandle,
+        settings: Settings,
+    ) -> Result<Self> {
         let file_name = path
             .as_ref()
             .file_name()
@@ -160,10 +166,10 @@ impl PdfView {
             });
 
             max_page_width = max_page_width.max(page_width);
-            offset_y += page_height + PAGE_GAP_DOC;
+            offset_y += page_height + settings.page_gap;
         }
 
-        let content_height_doc = offset_y - PAGE_GAP_DOC;
+        let content_height_doc = offset_y - settings.page_gap;
         let page_image_bounds = (0..pages.len()).map(|_| None).collect();
 
         Ok(Self {
@@ -179,11 +185,12 @@ impl PdfView {
             cached: Vec::new(),
             cache_access_counter: 0,
             pending_renders: Vec::new(),
-            zoom: 1.0,
+            zoom: settings.default_zoom,
             base_scale: 1.0,
             viewport_height: 0.0,
             scroll_y_doc: 0.0,
             command_palette: None,
+            settings_panel: None,
         })
     }
 
@@ -314,6 +321,17 @@ impl PdfView {
     fn max_scroll_y_doc(&self) -> f32 {
         let viewport_height_doc = self.viewport_height / self.effective_scale();
         (self.content_height_doc - viewport_height_doc).max(0.0)
+    }
+
+    fn recompute_layout(&mut self, page_gap: f32) {
+        let mut offset_y = 0.0;
+        for page in &mut self.pages {
+            page.offset_y = offset_y;
+            offset_y += page.height + page_gap;
+        }
+
+        self.content_height_doc = offset_y - page_gap;
+        self.clamp_scroll();
     }
 
     fn clamp_scroll(&mut self) {
@@ -753,15 +771,18 @@ impl PdfView {
     }
 
     fn zoom_in(&mut self, cx: &mut Context<Self>) {
-        self.set_zoom(self.zoom * ZOOM_STEP, cx);
+        let zoom_step = cx.global::<SettingsStore>().settings.zoom_step;
+        self.set_zoom(self.zoom * zoom_step, cx);
     }
 
     fn zoom_out(&mut self, cx: &mut Context<Self>) {
-        self.set_zoom(self.zoom / ZOOM_STEP, cx);
+        let zoom_step = cx.global::<SettingsStore>().settings.zoom_step;
+        self.set_zoom(self.zoom / zoom_step, cx);
     }
 
     fn reset_zoom(&mut self, cx: &mut Context<Self>) {
-        self.set_zoom(1.0, cx);
+        let default_zoom = cx.global::<SettingsStore>().settings.default_zoom;
+        self.set_zoom(default_zoom, cx);
     }
 
     fn current_page(&self) -> usize {
@@ -808,6 +829,7 @@ impl PdfView {
             self.close_command_palette(window, cx);
             return;
         }
+        self.close_settings_panel(window, cx);
 
         let actions = window
             .available_actions(cx)
@@ -829,6 +851,42 @@ impl PdfView {
 
     fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.command_palette.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn toggle_settings_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_panel.is_some() {
+            self.close_settings_panel(window, cx);
+            return;
+        }
+        self.close_command_palette(window, cx);
+
+        let previous_focus_handle = self.focus_handle.clone();
+        let panel = cx.new(|cx| SettingsPanel::new(previous_focus_handle.clone(), cx));
+
+        cx.subscribe_in(
+            &panel,
+            window,
+            |this, _, event: &PanelEvent, window, cx| match event {
+                PanelEvent::Dismissed => this.close_settings_panel(window, cx),
+                PanelEvent::Changed => {
+                    let page_gap = cx.global::<SettingsStore>().settings.page_gap;
+                    this.recompute_layout(page_gap);
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+
+        panel.focus_handle(cx).focus(window, cx);
+        self.settings_panel = Some(panel);
+        cx.notify();
+    }
+
+    fn close_settings_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_panel.take().is_some() {
             self.focus_handle.focus(window, cx);
             cx.notify();
         }
@@ -943,12 +1001,14 @@ impl Render for PdfView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
         let prepaint_view = view.clone();
+        let settings = cx.global::<SettingsStore>().settings;
+        let selection_highlight = settings.selection_highlight;
 
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x202020))
+            .bg(rgb(settings.background))
             .cursor_text()
             .key_context("PdfView")
             .track_focus(&self.focus_handle)
@@ -972,6 +1032,9 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.toggle_settings_panel(window, cx);
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 this.handle_scroll_wheel(event, cx);
@@ -1044,7 +1107,7 @@ impl Render for PdfView {
                             }
 
                             for highlight in paint_data.highlights {
-                                window.paint_quad(fill(highlight, rgba(0x61afef66)));
+                                window.paint_quad(fill(highlight, rgba(selection_highlight)));
                             }
                         },
                     )
@@ -1098,6 +1161,27 @@ impl Render for PdfView {
                             }),
                         )
                         .child(palette),
+                )
+            })
+            .when_some(self.settings_panel.clone(), |this, panel| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_start()
+                        .justify_center()
+                        .pt(px(96.0))
+                        .bg(rgba(0x00000066))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.close_settings_panel(window, cx);
+                            }),
+                        )
+                        .child(panel),
                 )
             })
     }

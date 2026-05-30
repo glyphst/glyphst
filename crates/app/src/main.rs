@@ -5,6 +5,8 @@ use gpui_platform::application;
 
 mod command_palette;
 mod pdf_view;
+mod settings;
+mod settings_panel;
 
 use command_palette::{
     PaletteBackspace, PaletteCancel, PaletteConfirm, PaletteDelete, PaletteEnd, PaletteHome,
@@ -12,8 +14,11 @@ use command_palette::{
     PaletteSelectPrev,
 };
 use pdf_view::{
-    CopySelection, PdfView, ResetZoom, SelectAll, ToggleCommandPalette, ZoomIn, ZoomOut,
+    CopySelection, OpenSettings, PdfView, ResetZoom, SelectAll, ToggleCommandPalette, ZoomIn,
+    ZoomOut,
 };
+use settings::SettingsStore;
+use settings_panel::PanelClose;
 
 fn main() {
     let path = std::env::args_os()
@@ -25,6 +30,8 @@ fn main() {
         });
 
     application().run(move |cx: &mut App| {
+        cx.set_global(SettingsStore::load());
+
         cx.bind_keys([
             KeyBinding::new("ctrl-c", CopySelection, Some("PdfView && !CommandPalette")),
             KeyBinding::new("cmd-c", CopySelection, Some("PdfView && !CommandPalette")),
@@ -36,6 +43,8 @@ fn main() {
             KeyBinding::new("=", ResetZoom, Some("PdfView && !CommandPalette")),
             KeyBinding::new("ctrl-shift-p", ToggleCommandPalette, Some("PdfView")),
             KeyBinding::new("cmd-shift-p", ToggleCommandPalette, Some("PdfView")),
+            KeyBinding::new("ctrl-,", OpenSettings, Some("PdfView")),
+            KeyBinding::new("cmd-,", OpenSettings, Some("PdfView")),
             KeyBinding::new("enter", PaletteConfirm, Some("CommandPalette")),
             KeyBinding::new("escape", PaletteCancel, Some("CommandPalette")),
             KeyBinding::new("down", PaletteSelectNext, Some("CommandPalette")),
@@ -50,6 +59,7 @@ fn main() {
             KeyBinding::new("cmd-a", PaletteSelectAll, Some("CommandPalette")),
             KeyBinding::new("ctrl-v", PalettePaste, Some("CommandPalette")),
             KeyBinding::new("cmd-v", PalettePaste, Some("CommandPalette")),
+            KeyBinding::new("escape", PanelClose, Some("SettingsPanel")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(800.0), px(1000.0)), cx);
@@ -63,7 +73,8 @@ fn main() {
                 cx.new(|cx| {
                     let focus_handle = cx.focus_handle();
                     focus_handle.focus(window, cx);
-                    PdfView::open(&path, focus_handle).expect("failed to open PDF")
+                    let settings = cx.global::<SettingsStore>().settings;
+                    PdfView::open(&path, focus_handle, settings).expect("failed to open PDF")
                 })
             },
         )

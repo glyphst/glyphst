@@ -1035,7 +1035,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -2323,9 +2323,11 @@ name = "gpui-template"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "gpui",
  "gpui_platform",
  "image",
+ "kdl",
  "mupdf",
  "smallvec",
 ]
@@ -3068,6 +3070,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kdl"
+version = "6.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f6d34a77a3a47e8152aa0a777568ac4785739225c797fb906293023767e309a"
+dependencies = [
+ "miette",
+ "num-traits",
+ "serde",
+ "winnow 0.7.15",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3402,6 +3416,16 @@ dependencies = [
  "log",
  "objc",
  "paste",
+]
+
+[[package]]
+name = "miette"
+version = "7.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f98efec8807c63c752b5bd61f862c165c115b0a35685bdcfd9238c7aeb592b7"
+dependencies = [
+ "cfg-if",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -5897,6 +5921,12 @@ name = "unicode-vo"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1d386ff53b415b7fe27b50bb44679e2cc4660272694b7b6f3326d8480823a94"
+
+[[package]]
+name = "unicode-width"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
 name = "unicode-width"
