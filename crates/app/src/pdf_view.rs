@@ -33,6 +33,7 @@ const INITIAL_SELECTION_TOLERANCE_PX: f32 = 24.0;
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 8.0;
 const SCROLL_LINE_MULTIPLIER: f32 = 20.0;
+const CTRL_SCROLL_ZOOM_STEP_MULTIPLIER: f32 = 0.25;
 const MAX_CACHED_RENDERS: usize = 12;
 
 struct PdfPage {
@@ -892,7 +893,7 @@ impl PdfView {
                 .settings
                 .behavior
                 .zoom_step
-                .powf(zoom_delta);
+                .powf(zoom_delta * CTRL_SCROLL_ZOOM_STEP_MULTIPLIER);
             self.set_zoom(self.zoom * factor, cx);
         } else {
             let (delta_x, delta_y) = match event.delta {
