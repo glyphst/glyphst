@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use crate::settings::SettingsStore;
 use gpui::{
     Action, App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId,
@@ -497,6 +498,7 @@ impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let matches = self.matches.iter().take(MAX_VISIBLE_MATCHES).enumerate();
+        let theme = cx.global::<SettingsStore>().resolved_theme;
 
         div()
             .key_context("CommandPalette")
@@ -507,11 +509,11 @@ impl Render for CommandPalette {
             .max_h(px(520.0))
             .rounded_md()
             .border_1()
-            .border_color(rgb(0x343434))
+            .border_color(rgb(theme.panel_border))
             .shadow_lg()
             .overflow_hidden()
-            .bg(rgb(0x181818))
-            .text_color(rgb(0xd4d4d4))
+            .bg(rgb(theme.panel_background))
+            .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
@@ -534,7 +536,7 @@ impl Render for CommandPalette {
                     .h(px(50.0))
                     .px_3()
                     .border_b(px(1.0))
-                    .border_color(rgb(0x2a2a2a))
+                    .border_color(rgb(theme.panel_border))
                     .cursor(CursorStyle::IBeam)
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -555,7 +557,7 @@ impl Render for CommandPalette {
                                 .flex()
                                 .items_center()
                                 .px_3()
-                                .text_color(rgb(0x888888))
+                                .text_color(rgb(theme.text_muted))
                                 .child("No commands found"),
                         )
                     })
@@ -573,7 +575,7 @@ impl Render for CommandPalette {
                                 (
                                     range,
                                     HighlightStyle {
-                                        color: Some(rgb(0xe5c07b).into()),
+                                        color: Some(rgb(theme.match_highlight).into()),
                                         font_weight: Some(FontWeight::BOLD),
                                         ..Default::default()
                                     },
@@ -590,7 +592,7 @@ impl Render for CommandPalette {
                             .px_3()
                             .text_size(px(13.0))
                             .bg(if selected {
-                                rgba(0x3a3f4bcc)
+                                rgba(theme.selected_row)
                             } else {
                                 rgba(0x00000000)
                             })
@@ -612,7 +614,7 @@ impl Render for CommandPalette {
                                     div()
                                         .flex_none()
                                         .ml_3()
-                                        .text_color(rgb(0x8a8a8a))
+                                        .text_color(rgb(theme.text_muted))
                                         .child(keybinding),
                                 )
                             })
@@ -678,8 +680,12 @@ impl Element for TextElement {
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let style = window.text_style();
+        let theme = cx.global::<SettingsStore>().resolved_theme;
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), rgba(0x888888aa).into())
+            (
+                input.placeholder.clone(),
+                rgba(theme.placeholder_text).into(),
+            )
         } else {
             (content, style.color)
         };
@@ -737,7 +743,7 @@ impl Element for TextElement {
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(2.0), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(0x61afef),
+                    rgb(theme.accent),
                 )),
             )
         } else {
@@ -753,7 +759,7 @@ impl Element for TextElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x61afef55),
+                    rgba(theme.selection_highlight),
                 )),
                 None,
             )

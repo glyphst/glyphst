@@ -7,6 +7,7 @@ mod command_palette;
 mod pdf_view;
 mod settings;
 mod settings_panel;
+mod theme;
 
 use command_palette::{
     PaletteBackspace, PaletteCancel, PaletteConfirm, PaletteDelete, PaletteEnd, PaletteHome,
@@ -73,8 +74,14 @@ fn main() {
                 cx.new(|cx| {
                     let focus_handle = cx.focus_handle();
                     focus_handle.focus(window, cx);
-                    let settings = cx.global::<SettingsStore>().settings;
-                    PdfView::open(&path, focus_handle, settings).expect("failed to open PDF")
+                    let store = cx.global::<SettingsStore>();
+                    PdfView::open(
+                        &path,
+                        focus_handle,
+                        store.settings.behavior,
+                        store.resolved_theme,
+                    )
+                    .expect("failed to open PDF")
                 })
             },
         )

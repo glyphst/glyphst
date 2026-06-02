@@ -1,8 +1,9 @@
 use std::{ops::Range, sync::Arc};
 
 use crate::command_palette::{CommandPalette, PaletteEvent};
-use crate::settings::{Settings, SettingsStore};
+use crate::settings::{BehaviorSettings, SettingsStore};
 use crate::settings_panel::{PanelEvent, SettingsPanel};
+use crate::theme::Theme;
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
     Bounds, ClipboardItem, Context, Corners, Entity, FocusHandle, Focusable, IntoElement,
@@ -123,7 +124,8 @@ impl PdfView {
     pub fn open(
         path: impl AsRef<std::path::Path>,
         focus_handle: FocusHandle,
-        settings: Settings,
+        behavior: BehaviorSettings,
+        theme: Theme,
     ) -> Result<Self> {
         let file_name = path
             .as_ref()
@@ -178,10 +180,10 @@ impl PdfView {
             });
 
             max_page_width = max_page_width.max(page_width);
-            offset_y += page_height + settings.page_gap;
+            offset_y += page_height + theme.page_gap;
         }
 
-        let content_height_doc = offset_y - settings.page_gap;
+        let content_height_doc = offset_y - theme.page_gap;
         let page_image_bounds = (0..pages.len()).map(|_| None).collect();
 
         Ok(Self {
@@ -199,7 +201,7 @@ impl PdfView {
             cache_access_counter: 0,
             pending_renders: Vec::new(),
             control_down: false,
-            zoom: settings.default_zoom,
+            zoom: behavior.default_zoom,
             base_scale: 1.0,
             viewport_width: 0.0,
             viewport_height: 0.0,
@@ -845,17 +847,17 @@ impl PdfView {
     }
 
     fn zoom_in(&mut self, cx: &mut Context<Self>) {
-        let zoom_step = cx.global::<SettingsStore>().settings.zoom_step;
+        let zoom_step = cx.global::<SettingsStore>().settings.behavior.zoom_step;
         self.set_zoom(self.zoom * zoom_step, cx);
     }
 
     fn zoom_out(&mut self, cx: &mut Context<Self>) {
-        let zoom_step = cx.global::<SettingsStore>().settings.zoom_step;
+        let zoom_step = cx.global::<SettingsStore>().settings.behavior.zoom_step;
         self.set_zoom(self.zoom / zoom_step, cx);
     }
 
     fn reset_zoom(&mut self, cx: &mut Context<Self>) {
-        let default_zoom = cx.global::<SettingsStore>().settings.default_zoom;
+        let default_zoom = cx.global::<SettingsStore>().settings.behavior.default_zoom;
         self.set_zoom(default_zoom, cx);
     }
 
@@ -888,6 +890,7 @@ impl PdfView {
             let factor = cx
                 .global::<SettingsStore>()
                 .settings
+                .behavior
                 .zoom_step
                 .powf(zoom_delta);
             self.set_zoom(self.zoom * factor, cx);
@@ -960,7 +963,7 @@ impl PdfView {
             |this, _, event: &PanelEvent, window, cx| match event {
                 PanelEvent::Dismissed => this.close_settings_panel(window, cx),
                 PanelEvent::Changed => {
-                    let page_gap = cx.global::<SettingsStore>().settings.page_gap;
+                    let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
                     this.recompute_layout(page_gap);
                     cx.notify();
                 }
@@ -1090,14 +1093,13 @@ impl Render for PdfView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
         let prepaint_view = view.clone();
-        let settings = cx.global::<SettingsStore>().settings;
-        let selection_highlight = settings.selection_highlight;
+        let theme = cx.global::<SettingsStore>().resolved_theme;
 
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(settings.background))
+            .bg(rgb(theme.background))
             .cursor_text()
             .when(self.panning.is_some(), |this| this.cursor_grabbing())
             .key_context("PdfView")
@@ -1218,7 +1220,7 @@ impl Render for PdfView {
                         },
                         move |_, paint_data, window, _| {
                             for page in paint_data.pages {
-                                window.paint_quad(fill(page.bounds, rgba(0xffffffff)));
+                                window.paint_quad(fill(page.bounds, rgb(theme.page)));
 
                                 if let Some(image) = page.image {
                                     let _ = window.paint_image(
@@ -1232,7 +1234,7 @@ impl Render for PdfView {
                             }
 
                             for highlight in paint_data.highlights {
-                                window.paint_quad(fill(highlight, rgba(selection_highlight)));
+                                window.paint_quad(fill(highlight, rgba(theme.selection_highlight)));
                             }
                         },
                     )
@@ -1250,10 +1252,10 @@ impl Render for PdfView {
                     .h(px(26.0))
                     .px_3()
                     .border_t(px(1.0))
-                    .border_color(rgb(0x303030))
-                    .bg(rgb(0x181818))
+                    .border_color(rgb(theme.footer_border))
+                    .bg(rgb(theme.footer_background))
                     .text_size(px(12.0))
-                    .text_color(rgb(0xaaaaaa))
+                    .text_color(rgb(theme.footer_text))
                     .child(
                         div()
                             .flex_1()
@@ -1278,7 +1280,7 @@ impl Render for PdfView {
                         .items_start()
                         .justify_center()
                         .pt(px(96.0))
-                        .bg(rgba(0x00000066))
+                        .bg(rgba(theme.overlay))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, window, cx| {
@@ -1299,7 +1301,7 @@ impl Render for PdfView {
                         .items_start()
                         .justify_center()
                         .pt(px(96.0))
-                        .bg(rgba(0x00000066))
+                        .bg(rgba(theme.overlay))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, window, cx| {
