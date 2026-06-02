@@ -6,10 +6,10 @@ use crate::settings_panel::{PanelEvent, SettingsPanel};
 use crate::theme::Theme;
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
-    Bounds, ClipboardItem, Context, Corners, Entity, FocusHandle, Focusable, IntoElement,
+    Anchor, Bounds, ClipboardItem, Context, Corners, Entity, FocusHandle, Focusable, IntoElement,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point as GpuiPoint,
-    Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Task, Window, canvas, div,
-    fill, point, prelude::*, px, rgb, rgba, size,
+    Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Task, Window, anchored,
+    canvas, deferred, div, fill, point, prelude::*, px, rgb, rgba, size,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
@@ -120,6 +120,7 @@ pub struct PdfView {
     scroll_y_doc: f32,
     command_palette: Option<Entity<CommandPalette>>,
     settings_panel: Option<Entity<SettingsPanel>>,
+    context_menu_position: Option<GpuiPoint<Pixels>>,
 }
 
 impl PdfView {
@@ -211,6 +212,7 @@ impl PdfView {
             scroll_y_doc: 0.0,
             command_palette: None,
             settings_panel: None,
+            context_menu_position: None,
         })
     }
 
@@ -819,6 +821,12 @@ impl PdfView {
         (!text.is_empty()).then_some(text)
     }
 
+    fn copy_selection(&self, cx: &mut Context<Self>) {
+        if let Some(text) = self.selected_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
     fn select_all(&mut self) {
         if self.glyphs.is_empty() {
             self.selection = None;
@@ -985,6 +993,145 @@ impl PdfView {
         }
     }
 
+    fn open_context_menu(
+        &mut self,
+        position: GpuiPoint<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_handle.focus(window, cx);
+        self.dragging = false;
+        self.panning = None;
+        self.context_menu_position = Some(position);
+        window.prevent_default();
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn close_context_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        let was_open = self.context_menu_position.take().is_some();
+        if was_open {
+            cx.notify();
+        }
+        was_open
+    }
+
+    fn context_menu_entry(
+        label: &'static str,
+        theme: Theme,
+        handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .h(px(30.0))
+            .px_3()
+            .text_size(px(13.0))
+            .text_color(rgb(theme.text))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    handler(this, window, cx);
+                    this.close_context_menu(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
+    fn context_menu_separator(theme: Theme) -> impl IntoElement {
+        div().h(px(1.0)).my_1().mx_1().bg(rgb(theme.panel_border))
+    }
+
+    fn render_context_menu(
+        has_selection: bool,
+        is_fullscreen: bool,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let fullscreen_label = if is_fullscreen {
+            "Exit Full Screen"
+        } else {
+            "Enter Full Screen"
+        };
+
+        div()
+            .occlude()
+            .flex()
+            .flex_col()
+            .w(px(190.0))
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(theme.panel_border))
+            .shadow_lg()
+            .overflow_hidden()
+            .bg(rgb(theme.panel_background))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_mouse_down(MouseButton::Middle, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_mouse_down(MouseButton::Right, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .when(has_selection, |menu| {
+                menu.child(Self::context_menu_entry(
+                    "Copy",
+                    theme,
+                    |this, _, cx| this.copy_selection(cx),
+                    cx,
+                ))
+                .child(Self::context_menu_separator(theme))
+            })
+            .child(Self::context_menu_entry(
+                "Select All",
+                theme,
+                |this, _, cx| {
+                    this.select_all();
+                    cx.notify();
+                },
+                cx,
+            ))
+            .child(Self::context_menu_separator(theme))
+            .child(Self::context_menu_entry(
+                "Zoom In",
+                theme,
+                |this, _, cx| this.zoom_in(cx),
+                cx,
+            ))
+            .child(Self::context_menu_entry(
+                "Zoom Out",
+                theme,
+                |this, _, cx| this.zoom_out(cx),
+                cx,
+            ))
+            .child(Self::context_menu_entry(
+                "Reset Zoom",
+                theme,
+                |this, _, cx| this.reset_zoom(cx),
+                cx,
+            ))
+            .child(Self::context_menu_separator(theme))
+            .child(Self::context_menu_entry(
+                fullscreen_label,
+                theme,
+                |_, window, _| window.toggle_fullscreen(),
+                cx,
+            ))
+            .child(Self::context_menu_entry(
+                "Settings",
+                theme,
+                |this, window, cx| this.toggle_settings_panel(window, cx),
+                cx,
+            ))
+    }
+
     fn selection_highlights(&self) -> Vec<Bounds<Pixels>> {
         let Some((start, end)) = self.selection_bounds() else {
             return Vec::new();
@@ -1092,10 +1239,25 @@ impl PdfView {
 }
 
 impl Render for PdfView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
         let prepaint_view = view.clone();
         let theme = cx.global::<SettingsStore>().resolved_theme;
+        let context_menu = self.context_menu_position.map(|position| {
+            deferred(
+                anchored()
+                    .snap_to_window_with_margin(px(8.0))
+                    .position(position)
+                    .anchor(Anchor::TopLeft)
+                    .child(Self::render_context_menu(
+                        self.selected_text().is_some(),
+                        window.is_fullscreen(),
+                        theme,
+                        cx,
+                    )),
+            )
+            .with_priority(1)
+        });
 
         div()
             .size_full()
@@ -1107,9 +1269,7 @@ impl Render for PdfView {
             .key_context("PdfView")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| {
-                if let Some(text) = this.selected_text() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                }
+                this.copy_selection(cx);
             }))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
                 this.select_all();
@@ -1142,6 +1302,7 @@ impl Render for PdfView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.close_context_menu(cx);
                     this.focus_handle.focus(window, cx);
                     this.dragging = false;
 
@@ -1167,6 +1328,7 @@ impl Render for PdfView {
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.close_context_menu(cx);
                     this.focus_handle.focus(window, cx);
                     this.dragging = false;
                     this.panning = Some(PanState {
@@ -1175,6 +1337,18 @@ impl Render for PdfView {
                         scroll_origin_y: this.scroll_y_doc,
                     });
                     cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.command_palette.is_some() || this.settings_panel.is_some() {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        return;
+                    }
+
+                    this.open_context_menu(event.position, window, cx);
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
@@ -1316,5 +1490,6 @@ impl Render for PdfView {
                         .child(panel),
                 )
             })
+            .children(context_menu)
     }
 }
