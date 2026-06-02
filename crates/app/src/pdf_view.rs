@@ -25,6 +25,7 @@ gpui::actions!(
         ZoomOut,
         ResetZoom,
         ToggleCommandPalette,
+        ToggleFullScreen,
         OpenSettings
     ]
 );
@@ -1125,6 +1126,9 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
+                window.toggle_fullscreen();
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.toggle_settings_panel(window, cx);

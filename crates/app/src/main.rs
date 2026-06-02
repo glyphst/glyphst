@@ -15,8 +15,8 @@ use command_palette::{
     PaletteSelectPrev,
 };
 use pdf_view::{
-    CopySelection, OpenSettings, PdfView, ResetZoom, SelectAll, ToggleCommandPalette, ZoomIn,
-    ZoomOut,
+    CopySelection, OpenSettings, PdfView, ResetZoom, SelectAll, ToggleCommandPalette,
+    ToggleFullScreen, ZoomIn, ZoomOut,
 };
 use settings::SettingsStore;
 use settings_panel::PanelClose;
@@ -44,6 +44,7 @@ fn main() {
             KeyBinding::new("=", ResetZoom, Some("PdfView && !CommandPalette")),
             KeyBinding::new("ctrl-shift-p", ToggleCommandPalette, Some("PdfView")),
             KeyBinding::new("cmd-shift-p", ToggleCommandPalette, Some("PdfView")),
+            KeyBinding::new("f11", ToggleFullScreen, Some("PdfView")),
             KeyBinding::new("ctrl-,", OpenSettings, Some("PdfView")),
             KeyBinding::new("cmd-,", OpenSettings, Some("PdfView")),
             KeyBinding::new("enter", PaletteConfirm, Some("CommandPalette")),
