@@ -1,10 +1,11 @@
-use std::{ops::Range, sync::Arc};
+use std::{borrow::Cow, cell::RefCell, ops::Range, path::PathBuf, rc::Rc, sync::Arc};
 
 use crate::command_palette::{CommandPalette, PaletteEvent};
 use crate::settings::{BehaviorSettings, SettingsStore};
 use crate::settings_panel::{PanelEvent, SettingsPanel};
 use crate::theme::Theme;
 use anyhow::{Context as _, Result, anyhow, bail};
+use arboard::{Clipboard, ImageData};
 use gpui::{
     Anchor, Bounds, ClipboardItem, Context, Corners, Entity, FocusHandle, Focusable, IntoElement,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point as GpuiPoint,
@@ -13,7 +14,10 @@ use gpui::{
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
-use mupdf::{Colorspace, Device, DisplayList, Matrix, Pixmap, Quad, Rect, TextPageFlags};
+use mupdf::{
+    ColorParams, Colorspace, Device, DisplayList, Image as PdfImage, Matrix, Pixmap, Quad, Rect,
+    TextPageFlags,
+};
 use smallvec::smallvec;
 
 gpui::actions!(
@@ -63,6 +67,50 @@ struct CachedRender {
 struct PendingRender {
     key: RenderKey,
     _task: Task<()>,
+}
+
+struct CollectedImage {
+    bounds: Rect,
+    matrix: Matrix,
+    image: PdfImage,
+}
+
+#[derive(Default)]
+struct ImageCollector {
+    images: Vec<CollectedImage>,
+}
+
+impl ImageCollector {
+    fn transformed_unit_square_bounds(matrix: &Matrix) -> Rect {
+        let corners = [
+            matrix.transform_xy(0.0, 0.0),
+            matrix.transform_xy(1.0, 0.0),
+            matrix.transform_xy(0.0, 1.0),
+            matrix.transform_xy(1.0, 1.0),
+        ];
+
+        let (mut x0, mut y0) = corners[0];
+        let (mut x1, mut y1) = corners[0];
+        for (x, y) in corners.into_iter().skip(1) {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+
+        Rect::new(x0, y0, x1, y1)
+    }
+}
+
+impl mupdf::NativeDevice for ImageCollector {
+    fn fill_image(&mut self, image: &PdfImage, matrix: Matrix, _alpha: f32, _cp: ColorParams) {
+        let bounds = Self::transformed_unit_square_bounds(&matrix);
+        self.images.push(CollectedImage {
+            bounds,
+            matrix,
+            image: image.clone(),
+        });
+    }
 }
 
 struct PaintPage {
@@ -121,6 +169,8 @@ pub struct PdfView {
     command_palette: Option<Entity<CommandPalette>>,
     settings_panel: Option<Entity<SettingsPanel>>,
     context_menu_position: Option<GpuiPoint<Pixels>>,
+    context_menu_image: Option<(usize, usize)>,
+    _image_clipboard: Option<Clipboard>,
 }
 
 impl PdfView {
@@ -213,6 +263,8 @@ impl PdfView {
             command_palette: None,
             settings_panel: None,
             context_menu_position: None,
+            context_menu_image: None,
+            _image_clipboard: None,
         })
     }
 
@@ -629,6 +681,208 @@ impl PdfView {
         Ok(Arc::new(RenderImage::new(smallvec![frame])))
     }
 
+    fn collect_images(display_list: &DisplayList) -> Result<Vec<CollectedImage>> {
+        let collector = Rc::new(RefCell::new(ImageCollector::default()));
+        let device = Device::from_native(collector.clone())?;
+        display_list
+            .run(&device, &Matrix::IDENTITY, Rect::INF)
+            .context("failed to collect PDF images")?;
+        drop(device);
+
+        Ok(std::mem::take(&mut collector.borrow_mut().images))
+    }
+
+    fn image_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<(usize, usize)> {
+        let page_idx = self.page_at_screen(point)?;
+        let pdf_point = self.screen_to_pdf(page_idx, point)?;
+        let images = match Self::collect_images(&self.pages[page_idx].display_list) {
+            Ok(images) => images,
+            Err(error) => {
+                eprintln!("failed to hit-test PDF images: {error:#}");
+                return None;
+            }
+        };
+
+        images
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(image_idx, image)| {
+                Self::image_contains_pdf_point(image, pdf_point).then_some((page_idx, image_idx))
+            })
+    }
+
+    fn image_contains_pdf_point(image: &CollectedImage, point: mupdf::Point) -> bool {
+        if !image.bounds.contains(point.x, point.y) {
+            return false;
+        }
+
+        let Some(inverse) = image.matrix.invert() else {
+            return true;
+        };
+
+        let (x, y) = inverse.transform_xy(point.x, point.y);
+        (-0.001..=1.001).contains(&x) && (-0.001..=1.001).contains(&y)
+    }
+
+    fn copy_image(&mut self, cx: &mut Context<Self>) {
+        let Some((page_idx, image_idx)) = self.context_menu_image else {
+            return;
+        };
+        let Some(page) = self.pages.get(page_idx) else {
+            return;
+        };
+        let display_list = page.display_list.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(
+                    async move { Self::copy_image_to_clipboard(display_list, image_idx) },
+                )
+                .await;
+
+            if let Err(error) = this.update(cx, |this, _| match result {
+                Ok(clipboard) => {
+                    this._image_clipboard = Some(clipboard);
+                }
+                Err(error) => eprintln!("failed to copy PDF image: {error:#}"),
+            }) {
+                eprintln!("failed to update PDF image clipboard state: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    fn copy_image_to_clipboard(
+        display_list: Arc<DisplayList>,
+        image_idx: usize,
+    ) -> Result<Clipboard> {
+        let (width, height, rgba) =
+            Self::rasterize_image_from_display_list(&display_list, image_idx)?;
+
+        let mut clipboard = Clipboard::new().context("failed to open clipboard")?;
+        clipboard
+            .set_image(ImageData {
+                width,
+                height,
+                bytes: Cow::Owned(rgba),
+            })
+            .context("failed to write image to clipboard")?;
+
+        Ok(clipboard)
+    }
+
+    fn save_image(&mut self, cx: &mut Context<Self>) {
+        let Some((page_idx, image_idx)) = self.context_menu_image else {
+            return;
+        };
+        let Some(page) = self.pages.get(page_idx) else {
+            return;
+        };
+        let display_list = page.display_list.clone();
+        let suggested_name = format!("page-{}-image-{}.png", page_idx + 1, image_idx + 1);
+        let directory = dirs::picture_dir()
+            .or_else(dirs::download_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+
+        cx.spawn(async move |_, cx| match dialog.await {
+            Ok(Ok(Some(path))) => {
+                let result = cx
+                    .background_spawn(async move {
+                        Self::save_image_to_path(display_list, image_idx, path)
+                    })
+                    .await;
+
+                if let Err(error) = result {
+                    eprintln!("failed to save PDF image: {error:#}");
+                }
+            }
+            Ok(Err(error)) => eprintln!("failed to open save image dialog: {error:#}"),
+            Ok(Ok(None)) | Err(_) => {}
+        })
+        .detach();
+    }
+
+    fn save_image_to_path(
+        display_list: Arc<DisplayList>,
+        image_idx: usize,
+        path: PathBuf,
+    ) -> Result<()> {
+        let (width, height, rgba) =
+            Self::rasterize_image_from_display_list(&display_list, image_idx)?;
+        let image = RgbaImage::from_raw(width as u32, height as u32, rgba)
+            .context("failed to create image data")?;
+        image
+            .save_with_format(&path, image::ImageFormat::Png)
+            .with_context(|| format!("failed to save image to {}", path.display()))
+    }
+
+    fn rasterize_image_from_display_list(
+        display_list: &DisplayList,
+        image_idx: usize,
+    ) -> Result<(usize, usize, Vec<u8>)> {
+        let image = Self::collect_images(display_list)?
+            .into_iter()
+            .nth(image_idx)
+            .ok_or_else(|| anyhow!("PDF image no longer exists"))?;
+
+        Self::rasterize_image_to_rgba(&image.image)
+    }
+
+    fn rasterize_image_to_rgba(image: &PdfImage) -> Result<(usize, usize, Vec<u8>)> {
+        let width = image.width();
+        let height = image.height();
+        if width == 0 || height == 0 {
+            bail!("PDF image has zero dimensions");
+        }
+        if width > i32::MAX as u32 || height > i32::MAX as u32 {
+            bail!("PDF image is too large to copy");
+        }
+
+        let mut pixmap =
+            Pixmap::new_with_w_h(&Colorspace::device_rgb(), width as i32, height as i32, true)?;
+        pixmap.clear()?;
+
+        let matrix = Matrix::new(width as f32, 0.0, 0.0, height as f32, 0.0, 0.0);
+        {
+            let device = Device::from_pixmap(&pixmap)?;
+            device
+                .fill_image(image, &matrix, 1.0, ColorParams::default())
+                .context("failed to rasterize PDF image")?;
+        }
+
+        let samples = pixmap.samples();
+        let expected_len = width as usize * height as usize * 4;
+        if samples.len() != expected_len || pixmap.n() != 4 {
+            bail!(
+                "unexpected image pixmap layout: {} samples, {} components",
+                samples.len(),
+                pixmap.n()
+            );
+        }
+
+        let mut rgba = samples.to_vec();
+        Self::unpremultiply_rgba(&mut rgba);
+        Ok((width as usize, height as usize, rgba))
+    }
+
+    fn unpremultiply_rgba(rgba: &mut [u8]) {
+        for pixel in rgba.chunks_exact_mut(4) {
+            let alpha = pixel[3] as u32;
+            if alpha == 0 {
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 0;
+            } else if alpha < 255 {
+                pixel[0] = ((pixel[0] as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
+                pixel[1] = ((pixel[1] as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
+                pixel[2] = ((pixel[2] as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+
     fn point_in_image(&self, point: GpuiPoint<Pixels>) -> bool {
         self.page_at_screen(point).is_some()
     }
@@ -1002,6 +1256,7 @@ impl PdfView {
         self.focus_handle.focus(window, cx);
         self.dragging = false;
         self.panning = None;
+        self.context_menu_image = self.image_at_screen(position);
         self.context_menu_position = Some(position);
         window.prevent_default();
         cx.stop_propagation();
@@ -1010,6 +1265,7 @@ impl PdfView {
 
     fn close_context_menu(&mut self, cx: &mut Context<Self>) -> bool {
         let was_open = self.context_menu_position.take().is_some();
+        self.context_menu_image = None;
         if was_open {
             cx.notify();
         }
@@ -1047,6 +1303,7 @@ impl PdfView {
     }
 
     fn render_context_menu(
+        has_image: bool,
         has_selection: bool,
         is_fullscreen: bool,
         theme: Theme,
@@ -1079,6 +1336,21 @@ impl PdfView {
             .on_mouse_down(MouseButton::Right, |_, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
+            })
+            .when(has_image, |menu| {
+                menu.child(Self::context_menu_entry(
+                    "Copy Image",
+                    theme,
+                    |this, _, cx| this.copy_image(cx),
+                    cx,
+                ))
+                .child(Self::context_menu_entry(
+                    "Save Image",
+                    theme,
+                    |this, _, cx| this.save_image(cx),
+                    cx,
+                ))
+                .child(Self::context_menu_separator(theme))
             })
             .when(has_selection, |menu| {
                 menu.child(Self::context_menu_entry(
@@ -1250,6 +1522,7 @@ impl Render for PdfView {
                     .position(position)
                     .anchor(Anchor::TopLeft)
                     .child(Self::render_context_menu(
+                        self.context_menu_image.is_some(),
                         self.selected_text().is_some(),
                         window.is_fullscreen(),
                         theme,
