@@ -5,6 +5,7 @@ use gpui_platform::application;
 
 mod command_palette;
 mod pdf_view;
+mod search;
 mod settings;
 mod settings_panel;
 mod theme;
@@ -15,8 +16,13 @@ use command_palette::{
     PaletteSelectPrev,
 };
 use pdf_view::{
-    CopySelection, OpenSettings, PdfView, ResetZoom, SelectAll, ToggleCommandPalette,
-    ToggleFullScreen, ZoomIn, ZoomOut,
+    CopySelection, OpenSettings, PdfView, ResetZoom, Search, SearchNext, SearchPrev, SelectAll,
+    ToggleCommandPalette, ToggleFullScreen, ZoomIn, ZoomOut,
+};
+use search::{
+    SearchInputBackspace, SearchInputCancel, SearchInputConfirm, SearchInputDelete, SearchInputEnd,
+    SearchInputHome, SearchInputLeft, SearchInputPaste, SearchInputPrevious, SearchInputRight,
+    SearchInputSelectAll,
 };
 use settings::SettingsStore;
 use settings_panel::PanelClose;
@@ -34,19 +40,72 @@ fn main() {
         cx.set_global(SettingsStore::load());
 
         cx.bind_keys([
-            KeyBinding::new("ctrl-c", CopySelection, Some("PdfView && !CommandPalette")),
-            KeyBinding::new("cmd-c", CopySelection, Some("PdfView && !CommandPalette")),
-            KeyBinding::new("ctrl-a", SelectAll, Some("PdfView && !CommandPalette")),
-            KeyBinding::new("cmd-a", SelectAll, Some("PdfView && !CommandPalette")),
-            KeyBinding::new("+", ZoomIn, Some("PdfView && !CommandPalette")),
-            KeyBinding::new("shift-=", ZoomIn, Some("PdfView && !CommandPalette")),
-            KeyBinding::new("-", ZoomOut, Some("PdfView && !CommandPalette")),
-            KeyBinding::new("=", ResetZoom, Some("PdfView && !CommandPalette")),
-            KeyBinding::new("ctrl-shift-p", ToggleCommandPalette, Some("PdfView")),
-            KeyBinding::new("cmd-shift-p", ToggleCommandPalette, Some("PdfView")),
-            KeyBinding::new("f11", ToggleFullScreen, Some("PdfView")),
-            KeyBinding::new("ctrl-,", OpenSettings, Some("PdfView")),
-            KeyBinding::new("cmd-,", OpenSettings, Some("PdfView")),
+            KeyBinding::new(
+                "ctrl-c",
+                CopySelection,
+                Some("PdfView && !CommandPalette && !Search"),
+            ),
+            KeyBinding::new(
+                "cmd-c",
+                CopySelection,
+                Some("PdfView && !CommandPalette && !Search"),
+            ),
+            KeyBinding::new(
+                "ctrl-a",
+                SelectAll,
+                Some("PdfView && !CommandPalette && !Search"),
+            ),
+            KeyBinding::new(
+                "cmd-a",
+                SelectAll,
+                Some("PdfView && !CommandPalette && !Search"),
+            ),
+            KeyBinding::new("+", ZoomIn, Some("PdfView && !CommandPalette && !Search")),
+            KeyBinding::new(
+                "shift-=",
+                ZoomIn,
+                Some("PdfView && !CommandPalette && !Search"),
+            ),
+            KeyBinding::new("-", ZoomOut, Some("PdfView && !CommandPalette && !Search")),
+            KeyBinding::new(
+                "=",
+                ResetZoom,
+                Some("PdfView && !CommandPalette && !Search"),
+            ),
+            KeyBinding::new(
+                "ctrl-f",
+                Search,
+                Some("PdfView && !CommandPalette && !Search"),
+            ),
+            KeyBinding::new(
+                "cmd-f",
+                Search,
+                Some("PdfView && !CommandPalette && !Search"),
+            ),
+            KeyBinding::new("/", Search, Some("PdfView && !CommandPalette && !Search")),
+            KeyBinding::new(
+                "n",
+                SearchNext,
+                Some("PdfView && !CommandPalette && !Search"),
+            ),
+            KeyBinding::new(
+                "shift-n",
+                SearchPrev,
+                Some("PdfView && !CommandPalette && !Search"),
+            ),
+            KeyBinding::new(
+                "ctrl-shift-p",
+                ToggleCommandPalette,
+                Some("PdfView && !Search"),
+            ),
+            KeyBinding::new(
+                "cmd-shift-p",
+                ToggleCommandPalette,
+                Some("PdfView && !Search"),
+            ),
+            KeyBinding::new("f11", ToggleFullScreen, Some("PdfView && !Search")),
+            KeyBinding::new("ctrl-,", OpenSettings, Some("PdfView && !Search")),
+            KeyBinding::new("cmd-,", OpenSettings, Some("PdfView && !Search")),
             KeyBinding::new("enter", PaletteConfirm, Some("CommandPalette")),
             KeyBinding::new("escape", PaletteCancel, Some("CommandPalette")),
             KeyBinding::new("down", PaletteSelectNext, Some("CommandPalette")),
@@ -61,6 +120,19 @@ fn main() {
             KeyBinding::new("cmd-a", PaletteSelectAll, Some("CommandPalette")),
             KeyBinding::new("ctrl-v", PalettePaste, Some("CommandPalette")),
             KeyBinding::new("cmd-v", PalettePaste, Some("CommandPalette")),
+            KeyBinding::new("enter", SearchInputConfirm, Some("Search")),
+            KeyBinding::new("shift-enter", SearchInputPrevious, Some("Search")),
+            KeyBinding::new("escape", SearchInputCancel, Some("Search")),
+            KeyBinding::new("backspace", SearchInputBackspace, Some("Search")),
+            KeyBinding::new("delete", SearchInputDelete, Some("Search")),
+            KeyBinding::new("left", SearchInputLeft, Some("Search")),
+            KeyBinding::new("right", SearchInputRight, Some("Search")),
+            KeyBinding::new("home", SearchInputHome, Some("Search")),
+            KeyBinding::new("end", SearchInputEnd, Some("Search")),
+            KeyBinding::new("ctrl-a", SearchInputSelectAll, Some("Search")),
+            KeyBinding::new("cmd-a", SearchInputSelectAll, Some("Search")),
+            KeyBinding::new("ctrl-v", SearchInputPaste, Some("Search")),
+            KeyBinding::new("cmd-v", SearchInputPaste, Some("Search")),
             KeyBinding::new("escape", PanelClose, Some("SettingsPanel")),
         ]);
 

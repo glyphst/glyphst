@@ -1,6 +1,7 @@
 use std::{borrow::Cow, cell::RefCell, ops::Range, path::PathBuf, rc::Rc, sync::Arc};
 
 use crate::command_palette::{CommandPalette, PaletteEvent};
+use crate::search::{SearchBar, SearchEvent};
 use crate::settings::{BehaviorSettings, SettingsStore};
 use crate::settings_panel::{PanelEvent, SettingsPanel};
 use crate::theme::Theme;
@@ -28,6 +29,9 @@ gpui::actions!(
         ZoomIn,
         ZoomOut,
         ResetZoom,
+        Search,
+        SearchNext,
+        SearchPrev,
         ToggleCommandPalette,
         ToggleFullScreen,
         OpenSettings
@@ -120,7 +124,9 @@ struct PaintPage {
 
 struct PaintData {
     pages: Vec<PaintPage>,
-    highlights: Vec<Bounds<Pixels>>,
+    selection_highlights: Vec<Bounds<Pixels>>,
+    search_highlights: Vec<Bounds<Pixels>>,
+    active_search_highlights: Vec<Bounds<Pixels>>,
 }
 
 #[derive(Clone)]
@@ -136,6 +142,27 @@ struct Glyph {
 struct Selection {
     anchor: usize,
     head: usize,
+}
+
+struct SearchMatch {
+    page_idx: usize,
+    range: Range<usize>,
+}
+
+struct SearchState {
+    query: SharedString,
+    matches: Vec<SearchMatch>,
+    active: Option<usize>,
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self {
+            query: "".into(),
+            matches: Vec::new(),
+            active: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -168,6 +195,8 @@ pub struct PdfView {
     scroll_y_doc: f32,
     command_palette: Option<Entity<CommandPalette>>,
     settings_panel: Option<Entity<SettingsPanel>>,
+    search_bar: Option<Entity<SearchBar>>,
+    search: SearchState,
     context_menu_position: Option<GpuiPoint<Pixels>>,
     context_menu_image: Option<(usize, usize)>,
     _image_clipboard: Option<Clipboard>,
@@ -262,6 +291,8 @@ impl PdfView {
             scroll_y_doc: 0.0,
             command_palette: None,
             settings_panel: None,
+            search_bar: None,
+            search: SearchState::default(),
             context_menu_position: None,
             context_menu_image: None,
             _image_clipboard: None,
@@ -366,9 +397,15 @@ impl PdfView {
             });
         }
 
-        let highlights = self.selection_highlights();
+        let selection_highlights = self.selection_highlights();
+        let (search_highlights, active_search_highlights) = self.search_highlights();
 
-        Ok(PaintData { pages, highlights })
+        Ok(PaintData {
+            pages,
+            selection_highlights,
+            search_highlights,
+            active_search_highlights,
+        })
     }
 
     fn image_bounds_for_page(
@@ -1093,6 +1130,219 @@ impl PdfView {
         });
     }
 
+    fn deploy_search_query(&mut self, query: SharedString, previous: bool, cx: &mut Context<Self>) {
+        if query.as_ref() == self.search.query.as_ref() {
+            self.navigate_search(previous, cx);
+            return;
+        }
+
+        self.search.query = query;
+        self.recompute_search();
+        self.search.active = self.nearest_search_match_index();
+        if previous
+            && let Some(active) = self.search.active
+            && !self.search.matches.is_empty()
+        {
+            self.search.active = Some(
+                active
+                    .checked_sub(1)
+                    .unwrap_or(self.search.matches.len() - 1),
+            );
+        }
+        self.sync_search_bar(cx);
+
+        if self.search.active.is_some() {
+            self.scroll_to_active_search_match(cx);
+        }
+
+        cx.notify();
+    }
+
+    fn recompute_search(&mut self) {
+        self.search.matches.clear();
+        self.search.active = None;
+
+        let needle = self.search.query.as_ref().to_lowercase();
+        if needle.is_empty() {
+            return;
+        }
+
+        for page_idx in 0..self.pages.len() {
+            let (haystack, glyph_map) = self.searchable_page_text(page_idx);
+            let mut start_byte = 0;
+
+            while let Some(relative_start) = haystack[start_byte..].find(&needle) {
+                let match_start = start_byte + relative_start;
+                let match_end = match_start + needle.len();
+                let start_char = Self::char_index_for_byte(&haystack, match_start);
+                let end_char = Self::char_index_for_byte(&haystack, match_end);
+
+                if let Some(range) =
+                    Self::glyph_range_for_search_chars(&glyph_map, start_char, end_char)
+                {
+                    self.search.matches.push(SearchMatch { page_idx, range });
+                }
+
+                start_byte = match_end;
+            }
+        }
+    }
+
+    fn searchable_page_text(&self, page_idx: usize) -> (String, Vec<Option<usize>>) {
+        let mut text = String::new();
+        let mut glyph_map = Vec::new();
+        let mut previous: Option<&Glyph> = None;
+
+        for glyph_ix in self.pages[page_idx].glyph_range.clone() {
+            let glyph = &self.glyphs[glyph_ix];
+            if let Some(previous) = previous {
+                if glyph.block_idx != previous.block_idx {
+                    Self::push_search_separator(&mut text, &mut glyph_map);
+                    Self::push_search_separator(&mut text, &mut glyph_map);
+                } else if glyph.line_idx != previous.line_idx {
+                    Self::push_search_separator(&mut text, &mut glyph_map);
+                }
+            }
+
+            for ch in glyph.c.to_lowercase() {
+                text.push(ch);
+                glyph_map.push(Some(glyph_ix));
+            }
+            previous = Some(glyph);
+        }
+
+        (text, glyph_map)
+    }
+
+    fn push_search_separator(text: &mut String, glyph_map: &mut Vec<Option<usize>>) {
+        text.push('\n');
+        glyph_map.push(None);
+    }
+
+    fn char_index_for_byte(text: &str, byte_ix: usize) -> usize {
+        text[..byte_ix].chars().count()
+    }
+
+    fn glyph_range_for_search_chars(
+        glyph_map: &[Option<usize>],
+        start_char: usize,
+        end_char: usize,
+    ) -> Option<Range<usize>> {
+        if start_char >= end_char || end_char > glyph_map.len() {
+            return None;
+        }
+
+        let start = glyph_map[start_char..end_char]
+            .iter()
+            .find_map(|glyph_ix| *glyph_ix)?;
+        let end = glyph_map[start_char..end_char]
+            .iter()
+            .rev()
+            .find_map(|glyph_ix| *glyph_ix)?
+            + 1;
+
+        (start < end).then_some(start..end)
+    }
+
+    fn nearest_search_match_index(&self) -> Option<usize> {
+        if self.search.matches.is_empty() {
+            return None;
+        }
+
+        self.search
+            .matches
+            .iter()
+            .enumerate()
+            .find_map(|(ix, search_match)| {
+                self.search_match_doc_rect(search_match)
+                    .and_then(|rect| (rect.y1 >= self.scroll_y_doc).then_some(ix))
+            })
+            .or(Some(0))
+    }
+
+    fn navigate_search(&mut self, previous: bool, cx: &mut Context<Self>) {
+        let match_count = self.search.matches.len();
+        if match_count == 0 {
+            self.sync_search_bar(cx);
+            cx.notify();
+            return;
+        }
+
+        let next = match self.search.active {
+            Some(active) if previous => active.checked_sub(1).unwrap_or(match_count - 1),
+            Some(active) => (active + 1) % match_count,
+            None if previous => match_count - 1,
+            None => 0,
+        };
+
+        self.search.active = Some(next);
+        self.sync_search_bar(cx);
+        self.scroll_to_search_match(next, cx);
+        cx.notify();
+    }
+
+    fn scroll_to_active_search_match(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = self.search.active {
+            self.scroll_to_search_match(active, cx);
+        }
+    }
+
+    fn scroll_to_search_match(&mut self, match_ix: usize, cx: &mut Context<Self>) {
+        let Some(search_match) = self.search.matches.get(match_ix) else {
+            return;
+        };
+        let Some(doc_rect) = self.search_match_doc_rect(search_match) else {
+            return;
+        };
+
+        let page_width = self.pages[search_match.page_idx].width;
+        let scale = self.effective_scale();
+        let center_x = (doc_rect.x0 + doc_rect.x1) / 2.0;
+        let center_y = (doc_rect.y0 + doc_rect.y1) / 2.0;
+
+        self.set_scroll_doc(
+            center_x - page_width / 2.0,
+            center_y - self.viewport_height / (2.0 * scale),
+            cx,
+        );
+    }
+
+    fn search_match_doc_rect(&self, search_match: &SearchMatch) -> Option<Rect> {
+        let mut rect = None;
+
+        for glyph in &self.glyphs[search_match.range.clone()] {
+            if glyph.page_idx != search_match.page_idx {
+                continue;
+            }
+
+            let glyph_rect = Self::quad_rect(&glyph.quad);
+            rect = Some(match rect {
+                Some(existing) => Self::union_rect(existing, glyph_rect),
+                None => glyph_rect,
+            });
+        }
+
+        let rect = rect?;
+        let page = &self.pages[search_match.page_idx];
+        Some(Rect::new(
+            rect.x0 - page.bounds.x0,
+            page.offset_y + rect.y0 - page.bounds.y0,
+            rect.x1 - page.bounds.x0,
+            page.offset_y + rect.y1 - page.bounds.y0,
+        ))
+    }
+
+    fn sync_search_bar(&mut self, cx: &mut Context<Self>) {
+        if let Some(search_bar) = self.search_bar.clone() {
+            let query = self.search.query.clone();
+            let active = self.search.active;
+            let match_count = self.search.matches.len();
+            search_bar.update(cx, |search_bar, cx| {
+                search_bar.set_match_status(query.clone(), active, match_count, cx);
+            });
+        }
+    }
+
     fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
         let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         if (zoom - self.zoom).abs() <= f32::EPSILON {
@@ -1185,6 +1435,7 @@ impl PdfView {
             return;
         }
         self.close_settings_panel(window, cx);
+        self.close_search_bar(window, cx);
 
         let actions = window
             .available_actions(cx)
@@ -1217,6 +1468,7 @@ impl PdfView {
             return;
         }
         self.close_command_palette(window, cx);
+        self.close_search_bar(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
         let panel = cx.new(|cx| SettingsPanel::new(previous_focus_handle.clone(), cx));
@@ -1242,6 +1494,53 @@ impl PdfView {
 
     fn close_settings_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_panel.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_bar.is_some() {
+            self.close_search_bar(window, cx);
+            return;
+        }
+
+        self.close_command_palette(window, cx);
+        self.close_settings_panel(window, cx);
+
+        let previous_focus_handle = self.focus_handle.clone();
+        let query = self.search.query.clone();
+        let active = self.search.active;
+        let match_count = self.search.matches.len();
+        let search_bar = cx.new(|cx| {
+            SearchBar::new(
+                previous_focus_handle.clone(),
+                query.clone(),
+                active,
+                match_count,
+                cx,
+            )
+        });
+
+        cx.subscribe_in(
+            &search_bar,
+            window,
+            |this, _, event: &SearchEvent, window, cx| match event {
+                SearchEvent::Activate { previous, query } => {
+                    this.deploy_search_query(query.clone(), *previous, cx)
+                }
+                SearchEvent::Dismissed => this.close_search_bar(window, cx),
+            },
+        )
+        .detach();
+
+        search_bar.focus_handle(cx).focus(window, cx);
+        self.search_bar = Some(search_bar);
+        cx.notify();
+    }
+
+    fn close_search_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_bar.take().is_some() {
             self.focus_handle.focus(window, cx);
             cx.notify();
         }
@@ -1409,12 +1708,36 @@ impl PdfView {
             return Vec::new();
         };
 
+        self.highlight_bounds_for_range(start..end + 1)
+    }
+
+    fn search_highlights(&self) -> (Vec<Bounds<Pixels>>, Vec<Bounds<Pixels>>) {
+        let mut highlights = Vec::new();
+        let mut active_highlights = Vec::new();
+
+        for (match_ix, search_match) in self.search.matches.iter().enumerate() {
+            let bounds = self.highlight_bounds_for_range(search_match.range.clone());
+            if self.search.active == Some(match_ix) {
+                active_highlights.extend(bounds);
+            } else {
+                highlights.extend(bounds);
+            }
+        }
+
+        (highlights, active_highlights)
+    }
+
+    fn highlight_bounds_for_range(&self, range: Range<usize>) -> Vec<Bounds<Pixels>> {
+        if range.start >= range.end || range.end > self.glyphs.len() {
+            return Vec::new();
+        }
+
         let mut highlights = Vec::new();
         let mut current_page = None;
         let mut current_line = None;
         let mut current_rect = None;
 
-        for glyph in &self.glyphs[start..=end] {
+        for glyph in &self.glyphs[range] {
             let rect = Self::quad_rect(&glyph.quad);
 
             match (current_page, current_line, current_rect) {
@@ -1508,6 +1831,10 @@ impl PdfView {
 
         dx.hypot(dy)
     }
+
+    fn with_alpha(rgb: u32, alpha: u8) -> u32 {
+        ((rgb & 0x00ff_ffff) << 8) | alpha as u32
+    }
 }
 
 impl Render for PdfView {
@@ -1556,6 +1883,15 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &ResetZoom, _, cx| {
                 this.reset_zoom(cx);
+            }))
+            .on_action(cx.listener(|this, _: &Search, window, cx| {
+                this.toggle_search(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SearchNext, _, cx| {
+                this.navigate_search(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SearchPrev, _, cx| {
+                this.navigate_search(true, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
@@ -1615,7 +1951,10 @@ impl Render for PdfView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    if this.command_palette.is_some() || this.settings_panel.is_some() {
+                    if this.command_palette.is_some()
+                        || this.settings_panel.is_some()
+                        || this.search_bar.is_some()
+                    {
                         window.prevent_default();
                         cx.stop_propagation();
                         return;
@@ -1685,7 +2024,21 @@ impl Render for PdfView {
                                 }
                             }
 
-                            for highlight in paint_data.highlights {
+                            for highlight in paint_data.search_highlights {
+                                window.paint_quad(fill(
+                                    highlight,
+                                    rgba(Self::with_alpha(theme.match_highlight, 0x66)),
+                                ));
+                            }
+
+                            for highlight in paint_data.active_search_highlights {
+                                window.paint_quad(fill(
+                                    highlight,
+                                    rgba(Self::with_alpha(theme.accent, 0x99)),
+                                ));
+                            }
+
+                            for highlight in paint_data.selection_highlights {
                                 window.paint_quad(fill(highlight, rgba(theme.selection_highlight)));
                             }
                         },
@@ -1761,6 +2114,18 @@ impl Render for PdfView {
                             }),
                         )
                         .child(panel),
+                )
+            })
+            .when_some(self.search_bar.clone(), |this, search_bar| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px(38.0))
+                        .flex()
+                        .justify_center()
+                        .child(search_bar),
                 )
             })
             .children(context_menu)
