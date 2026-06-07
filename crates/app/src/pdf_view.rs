@@ -1158,6 +1158,23 @@ impl PdfView {
         cx.notify();
     }
 
+    fn live_search(&mut self, query: SharedString, cx: &mut Context<Self>) {
+        if query.as_ref() == self.search.query.as_ref() {
+            return;
+        }
+
+        self.search.query = query;
+        self.recompute_search();
+        self.search.active = self.nearest_search_match_index();
+        self.sync_search_bar(cx);
+
+        if self.search.active.is_some() {
+            self.scroll_to_active_search_match(cx);
+        }
+
+        cx.notify();
+    }
+
     fn recompute_search(&mut self) {
         self.search.matches.clear();
         self.search.active = None;
@@ -1529,6 +1546,7 @@ impl PdfView {
                 SearchEvent::Activate { previous, query } => {
                     this.deploy_search_query(query.clone(), *previous, cx)
                 }
+                SearchEvent::QueryChanged { query } => this.live_search(query.clone(), cx),
                 SearchEvent::Dismissed => this.close_search_bar(window, cx),
             },
         )
@@ -2120,11 +2138,8 @@ impl Render for PdfView {
                 this.child(
                     div()
                         .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom(px(38.0))
-                        .flex()
-                        .justify_center()
+                        .top(px(12.0))
+                        .right(px(16.0))
                         .child(search_bar),
                 )
             })

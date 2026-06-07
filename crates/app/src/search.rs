@@ -1,12 +1,12 @@
-use std::ops::Range;
+use std::{ops::Range, time::Duration};
 
 use crate::settings::SettingsStore;
 use gpui::{
     App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
     IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point as GpuiPoint, Render, SharedString, Style, TextRun, UTF16Selection, Window, div,
-    fill, point, prelude::*, px, relative, rgb, rgba, size,
+    Pixels, Point as GpuiPoint, Render, SharedString, Style, Task, TextRun, UTF16Selection, Window,
+    div, fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
 
 gpui::actions!(
@@ -28,6 +28,7 @@ gpui::actions!(
 
 pub enum SearchEvent {
     Activate { previous: bool, query: SharedString },
+    QueryChanged { query: SharedString },
     Dismissed,
 }
 
@@ -45,6 +46,7 @@ pub struct SearchBar {
     applied_query: SharedString,
     active_match: Option<usize>,
     match_count: usize,
+    search_debounce: Option<Task<()>>,
 }
 
 impl SearchBar {
@@ -72,6 +74,7 @@ impl SearchBar {
             is_selecting: false,
             active_match,
             match_count,
+            search_debounce: None,
         }
     }
 
@@ -105,6 +108,19 @@ impl SearchBar {
             previous,
             query: self.content.clone(),
         });
+    }
+
+    fn schedule_query(&mut self, cx: &mut Context<Self>) {
+        self.search_debounce = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(180))
+                .await;
+            _ = this.update(cx, |this, cx| {
+                cx.emit(SearchEvent::QueryChanged {
+                    query: this.content.clone(),
+                });
+            });
+        }));
     }
 
     fn confirm(&mut self, _: &SearchInputConfirm, _: &mut Window, cx: &mut Context<Self>) {
@@ -301,18 +317,11 @@ impl SearchBar {
     }
 
     fn counter_text(&self) -> String {
-        if self.content.is_empty() {
+        if self.applied_query.is_empty() || self.content.as_ref() != self.applied_query.as_ref() {
             String::new()
-        } else if self.content.as_ref() != self.applied_query.as_ref() {
-            "Press Enter".to_string()
-        } else if self.match_count == 0 {
-            "No results".to_string()
         } else {
-            format!(
-                "{} / {}",
-                self.active_match.unwrap_or(0) + 1,
-                self.match_count
-            )
+            let active_match = self.active_match.map_or(0, |active| active + 1);
+            format!("{active_match}/{}", self.match_count)
         }
     }
 }
@@ -371,6 +380,7 @@ impl EntityInputHandler for SearchBar {
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.selection_reversed = false;
         self.marked_range.take();
+        self.schedule_query(cx);
         cx.notify();
     }
 
@@ -403,6 +413,7 @@ impl EntityInputHandler for SearchBar {
             })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         self.selection_reversed = false;
+        self.schedule_query(cx);
         cx.notify();
     }
 
@@ -454,10 +465,7 @@ impl Render for SearchBar {
         let entity = cx.entity();
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let counter = self.counter_text();
-        let counter_color = if !self.content.is_empty()
-            && self.content.as_ref() == self.applied_query.as_ref()
-            && self.match_count == 0
-        {
+        let counter_color = if !counter.is_empty() && self.match_count == 0 {
             theme.error
         } else {
             theme.text_muted
@@ -469,9 +477,10 @@ impl Render for SearchBar {
             .flex()
             .flex_row()
             .items_center()
-            .w(px(640.0))
-            .h(px(42.0))
-            .px_3()
+            .w(px(360.0))
+            .h(px(36.0))
+            .pl_3()
+            .pr_1()
             .rounded_md()
             .border_1()
             .border_color(rgb(theme.panel_border))
@@ -495,23 +504,12 @@ impl Render for SearchBar {
             .on_action(cx.listener(Self::paste))
             .child(
                 div()
-                    .flex_none()
-                    .mr_3()
-                    .text_color(rgb(theme.text_muted))
-                    .child("Find"),
-            )
-            .child(
-                div()
                     .flex()
                     .items_center()
                     .flex_1()
                     .min_w_0()
                     .h(px(28.0))
-                    .px_2()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(theme.control_border))
-                    .bg(rgb(theme.control_background))
+                    .pr_2()
                     .cursor(CursorStyle::IBeam)
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -519,14 +517,25 @@ impl Render for SearchBar {
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .child(SearchTextElement { search: entity }),
             )
+            .when(!counter.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .ml_2()
+                        .w(px(58.0))
+                        .text_align(gpui::TextAlign::Right)
+                        .text_color(rgb(counter_color))
+                        .child(counter),
+                )
+            })
             .child(
                 div()
                     .flex_none()
-                    .ml_3()
-                    .w(px(80.0))
-                    .text_align(gpui::TextAlign::Right)
-                    .text_color(rgb(counter_color))
-                    .child(counter),
+                    .ml_2()
+                    .mr_1()
+                    .w(px(1.0))
+                    .h(px(18.0))
+                    .bg(rgb(theme.control_border)),
             )
             .child(
                 div()
@@ -534,13 +543,31 @@ impl Render for SearchBar {
                     .flex_none()
                     .items_center()
                     .justify_center()
-                    .ml_3()
+                    .w(px(28.0))
                     .h(px(28.0))
-                    .px_3()
                     .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(theme.control_border))
-                    .bg(rgb(theme.control_background))
+                    .text_color(rgb(theme.text_muted))
+                    .hover(move |style| style.bg(rgb(theme.control_hover)))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.activate(true, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child("↑"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(px(28.0))
+                    .h(px(28.0))
+                    .rounded_sm()
+                    .text_color(rgb(theme.text_muted))
                     .hover(move |style| style.bg(rgb(theme.control_hover)))
                     .cursor_pointer()
                     .on_mouse_down(
@@ -550,7 +577,28 @@ impl Render for SearchBar {
                             cx.stop_propagation();
                         }),
                     )
-                    .child("Search"),
+                    .child("↓"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(px(28.0))
+                    .h(px(28.0))
+                    .rounded_sm()
+                    .text_color(rgb(theme.text_muted))
+                    .hover(move |style| style.bg(rgb(theme.control_hover)))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.dismiss(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child("✕"),
             )
     }
 }
