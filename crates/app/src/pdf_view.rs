@@ -13,9 +13,9 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use arboard::{Clipboard, ImageData};
 use gpui::{
     Anchor, Bounds, ClipboardItem, Context, Corners, Entity, FocusHandle, Focusable, IntoElement,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point as GpuiPoint,
-    Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Task, Window, anchored,
-    canvas, deferred, div, fill, point, prelude::*, px, rgb, rgba, size,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Task,
+    Window, anchored, canvas, deferred, div, fill, point, prelude::*, px, rgb, rgba, size,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
@@ -140,6 +140,7 @@ struct PaintPage {
 
 struct PaintData {
     pages: Vec<PaintPage>,
+    link_highlights: Vec<Bounds<Pixels>>,
     selection_highlights: Vec<Bounds<Pixels>>,
     search_highlights: Vec<Bounds<Pixels>>,
     active_search_highlights: Vec<Bounds<Pixels>>,
@@ -183,6 +184,22 @@ impl Default for SearchState {
     }
 }
 
+#[derive(Clone)]
+enum LinkTarget {
+    Internal {
+        page_idx: usize,
+        target_top: Option<f32>,
+        target_left: Option<f32>,
+    },
+    External(String),
+}
+
+struct PdfLink {
+    page_idx: usize,
+    rects: Vec<Rect>,
+    target: LinkTarget,
+}
+
 struct TocEntry {
     title: SharedString,
     depth: usize,
@@ -213,8 +230,11 @@ pub struct PdfView {
     max_page_width: f32,
     content_height_doc: f32,
     glyphs: Vec<Glyph>,
+    links: Vec<PdfLink>,
     selection: Option<Selection>,
     dragging: bool,
+    hovered_link: Option<usize>,
+    pending_link: Option<usize>,
     panning: Option<PanState>,
     page_image_bounds: Vec<Option<Bounds<Pixels>>>,
     focus_handle: FocusHandle,
@@ -282,13 +302,15 @@ impl PdfView {
 
         let mut pages = Vec::with_capacity(page_count as usize);
         let mut glyphs = Vec::new();
+        let mut links = Vec::new();
         let mut offset_y = 0.0;
         let mut max_page_width = 0.0_f32;
         let mut next_line_idx = 0;
         let mut next_block_idx = 0;
 
-        for page_idx in 0..page_count {
-            let page = document.load_page(page_idx)?;
+        for page_no in 0..page_count {
+            let page_idx = page_no as usize;
+            let page = document.load_page(page_no)?;
             let page_bounds = page.bounds()?;
             let page_width = page_bounds.x1 - page_bounds.x0;
             let page_height = page_bounds.y1 - page_bounds.y0;
@@ -297,13 +319,30 @@ impl PdfView {
             let device = Device::from_display_list(&display_list)?;
             page.run(&device, &Matrix::IDENTITY)?;
 
+            let explicit_links_start = links.len();
+            match Self::extract_explicit_links(&page, page_idx, page_count as usize) {
+                Ok(page_links) => links.extend(page_links),
+                Err(error) => eprintln!(
+                    "failed to read PDF links on page {}: {error:#}",
+                    page_idx + 1
+                ),
+            }
+
             let glyph_range = Self::extract_glyphs(
                 &display_list,
-                page_idx as usize,
+                page_idx,
                 &mut glyphs,
                 &mut next_line_idx,
                 &mut next_block_idx,
             )?;
+
+            let detected_links = Self::detect_text_url_links(
+                page_idx,
+                &glyphs,
+                glyph_range.clone(),
+                &links[explicit_links_start..],
+            );
+            links.extend(detected_links);
 
             pages.push(PdfPage {
                 display_list,
@@ -327,8 +366,11 @@ impl PdfView {
             max_page_width,
             content_height_doc,
             glyphs,
+            links,
             selection: None,
             dragging: false,
+            hovered_link: None,
+            pending_link: None,
             panning: None,
             page_image_bounds,
             focus_handle,
@@ -416,6 +458,267 @@ impl PdfView {
             DestinationKind::FitR { left, top, .. } => (Some(top), Some(left)),
             DestinationKind::Fit | DestinationKind::FitB => (None, None),
         }
+    }
+
+    fn extract_explicit_links(
+        page: &mupdf::Page,
+        page_idx: usize,
+        page_count: usize,
+    ) -> Result<Vec<PdfLink>> {
+        let mut links = Vec::new();
+
+        for link in page.links()? {
+            let Some(bounds) = Self::normalized_rect(link.bounds) else {
+                continue;
+            };
+
+            let target = match link.dest {
+                Some(dest) => {
+                    let target_page = dest.loc.page_number as usize;
+                    if target_page >= page_count {
+                        continue;
+                    }
+
+                    let (target_top, target_left) = Self::destination_coordinates(dest.kind);
+                    LinkTarget::Internal {
+                        page_idx: target_page,
+                        target_top,
+                        target_left,
+                    }
+                }
+                None => {
+                    let Some(uri) = Self::normalize_external_uri(&link.uri) else {
+                        continue;
+                    };
+                    LinkTarget::External(uri)
+                }
+            };
+
+            links.push(PdfLink {
+                page_idx,
+                rects: vec![bounds],
+                target,
+            });
+        }
+
+        Ok(links)
+    }
+
+    fn detect_text_url_links(
+        page_idx: usize,
+        glyphs: &[Glyph],
+        glyph_range: Range<usize>,
+        explicit_links: &[PdfLink],
+    ) -> Vec<PdfLink> {
+        let mut chars = Vec::new();
+        let mut glyph_indices = Vec::new();
+
+        for glyph_ix in glyph_range {
+            let c = glyphs[glyph_ix].c;
+            if c.is_control() {
+                continue;
+            }
+            chars.push(c);
+            glyph_indices.push(glyph_ix);
+        }
+
+        let mut links = Vec::new();
+        let mut ix = 0;
+        while ix < chars.len() {
+            if !Self::url_start_boundary(&chars, ix) {
+                ix += 1;
+                continue;
+            }
+
+            let Some(prefix_len) = Self::detected_url_prefix_len(&chars, ix) else {
+                ix += 1;
+                continue;
+            };
+
+            let mut end = ix + prefix_len;
+            while end < chars.len() && Self::is_url_body_char(chars[end]) {
+                end += 1;
+            }
+
+            let trimmed_end = Self::trim_url_end(&chars, ix, end);
+            if trimmed_end <= ix + prefix_len {
+                ix += 1;
+                continue;
+            }
+
+            let raw_url = chars[ix..trimmed_end].iter().collect::<String>();
+            let Some(url) = Self::normalize_detected_url(&raw_url) else {
+                ix = end.max(ix + 1);
+                continue;
+            };
+
+            let rects = Self::link_rects_for_glyph_indices(glyphs, &glyph_indices[ix..trimmed_end]);
+            if !rects.is_empty()
+                && !Self::link_rects_overlap_existing(page_idx, &rects, explicit_links)
+            {
+                links.push(PdfLink {
+                    page_idx,
+                    rects,
+                    target: LinkTarget::External(url),
+                });
+            }
+
+            ix = end.max(ix + 1);
+        }
+
+        links
+    }
+
+    fn detected_url_prefix_len(chars: &[char], ix: usize) -> Option<usize> {
+        for prefix in ["https://", "http://", "www."] {
+            if Self::starts_with_ascii_case_insensitive(chars, ix, prefix) {
+                return Some(prefix.len());
+            }
+        }
+
+        None
+    }
+
+    fn starts_with_ascii_case_insensitive(chars: &[char], ix: usize, pattern: &str) -> bool {
+        pattern.chars().enumerate().all(|(offset, expected)| {
+            chars
+                .get(ix + offset)
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(&expected))
+        })
+    }
+
+    fn url_start_boundary(chars: &[char], ix: usize) -> bool {
+        ix == 0 || Self::is_url_start_boundary_char(chars[ix - 1])
+    }
+
+    fn is_url_start_boundary_char(c: char) -> bool {
+        c.is_whitespace()
+            || c.is_control()
+            || (!c.is_ascii_alphanumeric()
+                && !matches!(
+                    c,
+                    '%' | '/' | '.' | '-' | '_' | '~' | '@' | '&' | '=' | '+' | '#'
+                ))
+    }
+
+    fn is_url_body_char(c: char) -> bool {
+        !c.is_whitespace() && !c.is_control() && !matches!(c, '<' | '>' | '"' | '“' | '”' | '`')
+    }
+
+    fn trim_url_end(chars: &[char], start: usize, mut end: usize) -> usize {
+        while end > start && Self::should_trim_url_trailing_char(chars, start, end) {
+            end -= 1;
+        }
+
+        end
+    }
+
+    fn should_trim_url_trailing_char(chars: &[char], start: usize, end: usize) -> bool {
+        match chars[end - 1] {
+            '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '’' | '”' => true,
+            ')' => Self::has_unmatched_trailing_closer(chars, start, end, '(', ')'),
+            ']' => Self::has_unmatched_trailing_closer(chars, start, end, '[', ']'),
+            '}' => Self::has_unmatched_trailing_closer(chars, start, end, '{', '}'),
+            _ => false,
+        }
+    }
+
+    fn has_unmatched_trailing_closer(
+        chars: &[char],
+        start: usize,
+        end: usize,
+        open: char,
+        close: char,
+    ) -> bool {
+        let mut opens = 0;
+        let mut closes = 0;
+        for c in &chars[start..end] {
+            if *c == open {
+                opens += 1;
+            } else if *c == close {
+                closes += 1;
+            }
+        }
+
+        closes > opens
+    }
+
+    fn normalize_detected_url(url: &str) -> Option<String> {
+        if Self::starts_with_ascii_case_insensitive(&url.chars().collect::<Vec<_>>(), 0, "www.") {
+            Some(format!("https://{url}"))
+        } else {
+            Self::normalize_external_uri(url)
+        }
+    }
+
+    fn normalize_external_uri(uri: &str) -> Option<String> {
+        let uri = uri.trim();
+        if uri.is_empty() {
+            return None;
+        }
+
+        let lower = uri.to_ascii_lowercase();
+        if lower.starts_with("www.") {
+            return Some(format!("https://{uri}"));
+        }
+
+        let (scheme, _) = uri.split_once(':')?;
+        matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "http" | "https" | "mailto" | "ftp" | "ftps" | "tel"
+        )
+        .then(|| uri.to_string())
+    }
+
+    fn link_rects_for_glyph_indices(glyphs: &[Glyph], glyph_indices: &[usize]) -> Vec<Rect> {
+        let mut rects = Vec::new();
+        let mut current_line = None;
+        let mut current_rect = None;
+
+        for &glyph_ix in glyph_indices {
+            let glyph = &glyphs[glyph_ix];
+            let Some(rect) = Self::normalized_rect(Self::quad_rect(&glyph.quad)) else {
+                continue;
+            };
+
+            match (current_line, current_rect) {
+                (Some(line), Some(existing)) if line == glyph.line_idx => {
+                    current_rect = Self::normalized_rect(Self::union_rect(existing, rect));
+                }
+                (Some(_), Some(existing)) => {
+                    rects.push(existing);
+                    current_line = Some(glyph.line_idx);
+                    current_rect = Some(rect);
+                }
+                _ => {
+                    current_line = Some(glyph.line_idx);
+                    current_rect = Some(rect);
+                }
+            }
+        }
+
+        if let Some(rect) = current_rect {
+            rects.push(rect);
+        }
+
+        rects
+    }
+
+    fn link_rects_overlap_existing(
+        page_idx: usize,
+        rects: &[Rect],
+        existing_links: &[PdfLink],
+    ) -> bool {
+        existing_links
+            .iter()
+            .filter(|link| link.page_idx == page_idx)
+            .any(|link| {
+                rects.iter().any(|rect| {
+                    link.rects
+                        .iter()
+                        .any(|existing| Self::rects_intersect(*rect, *existing))
+                })
+            })
     }
 
     fn extract_glyphs(
@@ -518,9 +821,11 @@ impl PdfView {
 
         let selection_highlights = self.selection_highlights();
         let (search_highlights, active_search_highlights) = self.search_highlights();
+        let link_highlights = self.link_highlights();
 
         Ok(PaintData {
             pages,
+            link_highlights,
             selection_highlights,
             search_highlights,
             active_search_highlights,
@@ -634,6 +939,8 @@ impl PdfView {
         let changed = (self.scroll_x_doc - previous_x).abs() > f32::EPSILON
             || (self.scroll_y_doc - previous_y).abs() > f32::EPSILON;
         if changed {
+            self.hovered_link = None;
+            self.pending_link = None;
             cx.notify();
         }
 
@@ -931,6 +1238,38 @@ impl PdfView {
             .find_map(|(image_idx, image)| {
                 Self::image_contains_pdf_point(image, pdf_point).then_some((page_idx, image_idx))
             })
+    }
+
+    fn link_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<usize> {
+        let page_idx = self.page_at_screen(point)?;
+        let pdf_point = self.screen_to_pdf(page_idx, point)?;
+
+        self.links.iter().enumerate().find_map(|(link_ix, link)| {
+            (link.page_idx == page_idx
+                && link
+                    .rects
+                    .iter()
+                    .any(|rect| rect.contains(pdf_point.x, pdf_point.y)))
+            .then_some(link_ix)
+        })
+    }
+
+    fn set_hovered_link(&mut self, link_ix: Option<usize>, cx: &mut Context<Self>) {
+        if self.hovered_link == link_ix {
+            return;
+        }
+
+        self.hovered_link = link_ix;
+        cx.notify();
+    }
+
+    fn update_hovered_link(&mut self, position: GpuiPoint<Pixels>, cx: &mut Context<Self>) {
+        let link_ix = if self.dragging || self.panning.is_some() {
+            None
+        } else {
+            self.link_at_screen(position)
+        };
+        self.set_hovered_link(link_ix, cx);
     }
 
     fn image_contains_pdf_point(image: &CollectedImage, point: mupdf::Point) -> bool {
@@ -1600,6 +1939,8 @@ impl PdfView {
         let new_scale = self.effective_scale();
         self.scroll_y_doc = center_doc - self.viewport_height / (2.0 * new_scale);
         self.clamp_scroll();
+        self.hovered_link = None;
+        self.pending_link = None;
         cx.notify();
     }
 
@@ -1936,24 +2277,21 @@ impl PdfView {
             .collect()
     }
 
-    fn navigate_to_toc_entry(&mut self, entry_ix: usize, cx: &mut Context<Self>) {
-        let Some(entry) = self.toc.get(entry_ix) else {
+    fn navigate_to_pdf_destination(
+        &mut self,
+        page_idx: usize,
+        target_top: Option<f32>,
+        target_left: Option<f32>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(page) = self.pages.get(page_idx) else {
             return;
         };
-        if !entry.navigable {
-            return;
-        }
 
-        let Some(page) = self.pages.get(entry.page_idx) else {
-            return;
-        };
-
-        let scroll_y_doc = entry
-            .target_top
+        let scroll_y_doc = target_top
             .map(|top| page.offset_y + top - page.bounds.y0)
             .unwrap_or(page.offset_y);
-        let scroll_x_doc = entry
-            .target_left
+        let scroll_x_doc = target_left
             .map(|left| left - page.bounds.x0 - page.width / 2.0)
             .unwrap_or(self.scroll_x_doc);
 
@@ -1962,6 +2300,35 @@ impl PdfView {
         self.jump_forward.clear();
         self.position_from_search = false;
         self.set_scroll_doc(scroll_x_doc, scroll_y_doc, cx);
+    }
+
+    fn navigate_to_toc_entry(&mut self, entry_ix: usize, cx: &mut Context<Self>) {
+        let Some(entry) = self.toc.get(entry_ix) else {
+            return;
+        };
+        if !entry.navigable {
+            return;
+        }
+
+        let page_idx = entry.page_idx;
+        let target_top = entry.target_top;
+        let target_left = entry.target_left;
+        self.navigate_to_pdf_destination(page_idx, target_top, target_left, cx);
+    }
+
+    fn activate_link(&mut self, link_ix: usize, cx: &mut Context<Self>) {
+        let Some(target) = self.links.get(link_ix).map(|link| link.target.clone()) else {
+            return;
+        };
+
+        match target {
+            LinkTarget::Internal {
+                page_idx,
+                target_top,
+                target_left,
+            } => self.navigate_to_pdf_destination(page_idx, target_top, target_left, cx),
+            LinkTarget::External(url) => cx.open_url(&url),
+        }
     }
 
     fn open_context_menu(
@@ -2313,6 +2680,22 @@ impl PdfView {
         self.highlight_bounds_for_range(start..end + 1)
     }
 
+    fn link_highlights(&self) -> Vec<Bounds<Pixels>> {
+        let Some(link_ix) = self.hovered_link else {
+            return Vec::new();
+        };
+        let Some(link) = self.links.get(link_ix) else {
+            return Vec::new();
+        };
+
+        let mut highlights = Vec::new();
+        for rect in &link.rects {
+            self.push_highlight(&mut highlights, link.page_idx, *rect);
+        }
+
+        highlights
+    }
+
     fn search_highlights(&self) -> (Vec<Bounds<Pixels>>, Vec<Bounds<Pixels>>) {
         let mut highlights = Vec::new();
         let mut active_highlights = Vec::new();
@@ -2415,6 +2798,19 @@ impl PdfView {
         )
     }
 
+    fn normalized_rect(rect: Rect) -> Option<Rect> {
+        let x0 = rect.x0.min(rect.x1);
+        let y0 = rect.y0.min(rect.y1);
+        let x1 = rect.x0.max(rect.x1);
+        let y1 = rect.y0.max(rect.y1);
+
+        (x1 - x0 > f32::EPSILON && y1 - y0 > f32::EPSILON).then(|| Rect::new(x0, y0, x1, y1))
+    }
+
+    fn rects_intersect(a: Rect, b: Rect) -> bool {
+        a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0
+    }
+
     fn distance_to_rect(point: mupdf::Point, rect: Rect) -> f32 {
         let dx = if point.x < rect.x0 {
             rect.x0 - point.x
@@ -2470,6 +2866,7 @@ impl Render for PdfView {
             .flex()
             .flex_col()
             .cursor_text()
+            .when(self.hovered_link.is_some(), |this| this.cursor_pointer())
             .when(self.panning.is_some(), |this| this.cursor_grabbing())
             .key_context("PdfView")
             .track_focus(&self.focus_handle)
@@ -2546,7 +2943,17 @@ impl Render for PdfView {
                     this.close_context_menu(cx);
                     this.focus_handle.focus(window, cx);
                     this.dragging = false;
+                    this.pending_link = None;
 
+                    if let Some(link_ix) = this.link_at_screen(event.position) {
+                        this.selection = None;
+                        this.pending_link = Some(link_ix);
+                        this.set_hovered_link(Some(link_ix), cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+
+                    this.set_hovered_link(None, cx);
                     if !this.point_in_image(event.position) {
                         this.selection = None;
                         cx.notify();
@@ -2572,6 +2979,8 @@ impl Render for PdfView {
                     this.close_context_menu(cx);
                     this.focus_handle.focus(window, cx);
                     this.dragging = false;
+                    this.pending_link = None;
+                    this.set_hovered_link(None, cx);
                     this.panning = Some(PanState {
                         pointer_origin: event.position,
                         scroll_origin_x: this.scroll_x_doc,
@@ -2612,9 +3021,11 @@ impl Render for PdfView {
                 }
 
                 if !this.dragging {
+                    this.update_hovered_link(event.position, cx);
                     return;
                 }
 
+                this.set_hovered_link(None, cx);
                 if let Some(ix) = this.glyph_at_screen(event.position) {
                     if let Some(selection) = this.selection.as_mut() {
                         selection.head = ix;
@@ -2624,8 +3035,16 @@ impl Render for PdfView {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| {
+                cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                    let pending_link = this.pending_link.take();
                     this.dragging = false;
+                    if let Some(link_ix) = pending_link {
+                        if this.link_at_screen(event.position) == Some(link_ix) {
+                            this.activate_link(link_ix, cx);
+                            cx.stop_propagation();
+                        }
+                        cx.notify();
+                    }
                 }),
             )
             .on_mouse_up(
@@ -2691,6 +3110,13 @@ impl Render for PdfView {
                                                 window.paint_quad(fill(
                                                     highlight,
                                                     rgba(Self::with_alpha(theme.accent, 0x99)),
+                                                ));
+                                            }
+
+                                            for highlight in paint_data.link_highlights {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    rgba(Self::with_alpha(theme.accent, 0x33)),
                                                 ));
                                             }
 
@@ -2817,5 +3243,29 @@ impl Render for PdfView {
                 )
             })
             .children(context_menu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PdfView;
+
+    #[test]
+    fn url_start_accepts_label_and_punctuation_boundaries() {
+        for text in [
+            "代码仓库：https://github.com/torvalds/linux.git",
+            "(https://example.com/a/b)",
+        ] {
+            let chars = text.chars().collect::<Vec<_>>();
+            let ix = chars.iter().position(|c| *c == 'h').unwrap();
+            assert!(PdfView::url_start_boundary(&chars, ix));
+        }
+    }
+
+    #[test]
+    fn url_start_rejects_embedded_prefixes() {
+        let chars = "abchttps://example.com/x".chars().collect::<Vec<_>>();
+        let ix = chars.iter().position(|c| *c == 'h').unwrap();
+        assert!(!PdfView::url_start_boundary(&chars, ix));
     }
 }
