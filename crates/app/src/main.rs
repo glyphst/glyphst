@@ -17,7 +17,7 @@ use command_palette::{
 };
 use pdf_view::{
     CopySelection, OpenSettings, PdfView, ResetZoom, Search, SearchNext, SearchPrev, SelectAll,
-    ToggleCommandPalette, ToggleFullScreen, ZoomIn, ZoomOut,
+    ToggleCommandPalette, ToggleFullScreen, ToggleTransparency, ZoomIn, ZoomOut,
 };
 use search::{
     SearchInputBackspace, SearchInputCancel, SearchInputConfirm, SearchInputDelete, SearchInputEnd,
@@ -104,6 +104,16 @@ fn main() {
                 Some("PdfView && !Search"),
             ),
             KeyBinding::new("f11", ToggleFullScreen, Some("PdfView && !Search")),
+            KeyBinding::new(
+                "ctrl-shift-t",
+                ToggleTransparency,
+                Some("PdfView && !CommandPalette && !Search"),
+            ),
+            KeyBinding::new(
+                "cmd-shift-t",
+                ToggleTransparency,
+                Some("PdfView && !CommandPalette && !Search"),
+            ),
             KeyBinding::new("ctrl-,", OpenSettings, Some("PdfView && !Search")),
             KeyBinding::new("cmd-,", OpenSettings, Some("PdfView && !Search")),
             KeyBinding::new("enter", PaletteConfirm, Some("CommandPalette")),
@@ -138,9 +148,13 @@ fn main() {
 
         let bounds = Bounds::centered(None, size(px(800.0), px(1000.0)), cx);
 
+        let window_settings = cx.global::<SettingsStore>().settings.window;
+        let transparency_enabled = window_settings.transparency_enabled_by_default();
+
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_background: window_settings.background_appearance(transparency_enabled),
                 ..Default::default()
             },
             |window, cx| {
@@ -152,6 +166,7 @@ fn main() {
                         &path,
                         focus_handle,
                         store.settings.behavior,
+                        store.settings.window,
                         store.resolved_theme,
                     )
                     .expect("failed to open PDF")

@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use gpui::Global;
+use gpui::{Global, WindowBackgroundAppearance};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 
 use crate::theme::{
@@ -18,6 +18,9 @@ const MIN_ZOOM_SETTING: f32 = 0.25;
 const MAX_ZOOM_SETTING: f32 = 8.0;
 const MIN_ZOOM_STEP: f32 = 1.01;
 const MAX_ZOOM_STEP: f32 = 4.0;
+const DEFAULT_WINDOW_OPACITY: f32 = 1.0;
+const MIN_WINDOW_OPACITY: f32 = 0.3;
+const MAX_WINDOW_OPACITY: f32 = 1.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BehaviorSettings {
@@ -41,9 +44,86 @@ impl BehaviorSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowBackgroundMode {
+    Opaque,
+    Transparent,
+    #[default]
+    Blurred,
+}
+
+impl WindowBackgroundMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Opaque => "opaque",
+            Self::Transparent => "transparent",
+            Self::Blurred => "blurred",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "opaque" => Some(Self::Opaque),
+            "transparent" => Some(Self::Transparent),
+            "blurred" | "blur" => Some(Self::Blurred),
+            _ => None,
+        }
+    }
+
+    fn into_gpui(self) -> WindowBackgroundAppearance {
+        match self {
+            Self::Opaque => WindowBackgroundAppearance::Opaque,
+            Self::Transparent => WindowBackgroundAppearance::Transparent,
+            Self::Blurred => WindowBackgroundAppearance::Blurred,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowSettings {
+    pub opacity: f32,
+    pub background: WindowBackgroundMode,
+}
+
+impl Default for WindowSettings {
+    fn default() -> Self {
+        Self {
+            opacity: DEFAULT_WINDOW_OPACITY,
+            background: WindowBackgroundMode::Blurred,
+        }
+    }
+}
+
+impl WindowSettings {
+    pub fn sanitize(&mut self) {
+        self.opacity = self.opacity.clamp(MIN_WINDOW_OPACITY, MAX_WINDOW_OPACITY);
+    }
+
+    pub fn transparency_enabled_by_default(self) -> bool {
+        self.opacity < MAX_WINDOW_OPACITY && self.background != WindowBackgroundMode::Opaque
+    }
+
+    pub fn effective_opacity(self, enabled: bool) -> f32 {
+        if enabled && self.transparency_enabled_by_default() {
+            self.opacity
+        } else {
+            MAX_WINDOW_OPACITY
+        }
+    }
+
+    pub fn background_appearance(self, enabled: bool) -> WindowBackgroundAppearance {
+        if enabled && self.transparency_enabled_by_default() {
+            self.background.into_gpui()
+        } else {
+            WindowBackgroundAppearance::Opaque
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub behavior: BehaviorSettings,
+    pub window: WindowSettings,
     pub theme_name: String,
     pub overrides: PartialTheme,
 }
@@ -52,6 +132,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             behavior: BehaviorSettings::default(),
+            window: WindowSettings::default(),
             theme_name: DEFAULT_THEME_ID.to_string(),
             overrides: PartialTheme::default(),
         }
@@ -61,6 +142,7 @@ impl Default for Settings {
 impl Settings {
     pub fn sanitize(&mut self) {
         self.behavior.sanitize();
+        self.window.sanitize();
         self.overrides.sanitize();
         if self.theme_name.trim().is_empty() {
             self.theme_name = DEFAULT_THEME_ID.to_string();
@@ -83,6 +165,19 @@ impl Settings {
             }
         }
 
+        if let Some(window) = document.get("window").and_then(KdlNode::children) {
+            if let Some(value) = window.get_arg("opacity").and_then(value_to_f32) {
+                settings.window.opacity = value;
+            }
+            if let Some(value) = window
+                .get_arg("appearance")
+                .and_then(KdlValue::as_string)
+                .and_then(WindowBackgroundMode::from_str)
+            {
+                settings.window.background = value;
+            }
+        }
+
         if let Some(overrides) = document.get("theme-overrides").and_then(KdlNode::children) {
             settings.overrides = PartialTheme::from_document(overrides);
         }
@@ -101,6 +196,16 @@ impl Settings {
         document.nodes_mut().push(zoom);
 
         push_value_node(&mut document, "theme", self.theme_name.clone());
+
+        let mut window = KdlNode::new("window");
+        let window_children = window.ensure_children();
+        push_value_node(window_children, "opacity", self.window.opacity as f64);
+        push_value_node(
+            window_children,
+            "appearance",
+            self.window.background.as_str(),
+        );
+        document.nodes_mut().push(window);
 
         if !self.overrides.is_empty() {
             let mut overrides = KdlNode::new("theme-overrides");
@@ -242,6 +347,10 @@ theme "one-dark"
 zoom {
     default 1.5
 }
+window {
+    opacity 0.85
+    appearance "transparent"
+}
 theme-overrides {
     colors {
         background "#101010"
@@ -253,9 +362,30 @@ theme-overrides {
 
         assert_eq!(settings.behavior.default_zoom, 1.5);
         assert_eq!(settings.behavior.zoom_step, DEFAULT_ZOOM_STEP);
+        assert_eq!(settings.window.opacity, 0.85);
+        assert_eq!(
+            settings.window.background,
+            WindowBackgroundMode::Transparent
+        );
         assert_eq!(settings.theme_name, "one-dark");
         assert_eq!(settings.overrides.background, Some(0x101010));
         assert_eq!(settings.overrides.selection_highlight, None);
+    }
+
+    #[test]
+    fn clamps_window_opacity() {
+        let settings = parse_settings(
+            r##"
+window {
+    opacity 0.1
+    appearance "blurred"
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.window.opacity, MIN_WINDOW_OPACITY);
+        assert_eq!(settings.window.background, WindowBackgroundMode::Blurred);
     }
 
     #[test]
@@ -272,6 +402,7 @@ theme-overrides {
                 page_gap: Some(32.0),
                 ..PartialTheme::default()
             },
+            ..Settings::default()
         };
 
         let exported = settings.clone().to_kdl_string();
@@ -408,6 +539,7 @@ page-gap 36
                 selection_highlight: Some(0x61afef66),
                 ..PartialTheme::default()
             },
+            ..Settings::default()
         };
         let store = test_store(
             settings.clone(),

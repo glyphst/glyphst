@@ -2,7 +2,7 @@ use std::{borrow::Cow, cell::RefCell, ops::Range, path::PathBuf, rc::Rc, sync::A
 
 use crate::command_palette::{CommandPalette, PaletteEvent};
 use crate::search::{SearchBar, SearchEvent};
-use crate::settings::{BehaviorSettings, SettingsStore};
+use crate::settings::{BehaviorSettings, SettingsStore, WindowSettings};
 use crate::settings_panel::{PanelEvent, SettingsPanel};
 use crate::theme::Theme;
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -34,6 +34,7 @@ gpui::actions!(
         SearchPrev,
         ToggleCommandPalette,
         ToggleFullScreen,
+        ToggleTransparency,
         OpenSettings
     ]
 );
@@ -196,6 +197,8 @@ pub struct PdfView {
     command_palette: Option<Entity<CommandPalette>>,
     settings_panel: Option<Entity<SettingsPanel>>,
     search_bar: Option<Entity<SearchBar>>,
+    transparency_enabled: bool,
+    window_settings: WindowSettings,
     search: SearchState,
     context_menu_position: Option<GpuiPoint<Pixels>>,
     context_menu_image: Option<(usize, usize)>,
@@ -207,6 +210,7 @@ impl PdfView {
         path: impl AsRef<std::path::Path>,
         focus_handle: FocusHandle,
         behavior: BehaviorSettings,
+        window_settings: WindowSettings,
         theme: Theme,
     ) -> Result<Self> {
         let file_name = path
@@ -292,6 +296,8 @@ impl PdfView {
             command_palette: None,
             settings_panel: None,
             search_bar: None,
+            transparency_enabled: window_settings.transparency_enabled_by_default(),
+            window_settings,
             search: SearchState::default(),
             context_menu_position: None,
             context_menu_image: None,
@@ -1498,7 +1504,13 @@ impl PdfView {
                 PanelEvent::Changed => {
                     let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
                     this.recompute_layout(page_gap);
-                    cx.notify();
+                    let window_settings = cx.global::<SettingsStore>().settings.window;
+                    if this.window_settings != window_settings {
+                        this.transparency_enabled =
+                            window_settings.transparency_enabled_by_default();
+                    }
+                    this.window_settings = window_settings;
+                    this.apply_transparency(window, cx);
                 }
             },
         )
@@ -1507,6 +1519,17 @@ impl PdfView {
         panel.focus_handle(cx).focus(window, cx);
         self.settings_panel = Some(panel);
         cx.notify();
+    }
+
+    fn apply_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = cx.global::<SettingsStore>().settings.window;
+        window.set_background_appearance(settings.background_appearance(self.transparency_enabled));
+        cx.notify();
+    }
+
+    fn toggle_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.transparency_enabled = !self.transparency_enabled;
+        self.apply_transparency(window, cx);
     }
 
     fn close_settings_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1859,7 +1882,11 @@ impl Render for PdfView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
         let prepaint_view = view.clone();
-        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let (theme, window_settings) = {
+            let store = cx.global::<SettingsStore>();
+            (store.resolved_theme, store.settings.window)
+        };
+        let opacity = window_settings.effective_opacity(self.transparency_enabled);
         let context_menu = self.context_menu_position.map(|position| {
             deferred(
                 anchored()
@@ -1881,7 +1908,6 @@ impl Render for PdfView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(theme.background))
             .cursor_text()
             .when(self.panning.is_some(), |this| this.cursor_grabbing())
             .key_context("PdfView")
@@ -1916,6 +1942,9 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
                 window.toggle_fullscreen();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTransparency, window, cx| {
+                this.toggle_transparency(window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.toggle_settings_panel(window, cx);
@@ -2019,78 +2048,90 @@ impl Render for PdfView {
                 }),
             )
             .child(
-                div().flex_1().min_h_0().child(
-                    canvas(
-                        move |bounds, window, cx| {
-                            prepaint_view.update(cx, |this, cx| {
-                                this.paint_data(bounds, window.scale_factor(), cx)
-                                    .expect("failed to render PDF")
-                            })
-                        },
-                        move |_, paint_data, window, _| {
-                            for page in paint_data.pages {
-                                window.paint_quad(fill(page.bounds, rgb(theme.page)));
-
-                                if let Some(image) = page.image {
-                                    let _ = window.paint_image(
-                                        page.bounds,
-                                        Corners::default(),
-                                        image,
-                                        0,
-                                        false,
-                                    );
-                                }
-                            }
-
-                            for highlight in paint_data.search_highlights {
-                                window.paint_quad(fill(
-                                    highlight,
-                                    rgba(Self::with_alpha(theme.match_highlight, 0x66)),
-                                ));
-                            }
-
-                            for highlight in paint_data.active_search_highlights {
-                                window.paint_quad(fill(
-                                    highlight,
-                                    rgba(Self::with_alpha(theme.accent, 0x99)),
-                                ));
-                            }
-
-                            for highlight in paint_data.selection_highlights {
-                                window.paint_quad(fill(highlight, rgba(theme.selection_highlight)));
-                            }
-                        },
-                    )
-                    .size_full(),
-                ),
-            )
-            .child(
                 div()
+                    .flex_1()
+                    .min_h_0()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .w_full()
-                    .flex_none()
-                    .h(px(26.0))
-                    .px_3()
-                    .border_t(px(1.0))
-                    .border_color(rgb(theme.footer_border))
-                    .bg(rgb(theme.footer_background))
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.footer_text))
+                    .flex_col()
+                    .bg(rgb(theme.background))
+                    .when(opacity < 1.0, |this| this.opacity(opacity))
+                    .child(
+                        div().flex_1().min_h_0().child(
+                            canvas(
+                                move |bounds, window, cx| {
+                                    prepaint_view.update(cx, |this, cx| {
+                                        this.paint_data(bounds, window.scale_factor(), cx)
+                                            .expect("failed to render PDF")
+                                    })
+                                },
+                                move |_, paint_data, window, _| {
+                                    for page in paint_data.pages {
+                                        window.paint_quad(fill(page.bounds, rgb(theme.page)));
+
+                                        if let Some(image) = page.image {
+                                            let _ = window.paint_image(
+                                                page.bounds,
+                                                Corners::default(),
+                                                image,
+                                                0,
+                                                false,
+                                            );
+                                        }
+                                    }
+
+                                    for highlight in paint_data.search_highlights {
+                                        window.paint_quad(fill(
+                                            highlight,
+                                            rgba(Self::with_alpha(theme.match_highlight, 0x66)),
+                                        ));
+                                    }
+
+                                    for highlight in paint_data.active_search_highlights {
+                                        window.paint_quad(fill(
+                                            highlight,
+                                            rgba(Self::with_alpha(theme.accent, 0x99)),
+                                        ));
+                                    }
+
+                                    for highlight in paint_data.selection_highlights {
+                                        window.paint_quad(fill(
+                                            highlight,
+                                            rgba(theme.selection_highlight),
+                                        ));
+                                    }
+                                },
+                            )
+                            .size_full(),
+                        ),
+                    )
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(self.file_name.clone()),
-                    )
-                    .child(div().flex_none().child(format!(
-                        "{} / {}",
-                        self.current_page(),
-                        self.pages.len()
-                    ))),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .w_full()
+                            .flex_none()
+                            .h(px(26.0))
+                            .px_3()
+                            .border_t(px(1.0))
+                            .border_color(rgb(theme.footer_border))
+                            .bg(rgb(theme.footer_background))
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.footer_text))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(self.file_name.clone()),
+                            )
+                            .child(div().flex_none().child(format!(
+                                "{} / {}",
+                                self.current_page(),
+                                self.pages.len()
+                            ))),
+                    ),
             )
             .when_some(self.command_palette.clone(), |this, palette| {
                 this.child(

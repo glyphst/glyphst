@@ -1,5 +1,5 @@
 use crate::{
-    settings::{Settings, SettingsStore},
+    settings::{Settings, SettingsStore, WindowBackgroundMode},
     theme::{PartialTheme, Theme, ThemeMetadata, format_rgb_hex, format_rgba_hex},
 };
 use gpui::{
@@ -11,6 +11,7 @@ use std::path::Path;
 gpui::actions!(settings_panel, [PanelClose]);
 
 const NUMBER_STEP_SMALL: f32 = 0.05;
+const OPACITY_STEP: f32 = 0.05;
 const PAGE_GAP_STEP: f32 = 4.0;
 const COLOR_SWATCHES: [u32; 10] = [
     0x101010, 0x181818, 0x202020, 0x282c34, 0x1e1e2e, 0x313244, 0x61afef, 0x89b4fa, 0xf5f5f5,
@@ -356,6 +357,49 @@ impl SettingsPanel {
             )
     }
 
+    fn background_option(
+        &self,
+        label: &'static str,
+        mode: WindowBackgroundMode,
+        selected_mode: WindowBackgroundMode,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = mode == selected_mode;
+
+        div()
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(if selected {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.control_border)
+            })
+            .bg(if selected {
+                rgba(theme.selected_row)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.change_settings(
+                        move |settings| settings.window.background = mode,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
     fn section_title(label: &'static str, theme: Theme) -> impl IntoElement {
         div()
             .pt_2()
@@ -386,6 +430,52 @@ impl SettingsPanel {
                 theme,
                 cx,
             ))
+            .child(Self::section_title("Window", theme))
+            .child(self.number_row(
+                "Opacity",
+                settings.window.opacity,
+                |settings| settings.window.opacity -= OPACITY_STEP,
+                |settings| settings.window.opacity += OPACITY_STEP,
+                theme,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(44.0))
+                    .child(div().text_color(rgb(theme.text)).child("Background"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(self.background_option(
+                                "Blurred",
+                                WindowBackgroundMode::Blurred,
+                                settings.window.background,
+                                theme,
+                                cx,
+                            ))
+                            .child(self.background_option(
+                                "Transparent",
+                                WindowBackgroundMode::Transparent,
+                                settings.window.background,
+                                theme,
+                                cx,
+                            ))
+                            .child(self.background_option(
+                                "Opaque",
+                                WindowBackgroundMode::Opaque,
+                                settings.window.background,
+                                theme,
+                                cx,
+                            )),
+                    ),
+            )
             .into_any_element()
     }
 
