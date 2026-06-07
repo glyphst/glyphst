@@ -195,6 +195,55 @@ impl SettingsPanel {
             )
     }
 
+    fn toggle_row(
+        &self,
+        label: &'static str,
+        enabled: bool,
+        update: impl FnOnce(&mut Settings) + Clone + 'static,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .h(px(44.0))
+            .child(div().text_color(rgb(theme.text)).child(label))
+            .child(
+                div()
+                    .h(px(28.0))
+                    .min_w(px(56.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.control_border))
+                    .bg(if enabled {
+                        rgba(theme.selected_row)
+                    } else {
+                        rgba(theme.control_background)
+                    })
+                    .text_color(rgb(if enabled {
+                        theme.accent
+                    } else {
+                        theme.text_muted
+                    }))
+                    .hover(move |style| style.bg(rgb(theme.control_hover)))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.change_settings(update.clone(), window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(if enabled { "On" } else { "Off" }),
+            )
+    }
+
     fn small_button(
         &self,
         label: &'static str,
@@ -469,6 +518,14 @@ impl SettingsPanel {
                 settings.behavior.zoom_step,
                 |settings| settings.behavior.zoom_step -= NUMBER_STEP_SMALL,
                 |settings| settings.behavior.zoom_step += NUMBER_STEP_SMALL,
+                theme,
+                cx,
+            ))
+            .child(Self::section_title("Scroll", theme))
+            .child(self.toggle_row(
+                "Smooth scrolling",
+                settings.behavior.smooth_scrolling,
+                |settings| settings.behavior.smooth_scrolling = !settings.behavior.smooth_scrolling,
                 theme,
                 cx,
             ))

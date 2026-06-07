@@ -13,6 +13,7 @@ use crate::theme::{
 
 pub const DEFAULT_ZOOM: f32 = 1.0;
 pub const DEFAULT_ZOOM_STEP: f32 = 1.05;
+pub const DEFAULT_SMOOTH_SCROLLING: bool = true;
 
 const MIN_ZOOM_SETTING: f32 = 0.25;
 const MAX_ZOOM_SETTING: f32 = 8.0;
@@ -26,6 +27,7 @@ const MAX_WINDOW_OPACITY: f32 = 1.0;
 pub struct BehaviorSettings {
     pub default_zoom: f32,
     pub zoom_step: f32,
+    pub smooth_scrolling: bool,
 }
 
 impl Default for BehaviorSettings {
@@ -33,6 +35,7 @@ impl Default for BehaviorSettings {
         Self {
             default_zoom: DEFAULT_ZOOM,
             zoom_step: DEFAULT_ZOOM_STEP,
+            smooth_scrolling: DEFAULT_SMOOTH_SCROLLING,
         }
     }
 }
@@ -219,6 +222,12 @@ impl Settings {
             }
         }
 
+        if let Some(scroll) = document.get("scroll").and_then(KdlNode::children)
+            && let Some(value) = scroll.get_arg("smooth").and_then(KdlValue::as_bool)
+        {
+            settings.behavior.smooth_scrolling = value;
+        }
+
         if let Some(window) = document.get("window").and_then(KdlNode::children) {
             if let Some(value) = window.get_arg("opacity").and_then(value_to_f32) {
                 settings.window.opacity = value;
@@ -262,6 +271,11 @@ impl Settings {
         push_value_node(zoom_children, "default", self.behavior.default_zoom as f64);
         push_value_node(zoom_children, "step", self.behavior.zoom_step as f64);
         document.nodes_mut().push(zoom);
+
+        let mut scroll = KdlNode::new("scroll");
+        let scroll_children = scroll.ensure_children();
+        push_value_node(scroll_children, "smooth", self.behavior.smooth_scrolling);
+        document.nodes_mut().push(scroll);
 
         push_value_node(&mut document, "theme", self.theme_name.clone());
         push_value_node(&mut document, "keymap", self.keymap_preset.as_str());
@@ -444,6 +458,7 @@ theme-overrides {
 
         assert_eq!(settings.behavior.default_zoom, 1.5);
         assert_eq!(settings.behavior.zoom_step, DEFAULT_ZOOM_STEP);
+        assert_eq!(settings.behavior.smooth_scrolling, DEFAULT_SMOOTH_SCROLLING);
         assert_eq!(settings.window.opacity, 0.85);
         assert_eq!(
             settings.window.background,
@@ -476,6 +491,7 @@ window {
             behavior: BehaviorSettings {
                 default_zoom: 1.5,
                 zoom_step: 1.2,
+                smooth_scrolling: false,
             },
             theme_name: "catppuccin-mocha".to_string(),
             overrides: PartialTheme {
@@ -645,6 +661,7 @@ page-gap 36
             behavior: BehaviorSettings {
                 default_zoom: 1.5,
                 zoom_step: 1.2,
+                smooth_scrolling: false,
             },
             theme_name: "glyphst-light".to_string(),
             overrides: PartialTheme {

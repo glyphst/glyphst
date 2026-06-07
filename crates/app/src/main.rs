@@ -6,9 +6,11 @@ use gpui_platform::application;
 mod command_palette;
 mod keybindings;
 mod pdf_view;
+mod picker;
 mod search;
 mod settings;
 mod settings_panel;
+mod smooth_scroll;
 mod theme;
 mod toc;
 
