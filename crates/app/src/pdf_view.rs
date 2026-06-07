@@ -1,6 +1,7 @@
 use std::{borrow::Cow, cell::RefCell, ops::Range, path::PathBuf, rc::Rc, sync::Arc};
 
 use crate::command_palette::{CommandPalette, PaletteEvent};
+use crate::keybindings;
 use crate::search::{SearchBar, SearchEvent};
 use crate::settings::{BehaviorSettings, SettingsStore, WindowSettings};
 use crate::settings_panel::{PanelEvent, SettingsPanel};
@@ -32,6 +33,12 @@ gpui::actions!(
         Search,
         SearchNext,
         SearchPrev,
+        NextPage,
+        PreviousPage,
+        NextHalfPage,
+        PreviousHalfPage,
+        JumpBackward,
+        JumpForward,
         ToggleCommandPalette,
         ToggleFullScreen,
         ToggleTransparency,
@@ -45,6 +52,8 @@ const MAX_ZOOM: f32 = 8.0;
 const SCROLL_LINE_MULTIPLIER: f32 = 20.0;
 const CTRL_SCROLL_ZOOM_STEP_MULTIPLIER: f32 = 0.25;
 const MAX_CACHED_RENDERS: usize = 12;
+const MAX_JUMP_HISTORY: usize = 128;
+const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
 
 struct PdfPage {
     display_list: Arc<DisplayList>,
@@ -173,6 +182,12 @@ struct PanState {
     scroll_origin_y: f32,
 }
 
+#[derive(Clone, Copy)]
+struct JumpPosition {
+    scroll_x_doc: f32,
+    scroll_y_doc: f32,
+}
+
 pub struct PdfView {
     file_name: SharedString,
     pages: Vec<PdfPage>,
@@ -197,6 +212,9 @@ pub struct PdfView {
     command_palette: Option<Entity<CommandPalette>>,
     settings_panel: Option<Entity<SettingsPanel>>,
     search_bar: Option<Entity<SearchBar>>,
+    jump_back: Vec<JumpPosition>,
+    jump_forward: Vec<JumpPosition>,
+    position_from_search: bool,
     transparency_enabled: bool,
     window_settings: WindowSettings,
     search: SearchState,
@@ -296,6 +314,9 @@ impl PdfView {
             command_palette: None,
             settings_panel: None,
             search_bar: None,
+            jump_back: Vec::new(),
+            jump_forward: Vec::new(),
+            position_from_search: false,
             transparency_enabled: window_settings.transparency_enabled_by_default(),
             window_settings,
             search: SearchState::default(),
@@ -506,18 +527,83 @@ impl PdfView {
         self.scroll_y_doc = self.scroll_y_doc.clamp(0.0, self.max_scroll_y_doc());
     }
 
-    fn set_scroll_doc(&mut self, scroll_x_doc: f32, scroll_y_doc: f32, cx: &mut Context<Self>) {
+    fn set_scroll_doc(
+        &mut self,
+        scroll_x_doc: f32,
+        scroll_y_doc: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let previous_x = self.scroll_x_doc;
         let previous_y = self.scroll_y_doc;
         self.scroll_x_doc = scroll_x_doc;
         self.scroll_y_doc = scroll_y_doc;
         self.clamp_scroll();
 
-        if (self.scroll_x_doc - previous_x).abs() > f32::EPSILON
-            || (self.scroll_y_doc - previous_y).abs() > f32::EPSILON
-        {
+        let changed = (self.scroll_x_doc - previous_x).abs() > f32::EPSILON
+            || (self.scroll_y_doc - previous_y).abs() > f32::EPSILON;
+        if changed {
             cx.notify();
         }
+
+        changed
+    }
+
+    fn current_jump_position(&self) -> JumpPosition {
+        JumpPosition {
+            scroll_x_doc: self.scroll_x_doc,
+            scroll_y_doc: self.scroll_y_doc,
+        }
+    }
+
+    fn push_jump_position(stack: &mut Vec<JumpPosition>, position: JumpPosition) {
+        if stack.last().is_some_and(|last| {
+            (last.scroll_x_doc - position.scroll_x_doc).abs() <= JUMP_POSITION_EPSILON_DOC
+                && (last.scroll_y_doc - position.scroll_y_doc).abs() <= JUMP_POSITION_EPSILON_DOC
+        }) {
+            return;
+        }
+
+        stack.push(position);
+        if stack.len() > MAX_JUMP_HISTORY {
+            stack.remove(0);
+        }
+    }
+
+    fn record_search_jump_origin(&mut self) {
+        if self.position_from_search {
+            return;
+        }
+
+        let position = self.current_jump_position();
+        Self::push_jump_position(&mut self.jump_back, position);
+        self.jump_forward.clear();
+        self.position_from_search = true;
+    }
+
+    fn mark_manual_navigation(&mut self) {
+        self.position_from_search = false;
+    }
+
+    fn jump_backward(&mut self, cx: &mut Context<Self>) {
+        let Some(position) = self.jump_back.pop() else {
+            return;
+        };
+
+        let current_position = self.current_jump_position();
+        Self::push_jump_position(&mut self.jump_forward, current_position);
+        self.set_scroll_doc(position.scroll_x_doc, position.scroll_y_doc, cx);
+        self.mark_manual_navigation();
+    }
+
+    fn jump_forward(&mut self, cx: &mut Context<Self>) {
+        let Some(position) = self.jump_forward.pop() else {
+            return;
+        };
+
+        let current_position = self.current_jump_position();
+        Self::push_jump_position(&mut self.jump_back, current_position);
+        self.set_scroll_doc(position.scroll_x_doc, position.scroll_y_doc, cx);
+        self.mark_manual_navigation();
     }
 
     fn request_render(&mut self, key: RenderKey, cx: &mut Context<Self>) {
@@ -1158,6 +1244,7 @@ impl PdfView {
         self.sync_search_bar(cx);
 
         if self.search.active.is_some() {
+            self.record_search_jump_origin();
             self.scroll_to_active_search_match(cx);
         }
 
@@ -1175,6 +1262,7 @@ impl PdfView {
         self.sync_search_bar(cx);
 
         if self.search.active.is_some() {
+            self.record_search_jump_origin();
             self.scroll_to_active_search_match(cx);
         }
 
@@ -1300,6 +1388,7 @@ impl PdfView {
 
         self.search.active = Some(next);
         self.sync_search_bar(cx);
+        self.record_search_jump_origin();
         self.scroll_to_search_match(next, cx);
         cx.notify();
     }
@@ -1398,7 +1487,7 @@ impl PdfView {
         self.set_zoom(default_zoom, cx);
     }
 
-    fn current_page(&self) -> usize {
+    fn current_page_index(&self) -> usize {
         let scale = self.effective_scale();
         let center_doc = self.scroll_y_doc + self.viewport_height / (2.0 * scale);
         let mut current = 0;
@@ -1411,7 +1500,52 @@ impl PdfView {
             }
         }
 
-        current + 1
+        current
+    }
+
+    fn current_page(&self) -> usize {
+        self.current_page_index() + 1
+    }
+
+    fn next_page(&mut self, cx: &mut Context<Self>) {
+        let target_page = (self.current_page_index() + 1).min(self.pages.len().saturating_sub(1));
+        let target = self
+            .pages
+            .get(target_page)
+            .map(|page| page.offset_y)
+            .unwrap_or_else(|| self.max_scroll_y_doc());
+
+        if self.set_scroll_doc(self.scroll_x_doc, target, cx) {
+            self.mark_manual_navigation();
+        }
+    }
+
+    fn previous_page(&mut self, cx: &mut Context<Self>) {
+        let target_page = self.current_page_index().saturating_sub(1);
+        let target = self
+            .pages
+            .get(target_page)
+            .map(|page| page.offset_y)
+            .unwrap_or(0.0);
+
+        if self.set_scroll_doc(self.scroll_x_doc, target, cx) {
+            self.mark_manual_navigation();
+        }
+    }
+
+    fn next_half_page(&mut self, cx: &mut Context<Self>) {
+        self.scroll_half_page(1.0, cx);
+    }
+
+    fn previous_half_page(&mut self, cx: &mut Context<Self>) {
+        self.scroll_half_page(-1.0, cx);
+    }
+
+    fn scroll_half_page(&mut self, direction: f32, cx: &mut Context<Self>) {
+        let delta = self.viewport_height / (2.0 * self.effective_scale());
+        if self.set_scroll_doc(self.scroll_x_doc, self.scroll_y_doc + direction * delta, cx) {
+            self.mark_manual_navigation();
+        }
     }
 
     fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
@@ -1444,11 +1578,13 @@ impl PdfView {
             }
 
             let scale = self.effective_scale();
-            self.set_scroll_doc(
+            if self.set_scroll_doc(
                 self.scroll_x_doc - delta_x / scale,
                 self.scroll_y_doc - delta_y / scale,
                 cx,
-            );
+            ) {
+                self.mark_manual_navigation();
+            }
         }
     }
 
@@ -1502,9 +1638,17 @@ impl PdfView {
             |this, _, event: &PanelEvent, window, cx| match event {
                 PanelEvent::Dismissed => this.close_settings_panel(window, cx),
                 PanelEvent::Changed => {
-                    let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
+                    let (page_gap, window_settings, keymap_preset, keybinding_overrides) = {
+                        let store = cx.global::<SettingsStore>();
+                        (
+                            store.resolved_theme.page_gap,
+                            store.settings.window,
+                            store.settings.keymap_preset,
+                            store.settings.keybinding_overrides.clone(),
+                        )
+                    };
+                    keybindings::apply(cx, keymap_preset, &keybinding_overrides);
                     this.recompute_layout(page_gap);
-                    let window_settings = cx.global::<SettingsStore>().settings.window;
                     if this.window_settings != window_settings {
                         this.transparency_enabled =
                             window_settings.transparency_enabled_by_default();
@@ -1937,6 +2081,24 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &SearchPrev, _, cx| {
                 this.navigate_search(true, cx);
             }))
+            .on_action(cx.listener(|this, _: &NextPage, _, cx| {
+                this.next_page(cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousPage, _, cx| {
+                this.previous_page(cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextHalfPage, _, cx| {
+                this.next_half_page(cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousHalfPage, _, cx| {
+                this.previous_half_page(cx);
+            }))
+            .on_action(cx.listener(|this, _: &JumpBackward, _, cx| {
+                this.jump_backward(cx);
+            }))
+            .on_action(cx.listener(|this, _: &JumpForward, _, cx| {
+                this.jump_forward(cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
@@ -2015,11 +2177,13 @@ impl Render for PdfView {
                     let scale = this.effective_scale();
                     let delta_x = (event.position.x - pan.pointer_origin.x).as_f32();
                     let delta_y = (event.position.y - pan.pointer_origin.y).as_f32();
-                    this.set_scroll_doc(
+                    if this.set_scroll_doc(
                         pan.scroll_origin_x - delta_x / scale,
                         pan.scroll_origin_y - delta_y / scale,
                         cx,
-                    );
+                    ) {
+                        this.mark_manual_navigation();
+                    }
                     return;
                 }
 

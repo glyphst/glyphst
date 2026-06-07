@@ -120,10 +120,49 @@ impl WindowSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeymapPreset {
+    #[default]
+    Modern,
+    Vim,
+}
+
+impl KeymapPreset {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Modern => "modern",
+            Self::Vim => "vim",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Modern => "Modern",
+            Self::Vim => "Vim",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "modern" => Some(Self::Modern),
+            "vim" | "vim-like" | "vim_like" => Some(Self::Vim),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyBindingOverride {
+    pub action: String,
+    pub keystrokes: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub behavior: BehaviorSettings,
     pub window: WindowSettings,
+    pub keymap_preset: KeymapPreset,
+    pub keybinding_overrides: Vec<KeyBindingOverride>,
     pub theme_name: String,
     pub overrides: PartialTheme,
 }
@@ -133,6 +172,8 @@ impl Default for Settings {
         Self {
             behavior: BehaviorSettings::default(),
             window: WindowSettings::default(),
+            keymap_preset: KeymapPreset::default(),
+            keybinding_overrides: Vec::new(),
             theme_name: DEFAULT_THEME_ID.to_string(),
             overrides: PartialTheme::default(),
         }
@@ -147,6 +188,11 @@ impl Settings {
         if self.theme_name.trim().is_empty() {
             self.theme_name = DEFAULT_THEME_ID.to_string();
         }
+        self.keybinding_overrides.retain_mut(|binding| {
+            binding.action = binding.action.trim().to_string();
+            binding.keystrokes = binding.keystrokes.trim().to_string();
+            !binding.action.is_empty() && !binding.keystrokes.is_empty()
+        });
     }
 
     fn from_document(document: &KdlDocument) -> Self {
@@ -154,6 +200,14 @@ impl Settings {
 
         if let Some(theme_name) = document.get_arg("theme").and_then(KdlValue::as_string) {
             settings.theme_name = theme_name.to_string();
+        }
+
+        if let Some(preset) = document
+            .get_arg("keymap")
+            .and_then(KdlValue::as_string)
+            .and_then(KeymapPreset::from_str)
+        {
+            settings.keymap_preset = preset;
         }
 
         if let Some(zoom) = document.get("zoom").and_then(KdlNode::children) {
@@ -182,6 +236,20 @@ impl Settings {
             settings.overrides = PartialTheme::from_document(overrides);
         }
 
+        if let Some(keybindings) = document.get("keybindings").and_then(KdlNode::children) {
+            settings.keybinding_overrides = keybindings
+                .nodes()
+                .iter()
+                .filter_map(|node| {
+                    let keystrokes = node.get(0).and_then(KdlValue::as_string)?;
+                    Some(KeyBindingOverride {
+                        action: node.name().value().to_string(),
+                        keystrokes: keystrokes.to_string(),
+                    })
+                })
+                .collect();
+        }
+
         settings.sanitize();
         settings
     }
@@ -196,6 +264,7 @@ impl Settings {
         document.nodes_mut().push(zoom);
 
         push_value_node(&mut document, "theme", self.theme_name.clone());
+        push_value_node(&mut document, "keymap", self.keymap_preset.as_str());
 
         let mut window = KdlNode::new("window");
         let window_children = window.ensure_children();
@@ -206,6 +275,19 @@ impl Settings {
             self.window.background.as_str(),
         );
         document.nodes_mut().push(window);
+
+        if !self.keybinding_overrides.is_empty() {
+            let mut keybindings = KdlNode::new("keybindings");
+            let keybinding_children = keybindings.ensure_children();
+            for binding in &self.keybinding_overrides {
+                push_value_node(
+                    keybinding_children,
+                    &binding.action,
+                    binding.keystrokes.clone(),
+                );
+            }
+            document.nodes_mut().push(keybindings);
+        }
 
         if !self.overrides.is_empty() {
             let mut overrides = KdlNode::new("theme-overrides");
@@ -407,6 +489,37 @@ window {
 
         let exported = settings.clone().to_kdl_string();
         assert_eq!(parse_settings(&exported).unwrap(), settings);
+    }
+
+    #[test]
+    fn parses_and_exports_keymap_settings() {
+        let settings = parse_settings(
+            r##"
+keymap "vim"
+keybindings {
+    next-page "j"
+    jump-backward "ctrl-o"
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.keymap_preset, KeymapPreset::Vim);
+        assert_eq!(
+            settings.keybinding_overrides,
+            vec![
+                KeyBindingOverride {
+                    action: "next-page".to_string(),
+                    keystrokes: "j".to_string(),
+                },
+                KeyBindingOverride {
+                    action: "jump-backward".to_string(),
+                    keystrokes: "ctrl-o".to_string(),
+                },
+            ]
+        );
+
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 
     #[test]

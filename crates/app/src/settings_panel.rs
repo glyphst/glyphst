@@ -1,5 +1,5 @@
 use crate::{
-    settings::{Settings, SettingsStore, WindowBackgroundMode},
+    settings::{KeymapPreset, Settings, SettingsStore, WindowBackgroundMode},
     theme::{PartialTheme, Theme, ThemeMetadata, format_rgb_hex, format_rgba_hex},
 };
 use gpui::{
@@ -400,6 +400,48 @@ impl SettingsPanel {
             .child(label)
     }
 
+    fn keymap_option(
+        &self,
+        preset: KeymapPreset,
+        selected_preset: KeymapPreset,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = preset == selected_preset;
+
+        div()
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(if selected {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.control_border)
+            })
+            .bg(if selected {
+                rgba(theme.selected_row)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.change_settings(
+                        move |settings| settings.keymap_preset = preset,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .child(preset.label())
+    }
+
     fn section_title(label: &'static str, theme: Theme) -> impl IntoElement {
         div()
             .pt_2()
@@ -430,6 +472,35 @@ impl SettingsPanel {
                 theme,
                 cx,
             ))
+            .child(Self::section_title("Keymap", theme))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(44.0))
+                    .child(div().text_color(rgb(theme.text)).child("Base preset"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(self.keymap_option(
+                                KeymapPreset::Modern,
+                                settings.keymap_preset,
+                                theme,
+                                cx,
+                            ))
+                            .child(self.keymap_option(
+                                KeymapPreset::Vim,
+                                settings.keymap_preset,
+                                theme,
+                                cx,
+                            )),
+                    ),
+            )
             .child(Self::section_title("Window", theme))
             .child(self.number_row(
                 "Opacity",
