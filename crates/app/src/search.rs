@@ -27,8 +27,17 @@ gpui::actions!(
 );
 
 pub enum SearchEvent {
-    Activate { previous: bool, query: SharedString },
-    QueryChanged { query: SharedString },
+    Activate {
+        previous: bool,
+        query: SharedString,
+    },
+    QueryChanged {
+        query: SharedString,
+    },
+    IgnoreCaseChanged {
+        query: SharedString,
+        ignore_case: bool,
+    },
     Dismissed,
 }
 
@@ -46,6 +55,7 @@ pub struct SearchBar {
     applied_query: SharedString,
     active_match: Option<usize>,
     match_count: usize,
+    ignore_case: bool,
     search_debounce: Option<Task<()>>,
 }
 
@@ -55,6 +65,7 @@ impl SearchBar {
         content: SharedString,
         active_match: Option<usize>,
         match_count: usize,
+        ignore_case: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let content_len = content.len();
@@ -74,6 +85,7 @@ impl SearchBar {
             is_selecting: false,
             active_match,
             match_count,
+            ignore_case,
             search_debounce: None,
         }
     }
@@ -83,11 +95,13 @@ impl SearchBar {
         applied_query: SharedString,
         active_match: Option<usize>,
         match_count: usize,
+        ignore_case: bool,
         cx: &mut Context<Self>,
     ) {
         if self.applied_query.as_ref() == applied_query.as_ref()
             && self.active_match == active_match
             && self.match_count == match_count
+            && self.ignore_case == ignore_case
         {
             return;
         }
@@ -95,6 +109,7 @@ impl SearchBar {
         self.applied_query = applied_query;
         self.active_match = active_match;
         self.match_count = match_count;
+        self.ignore_case = ignore_case;
         cx.notify();
     }
 
@@ -108,6 +123,15 @@ impl SearchBar {
             previous,
             query: self.content.clone(),
         });
+    }
+
+    fn toggle_ignore_case(&mut self, cx: &mut Context<Self>) {
+        self.ignore_case = !self.ignore_case;
+        cx.emit(SearchEvent::IgnoreCaseChanged {
+            query: self.content.clone(),
+            ignore_case: self.ignore_case,
+        });
+        cx.notify();
     }
 
     fn schedule_query(&mut self, cx: &mut Context<Self>) {
@@ -470,6 +494,7 @@ impl Render for SearchBar {
         } else {
             theme.text_muted
         };
+        let ignore_case = self.ignore_case;
 
         div()
             .key_context("Search")
@@ -536,6 +561,38 @@ impl Render for SearchBar {
                     .w(px(1.0))
                     .h(px(18.0))
                     .bg(rgb(theme.control_border)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(px(28.0))
+                    .h(px(28.0))
+                    .rounded_sm()
+                    .text_color(rgb(if ignore_case {
+                        theme.panel_background
+                    } else {
+                        theme.text_muted
+                    }))
+                    .when(ignore_case, |this| this.bg(rgb(theme.accent)))
+                    .hover(move |style| {
+                        style.bg(rgb(if ignore_case {
+                            theme.accent
+                        } else {
+                            theme.control_hover
+                        }))
+                    })
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.toggle_ignore_case(cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child("Aa"),
             )
             .child(
                 div()

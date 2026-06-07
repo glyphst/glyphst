@@ -169,6 +169,7 @@ struct SearchState {
     query: SharedString,
     matches: Vec<SearchMatch>,
     active: Option<usize>,
+    ignore_case: bool,
 }
 
 impl Default for SearchState {
@@ -177,6 +178,7 @@ impl Default for SearchState {
             query: "".into(),
             matches: Vec::new(),
             active: None,
+            ignore_case: true,
         }
     }
 }
@@ -1359,17 +1361,46 @@ impl PdfView {
         cx.notify();
     }
 
+    fn set_search_ignore_case(
+        &mut self,
+        query: SharedString,
+        ignore_case: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if query.as_ref() == self.search.query.as_ref() && ignore_case == self.search.ignore_case {
+            return;
+        }
+
+        self.search.query = query;
+        self.search.ignore_case = ignore_case;
+        self.recompute_search();
+        self.search.active = self.nearest_search_match_index();
+        self.sync_search_bar(cx);
+
+        if self.search.active.is_some() {
+            self.record_search_jump_origin();
+            self.scroll_to_active_search_match(cx);
+        }
+
+        cx.notify();
+    }
+
     fn recompute_search(&mut self) {
         self.search.matches.clear();
         self.search.active = None;
 
-        let needle = self.search.query.as_ref().to_lowercase();
+        let ignore_case = self.search.ignore_case;
+        let needle = if ignore_case {
+            self.search.query.as_ref().to_lowercase()
+        } else {
+            self.search.query.as_ref().to_string()
+        };
         if needle.is_empty() {
             return;
         }
 
         for page_idx in 0..self.pages.len() {
-            let (haystack, glyph_map) = self.searchable_page_text(page_idx);
+            let (haystack, glyph_map) = self.searchable_page_text(page_idx, ignore_case);
             let mut start_byte = 0;
 
             while let Some(relative_start) = haystack[start_byte..].find(&needle) {
@@ -1389,7 +1420,11 @@ impl PdfView {
         }
     }
 
-    fn searchable_page_text(&self, page_idx: usize) -> (String, Vec<Option<usize>>) {
+    fn searchable_page_text(
+        &self,
+        page_idx: usize,
+        ignore_case: bool,
+    ) -> (String, Vec<Option<usize>>) {
         let mut text = String::new();
         let mut glyph_map = Vec::new();
         let mut previous: Option<&Glyph> = None;
@@ -1405,8 +1440,13 @@ impl PdfView {
                 }
             }
 
-            for ch in glyph.c.to_lowercase() {
-                text.push(ch);
+            if ignore_case {
+                for ch in glyph.c.to_lowercase() {
+                    text.push(ch);
+                    glyph_map.push(Some(glyph_ix));
+                }
+            } else {
+                text.push(glyph.c);
                 glyph_map.push(Some(glyph_ix));
             }
             previous = Some(glyph);
@@ -1539,8 +1579,9 @@ impl PdfView {
             let query = self.search.query.clone();
             let active = self.search.active;
             let match_count = self.search.matches.len();
+            let ignore_case = self.search.ignore_case;
             search_bar.update(cx, |search_bar, cx| {
-                search_bar.set_match_status(query.clone(), active, match_count, cx);
+                search_bar.set_match_status(query.clone(), active, match_count, ignore_case, cx);
             });
         }
     }
@@ -1789,12 +1830,14 @@ impl PdfView {
         let query = self.search.query.clone();
         let active = self.search.active;
         let match_count = self.search.matches.len();
+        let ignore_case = self.search.ignore_case;
         let search_bar = cx.new(|cx| {
             SearchBar::new(
                 previous_focus_handle.clone(),
                 query.clone(),
                 active,
                 match_count,
+                ignore_case,
                 cx,
             )
         });
@@ -1807,6 +1850,9 @@ impl PdfView {
                     this.deploy_search_query(query.clone(), *previous, cx)
                 }
                 SearchEvent::QueryChanged { query } => this.live_search(query.clone(), cx),
+                SearchEvent::IgnoreCaseChanged { query, ignore_case } => {
+                    this.set_search_ignore_case(query.clone(), *ignore_case, cx)
+                }
                 SearchEvent::Dismissed => this.close_search_bar(window, cx),
             },
         )
