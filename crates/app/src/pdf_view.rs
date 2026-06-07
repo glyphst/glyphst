@@ -264,6 +264,8 @@ pub struct PdfView {
     context_menu_position: Option<GpuiPoint<Pixels>>,
     context_menu_image: Option<(usize, usize)>,
     _image_clipboard: Option<Clipboard>,
+    // Must drop after pages: Type3 fonts in display lists reference the document.
+    _document: mupdf::Document,
 }
 
 impl PdfView {
@@ -400,6 +402,7 @@ impl PdfView {
             context_menu_position: None,
             context_menu_image: None,
             _image_clipboard: None,
+            _document: document,
         })
     }
 
