@@ -10,6 +10,7 @@ mod search;
 mod settings;
 mod settings_panel;
 mod theme;
+mod toc;
 
 use pdf_view::PdfView;
 use settings::SettingsStore;

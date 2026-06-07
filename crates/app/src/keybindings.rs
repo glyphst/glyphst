@@ -8,8 +8,8 @@ use crate::{
     },
     pdf_view::{
         CopySelection, JumpBackward, JumpForward, NextHalfPage, NextPage, OpenSettings,
-        PreviousHalfPage, PreviousPage, ResetZoom, Search, SearchNext, SearchPrev, SelectAll,
-        ToggleCommandPalette, ToggleFullScreen, ToggleTransparency, ZoomIn, ZoomOut,
+        PreviousHalfPage, PreviousPage, ResetZoom, Search, SearchNext, SearchPrev, SelectAll, Toc,
+        ToggleCommandPalette, ToggleFullScreen, ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
     },
     search::{
         SearchInputBackspace, SearchInputCancel, SearchInputConfirm, SearchInputDelete,
@@ -18,14 +18,19 @@ use crate::{
     },
     settings::{KeyBindingOverride, KeymapPreset},
     settings_panel::PanelClose,
+    toc::{
+        TocBackspace, TocCancel, TocConfirm, TocDelete, TocEnd, TocHome, TocLeft, TocPaste,
+        TocRight, TocSelectAll, TocSelectNext, TocSelectPrev,
+    },
 };
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
 
-const PDF_CONTEXT: &str = "PdfView && !CommandPalette && !Search";
-const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !Search";
+const PDF_CONTEXT: &str = "PdfView && !CommandPalette && !Search && !Toc";
+const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !Search && !Toc";
 const PALETTE_CONTEXT: &str = "CommandPalette";
 const SEARCH_CONTEXT: &str = "Search";
 const SETTINGS_CONTEXT: &str = "SettingsPanel";
+const TOC_CONTEXT: &str = "Toc";
 
 struct ActionSpec {
     aliases: &'static [&'static str],
@@ -120,6 +125,20 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<SearchInputPaste>("ctrl-v", SEARCH_CONTEXT),
         bind::<SearchInputPaste>("cmd-v", SEARCH_CONTEXT),
         bind::<PanelClose>("escape", SETTINGS_CONTEXT),
+        bind::<TocConfirm>("enter", TOC_CONTEXT),
+        bind::<TocCancel>("escape", TOC_CONTEXT),
+        bind::<TocSelectNext>("down", TOC_CONTEXT),
+        bind::<TocSelectPrev>("up", TOC_CONTEXT),
+        bind::<TocBackspace>("backspace", TOC_CONTEXT),
+        bind::<TocDelete>("delete", TOC_CONTEXT),
+        bind::<TocLeft>("left", TOC_CONTEXT),
+        bind::<TocRight>("right", TOC_CONTEXT),
+        bind::<TocHome>("home", TOC_CONTEXT),
+        bind::<TocEnd>("end", TOC_CONTEXT),
+        bind::<TocSelectAll>("ctrl-a", TOC_CONTEXT),
+        bind::<TocSelectAll>("cmd-a", TOC_CONTEXT),
+        bind::<TocPaste>("ctrl-v", TOC_CONTEXT),
+        bind::<TocPaste>("cmd-v", TOC_CONTEXT),
     ]);
 
     bindings
@@ -304,6 +323,20 @@ fn action_specs() -> &'static [ActionSpec] {
             build: boxed::<JumpForward>,
         },
         ActionSpec {
+            aliases: &["toc", "goto-toc", "goto-table-of-contents"],
+            context: Some(PDF_NO_SEARCH_CONTEXT),
+            build: boxed::<Toc>,
+        },
+        ActionSpec {
+            aliases: &[
+                "toggle-toc",
+                "toggle-table-of-contents",
+                "table-of-contents",
+            ],
+            context: Some(PDF_NO_SEARCH_CONTEXT),
+            build: boxed::<ToggleToc>,
+        },
+        ActionSpec {
             aliases: &["toggle-command-palette", "command-palette"],
             context: Some(PDF_NO_SEARCH_CONTEXT),
             build: boxed::<ToggleCommandPalette>,
@@ -437,6 +470,66 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["search-input-paste"],
             context: Some(SEARCH_CONTEXT),
             build: boxed::<SearchInputPaste>,
+        },
+        ActionSpec {
+            aliases: &["toc-confirm"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<TocConfirm>,
+        },
+        ActionSpec {
+            aliases: &["toc-cancel"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<TocCancel>,
+        },
+        ActionSpec {
+            aliases: &["toc-select-next"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<TocSelectNext>,
+        },
+        ActionSpec {
+            aliases: &["toc-select-prev", "toc-select-previous"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<TocSelectPrev>,
+        },
+        ActionSpec {
+            aliases: &["toc-backspace"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<TocBackspace>,
+        },
+        ActionSpec {
+            aliases: &["toc-delete"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<TocDelete>,
+        },
+        ActionSpec {
+            aliases: &["toc-left"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<TocLeft>,
+        },
+        ActionSpec {
+            aliases: &["toc-right"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<TocRight>,
+        },
+        ActionSpec {
+            aliases: &["toc-home"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<TocHome>,
+        },
+        ActionSpec {
+            aliases: &["toc-end"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<TocEnd>,
+        },
+        ActionSpec {
+            aliases: &["toc-select-all"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<TocSelectAll>,
+        },
+        ActionSpec {
+            aliases: &["toc-paste"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<TocPaste>,
         },
         ActionSpec {
             aliases: &["panel-close", "settings-panel-close"],

@@ -1,4 +1,6 @@
-use std::{borrow::Cow, cell::RefCell, ops::Range, path::PathBuf, rc::Rc, sync::Arc};
+use std::{
+    borrow::Cow, cell::RefCell, collections::HashSet, ops::Range, path::PathBuf, rc::Rc, sync::Arc,
+};
 
 use crate::command_palette::{CommandPalette, PaletteEvent};
 use crate::keybindings;
@@ -6,6 +8,7 @@ use crate::search::{SearchBar, SearchEvent};
 use crate::settings::{BehaviorSettings, SettingsStore, WindowSettings};
 use crate::settings_panel::{PanelEvent, SettingsPanel};
 use crate::theme::Theme;
+use crate::toc::{TocEvent, TocPalette, TocPaletteEntry};
 use anyhow::{Context as _, Result, anyhow, bail};
 use arboard::{Clipboard, ImageData};
 use gpui::{
@@ -17,8 +20,8 @@ use gpui::{
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
 use mupdf::{
-    ColorParams, Colorspace, Device, DisplayList, Image as PdfImage, Matrix, Pixmap, Quad, Rect,
-    TextPageFlags,
+    ColorParams, Colorspace, DestinationKind, Device, DisplayList, Image as PdfImage, Matrix,
+    Pixmap, Quad, Rect, TextPageFlags,
 };
 use smallvec::smallvec;
 
@@ -39,6 +42,8 @@ gpui::actions!(
         PreviousHalfPage,
         JumpBackward,
         JumpForward,
+        Toc,
+        ToggleToc,
         ToggleCommandPalette,
         ToggleFullScreen,
         ToggleTransparency,
@@ -54,6 +59,7 @@ const CTRL_SCROLL_ZOOM_STEP_MULTIPLIER: f32 = 0.25;
 const MAX_CACHED_RENDERS: usize = 12;
 const MAX_JUMP_HISTORY: usize = 128;
 const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
+const TOC_SIDEBAR_WIDTH: f32 = 280.0;
 
 struct PdfPage {
     display_list: Arc<DisplayList>,
@@ -175,6 +181,17 @@ impl Default for SearchState {
     }
 }
 
+struct TocEntry {
+    title: SharedString,
+    depth: usize,
+    parent: Option<usize>,
+    has_children: bool,
+    page_idx: usize,
+    target_top: Option<f32>,
+    target_left: Option<f32>,
+    navigable: bool,
+}
+
 #[derive(Clone, Copy)]
 struct PanState {
     pointer_origin: GpuiPoint<Pixels>,
@@ -212,6 +229,10 @@ pub struct PdfView {
     command_palette: Option<Entity<CommandPalette>>,
     settings_panel: Option<Entity<SettingsPanel>>,
     search_bar: Option<Entity<SearchBar>>,
+    toc_palette: Option<Entity<TocPalette>>,
+    toc: Vec<TocEntry>,
+    toc_collapsed: HashSet<usize>,
+    toc_sidebar_open: bool,
     jump_back: Vec<JumpPosition>,
     jump_forward: Vec<JumpPosition>,
     position_from_search: bool,
@@ -248,6 +269,14 @@ impl PdfView {
         if page_count == 0 {
             bail!("PDF has no pages");
         }
+        let outlines = match document.outlines() {
+            Ok(outlines) => outlines,
+            Err(error) => {
+                eprintln!("failed to read PDF table of contents: {error:#}");
+                Vec::new()
+            }
+        };
+        let toc = Self::flatten_toc(outlines, page_count as usize);
 
         let mut pages = Vec::with_capacity(page_count as usize);
         let mut glyphs = Vec::new();
@@ -314,6 +343,10 @@ impl PdfView {
             command_palette: None,
             settings_panel: None,
             search_bar: None,
+            toc_palette: None,
+            toc,
+            toc_collapsed: HashSet::new(),
+            toc_sidebar_open: false,
             jump_back: Vec::new(),
             jump_forward: Vec::new(),
             position_from_search: false,
@@ -324,6 +357,63 @@ impl PdfView {
             context_menu_image: None,
             _image_clipboard: None,
         })
+    }
+
+    fn flatten_toc(outlines: Vec<mupdf::Outline>, page_count: usize) -> Vec<TocEntry> {
+        let mut entries = Vec::new();
+        for outline in outlines {
+            Self::push_toc_outline(outline, 0, None, page_count, &mut entries);
+        }
+        entries
+    }
+
+    fn push_toc_outline(
+        outline: mupdf::Outline,
+        depth: usize,
+        parent: Option<usize>,
+        page_count: usize,
+        entries: &mut Vec<TocEntry>,
+    ) {
+        let mupdf::Outline {
+            title, dest, down, ..
+        } = outline;
+        let has_children = !down.is_empty();
+        let (page_idx, target_top, target_left, navigable) = match dest {
+            Some(dest) => {
+                let page_idx = dest.loc.page_number as usize;
+                let navigable = page_idx < page_count;
+                let page_idx = page_idx.min(page_count.saturating_sub(1));
+                let (target_top, target_left) = Self::destination_coordinates(dest.kind);
+                (page_idx, target_top, target_left, navigable)
+            }
+            None => (0, None, None, false),
+        };
+
+        let entry_ix = entries.len();
+        entries.push(TocEntry {
+            title: title.into(),
+            depth,
+            parent,
+            has_children,
+            page_idx,
+            target_top,
+            target_left,
+            navigable,
+        });
+
+        for child in down {
+            Self::push_toc_outline(child, depth + 1, Some(entry_ix), page_count, entries);
+        }
+    }
+
+    fn destination_coordinates(kind: DestinationKind) -> (Option<f32>, Option<f32>) {
+        match kind {
+            DestinationKind::XYZ { left, top, .. } => (top, left),
+            DestinationKind::FitH { top } | DestinationKind::FitBH { top } => (top, None),
+            DestinationKind::FitV { left } | DestinationKind::FitBV { left } => (None, left),
+            DestinationKind::FitR { left, top, .. } => (Some(top), Some(left)),
+            DestinationKind::Fit | DestinationKind::FitB => (None, None),
+        }
     }
 
     fn extract_glyphs(
@@ -1595,6 +1685,7 @@ impl PdfView {
         }
         self.close_settings_panel(window, cx);
         self.close_search_bar(window, cx);
+        self.close_toc_palette(window, cx);
 
         let actions = window
             .available_actions(cx)
@@ -1628,6 +1719,7 @@ impl PdfView {
         }
         self.close_command_palette(window, cx);
         self.close_search_bar(window, cx);
+        self.close_toc_palette(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
         let panel = cx.new(|cx| SettingsPanel::new(previous_focus_handle.clone(), cx));
@@ -1691,6 +1783,7 @@ impl PdfView {
 
         self.close_command_palette(window, cx);
         self.close_settings_panel(window, cx);
+        self.close_toc_palette(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
         let query = self.search.query.clone();
@@ -1729,6 +1822,100 @@ impl PdfView {
             self.focus_handle.focus(window, cx);
             cx.notify();
         }
+    }
+
+    fn toggle_toc_sidebar(&mut self, cx: &mut Context<Self>) {
+        if self.toc.is_empty() {
+            return;
+        }
+
+        self.toc_sidebar_open = !self.toc_sidebar_open;
+        cx.notify();
+    }
+
+    fn toggle_toc_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.toc_palette.is_some() {
+            self.close_toc_palette(window, cx);
+            return;
+        }
+
+        let entries = self.toc_palette_entries();
+        if entries.is_empty() {
+            return;
+        }
+
+        self.close_command_palette(window, cx);
+        self.close_settings_panel(window, cx);
+        self.close_search_bar(window, cx);
+
+        let previous_focus_handle = self.focus_handle.clone();
+        let palette = cx.new(|cx| TocPalette::new(previous_focus_handle.clone(), entries, cx));
+
+        cx.subscribe_in(
+            &palette,
+            window,
+            |this, _, event: &TocEvent, window, cx| match event {
+                TocEvent::Navigate(entry_ix) => {
+                    this.navigate_to_toc_entry(*entry_ix, cx);
+                    this.close_toc_palette(window, cx);
+                }
+                TocEvent::Dismissed => this.close_toc_palette(window, cx),
+            },
+        )
+        .detach();
+
+        palette.focus_handle(cx).focus(window, cx);
+        self.toc_palette = Some(palette);
+        cx.notify();
+    }
+
+    fn close_toc_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.toc_palette.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn toc_palette_entries(&self) -> Vec<TocPaletteEntry> {
+        self.toc
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.navigable)
+            .map(|(entry_ix, entry)| TocPaletteEntry {
+                entry_ix,
+                title: entry.title.clone(),
+                depth: entry.depth,
+                page_number: entry.page_idx + 1,
+            })
+            .collect()
+    }
+
+    fn navigate_to_toc_entry(&mut self, entry_ix: usize, cx: &mut Context<Self>) {
+        let Some(entry) = self.toc.get(entry_ix) else {
+            return;
+        };
+        if !entry.navigable {
+            return;
+        }
+
+        let Some(page) = self.pages.get(entry.page_idx) else {
+            return;
+        };
+
+        let scroll_y_doc = entry
+            .target_top
+            .map(|top| page.offset_y + top - page.bounds.y0)
+            .unwrap_or(page.offset_y);
+        let scroll_x_doc = entry
+            .target_left
+            .map(|left| left - page.bounds.x0 - page.width / 2.0)
+            .unwrap_or(self.scroll_x_doc);
+
+        let current_position = self.current_jump_position();
+        Self::push_jump_position(&mut self.jump_back, current_position);
+        self.jump_forward.clear();
+        self.position_from_search = false;
+        self.set_scroll_doc(scroll_x_doc, scroll_y_doc, cx);
     }
 
     fn open_context_menu(
@@ -1886,6 +2073,190 @@ impl PdfView {
                 |this, window, cx| this.toggle_settings_panel(window, cx),
                 cx,
             ))
+    }
+
+    fn toc_entry_is_visible(&self, entry_ix: usize) -> bool {
+        let mut parent = self.toc[entry_ix].parent;
+        while let Some(parent_ix) = parent {
+            if self.toc_collapsed.contains(&parent_ix) {
+                return false;
+            }
+            parent = self.toc[parent_ix].parent;
+        }
+        true
+    }
+
+    fn render_toc_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.toc_sidebar_open;
+
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .h(px(20.0))
+            .px_2()
+            .mr_2()
+            .rounded_sm()
+            .text_color(rgb(if open {
+                theme.accent
+            } else {
+                theme.footer_text
+            }))
+            .bg(if open {
+                rgba(theme.selected_row)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_toc_sidebar(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child("TOC")
+    }
+
+    fn render_toc_sidebar(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let current_page = self.current_page_index();
+        let visible_entries = (0..self.toc.len())
+            .filter(|entry_ix| self.toc_entry_is_visible(*entry_ix))
+            .collect::<Vec<_>>();
+
+        div()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .min_h_0()
+            .w(px(TOC_SIDEBAR_WIDTH))
+            .border_r(px(1.0))
+            .border_color(rgb(theme.panel_border))
+            .bg(rgb(theme.panel_background))
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(40.0))
+                    .px_3()
+                    .border_b(px(1.0))
+                    .border_color(rgb(theme.panel_border))
+                    .child(div().text_size(px(13.0)).child("Table of Contents"))
+                    .child(
+                        div()
+                            .text_color(rgb(theme.text_muted))
+                            .child(format!("{} items", self.toc.len())),
+                    ),
+            )
+            .child(
+                div()
+                    .id("toc-sidebar-content")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .py_1()
+                    .children(visible_entries.into_iter().map(|entry_ix| {
+                        let entry = &self.toc[entry_ix];
+                        let collapsed = self.toc_collapsed.contains(&entry_ix);
+                        let current = entry.navigable && entry.page_idx == current_page;
+                        let title = entry.title.clone();
+                        let title_color = if entry.navigable {
+                            theme.text
+                        } else {
+                            theme.text_muted
+                        };
+                        let depth = entry.depth;
+                        let has_children = entry.has_children;
+                        let navigable = entry.navigable;
+                        let page_number = entry.page_idx + 1;
+
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .h(px(30.0))
+                            .px_2()
+                            .bg(if current {
+                                rgba(theme.selected_row)
+                            } else {
+                                rgba(0x00000000)
+                            })
+                            .child(div().flex_none().w(px(depth as f32 * 14.0)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(18.0))
+                                    .h(px(24.0))
+                                    .rounded_sm()
+                                    .text_color(rgb(theme.text_muted))
+                                    .when(has_children, |this| {
+                                        this.cursor_pointer()
+                                            .hover(move |style| style.bg(rgb(theme.control_hover)))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    if !this.toc_collapsed.remove(&entry_ix) {
+                                                        this.toc_collapsed.insert(entry_ix);
+                                                    }
+                                                    cx.stop_propagation();
+                                                    cx.notify();
+                                                }),
+                                            )
+                                    })
+                                    .child(if has_children {
+                                        if collapsed { "▸" } else { "▾" }
+                                    } else {
+                                        ""
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .items_center()
+                                    .h(px(28.0))
+                                    .rounded_sm()
+                                    .px_1()
+                                    .truncate()
+                                    .text_color(rgb(title_color))
+                                    .when(navigable, |this| {
+                                        this.cursor_pointer()
+                                            .hover(move |style| style.bg(rgb(theme.control_hover)))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    this.navigate_to_toc_entry(entry_ix, cx);
+                                                    cx.stop_propagation();
+                                                }),
+                                            )
+                                    })
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .ml_2()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(if navigable {
+                                        format!("{}", page_number)
+                                    } else {
+                                        String::new()
+                                    }),
+                            )
+                    })),
+            )
     }
 
     fn selection_highlights(&self) -> Vec<Bounds<Pixels>> {
@@ -2099,6 +2470,12 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &JumpForward, _, cx| {
                 this.jump_forward(cx);
             }))
+            .on_action(cx.listener(|this, _: &Toc, window, cx| {
+                this.toggle_toc_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleToc, _, cx| {
+                this.toggle_toc_sidebar(cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
@@ -2163,6 +2540,7 @@ impl Render for PdfView {
                     if this.command_palette.is_some()
                         || this.settings_panel.is_some()
                         || this.search_bar.is_some()
+                        || this.toc_palette.is_some()
                     {
                         window.prevent_default();
                         cx.stop_propagation();
@@ -2220,53 +2598,67 @@ impl Render for PdfView {
                     .bg(rgb(theme.background))
                     .when(opacity < 1.0, |this| this.opacity(opacity))
                     .child(
-                        div().flex_1().min_h_0().child(
-                            canvas(
-                                move |bounds, window, cx| {
-                                    prepaint_view.update(cx, |this, cx| {
-                                        this.paint_data(bounds, window.scale_factor(), cx)
-                                            .expect("failed to render PDF")
-                                    })
-                                },
-                                move |_, paint_data, window, _| {
-                                    for page in paint_data.pages {
-                                        window.paint_quad(fill(page.bounds, rgb(theme.page)));
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_row()
+                            .when(self.toc_sidebar_open && !self.toc.is_empty(), |this| {
+                                this.child(self.render_toc_sidebar(theme, cx))
+                            })
+                            .child(
+                                div().flex_1().min_w_0().min_h_0().child(
+                                    canvas(
+                                        move |bounds, window, cx| {
+                                            prepaint_view.update(cx, |this, cx| {
+                                                this.paint_data(bounds, window.scale_factor(), cx)
+                                                    .expect("failed to render PDF")
+                                            })
+                                        },
+                                        move |_, paint_data, window, _| {
+                                            for page in paint_data.pages {
+                                                window
+                                                    .paint_quad(fill(page.bounds, rgb(theme.page)));
 
-                                        if let Some(image) = page.image {
-                                            let _ = window.paint_image(
-                                                page.bounds,
-                                                Corners::default(),
-                                                image,
-                                                0,
-                                                false,
-                                            );
-                                        }
-                                    }
+                                                if let Some(image) = page.image {
+                                                    let _ = window.paint_image(
+                                                        page.bounds,
+                                                        Corners::default(),
+                                                        image,
+                                                        0,
+                                                        false,
+                                                    );
+                                                }
+                                            }
 
-                                    for highlight in paint_data.search_highlights {
-                                        window.paint_quad(fill(
-                                            highlight,
-                                            rgba(Self::with_alpha(theme.match_highlight, 0x66)),
-                                        ));
-                                    }
+                                            for highlight in paint_data.search_highlights {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    rgba(Self::with_alpha(
+                                                        theme.match_highlight,
+                                                        0x66,
+                                                    )),
+                                                ));
+                                            }
 
-                                    for highlight in paint_data.active_search_highlights {
-                                        window.paint_quad(fill(
-                                            highlight,
-                                            rgba(Self::with_alpha(theme.accent, 0x99)),
-                                        ));
-                                    }
+                                            for highlight in paint_data.active_search_highlights {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    rgba(Self::with_alpha(theme.accent, 0x99)),
+                                                ));
+                                            }
 
-                                    for highlight in paint_data.selection_highlights {
-                                        window.paint_quad(fill(
-                                            highlight,
-                                            rgba(theme.selection_highlight),
-                                        ));
-                                    }
-                                },
-                            )
-                            .size_full(),
-                        ),
+                                            for highlight in paint_data.selection_highlights {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    rgba(theme.selection_highlight),
+                                                ));
+                                            }
+                                        },
+                                    )
+                                    .size_full(),
+                                ),
+                            ),
                     )
                     .child(
                         div()
@@ -2287,8 +2679,18 @@ impl Render for PdfView {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .truncate()
-                                    .child(self.file_name.clone()),
+                                    .flex()
+                                    .items_center()
+                                    .when(!self.toc.is_empty(), |this| {
+                                        this.child(self.render_toc_button(theme, cx))
+                                    })
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(self.file_name.clone()),
+                                    ),
                             )
                             .child(div().flex_none().child(format!(
                                 "{} / {}",
@@ -2346,6 +2748,26 @@ impl Render for PdfView {
                         .top(px(12.0))
                         .right(px(16.0))
                         .child(search_bar),
+                )
+            })
+            .when_some(self.toc_palette.clone(), |this, palette| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgba(theme.overlay))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.close_toc_palette(window, cx);
+                            }),
+                        )
+                        .child(palette),
                 )
             })
             .children(context_menu)
