@@ -8,7 +8,7 @@ use crate::picker::{Picker, PickerEvent};
 use crate::search::{SearchBar, SearchEvent};
 use crate::settings::{BehaviorSettings, SettingsStore, WindowSettings};
 use crate::settings_panel::{PanelEvent, SettingsPanel};
-use crate::smooth_scroll::{SmoothScroll, advance_toward};
+use crate::smooth_scroll::advance_toward;
 use crate::theme::Theme;
 use crate::toc::{TocPalette, TocPaletteDelegate, TocPaletteEntry};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -17,7 +17,8 @@ use gpui::{
     Anchor, Bounds, ClipboardItem, Context, Corners, Entity, FocusHandle, Focusable, IntoElement,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Task,
-    Window, anchored, canvas, deferred, div, fill, point, prelude::*, px, rgb, rgba, size,
+    UniformListScrollHandle, Window, anchored, canvas, deferred, div, fill, point, prelude::*, px,
+    rgb, rgba, size, uniform_list,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
@@ -62,7 +63,6 @@ const MAX_CACHED_RENDERS: usize = 12;
 const MAX_JUMP_HISTORY: usize = 128;
 const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
 const TOC_SIDEBAR_WIDTH: f32 = 280.0;
-const TOC_SIDEBAR_HEADER_HEIGHT: f32 = 40.0;
 const TOC_SIDEBAR_ROW_HEIGHT: f32 = 30.0;
 
 struct PdfPage {
@@ -207,7 +207,6 @@ struct PdfLink {
 struct TocEntry {
     title: SharedString,
     depth: usize,
-    parent: Option<usize>,
     has_children: bool,
     page_idx: usize,
     target_top: Option<f32>,
@@ -261,7 +260,9 @@ pub struct PdfView {
     toc: Vec<TocEntry>,
     toc_collapsed: HashSet<usize>,
     toc_sidebar_open: bool,
-    toc_sidebar_scroll: SmoothScroll,
+    toc_sidebar_scroll: UniformListScrollHandle,
+    toc_sidebar_visible_entry_ixs: Vec<usize>,
+    toc_sidebar_entries_dirty: bool,
     jump_back: Vec<JumpPosition>,
     jump_forward: Vec<JumpPosition>,
     position_from_search: bool,
@@ -402,7 +403,9 @@ impl PdfView {
             toc,
             toc_collapsed: HashSet::new(),
             toc_sidebar_open: false,
-            toc_sidebar_scroll: SmoothScroll::new(0.0),
+            toc_sidebar_scroll: UniformListScrollHandle::new(),
+            toc_sidebar_visible_entry_ixs: Vec::new(),
+            toc_sidebar_entries_dirty: true,
             jump_back: Vec::new(),
             jump_forward: Vec::new(),
             position_from_search: false,
@@ -419,7 +422,7 @@ impl PdfView {
     fn flatten_toc(outlines: Vec<mupdf::Outline>, page_count: usize) -> Vec<TocEntry> {
         let mut entries = Vec::new();
         for outline in outlines {
-            Self::push_toc_outline(outline, 0, None, page_count, &mut entries);
+            Self::push_toc_outline(outline, 0, page_count, &mut entries);
         }
         entries
     }
@@ -427,7 +430,6 @@ impl PdfView {
     fn push_toc_outline(
         outline: mupdf::Outline,
         depth: usize,
-        parent: Option<usize>,
         page_count: usize,
         entries: &mut Vec<TocEntry>,
     ) {
@@ -446,11 +448,9 @@ impl PdfView {
             None => (0, None, None, false),
         };
 
-        let entry_ix = entries.len();
         entries.push(TocEntry {
             title: title.into(),
             depth,
-            parent,
             has_children,
             page_idx,
             target_top,
@@ -459,7 +459,7 @@ impl PdfView {
         });
 
         for child in down {
-            Self::push_toc_outline(child, depth + 1, Some(entry_ix), page_count, entries);
+            Self::push_toc_outline(child, depth + 1, page_count, entries);
         }
     }
 
@@ -2559,36 +2559,27 @@ impl PdfView {
             ))
     }
 
-    fn toc_entry_is_visible(&self, entry_ix: usize) -> bool {
-        let mut parent = self.toc[entry_ix].parent;
-        while let Some(parent_ix) = parent {
-            if self.toc_collapsed.contains(&parent_ix) {
-                return false;
+    fn ensure_toc_sidebar_visible_entries(&mut self) {
+        if !self.toc_sidebar_entries_dirty {
+            return;
+        }
+
+        self.toc_sidebar_visible_entry_ixs.clear();
+        let mut hidden_depth = None;
+        for (entry_ix, entry) in self.toc.iter().enumerate() {
+            if let Some(depth) = hidden_depth {
+                if entry.depth > depth {
+                    continue;
+                }
+                hidden_depth = None;
             }
-            parent = self.toc[parent_ix].parent;
+
+            self.toc_sidebar_visible_entry_ixs.push(entry_ix);
+            if self.toc_collapsed.contains(&entry_ix) {
+                hidden_depth = Some(entry.depth);
+            }
         }
-        true
-    }
-
-    fn toc_sidebar_visible_entries(&self) -> Vec<usize> {
-        (0..self.toc.len())
-            .filter(|entry_ix| self.toc_entry_is_visible(*entry_ix))
-            .collect()
-    }
-
-    fn toc_sidebar_viewport_height(&self) -> f32 {
-        (self.viewport_height - TOC_SIDEBAR_HEADER_HEIGHT).max(0.0)
-    }
-
-    fn toc_sidebar_max_scroll_for_len(&self, len: usize) -> f32 {
-        (len as f32 * TOC_SIDEBAR_ROW_HEIGHT - self.toc_sidebar_viewport_height()).max(0.0)
-    }
-
-    fn scroll_delta_y(event: &ScrollWheelEvent) -> f32 {
-        match event.delta {
-            ScrollDelta::Pixels(pixels) => pixels.y.as_f32(),
-            ScrollDelta::Lines(lines) => lines.y * SCROLL_LINE_MULTIPLIER,
-        }
+        self.toc_sidebar_entries_dirty = false;
     }
 
     fn render_toc_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2628,24 +2619,12 @@ impl PdfView {
     fn render_toc_sidebar(
         &mut self,
         theme: Theme,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let current_page = self.current_page_index();
-        let visible_entries = self.toc_sidebar_visible_entries();
-        let max_scroll = self.toc_sidebar_max_scroll_for_len(visible_entries.len());
-        let smooth_scrolling = cx
-            .global::<SettingsStore>()
-            .settings
-            .behavior
-            .smooth_scrolling;
-        self.toc_sidebar_scroll.clamp(0.0, max_scroll);
-        if self.toc_sidebar_scroll.advance(smooth_scrolling)
-            && self.toc_sidebar_scroll.is_animating()
-        {
-            window.request_animation_frame();
-        }
-        let scroll_offset = self.toc_sidebar_scroll.current();
+        self.ensure_toc_sidebar_visible_entries();
+        let visible_len = self.toc_sidebar_visible_entry_ixs.len();
+        let scroll_handle = self.toc_sidebar_scroll.clone();
 
         div()
             .flex()
@@ -2661,20 +2640,9 @@ impl PdfView {
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                let visible_len = this.toc_sidebar_visible_entries().len();
-                let max_scroll = this.toc_sidebar_max_scroll_for_len(visible_len);
-                let delta_y = Self::scroll_delta_y(event);
-                if delta_y != 0.0 {
-                    this.toc_sidebar_scroll.set_target(
-                        this.toc_sidebar_scroll.target() - delta_y,
-                        0.0,
-                        max_scroll,
-                    );
-                    cx.notify();
-                }
+            .on_scroll_wheel(|_, _, cx| {
                 cx.stop_propagation();
-            }))
+            })
             .child(
                 div()
                     .flex()
@@ -2697,105 +2665,153 @@ impl PdfView {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(div().flex().flex_col().mt(px(-scroll_offset)).children(
-                        visible_entries.into_iter().map(|entry_ix| {
-                            let entry = &self.toc[entry_ix];
-                            let collapsed = self.toc_collapsed.contains(&entry_ix);
-                            let current = entry.navigable && entry.page_idx == current_page;
-                            let title = entry.title.clone();
-                            let title_color = if entry.navigable {
-                                theme.text
-                            } else {
-                                theme.text_muted
-                            };
-                            let depth = entry.depth;
-                            let has_children = entry.has_children;
-                            let navigable = entry.navigable;
-                            let page_number = entry.page_idx + 1;
+                    .child(
+                        uniform_list(
+                            "toc-sidebar-list",
+                            visible_len,
+                            cx.processor(
+                                |this, visible_range: Range<usize>, _window, cx| {
+                                    let theme = cx.global::<SettingsStore>().resolved_theme;
+                                    let current_page = this.current_page_index();
 
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .h(px(TOC_SIDEBAR_ROW_HEIGHT))
-                                .px_2()
-                                .bg(if current {
-                                    rgba(theme.selected_row)
-                                } else {
-                                    rgba(0x00000000)
-                                })
-                                .child(div().flex_none().w(px(depth as f32 * 14.0)))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_none()
-                                        .items_center()
-                                        .justify_center()
-                                        .w(px(18.0))
-                                        .h(px(24.0))
-                                        .rounded_sm()
-                                        .text_color(rgb(theme.text_muted))
-                                        .when(has_children, |this| {
-                                            this.cursor_pointer()
-                                                .hover(move |style| {
-                                                    style.bg(rgb(theme.control_hover))
-                                                })
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(move |this, _, _, cx| {
-                                                        if !this.toc_collapsed.remove(&entry_ix) {
-                                                            this.toc_collapsed.insert(entry_ix);
-                                                        }
-                                                        cx.stop_propagation();
-                                                        cx.notify();
-                                                    }),
-                                                )
+                                    visible_range
+                                        .filter_map(|visible_ix| {
+                                            let entry_ix = this
+                                                .toc_sidebar_visible_entry_ixs
+                                                .get(visible_ix)
+                                                .copied()?;
+                                            let entry = &this.toc[entry_ix];
+                                            let collapsed =
+                                                this.toc_collapsed.contains(&entry_ix);
+                                            let current =
+                                                entry.navigable && entry.page_idx == current_page;
+                                            let title = entry.title.clone();
+                                            let title_color = if entry.navigable {
+                                                theme.text
+                                            } else {
+                                                theme.text_muted
+                                            };
+                                            let depth = entry.depth;
+                                            let has_children = entry.has_children;
+                                            let navigable = entry.navigable;
+                                            let page_number = entry.page_idx + 1;
+
+                                            Some(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .h(px(TOC_SIDEBAR_ROW_HEIGHT))
+                                                    .px_2()
+                                                    .bg(if current {
+                                                        rgba(theme.selected_row)
+                                                    } else {
+                                                        rgba(0x00000000)
+                                                    })
+                                                    .child(
+                                                        div()
+                                                            .flex_none()
+                                                            .w(px(depth as f32 * 14.0)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_none()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .w(px(18.0))
+                                                            .h(px(24.0))
+                                                            .rounded_sm()
+                                                            .text_color(rgb(theme.text_muted))
+                                                            .when(has_children, |this| {
+                                                                this.cursor_pointer()
+                                                                    .hover(move |style| {
+                                                                        style.bg(rgb(
+                                                                            theme.control_hover,
+                                                                        ))
+                                                                    })
+                                                                    .on_mouse_down(
+                                                                        MouseButton::Left,
+                                                                        cx.listener(
+                                                                            move |this, _, _, cx| {
+                                                                                if !this
+                                                                                    .toc_collapsed
+                                                                                    .remove(
+                                                                                        &entry_ix,
+                                                                                    )
+                                                                                {
+                                                                                    this.toc_collapsed
+                                                                                        .insert(
+                                                                                            entry_ix,
+                                                                                        );
+                                                                                }
+                                                                                this.toc_sidebar_entries_dirty =
+                                                                                    true;
+                                                                                cx.stop_propagation();
+                                                                                cx.notify();
+                                                                            },
+                                                                        ),
+                                                                    )
+                                                            })
+                                                            .child(if has_children {
+                                                                if collapsed { "▸" } else { "▾" }
+                                                            } else {
+                                                                ""
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .items_center()
+                                                            .h(px(28.0))
+                                                            .rounded_sm()
+                                                            .px_1()
+                                                            .truncate()
+                                                            .text_color(rgb(title_color))
+                                                            .when(navigable, |this| {
+                                                                this.cursor_pointer()
+                                                                    .hover(move |style| {
+                                                                        style.bg(rgb(
+                                                                            theme.control_hover,
+                                                                        ))
+                                                                    })
+                                                                    .on_mouse_down(
+                                                                        MouseButton::Left,
+                                                                        cx.listener(
+                                                                            move |this, _, _, cx| {
+                                                                                this.navigate_to_toc_entry(
+                                                                                    entry_ix,
+                                                                                    cx,
+                                                                                );
+                                                                                cx.stop_propagation();
+                                                                            },
+                                                                        ),
+                                                                    )
+                                                            })
+                                                            .child(title),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_none()
+                                                            .ml_2()
+                                                            .text_color(rgb(theme.text_muted))
+                                                            .child(if navigable {
+                                                                format!("{}", page_number)
+                                                            } else {
+                                                                String::new()
+                                                            }),
+                                                    ),
+                                            )
                                         })
-                                        .child(if has_children {
-                                            if collapsed { "▸" } else { "▾" }
-                                        } else {
-                                            ""
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .items_center()
-                                        .h(px(28.0))
-                                        .rounded_sm()
-                                        .px_1()
-                                        .truncate()
-                                        .text_color(rgb(title_color))
-                                        .when(navigable, |this| {
-                                            this.cursor_pointer()
-                                                .hover(move |style| {
-                                                    style.bg(rgb(theme.control_hover))
-                                                })
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(move |this, _, _, cx| {
-                                                        this.navigate_to_toc_entry(entry_ix, cx);
-                                                        cx.stop_propagation();
-                                                    }),
-                                                )
-                                        })
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .ml_2()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child(if navigable {
-                                            format!("{}", page_number)
-                                        } else {
-                                            String::new()
-                                        }),
-                                )
-                        }),
-                    )),
+                                        .collect::<Vec<_>>()
+                                },
+                            ),
+                        )
+                        .track_scroll(&scroll_handle)
+                        .size_full(),
+                    ),
             )
     }
 

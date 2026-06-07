@@ -1,15 +1,14 @@
 use std::ops::Range;
 
 use crate::settings::SettingsStore;
-use crate::smooth_scroll::SmoothScroll;
 use crate::theme::Theme;
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
     IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point as GpuiPoint, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString,
-    Style, TextRun, UTF16Selection, Window, div, fill, point, prelude::*, px, relative, rgb, rgba,
-    size,
+    Pixels, Point as GpuiPoint, Render, ScrollStrategy, ShapedLine, SharedString, Style, TextRun,
+    UTF16Selection, UniformListScrollHandle, Window, div, fill, point, prelude::*, px, relative,
+    rgb, rgba, size, uniform_list,
 };
 
 gpui::actions!(
@@ -31,7 +30,6 @@ gpui::actions!(
 );
 
 const INPUT_HEIGHT: f32 = 50.0;
-const LIST_SCROLL_LINE_MULTIPLIER: f32 = 20.0;
 
 pub enum PickerEvent {
     Dismissed,
@@ -73,7 +71,7 @@ pub struct Picker<D: PickerDelegate> {
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
     selected_ix: usize,
-    list_scroll: SmoothScroll,
+    list_scroll_handle: UniformListScrollHandle,
     delegate: D,
 }
 
@@ -90,7 +88,7 @@ impl<D: PickerDelegate> Picker<D> {
             last_bounds: None,
             is_selecting: false,
             selected_ix: 0,
-            list_scroll: SmoothScroll::new(0.0),
+            list_scroll_handle: UniformListScrollHandle::new(),
             delegate,
         };
         this.update_matches();
@@ -117,43 +115,13 @@ impl<D: PickerDelegate> Picker<D> {
         self.row_height() * self.match_count().min(self.delegate.max_visible_matches()) as f32
     }
 
-    fn list_content_height(&self) -> f32 {
-        self.row_height() * self.match_count() as f32
-    }
-
-    fn list_max_scroll(&self) -> f32 {
-        (self.list_content_height() - self.list_viewport_height()).max(0.0)
-    }
-
     fn center_selected(&mut self) {
         if self.match_count() == 0 {
-            self.list_scroll.jump_to(0.0, 0.0, 0.0);
             return;
         }
 
-        let row_height = self.row_height();
-        let target =
-            self.selected_ix as f32 * row_height - (self.list_viewport_height() - row_height) / 2.0;
-        self.list_scroll
-            .set_target(target, 0.0, self.list_max_scroll());
-    }
-
-    fn scroll_delta_y(event: &ScrollWheelEvent) -> f32 {
-        match event.delta {
-            ScrollDelta::Pixels(pixels) => pixels.y.as_f32(),
-            ScrollDelta::Lines(lines) => lines.y * LIST_SCROLL_LINE_MULTIPLIER,
-        }
-    }
-
-    fn on_list_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let delta_y = Self::scroll_delta_y(event);
-        if delta_y != 0.0 {
-            let target = self.list_scroll.target() - delta_y;
-            self.list_scroll
-                .set_target(target, 0.0, self.list_max_scroll());
-            cx.notify();
-        }
-        cx.stop_propagation();
+        self.list_scroll_handle
+            .scroll_to_item_strict(self.selected_ix, ScrollStrategy::Center);
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -514,24 +482,12 @@ impl<D: PickerDelegate> Focusable for Picker<D> {
 }
 
 impl<D: PickerDelegate> Render for Picker<D> {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let theme = cx.global::<SettingsStore>().resolved_theme;
-        let smooth_scrolling = cx
-            .global::<SettingsStore>()
-            .settings
-            .behavior
-            .smooth_scrolling;
         let match_count = self.match_count();
         let list_height = self.list_viewport_height();
-        let list_scroll_max = self.list_max_scroll();
-        self.list_scroll.clamp(0.0, list_scroll_max);
-        if self.list_scroll.advance(smooth_scrolling) && self.list_scroll.is_animating() {
-            window.request_animation_frame();
-        }
-        let list_offset = self.list_scroll.current();
-        let row_height = self.row_height();
-        let previous_focus_handle = self.previous_focus_handle.clone();
+        let scroll_handle = self.list_scroll_handle.clone();
 
         div()
             .key_context(self.delegate.key_context())
@@ -594,39 +550,60 @@ impl<D: PickerDelegate> Render for Picker<D> {
                     })
                     .when(match_count > 0, |this| {
                         this.h(px(list_height))
-                            .on_scroll_wheel(cx.listener(Self::on_list_scroll))
-                            .child(div().flex().flex_col().mt(px(-list_offset)).children(
-                                (0..match_count).map(|match_ix| {
-                                    let selected = match_ix == self.selected_ix;
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_between()
-                                        .h(px(row_height))
-                                        .px_3()
-                                        .text_size(px(13.0))
-                                        .bg(if selected {
-                                            rgba(theme.selected_row)
-                                        } else {
-                                            rgba(0x00000000)
-                                        })
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.selected_ix = match_ix;
-                                                this.confirm_selected(window, cx);
-                                                cx.stop_propagation();
-                                            }),
-                                        )
-                                        .child(self.delegate.render_match(
-                                            match_ix,
-                                            theme,
-                                            &previous_focus_handle,
-                                            window,
-                                        ))
-                                }),
-                            ))
+                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                            .child(
+                                uniform_list(
+                                    "picker-matches",
+                                    match_count,
+                                    cx.processor(
+                                        move |this, visible_range: Range<usize>, window, cx| {
+                                            let theme = cx.global::<SettingsStore>().resolved_theme;
+                                            let row_height = this.row_height();
+                                            let previous_focus_handle =
+                                                this.previous_focus_handle.clone();
+
+                                            visible_range
+                                                .map(|match_ix| {
+                                                    let selected = match_ix == this.selected_ix;
+                                                    div()
+                                                        .flex()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .h(px(row_height))
+                                                        .px_3()
+                                                        .text_size(px(13.0))
+                                                        .bg(if selected {
+                                                            rgba(theme.selected_row)
+                                                        } else {
+                                                            rgba(0x00000000)
+                                                        })
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(
+                                                                move |this, _, window, cx| {
+                                                                    this.selected_ix = match_ix;
+                                                                    this.confirm_selected(
+                                                                        window, cx,
+                                                                    );
+                                                                    cx.stop_propagation();
+                                                                },
+                                                            ),
+                                                        )
+                                                        .child(this.delegate.render_match(
+                                                            match_ix,
+                                                            theme,
+                                                            &previous_focus_handle,
+                                                            window,
+                                                        ))
+                                                })
+                                                .collect::<Vec<_>>()
+                                        },
+                                    ),
+                                )
+                                .track_scroll(&scroll_handle)
+                                .size_full(),
+                            )
                     }),
             )
     }

@@ -193,7 +193,11 @@ impl PickerDelegate for CommandPaletteDelegate {
         };
 
         let action = self.commands[command_ix].action.boxed_clone();
-        previous_focus_handle.dispatch_action(action.as_ref(), window, cx);
+        let previous_focus_handle = previous_focus_handle.clone();
+        window.defer(cx, move |window, cx| {
+            previous_focus_handle.focus(window, cx);
+            previous_focus_handle.dispatch_action(action.as_ref(), window, cx);
+        });
     }
 }
 
