@@ -33,8 +33,8 @@ use gpui::{
     Anchor, Bounds, ClipboardItem, Context, Corners, Entity, FocusHandle, Focusable, IntoElement,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathPromptOptions, Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta,
-    ScrollWheelEvent, SharedString, Task, UniformListScrollHandle, Window, anchored, canvas,
-    deferred, div, fill, point, prelude::*, px, rgb, rgba, size, uniform_list,
+    ScrollStrategy, ScrollWheelEvent, SharedString, Task, UniformListScrollHandle, Window,
+    anchored, canvas, deferred, div, fill, point, prelude::*, px, rgb, rgba, size, uniform_list,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
@@ -59,6 +59,8 @@ gpui::actions!(
         PreviousPage,
         NextHalfPage,
         PreviousHalfPage,
+        GoToBeginning,
+        GoToEnd,
         JumpBackward,
         JumpForward,
         Toc,
@@ -73,7 +75,12 @@ gpui::actions!(
         OpenBookmarks,
         OpenFile,
         AddBookmark,
-        ToggleGridOverview
+        ToggleGridOverview,
+        GridCursorUp,
+        GridCursorDown,
+        GridCursorLeft,
+        GridCursorRight,
+        GridOverviewConfirm
     ]
 );
 
@@ -350,6 +357,7 @@ pub struct PdfView {
     grid_overview_scroll: UniformListScrollHandle,
     grid_overview_zoom: f32,
     grid_overview_cols: usize,
+    grid_overview_cursor: usize,
     grid_overview_viewport_width: f32,
     jump_back: Vec<JumpPosition>,
     jump_forward: Vec<JumpPosition>,
@@ -518,6 +526,7 @@ impl PdfView {
             grid_overview_scroll: UniformListScrollHandle::new(),
             grid_overview_zoom: GRID_OVERVIEW_DEFAULT_ZOOM,
             grid_overview_cols: GRID_OVERVIEW_DEFAULT_COLS,
+            grid_overview_cursor: 0,
             grid_overview_viewport_width: 0.0,
             jump_back: Vec::new(),
             jump_forward: Vec::new(),
@@ -2725,8 +2734,12 @@ impl PdfView {
         self.current_page_index() + 1
     }
 
-    fn next_page(&mut self, cx: &mut Context<Self>) {
-        let target_page = (self.current_page_index() + 1).min(self.pages.len().saturating_sub(1));
+    fn last_page_index(&self) -> usize {
+        self.pages.len().saturating_sub(1)
+    }
+
+    fn navigate_to_page_start(&mut self, page_idx: usize, cx: &mut Context<Self>) {
+        let target_page = page_idx.min(self.last_page_index());
         let target = self
             .pages
             .get(target_page)
@@ -2738,24 +2751,156 @@ impl PdfView {
         }
     }
 
-    fn previous_page(&mut self, cx: &mut Context<Self>) {
-        let target_page = self.current_page_index().saturating_sub(1);
-        let target = self
-            .pages
-            .get(target_page)
-            .map(|page| page.offset_y)
-            .unwrap_or(0.0);
+    fn grid_overview_cursor_row(&self) -> usize {
+        self.grid_overview_cursor / self.grid_overview_cols.max(1)
+    }
 
-        if self.set_scroll_doc_target(self.target_scroll_x_doc, target, cx) {
+    fn scroll_grid_overview_cursor(&self, strategy: ScrollStrategy) {
+        self.grid_overview_scroll
+            .scroll_to_item(self.grid_overview_cursor_row(), strategy);
+    }
+
+    fn set_grid_overview_cursor(
+        &mut self,
+        page_idx: usize,
+        strategy: ScrollStrategy,
+        cx: &mut Context<Self>,
+    ) {
+        self.grid_overview_cursor = page_idx.min(self.last_page_index());
+        self.scroll_grid_overview_cursor(strategy);
+        cx.notify();
+    }
+
+    fn move_grid_overview_cursor(
+        &mut self,
+        delta: isize,
+        strategy: ScrollStrategy,
+        cx: &mut Context<Self>,
+    ) {
+        let target = if delta < 0 {
+            self.grid_overview_cursor
+                .saturating_sub(delta.unsigned_abs())
+        } else {
+            self.grid_overview_cursor.saturating_add(delta as usize)
+        };
+        self.set_grid_overview_cursor(target, strategy, cx);
+    }
+
+    fn scroll_grid_overview_by(&mut self, direction: f32, fraction: f32, cx: &mut Context<Self>) {
+        let scroll_handle = self.grid_overview_scroll.0.borrow().base_handle.clone();
+        let offset = scroll_handle.offset();
+        let max_offset = scroll_handle.max_offset();
+        let delta = scroll_handle.bounds().size.height.as_f32() * fraction;
+        let max_y = max_offset.y.as_f32().max(0.0);
+        if max_y <= 0.0 || delta <= 0.0 {
+            return;
+        }
+
+        let target_y = (offset.y.as_f32() - direction * delta).clamp(-max_y, 0.0);
+        if (target_y - offset.y.as_f32()).abs() <= f32::EPSILON {
+            return;
+        }
+
+        scroll_handle.set_offset(point(offset.x, px(target_y)));
+        cx.notify();
+    }
+
+    fn scroll_grid_overview_to_top(&mut self, cx: &mut Context<Self>) {
+        self.grid_overview_scroll
+            .scroll_to_item_strict(0, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    fn scroll_grid_overview_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.grid_overview_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    fn confirm_grid_overview_selection(&mut self, cx: &mut Context<Self>) {
+        let page_idx = self.grid_overview_cursor.min(self.last_page_index());
+        self.navigate_to_pdf_destination(page_idx, None, None, cx);
+        self.set_grid_overview_open(false, cx);
+    }
+
+    fn grid_cursor_up(&mut self, cx: &mut Context<Self>) {
+        self.move_grid_overview_cursor(
+            -(self.grid_overview_cols.max(1) as isize),
+            ScrollStrategy::Center,
+            cx,
+        );
+    }
+
+    fn grid_cursor_down(&mut self, cx: &mut Context<Self>) {
+        self.move_grid_overview_cursor(
+            self.grid_overview_cols.max(1) as isize,
+            ScrollStrategy::Center,
+            cx,
+        );
+    }
+
+    fn grid_cursor_left(&mut self, cx: &mut Context<Self>) {
+        self.move_grid_overview_cursor(-1, ScrollStrategy::Center, cx);
+    }
+
+    fn grid_cursor_right(&mut self, cx: &mut Context<Self>) {
+        self.move_grid_overview_cursor(1, ScrollStrategy::Center, cx);
+    }
+
+    fn next_page(&mut self, cx: &mut Context<Self>) {
+        if self.grid_overview_open {
+            self.scroll_grid_overview_by(1.0, 1.0, cx);
+            return;
+        }
+
+        self.navigate_to_page_start(self.current_page_index() + 1, cx);
+    }
+
+    fn previous_page(&mut self, cx: &mut Context<Self>) {
+        if self.grid_overview_open {
+            self.scroll_grid_overview_by(-1.0, 1.0, cx);
+            return;
+        }
+
+        self.navigate_to_page_start(self.current_page_index().saturating_sub(1), cx);
+    }
+
+    fn go_to_beginning(&mut self, cx: &mut Context<Self>) {
+        if self.grid_overview_open {
+            self.scroll_grid_overview_to_top(cx);
+            return;
+        }
+
+        if self.set_scroll_doc_target(self.target_scroll_x_doc, 0.0, cx) {
+            self.mark_manual_navigation();
+        }
+    }
+
+    fn go_to_end(&mut self, cx: &mut Context<Self>) {
+        if self.grid_overview_open {
+            self.scroll_grid_overview_to_bottom(cx);
+            return;
+        }
+
+        if self.set_scroll_doc_target(self.target_scroll_x_doc, self.max_scroll_y_doc(), cx) {
             self.mark_manual_navigation();
         }
     }
 
     fn next_half_page(&mut self, cx: &mut Context<Self>) {
+        if self.grid_overview_open {
+            self.scroll_grid_overview_by(1.0, 0.5, cx);
+            return;
+        }
+
         self.scroll_half_page(1.0, cx);
     }
 
     fn previous_half_page(&mut self, cx: &mut Context<Self>) {
+        if self.grid_overview_open {
+            self.scroll_grid_overview_by(-1.0, 0.5, cx);
+            return;
+        }
+
         self.scroll_half_page(-1.0, cx);
     }
 
@@ -3883,6 +4028,10 @@ impl PdfView {
         }
 
         self.grid_overview_open = open;
+        if open {
+            self.grid_overview_cursor = self.current_page_index().min(self.last_page_index());
+            self.scroll_grid_overview_cursor(ScrollStrategy::Center);
+        }
         cx.notify();
     }
 
@@ -3936,11 +4085,15 @@ impl PdfView {
             > GRID_OVERVIEW_VIEWPORT_WIDTH_EPSILON;
         self.grid_overview_viewport_width = viewport_width;
         let cols = Self::grid_overview_cols_for_width(viewport_width, self.grid_overview_zoom);
-        if cols == self.grid_overview_cols && !viewport_width_changed {
+        let cols_changed = cols != self.grid_overview_cols;
+        if !cols_changed && !viewport_width_changed {
             return false;
         }
 
         self.grid_overview_cols = cols;
+        if cols_changed {
+            self.scroll_grid_overview_cursor(ScrollStrategy::Center);
+        }
         cx.notify();
         true
     }
@@ -4048,7 +4201,8 @@ impl PdfView {
                             rows,
                             cx.processor(move |this, visible_range: Range<usize>, _window, cx| {
                                 let theme = cx.global::<SettingsStore>().resolved_theme;
-                                let current_page = this.current_page_index();
+                                let current_page =
+                                    this.grid_overview_cursor.min(this.last_page_index());
 
                                 visible_range
                                     .map(|row_ix| {
@@ -4805,6 +4959,24 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &PreviousHalfPage, _, cx| {
                 this.previous_half_page(cx);
             }))
+            .on_action(cx.listener(|this, _: &GoToBeginning, _, cx| {
+                this.go_to_beginning(cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoToEnd, _, cx| {
+                this.go_to_end(cx);
+            }))
+            .on_action(cx.listener(|this, _: &GridCursorUp, _, cx| {
+                this.grid_cursor_up(cx);
+            }))
+            .on_action(cx.listener(|this, _: &GridCursorDown, _, cx| {
+                this.grid_cursor_down(cx);
+            }))
+            .on_action(cx.listener(|this, _: &GridCursorLeft, _, cx| {
+                this.grid_cursor_left(cx);
+            }))
+            .on_action(cx.listener(|this, _: &GridCursorRight, _, cx| {
+                this.grid_cursor_right(cx);
+            }))
             .on_action(cx.listener(|this, _: &JumpBackward, _, cx| {
                 this.jump_backward(cx);
             }))
@@ -4825,6 +4997,9 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &ToggleGridOverview, _, cx| {
                 this.toggle_grid_overview(cx);
+            }))
+            .on_action(cx.listener(|this, _: &GridOverviewConfirm, _, cx| {
+                this.confirm_grid_overview_selection(cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
