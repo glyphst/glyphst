@@ -1260,11 +1260,7 @@ impl PdfView {
         self.cached
             .iter()
             .enumerate()
-            .filter(|(_, cached)| {
-                cached.key.page_idx == key.page_idx
-                    && cached.key.physical_width <= key.physical_width
-                    && cached.key.physical_height <= key.physical_height
-            })
+            .filter(|(_, cached)| cached.key.page_idx == key.page_idx)
             .min_by(|(_, a), (_, b)| {
                 (a.render_scale - render_scale)
                     .abs()
