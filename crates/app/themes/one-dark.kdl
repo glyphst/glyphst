@@ -27,4 +27,4 @@ colors {
     success "#98c379"
     error "#e06c75"
 }
-page-gap 24
+page-gap 4

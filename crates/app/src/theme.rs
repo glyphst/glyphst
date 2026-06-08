@@ -9,7 +9,7 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 use crate::library::HighlightColor;
 
 pub const DEFAULT_THEME_ID: &str = "glyphst-light";
-pub const DEFAULT_PAGE_GAP: f32 = 24.0;
+pub const DEFAULT_PAGE_GAP: f32 = 4.0;
 
 const MIN_PAGE_GAP: f32 = 0.0;
 const MAX_PAGE_GAP: f32 = 240.0;
