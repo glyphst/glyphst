@@ -9,8 +9,8 @@ use crate::{
         AddBookmark, CopySelection, JumpBackward, JumpForward, NextHalfPage, NextPage,
         OpenBookmarks, OpenFile, OpenHistory, OpenNotes, OpenSettings, PreviousHalfPage,
         PreviousPage, ResetZoom, Search, SearchNext, SearchPrev, SelectAll, Toc,
-        ToggleCommandPalette, ToggleFullScreen, ToggleNotes, ToggleToc, ToggleTransparency, ZoomIn,
-        ZoomOut,
+        ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview, ToggleNotes, ToggleToc,
+        ToggleTransparency, ZoomIn, ZoomOut,
     },
     picker::{
         PickerBackspace, PickerCancel, PickerConfirm, PickerDelete, PickerEnd, PickerHome,
@@ -27,8 +27,9 @@ use crate::{
 };
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
 
-const PDF_CONTEXT: &str = "PdfView && !CommandPalette && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor";
-const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor";
+const PDF_CONTEXT: &str = "PdfView && !GridOverview && !CommandPalette && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor";
+const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !GridOverview && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor";
+const GRID_OVERVIEW_CONTEXT: &str = "GridOverview";
 const PALETTE_CONTEXT: &str = "CommandPalette";
 const SEARCH_CONTEXT: &str = "Search";
 const SETTINGS_CONTEXT: &str = "SettingsPanel";
@@ -78,6 +79,12 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<OpenSettings>("cmd-,", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenHistory>("ctrl-h", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenFile>("cmd-o", PDF_NO_SEARCH_CONTEXT),
+        bind::<ToggleGridOverview>("ctrl-g", PDF_NO_SEARCH_CONTEXT),
+        bind::<ZoomIn>("+", GRID_OVERVIEW_CONTEXT),
+        bind::<ZoomIn>("shift-=", GRID_OVERVIEW_CONTEXT),
+        bind::<ZoomOut>("-", GRID_OVERVIEW_CONTEXT),
+        bind::<ToggleGridOverview>("ctrl-g", GRID_OVERVIEW_CONTEXT),
+        bind::<ToggleGridOverview>("escape", GRID_OVERVIEW_CONTEXT),
     ]);
 
     match preset {
@@ -431,6 +438,11 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["toggle-notes", "toggle-notes-sidebar"],
             context: Some(PDF_NO_SEARCH_CONTEXT),
             build: boxed::<ToggleNotes>,
+        },
+        ActionSpec {
+            aliases: &["toggle-grid-overview", "grid-overview", "page-overview"],
+            context: Some(PDF_NO_SEARCH_CONTEXT),
+            build: boxed::<ToggleGridOverview>,
         },
         ActionSpec {
             aliases: &["toggle-command-palette", "command-palette"],

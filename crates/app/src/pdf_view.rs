@@ -72,7 +72,8 @@ gpui::actions!(
         OpenHistory,
         OpenBookmarks,
         OpenFile,
-        AddBookmark
+        AddBookmark,
+        ToggleGridOverview
     ]
 );
 
@@ -81,13 +82,25 @@ const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 8.0;
 const SCROLL_LINE_MULTIPLIER: f32 = 20.0;
 const CTRL_SCROLL_ZOOM_STEP_MULTIPLIER: f32 = 0.25;
-const MAX_CACHED_RENDERS: usize = 12;
+const MAX_CACHED_RENDERS: usize = 2048;
+const MAX_CACHED_RENDER_PIXELS: u64 = 80_000_000;
 const MAX_JUMP_HISTORY: usize = 128;
 const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
 const TOC_SIDEBAR_WIDTH: f32 = 280.0;
 const TOC_SIDEBAR_ROW_HEIGHT: f32 = 30.0;
 const NOTES_SIDEBAR_WIDTH: f32 = 300.0;
 const NOTES_SIDEBAR_ROW_HEIGHT: f32 = 52.0;
+const GRID_OVERVIEW_DEFAULT_ZOOM: f32 = 1.0;
+const GRID_OVERVIEW_MIN_ZOOM: f32 = 0.25;
+const GRID_OVERVIEW_MAX_ZOOM: f32 = 4.0;
+const GRID_OVERVIEW_DEFAULT_COLS: usize = 4;
+const GRID_OVERVIEW_BASE_THUMBNAIL_WIDTH: f32 = 130.0;
+const GRID_OVERVIEW_BASE_THUMBNAIL_MAX_HEIGHT: f32 = 180.0;
+const GRID_OVERVIEW_CELL_PADDING: f32 = 8.0;
+const GRID_OVERVIEW_CELL_GAP: f32 = 12.0;
+const GRID_OVERVIEW_ROW_PADDING_Y: f32 = 16.0;
+const GRID_OVERVIEW_LABEL_HEIGHT: f32 = 18.0;
+const GRID_OVERVIEW_HEADER_HEIGHT: f32 = 40.0;
 const SIDEBAR_PAGE_NUMBER_WIDTH: f32 = 38.0;
 const INFERRED_SPACE_WIDTH_RATIO: f32 = 0.75;
 const INFERRED_SPACE_HEIGHT_RATIO: f32 = 0.20;
@@ -332,6 +345,11 @@ pub struct PdfView {
     notes_sidebar_scroll: UniformListScrollHandle,
     notes_sidebar_entries: Vec<NotePaletteEntry>,
     notes_sidebar_selected: Option<u64>,
+    grid_overview_open: bool,
+    grid_overview_scroll: UniformListScrollHandle,
+    grid_overview_zoom: f32,
+    grid_overview_cols: usize,
+    grid_overview_viewport_width: f32,
     jump_back: Vec<JumpPosition>,
     jump_forward: Vec<JumpPosition>,
     position_from_search: bool,
@@ -495,6 +513,11 @@ impl PdfView {
             notes_sidebar_scroll: UniformListScrollHandle::new(),
             notes_sidebar_entries: Vec::new(),
             notes_sidebar_selected: None,
+            grid_overview_open: false,
+            grid_overview_scroll: UniformListScrollHandle::new(),
+            grid_overview_zoom: GRID_OVERVIEW_DEFAULT_ZOOM,
+            grid_overview_cols: GRID_OVERVIEW_DEFAULT_COLS,
+            grid_overview_viewport_width: 0.0,
             jump_back: Vec::new(),
             jump_forward: Vec::new(),
             position_from_search: false,
@@ -1247,7 +1270,13 @@ impl PdfView {
             return Some(self.touch_cached_render(index));
         }
 
-        self.start_background_render(key, cx);
+        if !self
+            .pending_renders
+            .iter()
+            .any(|pending| pending.key.page_idx == key.page_idx)
+        {
+            self.start_background_render(key, cx);
+        }
         self.scaled_fallback_render_index(key)
             .map(|index| self.touch_cached_render(index))
     }
@@ -1296,7 +1325,9 @@ impl PdfView {
             });
         }
 
-        while self.cached.len() > MAX_CACHED_RENDERS {
+        while self.cached.len() > MAX_CACHED_RENDERS
+            || (self.cached.len() > 1 && self.cached_render_pixels() > MAX_CACHED_RENDER_PIXELS)
+        {
             if let Some(index) = self
                 .cached
                 .iter()
@@ -1307,6 +1338,13 @@ impl PdfView {
                 self.cached.remove(index);
             }
         }
+    }
+
+    fn cached_render_pixels(&self) -> u64 {
+        self.cached
+            .iter()
+            .map(|cached| cached.key.physical_width as u64 * cached.key.physical_height as u64)
+            .sum()
     }
 
     fn next_cache_access(&mut self) -> u64 {
@@ -2628,17 +2666,38 @@ impl PdfView {
 
     fn zoom_in(&mut self, cx: &mut Context<Self>) {
         let zoom_step = cx.global::<SettingsStore>().settings.behavior.zoom_step;
+        if self.grid_overview_open {
+            self.set_grid_overview_zoom(self.grid_overview_zoom * zoom_step, cx);
+            return;
+        }
+
         self.set_zoom(self.zoom * zoom_step, cx);
     }
 
     fn zoom_out(&mut self, cx: &mut Context<Self>) {
         let zoom_step = cx.global::<SettingsStore>().settings.behavior.zoom_step;
+        if self.grid_overview_open {
+            self.set_grid_overview_zoom(self.grid_overview_zoom / zoom_step, cx);
+            return;
+        }
+
         self.set_zoom(self.zoom / zoom_step, cx);
     }
 
     fn reset_zoom(&mut self, cx: &mut Context<Self>) {
         let default_zoom = cx.global::<SettingsStore>().settings.behavior.default_zoom;
         self.set_zoom(default_zoom, cx);
+    }
+
+    fn set_grid_overview_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        let zoom = zoom.clamp(GRID_OVERVIEW_MIN_ZOOM, GRID_OVERVIEW_MAX_ZOOM);
+        if (zoom - self.grid_overview_zoom).abs() <= f32::EPSILON {
+            return;
+        }
+
+        self.grid_overview_zoom = zoom;
+        self.update_grid_overview_cols(self.grid_overview_viewport_width, cx);
+        cx.notify();
     }
 
     fn page_index_for_scroll_y(&self, scroll_y_doc: f32) -> usize {
@@ -2726,7 +2785,11 @@ impl PdfView {
                 .behavior
                 .zoom_step
                 .powf(zoom_delta * CTRL_SCROLL_ZOOM_STEP_MULTIPLIER);
-            self.set_zoom(self.zoom * factor, cx);
+            if self.grid_overview_open {
+                self.set_grid_overview_zoom(self.grid_overview_zoom * factor, cx);
+            } else {
+                self.set_zoom(self.zoom * factor, cx);
+            }
         } else {
             let (delta_x, delta_y) = match event.delta {
                 ScrollDelta::Pixels(pixels) => (pixels.x.as_f32(), pixels.y.as_f32()),
@@ -2964,6 +3027,10 @@ impl PdfView {
 
         self.notes_sidebar_open = !self.notes_sidebar_open;
         cx.notify();
+    }
+
+    fn toggle_grid_overview(&mut self, cx: &mut Context<Self>) {
+        self.set_grid_overview_open(!self.grid_overview_open, cx);
     }
 
     fn toggle_notes_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3771,6 +3838,337 @@ impl PdfView {
             .child("✎")
     }
 
+    fn render_grid_overview_button(
+        &self,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let open = self.grid_overview_open;
+
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .h(px(20.0))
+            .px_2()
+            .mr_2()
+            .rounded_sm()
+            .text_color(rgb(if open {
+                theme.accent
+            } else {
+                theme.footer_text
+            }))
+            .bg(if open {
+                rgba(theme.selected_row)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_grid_overview(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child("⊞")
+    }
+
+    fn set_grid_overview_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.grid_overview_open == open {
+            return;
+        }
+
+        self.grid_overview_open = open;
+        cx.notify();
+    }
+
+    fn grid_overview_thumbnail_max_width(zoom: f32) -> f32 {
+        GRID_OVERVIEW_BASE_THUMBNAIL_WIDTH * zoom
+    }
+
+    fn grid_overview_thumbnail_max_height(zoom: f32) -> f32 {
+        GRID_OVERVIEW_BASE_THUMBNAIL_MAX_HEIGHT * zoom
+    }
+
+    fn grid_overview_cell_width(zoom: f32) -> f32 {
+        Self::grid_overview_thumbnail_max_width(zoom)
+            + GRID_OVERVIEW_CELL_PADDING
+            + GRID_OVERVIEW_CELL_GAP
+    }
+
+    fn grid_overview_row_height(zoom: f32) -> f32 {
+        Self::grid_overview_thumbnail_max_height(zoom)
+            + GRID_OVERVIEW_CELL_PADDING
+            + GRID_OVERVIEW_LABEL_HEIGHT
+            + GRID_OVERVIEW_ROW_PADDING_Y
+    }
+
+    fn grid_overview_cols_for_width(viewport_width: f32, zoom: f32) -> usize {
+        if !viewport_width.is_finite() || viewport_width <= 0.0 {
+            return GRID_OVERVIEW_DEFAULT_COLS;
+        }
+
+        let available_width = (viewport_width - GRID_OVERVIEW_CELL_GAP * 2.0).max(1.0);
+        let cell_width = Self::grid_overview_cell_width(zoom).max(1.0);
+        ((available_width / cell_width).floor() as usize).max(1)
+    }
+
+    fn update_grid_overview_cols(&mut self, viewport_width: f32, cx: &mut Context<Self>) -> bool {
+        if !viewport_width.is_finite() || viewport_width <= 0.0 {
+            return false;
+        }
+
+        self.grid_overview_viewport_width = viewport_width;
+        let cols = Self::grid_overview_cols_for_width(viewport_width, self.grid_overview_zoom);
+        if cols == self.grid_overview_cols {
+            return false;
+        }
+
+        self.grid_overview_cols = cols;
+        cx.notify();
+        true
+    }
+
+    fn grid_overview_thumbnail_size(page: &PdfPage, zoom: f32) -> (f32, f32) {
+        let page_width = page.width.max(1.0);
+        let page_height = page.height.max(1.0);
+        let scale = (Self::grid_overview_thumbnail_max_width(zoom) / page_width)
+            .min(Self::grid_overview_thumbnail_max_height(zoom) / page_height)
+            .max(0.001);
+
+        (page_width * scale, page_height * scale)
+    }
+
+    fn render_grid_overview(
+        &mut self,
+        theme: Theme,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let cols = self.grid_overview_cols.max(1);
+        let rows = self.pages.len().div_ceil(cols);
+        let zoom = self.grid_overview_zoom;
+        let row_height = Self::grid_overview_row_height(zoom);
+        let thumbnail_max_width = Self::grid_overview_thumbnail_max_width(zoom);
+        let thumbnail_max_height = Self::grid_overview_thumbnail_max_height(zoom);
+        let thumbnail_box_width = thumbnail_max_width + GRID_OVERVIEW_CELL_PADDING;
+        let thumbnail_box_height = thumbnail_max_height + GRID_OVERVIEW_CELL_PADDING;
+        let page_count = self.pages.len();
+        let scroll_handle = self.grid_overview_scroll.clone();
+        let measure_view = cx.entity();
+
+        let measure = canvas(
+            {
+                let measure_view = measure_view.clone();
+                move |bounds, _window, cx| {
+                    let width = bounds.size.width.as_f32();
+                    measure_view.update(cx, |this, cx| {
+                        this.update_grid_overview_cols(width, cx);
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
+
+        div()
+            .id("grid-overview")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .key_context("GridOverview")
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.panel_background))
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                if this.control_down {
+                    this.handle_scroll_wheel(event, cx);
+                }
+                cx.stop_propagation();
+            }))
+            .child(measure)
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_between()
+                    .h(px(GRID_OVERVIEW_HEADER_HEIGHT))
+                    .px_3()
+                    .border_b(px(1.0))
+                    .border_color(rgb(theme.panel_border))
+                    .child(div().text_size(px(13.0)).child("Page Overview"))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(if page_count == 1 {
+                                "1 page".to_string()
+                            } else {
+                                format!("{page_count} pages")
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .id("grid-overview-content")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(
+                        uniform_list(
+                            "grid-overview-list",
+                            rows,
+                            cx.processor(move |this, visible_range: Range<usize>, _window, cx| {
+                                let theme = cx.global::<SettingsStore>().resolved_theme;
+                                let current_page = this.current_page_index();
+
+                                visible_range
+                                    .map(|row_ix| {
+                                        let mut row = div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_start()
+                                            .justify_center()
+                                            .gap_3()
+                                            .h(px(row_height))
+                                            .px_3()
+                                            .py_2();
+
+                                        for col_ix in 0..cols {
+                                            let page_idx = row_ix * cols + col_ix;
+                                            if let Some(page) = this.pages.get(page_idx) {
+                                                let (thumbnail_width, thumbnail_height) =
+                                                    Self::grid_overview_thumbnail_size(page, zoom);
+                                                let current = page_idx == current_page;
+                                                let border_color = if current {
+                                                    theme.accent
+                                                } else {
+                                                    theme.panel_border
+                                                };
+                                                let label_color = if current {
+                                                    theme.accent
+                                                } else {
+                                                    theme.text_muted
+                                                };
+                                                let thumbnail_view = cx.entity();
+                                                let thumbnail = canvas(
+                                                    {
+                                                        let thumbnail_view = thumbnail_view.clone();
+                                                        move |bounds, window, cx| {
+                                                            thumbnail_view.update(cx, |this, cx| {
+                                                                let key = Self::render_key(
+                                                                    page_idx,
+                                                                    bounds,
+                                                                    window.scale_factor(),
+                                                                );
+                                                                this.cached_or_request_render(
+                                                                    key, cx,
+                                                                )
+                                                            })
+                                                        }
+                                                    },
+                                                    move |bounds, image, window, _| {
+                                                        window.paint_quad(fill(
+                                                            bounds,
+                                                            rgb(theme.page),
+                                                        ));
+                                                        if let Some(image) = image {
+                                                            let _ = window.paint_image(
+                                                                bounds,
+                                                                Corners::default(),
+                                                                image,
+                                                                0,
+                                                                false,
+                                                            );
+                                                        }
+                                                    },
+                                                )
+                                                .w(px(thumbnail_width))
+                                                .h(px(thumbnail_height));
+
+                                                row = row.child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_none()
+                                                        .flex_col()
+                                                        .items_center()
+                                                        .w(px(thumbnail_box_width))
+                                                        .rounded_sm()
+                                                        .cursor_pointer()
+                                                        .hover(move |style| {
+                                                            style.bg(rgb(theme.control_hover))
+                                                        })
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(move |this, _, _, cx| {
+                                                                this.navigate_to_pdf_destination(
+                                                                    page_idx, None, None, cx,
+                                                                );
+                                                                this.set_grid_overview_open(
+                                                                    false, cx,
+                                                                );
+                                                                cx.stop_propagation();
+                                                            }),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .w(px(thumbnail_box_width))
+                                                                .h(px(thumbnail_box_height))
+                                                                .rounded_sm()
+                                                                .border_1()
+                                                                .border_color(rgb(border_color))
+                                                                .bg(if current {
+                                                                    rgba(Self::with_alpha(
+                                                                        theme.accent,
+                                                                        0x18,
+                                                                    ))
+                                                                } else {
+                                                                    rgba(0x00000000)
+                                                                })
+                                                                .child(thumbnail),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .mt_1()
+                                                                .text_size(px(11.0))
+                                                                .text_color(rgb(label_color))
+                                                                .child(format!("{}", page_idx + 1)),
+                                                        ),
+                                                );
+                                            } else {
+                                                row = row.child(
+                                                    div().flex_none().w(px(thumbnail_box_width)),
+                                                );
+                                            }
+                                        }
+
+                                        row
+                                    })
+                                    .collect::<Vec<_>>()
+                            }),
+                        )
+                        .track_scroll(&scroll_handle)
+                        .size_full(),
+                    ),
+            )
+    }
+
     fn render_toc_sidebar(
         &mut self,
         theme: Theme,
@@ -4348,7 +4746,11 @@ impl Render for PdfView {
                 |this| this.cursor_pointer(),
             )
             .when(self.panning.is_some(), |this| this.cursor_grabbing())
-            .key_context("PdfView")
+            .key_context(if self.grid_overview_open {
+                "GridOverview"
+            } else {
+                "PdfView"
+            })
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| {
                 this.copy_selection(cx);
@@ -4404,6 +4806,9 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &ToggleNotes, _, cx| {
                 this.toggle_notes_sidebar(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleGridOverview, _, cx| {
+                this.toggle_grid_overview(cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
@@ -4779,6 +5184,7 @@ impl Render for PdfView {
                                     .items_center()
                                     .child(self.render_toc_button(theme, cx))
                                     .child(self.render_notes_button(theme, cx))
+                                    .child(self.render_grid_overview_button(theme, cx))
                                     .child(
                                         div()
                                             .flex_1()
@@ -4794,6 +5200,9 @@ impl Render for PdfView {
                             ))),
                     ),
             )
+            .when(self.grid_overview_open, |this| {
+                this.child(self.render_grid_overview(theme, window, cx))
+            })
             .when_some(self.command_palette.clone(), |this, palette| {
                 this.child(Self::render_top_aligned_overlay(
                     palette,
