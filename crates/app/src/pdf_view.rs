@@ -2415,8 +2415,11 @@ impl PdfView {
         self.close_bookmark_prompt(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
+        let selected_ix = self.current_toc_palette_match_ix(&entries);
         let delegate = TocPaletteDelegate::new(cx.entity().downgrade(), entries);
-        let palette = cx.new(|cx| Picker::new(previous_focus_handle.clone(), delegate, cx));
+        let palette = cx.new(|cx| {
+            Picker::new_with_selected_ix(previous_focus_handle.clone(), delegate, selected_ix, cx)
+        });
 
         cx.subscribe_in(&palette, window, |this, _, _: &PickerEvent, window, cx| {
             this.close_toc_palette(window, cx);
@@ -2565,6 +2568,19 @@ impl PdfView {
                 page_number: entry.page_idx + 1,
             })
             .collect()
+    }
+
+    fn current_toc_palette_match_ix(&self, entries: &[TocPaletteEntry]) -> usize {
+        let current_page_number = self.current_page_index() + 1;
+        entries
+            .iter()
+            .position(|entry| entry.page_number == current_page_number)
+            .or_else(|| {
+                entries
+                    .iter()
+                    .rposition(|entry| entry.page_number < current_page_number)
+            })
+            .unwrap_or(0)
     }
 
     fn navigate_to_pdf_destination(

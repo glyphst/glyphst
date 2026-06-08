@@ -87,13 +87,38 @@ pub struct Picker<D: PickerDelegate> {
 
 impl<D: PickerDelegate> Picker<D> {
     pub fn new(previous_focus_handle: FocusHandle, delegate: D, cx: &mut Context<Self>) -> Self {
-        Self::with_content(previous_focus_handle, delegate, "".into(), cx)
+        Self::with_content_and_selected_ix(previous_focus_handle, delegate, "".into(), 0, cx)
+    }
+
+    pub fn new_with_selected_ix(
+        previous_focus_handle: FocusHandle,
+        delegate: D,
+        selected_ix: usize,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_content_and_selected_ix(
+            previous_focus_handle,
+            delegate,
+            "".into(),
+            selected_ix,
+            cx,
+        )
     }
 
     pub fn with_content(
         previous_focus_handle: FocusHandle,
         delegate: D,
         content: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_content_and_selected_ix(previous_focus_handle, delegate, content, 0, cx)
+    }
+
+    fn with_content_and_selected_ix(
+        previous_focus_handle: FocusHandle,
+        delegate: D,
+        content: SharedString,
+        selected_ix: usize,
         cx: &mut Context<Self>,
     ) -> Self {
         let content_len = content.len();
@@ -107,7 +132,7 @@ impl<D: PickerDelegate> Picker<D> {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
-            selected_ix: 0,
+            selected_ix,
             list_scroll_handle: UniformListScrollHandle::new(),
             delegate,
         };
