@@ -16,8 +16,9 @@ use crate::command_palette::{CommandPalette, CommandPaletteDelegate};
 use crate::history::{HistoryPalette, HistoryPaletteDelegate};
 use crate::keybindings;
 use crate::library::{
-    DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore, normalize_path,
+    DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore, Note, normalize_path,
 };
+use crate::note_editor::{NoteEditor, NoteEditorEvent};
 use crate::picker::{Picker, PickerEvent};
 use crate::search::{SearchBar, SearchEvent};
 use crate::settings::{BehaviorSettings, SettingsStore, WindowSettings};
@@ -165,6 +166,7 @@ struct PaintData {
     pages: Vec<PaintPage>,
     highlight_overlays: Vec<HighlightOverlay>,
     selected_highlight_borders: Vec<Bounds<Pixels>>,
+    note_underlines: Vec<(Bounds<Pixels>, HighlightColor)>,
     link_highlights: Vec<Bounds<Pixels>>,
     selection_highlights: Vec<Bounds<Pixels>>,
     search_highlights: Vec<Bounds<Pixels>>,
@@ -190,6 +192,21 @@ struct Selection {
 enum HighlightColorAction {
     Create,
     Change,
+}
+
+enum NoteTarget {
+    New {
+        rects: Vec<HighlightRect>,
+        text: String,
+    },
+    Edit {
+        id: u64,
+    },
+}
+
+pub(crate) struct PdfAnnotations {
+    pub(crate) highlights: Vec<Highlight>,
+    pub(crate) notes: Vec<Note>,
 }
 
 struct SearchMatch {
@@ -263,10 +280,13 @@ pub struct PdfView {
     glyphs: Vec<Glyph>,
     links: Vec<PdfLink>,
     highlights: Vec<Highlight>,
+    notes: Vec<Note>,
     selected_highlight: Option<u64>,
     selection: Option<Selection>,
     dragging: bool,
     hovered_link: Option<usize>,
+    hovered_note: Option<u64>,
+    hovered_note_position: Option<GpuiPoint<Pixels>>,
     pending_link: Option<usize>,
     panning: Option<PanState>,
     page_image_bounds: Vec<Option<Bounds<Pixels>>>,
@@ -290,6 +310,8 @@ pub struct PdfView {
     history_palette: Option<Entity<HistoryPalette>>,
     bookmark_palette: Option<Entity<BookmarkPalette>>,
     bookmark_prompt: Option<Entity<BookmarkPrompt>>,
+    note_editor: Option<Entity<NoteEditor>>,
+    note_target: Option<NoteTarget>,
     toc: Vec<TocEntry>,
     toc_collapsed: HashSet<usize>,
     toc_sidebar_open: bool,
@@ -306,6 +328,7 @@ pub struct PdfView {
     context_menu_position: Option<GpuiPoint<Pixels>>,
     context_menu_image: Option<(usize, usize)>,
     context_menu_highlight: Option<u64>,
+    context_menu_note: Option<u64>,
     _image_clipboard: Option<Clipboard>,
     // Must drop after pages: Type3 fonts in display lists reference the document.
     _document: mupdf::Document,
@@ -319,7 +342,7 @@ impl PdfView {
         window_settings: WindowSettings,
         theme: Theme,
         initial_position: Option<DocumentPosition>,
-        highlights: Vec<Highlight>,
+        annotations: PdfAnnotations,
     ) -> Result<Self> {
         let path = normalize_path(path.as_ref());
         let file_name = path
@@ -414,11 +437,14 @@ impl PdfView {
             content_height_doc,
             glyphs,
             links,
-            highlights,
+            highlights: annotations.highlights,
+            notes: annotations.notes,
             selected_highlight: None,
             selection: None,
             dragging: false,
             hovered_link: None,
+            hovered_note: None,
+            hovered_note_position: None,
             pending_link: None,
             panning: None,
             page_image_bounds,
@@ -442,6 +468,8 @@ impl PdfView {
             history_palette: None,
             bookmark_palette: None,
             bookmark_prompt: None,
+            note_editor: None,
+            note_target: None,
             toc,
             toc_collapsed: HashSet::new(),
             toc_sidebar_open: false,
@@ -458,6 +486,7 @@ impl PdfView {
             context_menu_position: None,
             context_menu_image: None,
             context_menu_highlight: None,
+            context_menu_note: None,
             _image_clipboard: None,
             _document: document,
         };
@@ -883,6 +912,7 @@ impl PdfView {
         }
 
         let (highlight_overlays, selected_highlight_borders) = self.highlight_overlays();
+        let note_underlines = self.note_underlines();
         let selection_highlights = self.selection_highlights();
         let (search_highlights, active_search_highlights) = self.search_highlights();
         let link_highlights = self.link_highlights();
@@ -891,6 +921,7 @@ impl PdfView {
             pages,
             highlight_overlays,
             selected_highlight_borders,
+            note_underlines,
             link_highlights,
             selection_highlights,
             search_highlights,
@@ -1451,12 +1482,46 @@ impl PdfView {
             .map(|highlight| highlight.color)
     }
 
+    fn note_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<u64> {
+        let page_idx = self.page_at_screen(point)?;
+        let pdf_point = self.screen_to_pdf(page_idx, point)?;
+
+        self.notes.iter().rev().find_map(|note| {
+            note.rects
+                .iter()
+                .any(|rect| rect.contains(page_idx, pdf_point.x, pdf_point.y))
+                .then_some(note.id)
+        })
+    }
+
+    fn note_body_for_id(&self, id: u64) -> Option<SharedString> {
+        self.notes
+            .iter()
+            .find(|note| note.id == id)
+            .map(|note| note.body.clone().into())
+    }
+
     fn set_hovered_link(&mut self, link_ix: Option<usize>, cx: &mut Context<Self>) {
         if self.hovered_link == link_ix {
             return;
         }
 
         self.hovered_link = link_ix;
+        cx.notify();
+    }
+
+    fn set_hovered_note(
+        &mut self,
+        note_id: Option<u64>,
+        position: Option<GpuiPoint<Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hovered_note == note_id && self.hovered_note_position == position {
+            return;
+        }
+
+        self.hovered_note = note_id;
+        self.hovered_note_position = position;
         cx.notify();
     }
 
@@ -1467,6 +1532,16 @@ impl PdfView {
             self.link_at_screen(position)
         };
         self.set_hovered_link(link_ix, cx);
+    }
+
+    fn update_hovered_note(&mut self, position: GpuiPoint<Pixels>, cx: &mut Context<Self>) {
+        let note_id = if self.dragging || self.panning.is_some() {
+            None
+        } else {
+            self.note_at_screen(position)
+        };
+        let position = note_id.map(|_| position);
+        self.set_hovered_note(note_id, position, cx);
     }
 
     fn image_contains_pdf_point(image: &CollectedImage, point: mupdf::Point) -> bool {
@@ -1918,6 +1993,161 @@ impl PdfView {
             }
             Ok(false) => {}
             Err(error) => eprintln!("failed to remove PDF highlight: {error:#}"),
+        }
+    }
+
+    fn begin_add_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((start, end)) = self.selection_bounds() else {
+            return;
+        };
+        let Some(text) = self.selected_text() else {
+            return;
+        };
+        let rects = self.highlight_rects_for_range(start..end + 1);
+        if rects.is_empty() {
+            return;
+        }
+
+        self.open_note_editor(
+            "".into(),
+            HighlightColor::Yellow,
+            NoteTarget::New { rects, text },
+            window,
+            cx,
+        );
+    }
+
+    fn begin_edit_context_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.context_menu_note.or(self.hovered_note) else {
+            return;
+        };
+        let Some((body, color)) = self
+            .notes
+            .iter()
+            .find(|note| note.id == id)
+            .map(|note| (note.body.clone(), note.color))
+        else {
+            return;
+        };
+
+        self.open_note_editor(body.into(), color, NoteTarget::Edit { id }, window, cx);
+    }
+
+    fn open_note_editor(
+        &mut self,
+        content: SharedString,
+        color: HighlightColor,
+        target: NoteTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_context_menu(cx);
+        self.close_command_palette(window, cx);
+        self.close_settings_panel(window, cx);
+        self.close_search_bar(window, cx);
+        self.close_toc_palette(window, cx);
+        self.close_history_palette(window, cx);
+        self.close_bookmark_palette(window, cx);
+        self.close_bookmark_prompt(window, cx);
+
+        let previous_focus_handle = self.focus_handle.clone();
+        let editor =
+            cx.new(|cx| NoteEditor::new(previous_focus_handle.clone(), content, color, cx));
+
+        cx.subscribe_in(&editor, window, |this, _, event, window, cx| match event {
+            NoteEditorEvent::Save { body, color } => {
+                this.save_note_editor(body.clone(), *color, window, cx);
+            }
+            NoteEditorEvent::Cancel => {
+                this.close_note_editor(window, cx);
+            }
+        })
+        .detach();
+
+        editor.focus_handle(cx).focus(window, cx);
+        self.note_editor = Some(editor);
+        self.note_target = Some(target);
+        cx.notify();
+    }
+
+    fn save_note_editor(
+        &mut self,
+        body: SharedString,
+        color: HighlightColor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let body = body.as_ref().trim().to_string();
+        if body.is_empty() {
+            self.close_note_editor(window, cx);
+            return;
+        }
+
+        let Some(target) = self.note_target.take() else {
+            self.close_note_editor(window, cx);
+            return;
+        };
+
+        match target {
+            NoteTarget::New { rects, text } => {
+                match cx
+                    .global_mut::<LibraryStore>()
+                    .add_note(&self.path, color, rects, text, body)
+                {
+                    Ok(note) => {
+                        self.notes.push(note);
+                        self.selection = None;
+                    }
+                    Err(error) => eprintln!("failed to add PDF note: {error:#}"),
+                }
+            }
+            NoteTarget::Edit { id } => {
+                match cx
+                    .global_mut::<LibraryStore>()
+                    .update_note(id, body.clone(), color)
+                {
+                    Ok(true) => {
+                        if let Some(note) = self.notes.iter_mut().find(|note| note.id == id) {
+                            note.body = body;
+                            note.color = color;
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => eprintln!("failed to update PDF note: {error:#}"),
+                }
+            }
+        }
+
+        self.note_editor = None;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_note_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.note_editor.take().is_some() {
+            self.note_target = None;
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn remove_context_note(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.context_menu_note.or(self.hovered_note) else {
+            return;
+        };
+
+        match cx.global_mut::<LibraryStore>().remove_note(id) {
+            Ok(true) => {
+                self.notes.retain(|note| note.id != id);
+                if self.hovered_note == Some(id) {
+                    self.hovered_note = None;
+                    self.hovered_note_position = None;
+                }
+                self.context_menu_note = None;
+                cx.notify();
+            }
+            Ok(false) => {}
+            Err(error) => eprintln!("failed to remove PDF note: {error:#}"),
         }
     }
 
@@ -2755,7 +2985,10 @@ impl PdfView {
                 store.resolved_theme,
             )
         };
-        let highlights = cx.global::<LibraryStore>().highlights_for(&path);
+        let annotations = PdfAnnotations {
+            highlights: cx.global::<LibraryStore>().highlights_for(&path),
+            notes: cx.global::<LibraryStore>().notes_for(&path),
+        };
 
         match Self::open(
             &path,
@@ -2764,7 +2997,7 @@ impl PdfView {
             window_settings,
             theme,
             initial_position,
-            highlights,
+            annotations,
         ) {
             Ok(mut pdf_view) => {
                 pdf_view.transparency_enabled = transparency_enabled;
@@ -2816,11 +3049,12 @@ impl PdfView {
         self.focus_handle.focus(window, cx);
         self.dragging = false;
         self.panning = None;
-        self.context_menu_image = if self.context_menu_highlight.is_some() {
-            None
-        } else {
-            self.image_at_screen(position)
-        };
+        self.context_menu_image =
+            if self.context_menu_highlight.is_some() || self.context_menu_note.is_some() {
+                None
+            } else {
+                self.image_at_screen(position)
+            };
         self.context_menu_position = Some(position);
         window.prevent_default();
         cx.stop_propagation();
@@ -2832,6 +3066,7 @@ impl PdfView {
         self.context_menu_image = None;
         self.context_menu_highlight = None;
         if was_open {
+            self.context_menu_note = None;
             cx.notify();
         }
         was_open
@@ -2872,6 +3107,29 @@ impl PdfView {
             .text_size(px(12.0))
             .text_color(rgb(theme.text_muted))
             .child(label)
+    }
+
+    fn render_note_popup(body: SharedString, theme: Theme) -> impl IntoElement {
+        let mut note = div()
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .max_w(px(360.0))
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(theme.panel_border))
+            .shadow_lg()
+            .bg(rgb(theme.panel_background))
+            .text_size(px(13.0))
+            .text_color(rgb(theme.text));
+
+        for line in body.as_ref().lines() {
+            note = note.child(div().child(line.to_string()));
+        }
+
+        note
     }
 
     fn context_menu_highlight_color_row(
@@ -2936,6 +3194,7 @@ impl PdfView {
         has_image: bool,
         has_selection: bool,
         highlight_color: Option<HighlightColor>,
+        has_note: bool,
         is_fullscreen: bool,
         theme: Theme,
         cx: &mut Context<Self>,
@@ -2967,6 +3226,30 @@ impl PdfView {
             .on_mouse_down(MouseButton::Right, |_, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
+            })
+            .when(has_note, |menu| {
+                menu.child(Self::context_menu_entry(
+                    "Edit Note",
+                    theme,
+                    |this, window, cx| this.begin_edit_context_note(window, cx),
+                    cx,
+                ))
+                .child(Self::context_menu_entry(
+                    "Remove Note",
+                    theme,
+                    |this, _, cx| this.remove_context_note(cx),
+                    cx,
+                ))
+                .child(Self::context_menu_separator(theme))
+            })
+            .when(!has_note && has_selection, |menu| {
+                menu.child(Self::context_menu_entry(
+                    "Add Note",
+                    theme,
+                    |this, window, cx| this.begin_add_note(window, cx),
+                    cx,
+                ))
+                .child(Self::context_menu_separator(theme))
             })
             .when_some(highlight_color, |menu, color| {
                 menu.child(Self::context_menu_label("Change Highlight Color", theme))
@@ -3336,6 +3619,21 @@ impl PdfView {
         (overlays, selected_borders)
     }
 
+    fn note_underlines(&self) -> Vec<(Bounds<Pixels>, HighlightColor)> {
+        let mut underlines = Vec::new();
+
+        for note in &self.notes {
+            for rect in &note.rects {
+                let Some(bounds) = self.highlight_rect_to_screen(rect) else {
+                    continue;
+                };
+                underlines.push((bounds, note.color));
+            }
+        }
+
+        underlines
+    }
+
     fn highlight_rect_to_screen(&self, rect: &HighlightRect) -> Option<Bounds<Pixels>> {
         let image_bounds = *self.page_image_bounds.get(rect.page_idx)?.as_ref()?;
         Some(self.pdf_rect_to_screen(
@@ -3585,6 +3883,7 @@ impl Render for PdfView {
                         self.context_menu_image.is_some(),
                         self.selected_text().is_some(),
                         context_menu_highlight_color,
+                        self.context_menu_note.is_some(),
                         window.is_fullscreen(),
                         theme,
                         cx,
@@ -3592,13 +3891,32 @@ impl Render for PdfView {
             )
             .with_priority(1)
         });
+        let note_popup = if self.context_menu_position.is_none() && self.note_editor.is_none() {
+            self.hovered_note
+                .and_then(|id| self.hovered_note_position.zip(self.note_body_for_id(id)))
+                .map(|(position, body)| {
+                    deferred(
+                        anchored()
+                            .snap_to_window_with_margin(px(8.0))
+                            .position(point(position.x + px(12.0), position.y + px(12.0)))
+                            .anchor(Anchor::TopLeft)
+                            .child(Self::render_note_popup(body, theme)),
+                    )
+                    .with_priority(1)
+                })
+        } else {
+            None
+        };
 
         div()
             .size_full()
             .flex()
             .flex_col()
             .cursor_text()
-            .when(self.hovered_link.is_some(), |this| this.cursor_pointer())
+            .when(
+                self.hovered_link.is_some() || self.hovered_note.is_some(),
+                |this| this.cursor_pointer(),
+            )
             .when(self.panning.is_some(), |this| this.cursor_grabbing())
             .key_context("PdfView")
             .track_focus(&self.focus_handle)
@@ -3696,6 +4014,7 @@ impl Render for PdfView {
                     }
 
                     this.set_hovered_link(None, cx);
+                    this.set_hovered_note(None, None, cx);
                     if !this.point_in_image(event.position) {
                         this.selection = None;
                         this.selected_highlight = None;
@@ -3733,6 +4052,7 @@ impl Render for PdfView {
                     this.dragging = false;
                     this.pending_link = None;
                     this.set_hovered_link(None, cx);
+                    this.set_hovered_note(None, None, cx);
                     this.panning = Some(PanState {
                         pointer_origin: event.position,
                         scroll_origin_x: this.scroll_x_doc,
@@ -3751,6 +4071,7 @@ impl Render for PdfView {
                         || this.history_palette.is_some()
                         || this.bookmark_palette.is_some()
                         || this.bookmark_prompt.is_some()
+                        || this.note_editor.is_some()
                     {
                         window.prevent_default();
                         cx.stop_propagation();
@@ -3758,6 +4079,7 @@ impl Render for PdfView {
                     }
 
                     this.context_menu_highlight = this.highlight_at_screen(event.position);
+                    this.context_menu_note = this.note_at_screen(event.position);
                     if let Some(highlight_id) = this.context_menu_highlight {
                         this.selected_highlight = Some(highlight_id);
                         this.selection = None;
@@ -3769,6 +4091,7 @@ impl Render for PdfView {
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if let Some(pan) = this.panning {
+                    this.set_hovered_note(None, None, cx);
                     let scale = this.effective_scale();
                     let delta_x = (event.position.x - pan.pointer_origin.x).as_f32();
                     let delta_y = (event.position.y - pan.pointer_origin.y).as_f32();
@@ -3784,10 +4107,12 @@ impl Render for PdfView {
 
                 if !this.dragging {
                     this.update_hovered_link(event.position, cx);
+                    this.update_hovered_note(event.position, cx);
                     return;
                 }
 
                 this.set_hovered_link(None, cx);
+                this.set_hovered_note(None, None, cx);
                 if let Some(ix) = this.glyph_at_screen(event.position) {
                     if let Some(selection) = this.selection.as_mut() {
                         selection.head = ix;
@@ -3864,6 +4189,35 @@ impl Render for PdfView {
                                                     highlight,
                                                     rgba(theme.highlight_color(color)),
                                                 ));
+                                            }
+
+                                            for (note, color) in paint_data.note_underlines {
+                                                let dot = px(3.0);
+                                                let gap = px(3.0);
+                                                let step = dot + gap;
+                                                let y = note.origin.y + note.size.height
+                                                    - dot
+                                                    - px(1.0);
+                                                let right = note.origin.x + note.size.width;
+                                                let mut x = note.origin.x;
+                                                while x < right {
+                                                    let width = if x + dot > right {
+                                                        right - x
+                                                    } else {
+                                                        dot
+                                                    };
+                                                    window.paint_quad(
+                                                        fill(
+                                                            Bounds::new(
+                                                                point(x, y),
+                                                                size(width, dot),
+                                                            ),
+                                                            rgba(theme.note_color(color)),
+                                                        )
+                                                        .corner_radii(Corners::all(dot / 2.0)),
+                                                    );
+                                                    x += step;
+                                                }
                                             }
 
                                             for highlight in paint_data.search_highlights {
@@ -4127,6 +4481,30 @@ impl Render for PdfView {
                         .child(prompt),
                 )
             })
+            .when_some(self.note_editor.clone(), |this, editor| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgba(theme.overlay))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.close_note_editor(window, cx);
+                            }),
+                        )
+                        .on_scroll_wheel(|_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(editor),
+                )
+            })
+            .children(note_popup)
             .children(context_menu)
     }
 }

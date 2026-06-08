@@ -8,6 +8,7 @@ mod command_palette;
 mod history;
 mod keybindings;
 mod library;
+mod note_editor;
 mod pdf_view;
 mod picker;
 mod search;
@@ -18,7 +19,7 @@ mod theme;
 mod toc;
 
 use library::{DocumentPosition, LibraryStore};
-use pdf_view::PdfView;
+use pdf_view::{PdfAnnotations, PdfView};
 use settings::SettingsStore;
 
 fn main() {
@@ -82,7 +83,10 @@ fn main() {
                             zoom: behavior.default_zoom,
                             page: 1,
                         });
-                    let highlights = cx.global::<LibraryStore>().highlights_for(&path);
+                    let annotations = PdfAnnotations {
+                        highlights: cx.global::<LibraryStore>().highlights_for(&path),
+                        notes: cx.global::<LibraryStore>().notes_for(&path),
+                    };
                     let pdf_view = PdfView::open(
                         &path,
                         focus_handle,
@@ -90,7 +94,7 @@ fn main() {
                         window_settings,
                         theme,
                         Some(initial_position),
-                        highlights,
+                        annotations,
                     )
                     .expect("failed to open PDF");
                     cx.global_mut::<LibraryStore>()

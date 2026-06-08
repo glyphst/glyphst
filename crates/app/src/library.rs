@@ -14,6 +14,7 @@ const MAX_HISTORY_ENTRIES: usize = 100;
 const HISTORY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("history");
 const BOOKMARKS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("bookmarks");
 const HIGHLIGHTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("highlights");
+const NOTES_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("notes");
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentPosition {
@@ -84,13 +85,26 @@ pub struct Highlight {
     pub created: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Note {
+    pub id: u64,
+    pub path: PathBuf,
+    pub color: HighlightColor,
+    pub rects: Vec<HighlightRect>,
+    pub text: String,
+    pub body: String,
+    pub created: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Library {
     pub history: Vec<HistoryEntry>,
     pub bookmarks: Vec<Bookmark>,
     pub highlights: Vec<Highlight>,
+    pub notes: Vec<Note>,
     next_bookmark_id: u64,
     next_highlight_id: u64,
+    next_note_id: u64,
 }
 
 pub struct LibraryStore {
@@ -140,6 +154,16 @@ impl LibraryStore {
             .highlights
             .iter()
             .filter(|highlight| highlight.path == path)
+            .cloned()
+            .collect()
+    }
+
+    pub fn notes_for(&self, path: &Path) -> Vec<Note> {
+        let path = normalize_path(path);
+        self.library
+            .notes
+            .iter()
+            .filter(|note| note.path == path)
             .cloned()
             .collect()
     }
@@ -198,10 +222,35 @@ impl LibraryStore {
         Ok(highlight)
     }
 
+    pub fn add_note(
+        &mut self,
+        path: &Path,
+        color: HighlightColor,
+        rects: Vec<HighlightRect>,
+        text: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Result<Note> {
+        let note = self
+            .library
+            .build_note(path, color, rects, text, body, current_timestamp());
+        self.write_note(&note)?;
+        self.library.notes.push(note.clone());
+        self.library.sanitize();
+        Ok(note)
+    }
+
     pub fn remove_highlight(&mut self, id: u64) -> Result<bool> {
         let removed = self.library.remove_highlight(id);
         if removed {
             self.remove_highlight_from_database(id)?;
+        }
+        Ok(removed)
+    }
+
+    pub fn remove_note(&mut self, id: u64) -> Result<bool> {
+        let removed = self.library.remove_note(id);
+        if removed {
+            self.remove_note_from_database(id)?;
         }
         Ok(removed)
     }
@@ -220,6 +269,25 @@ impl LibraryStore {
         highlight.color = color;
         self.write_highlight(&highlight)?;
         self.library.highlights[highlight_ix] = highlight;
+        Ok(true)
+    }
+
+    pub fn update_note(
+        &mut self,
+        id: u64,
+        body: impl Into<String>,
+        color: HighlightColor,
+    ) -> Result<bool> {
+        let Some(note_ix) = self.library.notes.iter().position(|note| note.id == id) else {
+            return Ok(false);
+        };
+
+        let mut note = self.library.notes[note_ix].clone();
+        note.body = body.into();
+        note.color = color;
+        self.write_note(&note)?;
+        self.library.notes[note_ix] = note;
+        self.library.sanitize();
         Ok(true)
     }
 
@@ -300,6 +368,27 @@ impl LibraryStore {
         write_txn.commit()?;
         Ok(())
     }
+
+    fn write_note(&self, note: &Note) -> Result<()> {
+        let write_txn = self.database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(NOTES_TABLE)?;
+            let encoded = encode(note)?;
+            table.insert(note.id, encoded.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn remove_note_from_database(&self, id: u64) -> Result<()> {
+        let write_txn = self.database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(NOTES_TABLE)?;
+            table.remove(id)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
 }
 
 impl Library {
@@ -354,6 +443,28 @@ impl Library {
         }
     }
 
+    fn build_note(
+        &mut self,
+        path: &Path,
+        color: HighlightColor,
+        rects: Vec<HighlightRect>,
+        text: impl Into<String>,
+        body: impl Into<String>,
+        created: u64,
+    ) -> Note {
+        let id = self.next_note_id.max(1);
+        self.next_note_id = id + 1;
+        Note {
+            id,
+            path: normalize_path(path),
+            color,
+            rects,
+            text: text.into(),
+            body: body.into(),
+            created,
+        }
+    }
+
     fn remove_bookmark(&mut self, id: u64) -> bool {
         let before = self.bookmarks.len();
         self.bookmarks.retain(|bookmark| bookmark.id != id);
@@ -364,6 +475,12 @@ impl Library {
         let before = self.highlights.len();
         self.highlights.retain(|highlight| highlight.id != id);
         before != self.highlights.len()
+    }
+
+    fn remove_note(&mut self, id: u64) -> bool {
+        let before = self.notes.len();
+        self.notes.retain(|note| note.id != id);
+        before != self.notes.len()
     }
 
     fn sanitize(&mut self) {
@@ -401,6 +518,17 @@ impl Library {
                 .then_with(|| left.id.cmp(&right.id))
         });
 
+        self.notes.retain_mut(|note| {
+            note.text = note.text.trim().to_string();
+            note.body = note.body.trim().to_string();
+            !note.path.as_os_str().is_empty() && !note.rects.is_empty() && !note.body.is_empty()
+        });
+        self.notes.sort_by(|left, right| {
+            left.created
+                .cmp(&right.created)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
         self.next_bookmark_id = self.next_bookmark_id.max(
             self.bookmarks
                 .iter()
@@ -417,6 +545,9 @@ impl Library {
                 .unwrap_or(0)
                 + 1,
         );
+        self.next_note_id = self
+            .next_note_id
+            .max(self.notes.iter().map(|note| note.id).max().unwrap_or(0) + 1);
     }
 }
 
@@ -450,6 +581,9 @@ fn ensure_tables(database: &Database) -> Result<()> {
     }
     {
         write_txn.open_table(HIGHLIGHTS_TABLE)?;
+    }
+    {
+        write_txn.open_table(NOTES_TABLE)?;
     }
     write_txn.commit()?;
     Ok(())
@@ -497,6 +631,20 @@ fn load_library(database: &Database) -> Result<Library> {
                     library.highlights.push(highlight);
                 }
                 Err(error) => eprintln!("failed to decode PDF highlight: {error:#}"),
+            }
+        }
+    }
+
+    {
+        let table = read_txn.open_table(NOTES_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<Note>(value.value()) {
+                Ok(mut note) => {
+                    note.path = normalize_path(&note.path);
+                    library.notes.push(note);
+                }
+                Err(error) => eprintln!("failed to decode PDF note: {error:#}"),
             }
         }
     }
@@ -591,6 +739,7 @@ mod tests {
         };
         let highlight_id;
         let bookmark_id;
+        let note_id;
 
         {
             let mut store = LibraryStore::open(path.clone()).unwrap();
@@ -614,6 +763,21 @@ mod tests {
                     .set_highlight_color(highlight_id, HighlightColor::Blue)
                     .unwrap()
             );
+            let note = store
+                .add_note(
+                    document_path,
+                    HighlightColor::Yellow,
+                    vec![highlight_rect],
+                    "selected text",
+                    "initial note",
+                )
+                .unwrap();
+            note_id = note.id;
+            assert!(
+                store
+                    .update_note(note_id, "updated note", HighlightColor::Green)
+                    .unwrap()
+            );
         }
 
         {
@@ -625,8 +789,15 @@ mod tests {
             assert_eq!(highlights[0].id, highlight_id);
             assert_eq!(highlights[0].color, HighlightColor::Blue);
             assert_eq!(highlights[0].rects, vec![highlight_rect]);
+            let notes = store.notes_for(document_path);
+            assert_eq!(notes.len(), 1);
+            assert_eq!(notes[0].id, note_id);
+            assert_eq!(notes[0].color, HighlightColor::Green);
+            assert_eq!(notes[0].rects, vec![highlight_rect]);
+            assert_eq!(notes[0].body, "updated note");
 
             assert!(store.remove_highlight(highlight_id).unwrap());
+            assert!(store.remove_note(note_id).unwrap());
             assert!(store.remove_bookmark(bookmark_id).unwrap());
         }
 
@@ -634,6 +805,7 @@ mod tests {
             let store = LibraryStore::open(path.clone()).unwrap();
             assert!(store.bookmarks().is_empty());
             assert!(store.highlights_for(document_path).is_empty());
+            assert!(store.notes_for(document_path).is_empty());
         }
 
         let _ = fs::remove_file(path);

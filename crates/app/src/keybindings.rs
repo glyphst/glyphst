@@ -1,6 +1,10 @@
 use std::rc::Rc;
 
 use crate::{
+    note_editor::{
+        NoteBackspace, NoteCancel, NoteDelete, NoteDown, NoteEnd, NoteHome, NoteLeft, NoteNewline,
+        NotePaste, NoteRight, NoteSave, NoteSelectAll, NoteUp,
+    },
     pdf_view::{
         AddBookmark, CopySelection, JumpBackward, JumpForward, NextHalfPage, NextPage,
         OpenBookmarks, OpenHistory, OpenSettings, PreviousHalfPage, PreviousPage, ResetZoom,
@@ -22,10 +26,9 @@ use crate::{
 };
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
 
-const PDF_CONTEXT: &str =
-    "PdfView && !CommandPalette && !Search && !Toc && !History && !Bookmarks && !BookmarkPrompt";
+const PDF_CONTEXT: &str = "PdfView && !CommandPalette && !Search && !Toc && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor";
 const PDF_NO_SEARCH_CONTEXT: &str =
-    "PdfView && !Search && !Toc && !History && !Bookmarks && !BookmarkPrompt";
+    "PdfView && !Search && !Toc && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor";
 const PALETTE_CONTEXT: &str = "CommandPalette";
 const SEARCH_CONTEXT: &str = "Search";
 const SETTINGS_CONTEXT: &str = "SettingsPanel";
@@ -33,6 +36,7 @@ const TOC_CONTEXT: &str = "Toc";
 const HISTORY_CONTEXT: &str = "History";
 const BOOKMARKS_CONTEXT: &str = "Bookmarks";
 const BOOKMARK_PROMPT_CONTEXT: &str = "BookmarkPrompt";
+const NOTE_EDITOR_CONTEXT: &str = "NoteEditor";
 
 struct ActionSpec {
     aliases: &'static [&'static str],
@@ -187,6 +191,22 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<PickerSelectAll>("cmd-a", BOOKMARK_PROMPT_CONTEXT),
         bind::<PickerPaste>("ctrl-v", BOOKMARK_PROMPT_CONTEXT),
         bind::<PickerPaste>("cmd-v", BOOKMARK_PROMPT_CONTEXT),
+        bind::<NoteSave>("ctrl-enter", NOTE_EDITOR_CONTEXT),
+        bind::<NoteSave>("cmd-enter", NOTE_EDITOR_CONTEXT),
+        bind::<NoteCancel>("escape", NOTE_EDITOR_CONTEXT),
+        bind::<NoteNewline>("enter", NOTE_EDITOR_CONTEXT),
+        bind::<NoteBackspace>("backspace", NOTE_EDITOR_CONTEXT),
+        bind::<NoteDelete>("delete", NOTE_EDITOR_CONTEXT),
+        bind::<NoteLeft>("left", NOTE_EDITOR_CONTEXT),
+        bind::<NoteRight>("right", NOTE_EDITOR_CONTEXT),
+        bind::<NoteUp>("up", NOTE_EDITOR_CONTEXT),
+        bind::<NoteDown>("down", NOTE_EDITOR_CONTEXT),
+        bind::<NoteHome>("home", NOTE_EDITOR_CONTEXT),
+        bind::<NoteEnd>("end", NOTE_EDITOR_CONTEXT),
+        bind::<NoteSelectAll>("ctrl-a", NOTE_EDITOR_CONTEXT),
+        bind::<NoteSelectAll>("cmd-a", NOTE_EDITOR_CONTEXT),
+        bind::<NotePaste>("ctrl-v", NOTE_EDITOR_CONTEXT),
+        bind::<NotePaste>("cmd-v", NOTE_EDITOR_CONTEXT),
     ]);
 
     bindings
@@ -418,6 +438,71 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["add-bookmark", "bookmark-page"],
             context: Some(PDF_CONTEXT),
             build: boxed::<AddBookmark>,
+        },
+        ActionSpec {
+            aliases: &["note-save", "save-note"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteSave>,
+        },
+        ActionSpec {
+            aliases: &["note-cancel", "cancel-note"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteCancel>,
+        },
+        ActionSpec {
+            aliases: &["note-newline"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteNewline>,
+        },
+        ActionSpec {
+            aliases: &["note-backspace"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteBackspace>,
+        },
+        ActionSpec {
+            aliases: &["note-delete"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteDelete>,
+        },
+        ActionSpec {
+            aliases: &["note-left"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteLeft>,
+        },
+        ActionSpec {
+            aliases: &["note-right"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteRight>,
+        },
+        ActionSpec {
+            aliases: &["note-up"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteUp>,
+        },
+        ActionSpec {
+            aliases: &["note-down"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteDown>,
+        },
+        ActionSpec {
+            aliases: &["note-home"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteHome>,
+        },
+        ActionSpec {
+            aliases: &["note-end"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteEnd>,
+        },
+        ActionSpec {
+            aliases: &["note-select-all"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteSelectAll>,
+        },
+        ActionSpec {
+            aliases: &["note-paste"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NotePaste>,
         },
         ActionSpec {
             aliases: &["palette-confirm"],

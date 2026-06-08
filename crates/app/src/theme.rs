@@ -159,6 +159,12 @@ impl Theme {
             HighlightColor::Orange => self.highlight_orange,
         }
     }
+
+    pub fn note_color(self, color: HighlightColor) -> u32 {
+        let base = self.highlight_color(color);
+        let scale = |shift: u32| (((base >> shift) & 0xffu32) as f32 * 0.65) as u32;
+        (scale(24) << 24) | (scale(16) << 16) | (scale(8) << 8) | 0xff
+    }
 }
 
 impl Default for Theme {
