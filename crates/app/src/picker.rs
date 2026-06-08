@@ -25,7 +25,8 @@ gpui::actions!(
         PickerHome,
         PickerEnd,
         PickerSelectAll,
-        PickerPaste
+        PickerPaste,
+        PickerRemove
     ]
 );
 
@@ -58,6 +59,15 @@ pub trait PickerDelegate: Sized + 'static {
         window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     );
+    fn confirm_input(
+        &mut self,
+        _: SharedString,
+        _: &FocusHandle,
+        _: &mut Window,
+        _: &mut Context<Picker<Self>>,
+    ) {
+    }
+    fn remove_match(&mut self, _: usize, _: &mut Context<Picker<Self>>) {}
 }
 
 pub struct Picker<D: PickerDelegate> {
@@ -77,11 +87,21 @@ pub struct Picker<D: PickerDelegate> {
 
 impl<D: PickerDelegate> Picker<D> {
     pub fn new(previous_focus_handle: FocusHandle, delegate: D, cx: &mut Context<Self>) -> Self {
+        Self::with_content(previous_focus_handle, delegate, "".into(), cx)
+    }
+
+    pub fn with_content(
+        previous_focus_handle: FocusHandle,
+        delegate: D,
+        content: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let content_len = content.len();
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             previous_focus_handle,
-            content: "".into(),
-            selected_range: 0..0,
+            content,
+            selected_range: 0..content_len,
             selection_reversed: false,
             marked_range: None,
             last_layout: None,
@@ -131,6 +151,10 @@ impl<D: PickerDelegate> Picker<D> {
 
     fn confirm_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_ix >= self.match_count() {
+            let content = self.content.clone();
+            self.previous_focus_handle.focus(window, cx);
+            self.delegate
+                .confirm_input(content, &self.previous_focus_handle, window, cx);
             self.dismiss(window, cx);
             return;
         }
@@ -212,6 +236,14 @@ impl<D: PickerDelegate> Picker<D> {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace(['\n', '\r'], " ");
             self.replace_text_in_range(None, &text, window, cx);
+        }
+    }
+
+    fn remove_selected(&mut self, _: &PickerRemove, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_ix < self.match_count() {
+            self.delegate.remove_match(self.selected_ix, cx);
+            self.update_matches();
+            cx.notify();
         }
     }
 
@@ -517,6 +549,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::remove_selected))
             .child(
                 div()
                     .flex()

@@ -1,9 +1,21 @@
 use std::{
-    borrow::Cow, cell::RefCell, collections::HashSet, ops::Range, path::PathBuf, rc::Rc, sync::Arc,
+    borrow::Cow,
+    cell::RefCell,
+    collections::HashSet,
+    ops::Range,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
 };
 
+use crate::bookmarks::{
+    BookmarkPalette, BookmarkPaletteDelegate, BookmarkPrompt, BookmarkPromptDelegate,
+};
 use crate::command_palette::{CommandPalette, CommandPaletteDelegate};
+use crate::history::{HistoryPalette, HistoryPaletteDelegate};
 use crate::keybindings;
+use crate::library::{DocumentPosition, LibraryStore, normalize_path};
 use crate::picker::{Picker, PickerEvent};
 use crate::search::{SearchBar, SearchEvent};
 use crate::settings::{BehaviorSettings, SettingsStore, WindowSettings};
@@ -50,7 +62,10 @@ gpui::actions!(
         ToggleCommandPalette,
         ToggleFullScreen,
         ToggleTransparency,
-        OpenSettings
+        OpenSettings,
+        OpenHistory,
+        OpenBookmarks,
+        AddBookmark
     ]
 );
 
@@ -228,6 +243,7 @@ struct JumpPosition {
 }
 
 pub struct PdfView {
+    path: PathBuf,
     file_name: SharedString,
     pages: Vec<PdfPage>,
     max_page_width: f32,
@@ -257,6 +273,9 @@ pub struct PdfView {
     settings_panel: Option<Entity<SettingsPanel>>,
     search_bar: Option<Entity<SearchBar>>,
     toc_palette: Option<Entity<TocPalette>>,
+    history_palette: Option<Entity<HistoryPalette>>,
+    bookmark_palette: Option<Entity<BookmarkPalette>>,
+    bookmark_prompt: Option<Entity<BookmarkPrompt>>,
     toc: Vec<TocEntry>,
     toc_collapsed: HashSet<usize>,
     toc_sidebar_open: bool,
@@ -269,6 +288,7 @@ pub struct PdfView {
     transparency_enabled: bool,
     window_settings: WindowSettings,
     search: SearchState,
+    position_save_task: Option<Task<()>>,
     context_menu_position: Option<GpuiPoint<Pixels>>,
     context_menu_image: Option<(usize, usize)>,
     _image_clipboard: Option<Clipboard>,
@@ -278,14 +298,15 @@ pub struct PdfView {
 
 impl PdfView {
     pub fn open(
-        path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
         focus_handle: FocusHandle,
         behavior: BehaviorSettings,
         window_settings: WindowSettings,
         theme: Theme,
+        initial_position: Option<DocumentPosition>,
     ) -> Result<Self> {
+        let path = normalize_path(path.as_ref());
         let file_name = path
-            .as_ref()
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("Untitled")
@@ -293,8 +314,7 @@ impl PdfView {
             .into();
 
         let document = mupdf::Document::open(
-            path.as_ref()
-                .to_str()
+            path.to_str()
                 .ok_or_else(|| anyhow!("PDF path is not valid UTF-8"))?,
         )?;
         let page_count = document.page_count()?;
@@ -370,7 +390,8 @@ impl PdfView {
         let content_height_doc = offset_y - theme.page_gap;
         let page_image_bounds = (0..pages.len()).map(|_| None).collect();
 
-        Ok(Self {
+        let mut view = Self {
+            path,
             file_name,
             pages,
             max_page_width,
@@ -400,6 +421,9 @@ impl PdfView {
             settings_panel: None,
             search_bar: None,
             toc_palette: None,
+            history_palette: None,
+            bookmark_palette: None,
+            bookmark_prompt: None,
             toc,
             toc_collapsed: HashSet::new(),
             toc_sidebar_open: false,
@@ -412,11 +436,18 @@ impl PdfView {
             transparency_enabled: window_settings.transparency_enabled_by_default(),
             window_settings,
             search: SearchState::default(),
+            position_save_task: None,
             context_menu_position: None,
             context_menu_image: None,
             _image_clipboard: None,
             _document: document,
-        })
+        };
+
+        if let Some(position) = initial_position {
+            view.restore_position(position);
+        }
+
+        Ok(view)
     }
 
     fn flatten_toc(outlines: Vec<mupdf::Outline>, page_count: usize) -> Vec<TocEntry> {
@@ -958,6 +989,7 @@ impl PdfView {
         if changed {
             self.hovered_link = None;
             self.pending_link = None;
+            self.schedule_position_save(cx);
             cx.notify();
         }
 
@@ -991,6 +1023,7 @@ impl PdfView {
         if changed {
             self.hovered_link = None;
             self.pending_link = None;
+            self.schedule_position_save(cx);
             cx.notify();
         }
 
@@ -1016,6 +1049,57 @@ impl PdfView {
         if changed_x || changed_y {
             window.request_animation_frame();
         }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn restore_position(&mut self, position: DocumentPosition) {
+        self.zoom = position.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        self.scroll_x_doc = position.scroll_x_doc;
+        self.scroll_y_doc = position.scroll_y_doc;
+        self.target_scroll_x_doc = position.scroll_x_doc;
+        self.target_scroll_y_doc = position.scroll_y_doc;
+        self.clamp_scroll();
+    }
+
+    fn current_document_position(&self) -> DocumentPosition {
+        DocumentPosition {
+            scroll_x_doc: self.target_scroll_x_doc,
+            scroll_y_doc: self.target_scroll_y_doc,
+            zoom: self.zoom,
+            page: self.page_index_for_scroll_y(self.target_scroll_y_doc) + 1,
+        }
+    }
+
+    fn record_current_history_position(&self, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        let position = self.current_document_position();
+        cx.global_mut::<LibraryStore>()
+            .record_history(&path, position);
+    }
+
+    fn flush_current_history_position(&mut self, cx: &mut Context<Self>) {
+        self.position_save_task.take();
+        self.record_current_history_position(cx);
+        if let Err(error) = cx.global::<LibraryStore>().save() {
+            eprintln!("failed to save PDF history: {error:#}");
+        }
+    }
+
+    fn schedule_position_save(&mut self, cx: &mut Context<Self>) {
+        self.record_current_history_position(cx);
+        self.position_save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1000))
+                .await;
+            _ = this.update(cx, |_, cx| {
+                if let Err(error) = cx.global::<LibraryStore>().save() {
+                    eprintln!("failed to save PDF history: {error:#}");
+                }
+            });
+        }));
     }
 
     fn current_jump_position(&self) -> JumpPosition {
@@ -2014,6 +2098,7 @@ impl PdfView {
         self.clamp_scroll();
         self.hovered_link = None;
         self.pending_link = None;
+        self.schedule_position_save(cx);
         cx.notify();
     }
 
@@ -2032,9 +2117,9 @@ impl PdfView {
         self.set_zoom(default_zoom, cx);
     }
 
-    fn current_page_index(&self) -> usize {
+    fn page_index_for_scroll_y(&self, scroll_y_doc: f32) -> usize {
         let scale = self.effective_scale();
-        let center_doc = self.scroll_y_doc + self.viewport_height / (2.0 * scale);
+        let center_doc = scroll_y_doc + self.viewport_height / (2.0 * scale);
         let mut current = 0;
 
         for (idx, page) in self.pages.iter().enumerate() {
@@ -2046,6 +2131,10 @@ impl PdfView {
         }
 
         current
+    }
+
+    fn current_page_index(&self) -> usize {
+        self.page_index_for_scroll_y(self.scroll_y_doc)
     }
 
     fn current_page(&self) -> usize {
@@ -2145,6 +2234,9 @@ impl PdfView {
         self.close_settings_panel(window, cx);
         self.close_search_bar(window, cx);
         self.close_toc_palette(window, cx);
+        self.close_history_palette(window, cx);
+        self.close_bookmark_palette(window, cx);
+        self.close_bookmark_prompt(window, cx);
 
         let actions = window
             .available_actions(cx)
@@ -2180,6 +2272,9 @@ impl PdfView {
         self.close_command_palette(window, cx);
         self.close_search_bar(window, cx);
         self.close_toc_palette(window, cx);
+        self.close_history_palette(window, cx);
+        self.close_bookmark_palette(window, cx);
+        self.close_bookmark_prompt(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
         let panel = cx.new(|cx| SettingsPanel::new(previous_focus_handle.clone(), cx));
@@ -2244,6 +2339,9 @@ impl PdfView {
         self.close_command_palette(window, cx);
         self.close_settings_panel(window, cx);
         self.close_toc_palette(window, cx);
+        self.close_history_palette(window, cx);
+        self.close_bookmark_palette(window, cx);
+        self.close_bookmark_prompt(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
         let query = self.search.query.clone();
@@ -2312,6 +2410,9 @@ impl PdfView {
         self.close_command_palette(window, cx);
         self.close_settings_panel(window, cx);
         self.close_search_bar(window, cx);
+        self.close_history_palette(window, cx);
+        self.close_bookmark_palette(window, cx);
+        self.close_bookmark_prompt(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
         let delegate = TocPaletteDelegate::new(cx.entity().downgrade(), entries);
@@ -2332,6 +2433,124 @@ impl PdfView {
             self.focus_handle.focus(window, cx);
             cx.notify();
         }
+    }
+
+    fn toggle_history_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.history_palette.is_some() {
+            self.close_history_palette(window, cx);
+            return;
+        }
+
+        self.close_command_palette(window, cx);
+        self.close_settings_panel(window, cx);
+        self.close_search_bar(window, cx);
+        self.close_toc_palette(window, cx);
+        self.close_bookmark_palette(window, cx);
+        self.close_bookmark_prompt(window, cx);
+
+        let entries = cx.global::<LibraryStore>().history_entries().to_vec();
+        let previous_focus_handle = self.focus_handle.clone();
+        let delegate = HistoryPaletteDelegate::new(cx.entity().downgrade(), entries);
+        let palette = cx.new(|cx| Picker::new(previous_focus_handle.clone(), delegate, cx));
+
+        cx.subscribe_in(&palette, window, |this, _, _: &PickerEvent, window, cx| {
+            this.close_history_palette(window, cx);
+        })
+        .detach();
+
+        palette.focus_handle(cx).focus(window, cx);
+        self.history_palette = Some(palette);
+        cx.notify();
+    }
+
+    fn close_history_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.history_palette.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn toggle_bookmark_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bookmark_palette.is_some() {
+            self.close_bookmark_palette(window, cx);
+            return;
+        }
+
+        self.close_command_palette(window, cx);
+        self.close_settings_panel(window, cx);
+        self.close_search_bar(window, cx);
+        self.close_toc_palette(window, cx);
+        self.close_history_palette(window, cx);
+        self.close_bookmark_prompt(window, cx);
+
+        let bookmarks = cx.global::<LibraryStore>().bookmarks().to_vec();
+        let previous_focus_handle = self.focus_handle.clone();
+        let delegate =
+            BookmarkPaletteDelegate::new(cx.entity().downgrade(), bookmarks, self.path.clone());
+        let palette = cx.new(|cx| Picker::new(previous_focus_handle.clone(), delegate, cx));
+
+        cx.subscribe_in(&palette, window, |this, _, _: &PickerEvent, window, cx| {
+            this.close_bookmark_palette(window, cx);
+        })
+        .detach();
+
+        palette.focus_handle(cx).focus(window, cx);
+        self.bookmark_palette = Some(palette);
+        cx.notify();
+    }
+
+    fn close_bookmark_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bookmark_palette.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn toggle_bookmark_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bookmark_prompt.is_some() {
+            self.close_bookmark_prompt(window, cx);
+            return;
+        }
+
+        self.close_command_palette(window, cx);
+        self.close_settings_panel(window, cx);
+        self.close_search_bar(window, cx);
+        self.close_toc_palette(window, cx);
+        self.close_history_palette(window, cx);
+        self.close_bookmark_palette(window, cx);
+
+        let previous_focus_handle = self.focus_handle.clone();
+        let default_label = self.default_bookmark_label();
+        let delegate =
+            BookmarkPromptDelegate::new(self.path.clone(), self.current_document_position());
+        let prompt = cx.new(|cx| {
+            Picker::with_content(previous_focus_handle.clone(), delegate, default_label, cx)
+        });
+
+        cx.subscribe_in(&prompt, window, |this, _, _: &PickerEvent, window, cx| {
+            this.close_bookmark_prompt(window, cx);
+        })
+        .detach();
+
+        prompt.focus_handle(cx).focus(window, cx);
+        self.bookmark_prompt = Some(prompt);
+        cx.notify();
+    }
+
+    fn close_bookmark_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bookmark_prompt.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn default_bookmark_label(&self) -> SharedString {
+        let current_page = self.current_page_index();
+        self.toc
+            .iter()
+            .rfind(|entry| entry.navigable && entry.page_idx <= current_page)
+            .map(|entry| entry.title.clone())
+            .unwrap_or_else(|| format!("Page {}", self.current_page()).into())
     }
 
     fn toc_palette_entries(&self) -> Vec<TocPaletteEntry> {
@@ -2371,6 +2590,61 @@ impl PdfView {
         self.jump_forward.clear();
         self.position_from_search = false;
         self.set_scroll_doc(scroll_x_doc, scroll_y_doc, cx);
+    }
+
+    pub(crate) fn navigate_to_document_position(
+        &mut self,
+        position: DocumentPosition,
+        cx: &mut Context<Self>,
+    ) {
+        let current_position = self.current_jump_position();
+        Self::push_jump_position(&mut self.jump_back, current_position);
+        self.jump_forward.clear();
+        self.position_from_search = false;
+        self.set_zoom(position.zoom, cx);
+        self.set_scroll_doc(position.scroll_x_doc, position.scroll_y_doc, cx);
+    }
+
+    pub(crate) fn open_library_document(
+        &mut self,
+        path: PathBuf,
+        position: Option<DocumentPosition>,
+        cx: &mut Context<Self>,
+    ) {
+        self.flush_current_history_position(cx);
+
+        let path = normalize_path(&path);
+        let initial_position =
+            position.or_else(|| cx.global::<LibraryStore>().history_position(&path));
+        let focus_handle = self.focus_handle.clone();
+        let transparency_enabled = self.transparency_enabled;
+        let (behavior, window_settings, theme) = {
+            let store = cx.global::<SettingsStore>();
+            (
+                store.settings.behavior,
+                store.settings.window,
+                store.resolved_theme,
+            )
+        };
+
+        match Self::open(
+            &path,
+            focus_handle,
+            behavior,
+            window_settings,
+            theme,
+            initial_position,
+        ) {
+            Ok(mut pdf_view) => {
+                pdf_view.transparency_enabled = transparency_enabled;
+                *self = pdf_view;
+                self.flush_current_history_position(cx);
+                cx.notify();
+            }
+            Err(error) => {
+                eprintln!("failed to open {}: {error:#}", path.display());
+            }
+        }
     }
 
     pub(crate) fn navigate_to_toc_entry(&mut self, entry_ix: usize, cx: &mut Context<Self>) {
@@ -3075,6 +3349,15 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.toggle_settings_panel(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenHistory, window, cx| {
+                this.toggle_history_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenBookmarks, window, cx| {
+                this.toggle_bookmark_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &AddBookmark, window, cx| {
+                this.toggle_bookmark_prompt(window, cx);
+            }))
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, _| {
                 this.control_down = event.modifiers.control;
             }))
@@ -3140,6 +3423,9 @@ impl Render for PdfView {
                         || this.settings_panel.is_some()
                         || this.search_bar.is_some()
                         || this.toc_palette.is_some()
+                        || this.history_palette.is_some()
+                        || this.bookmark_palette.is_some()
+                        || this.bookmark_prompt.is_some()
                     {
                         window.prevent_default();
                         cx.stop_propagation();
@@ -3388,6 +3674,75 @@ impl Render for PdfView {
                             cx.stop_propagation();
                         })
                         .child(palette),
+                )
+            })
+            .when_some(self.history_palette.clone(), |this, palette| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgba(theme.overlay))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.close_history_palette(window, cx);
+                            }),
+                        )
+                        .on_scroll_wheel(|_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(palette),
+                )
+            })
+            .when_some(self.bookmark_palette.clone(), |this, palette| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgba(theme.overlay))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.close_bookmark_palette(window, cx);
+                            }),
+                        )
+                        .on_scroll_wheel(|_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(palette),
+                )
+            })
+            .when_some(self.bookmark_prompt.clone(), |this, prompt| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgba(theme.overlay))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.close_bookmark_prompt(window, cx);
+                            }),
+                        )
+                        .on_scroll_wheel(|_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(prompt),
                 )
             })
             .children(context_menu)

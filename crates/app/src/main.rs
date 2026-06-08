@@ -3,8 +3,11 @@ use std::path::PathBuf;
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
 
+mod bookmarks;
 mod command_palette;
+mod history;
 mod keybindings;
+mod library;
 mod pdf_view;
 mod picker;
 mod search;
@@ -14,6 +17,7 @@ mod smooth_scroll;
 mod theme;
 mod toc;
 
+use library::{DocumentPosition, LibraryStore};
 use pdf_view::PdfView;
 use settings::SettingsStore;
 
@@ -28,6 +32,15 @@ fn main() {
 
     application().run(move |cx: &mut App| {
         cx.set_global(SettingsStore::load());
+        cx.set_global(LibraryStore::load());
+        cx.on_app_quit(|cx| {
+            if let Err(error) = cx.global::<LibraryStore>().save() {
+                eprintln!("failed to save PDF library: {error:#}");
+            }
+            async {}
+        })
+        .detach();
+
         let (keymap_preset, keybinding_overrides) = {
             let store = cx.global::<SettingsStore>();
             (
@@ -52,15 +65,38 @@ fn main() {
                 cx.new(|cx| {
                     let focus_handle = cx.focus_handle();
                     focus_handle.focus(window, cx);
-                    let store = cx.global::<SettingsStore>();
-                    PdfView::open(
+                    let (behavior, window_settings, theme) = {
+                        let store = cx.global::<SettingsStore>();
+                        (
+                            store.settings.behavior,
+                            store.settings.window,
+                            store.resolved_theme,
+                        )
+                    };
+                    let initial_position = cx
+                        .global::<LibraryStore>()
+                        .history_position(&path)
+                        .unwrap_or(DocumentPosition {
+                            scroll_x_doc: 0.0,
+                            scroll_y_doc: 0.0,
+                            zoom: behavior.default_zoom,
+                            page: 1,
+                        });
+                    let pdf_view = PdfView::open(
                         &path,
                         focus_handle,
-                        store.settings.behavior,
-                        store.settings.window,
-                        store.resolved_theme,
+                        behavior,
+                        window_settings,
+                        theme,
+                        Some(initial_position),
                     )
-                    .expect("failed to open PDF")
+                    .expect("failed to open PDF");
+                    cx.global_mut::<LibraryStore>()
+                        .record_history(&path, initial_position);
+                    if let Err(error) = cx.global::<LibraryStore>().save() {
+                        eprintln!("failed to save PDF history: {error:#}");
+                    }
+                    pdf_view
                 })
             },
         )

@@ -2,13 +2,15 @@ use std::rc::Rc;
 
 use crate::{
     pdf_view::{
-        CopySelection, JumpBackward, JumpForward, NextHalfPage, NextPage, OpenSettings,
-        PreviousHalfPage, PreviousPage, ResetZoom, Search, SearchNext, SearchPrev, SelectAll, Toc,
-        ToggleCommandPalette, ToggleFullScreen, ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
+        AddBookmark, CopySelection, JumpBackward, JumpForward, NextHalfPage, NextPage,
+        OpenBookmarks, OpenHistory, OpenSettings, PreviousHalfPage, PreviousPage, ResetZoom,
+        Search, SearchNext, SearchPrev, SelectAll, Toc, ToggleCommandPalette, ToggleFullScreen,
+        ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
     },
     picker::{
         PickerBackspace, PickerCancel, PickerConfirm, PickerDelete, PickerEnd, PickerHome,
-        PickerLeft, PickerPaste, PickerRight, PickerSelectAll, PickerSelectNext, PickerSelectPrev,
+        PickerLeft, PickerPaste, PickerRemove, PickerRight, PickerSelectAll, PickerSelectNext,
+        PickerSelectPrev,
     },
     search::{
         SearchInputBackspace, SearchInputCancel, SearchInputConfirm, SearchInputDelete,
@@ -20,12 +22,17 @@ use crate::{
 };
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
 
-const PDF_CONTEXT: &str = "PdfView && !CommandPalette && !Search && !Toc";
-const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !Search && !Toc";
+const PDF_CONTEXT: &str =
+    "PdfView && !CommandPalette && !Search && !Toc && !History && !Bookmarks && !BookmarkPrompt";
+const PDF_NO_SEARCH_CONTEXT: &str =
+    "PdfView && !Search && !Toc && !History && !Bookmarks && !BookmarkPrompt";
 const PALETTE_CONTEXT: &str = "CommandPalette";
 const SEARCH_CONTEXT: &str = "Search";
 const SETTINGS_CONTEXT: &str = "SettingsPanel";
 const TOC_CONTEXT: &str = "Toc";
+const HISTORY_CONTEXT: &str = "History";
+const BOOKMARKS_CONTEXT: &str = "Bookmarks";
+const BOOKMARK_PROMPT_CONTEXT: &str = "BookmarkPrompt";
 
 struct ActionSpec {
     aliases: &'static [&'static str],
@@ -64,6 +71,7 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<ToggleTransparency>("cmd-shift-t", PDF_CONTEXT),
         bind::<OpenSettings>("ctrl-,", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenSettings>("cmd-,", PDF_NO_SEARCH_CONTEXT),
+        bind::<OpenHistory>("ctrl-h", PDF_NO_SEARCH_CONTEXT),
     ]);
 
     match preset {
@@ -77,6 +85,8 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind::<PreviousPage>("pageup", PDF_CONTEXT),
             bind::<NextHalfPage>("shift-pagedown", PDF_CONTEXT),
             bind::<PreviousHalfPage>("shift-pageup", PDF_CONTEXT),
+            bind::<OpenBookmarks>("ctrl-b", PDF_NO_SEARCH_CONTEXT),
+            bind::<AddBookmark>("ctrl-d", PDF_CONTEXT),
         ]),
         KeymapPreset::Vim => bindings.extend([
             bind::<Search>("/", PDF_CONTEXT),
@@ -88,6 +98,8 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind::<PreviousHalfPage>("ctrl-u", PDF_CONTEXT),
             bind::<JumpBackward>("ctrl-o", PDF_CONTEXT),
             bind::<JumpForward>("ctrl-i", PDF_CONTEXT),
+            bind::<OpenBookmarks>("'", PDF_NO_SEARCH_CONTEXT),
+            bind::<AddBookmark>("m", PDF_CONTEXT),
         ]),
     }
 
@@ -134,6 +146,47 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<PickerSelectAll>("cmd-a", TOC_CONTEXT),
         bind::<PickerPaste>("ctrl-v", TOC_CONTEXT),
         bind::<PickerPaste>("cmd-v", TOC_CONTEXT),
+        bind::<PickerConfirm>("enter", HISTORY_CONTEXT),
+        bind::<PickerCancel>("escape", HISTORY_CONTEXT),
+        bind::<PickerSelectNext>("down", HISTORY_CONTEXT),
+        bind::<PickerSelectPrev>("up", HISTORY_CONTEXT),
+        bind::<PickerBackspace>("backspace", HISTORY_CONTEXT),
+        bind::<PickerDelete>("delete", HISTORY_CONTEXT),
+        bind::<PickerLeft>("left", HISTORY_CONTEXT),
+        bind::<PickerRight>("right", HISTORY_CONTEXT),
+        bind::<PickerHome>("home", HISTORY_CONTEXT),
+        bind::<PickerEnd>("end", HISTORY_CONTEXT),
+        bind::<PickerSelectAll>("ctrl-a", HISTORY_CONTEXT),
+        bind::<PickerSelectAll>("cmd-a", HISTORY_CONTEXT),
+        bind::<PickerPaste>("ctrl-v", HISTORY_CONTEXT),
+        bind::<PickerPaste>("cmd-v", HISTORY_CONTEXT),
+        bind::<PickerConfirm>("enter", BOOKMARKS_CONTEXT),
+        bind::<PickerCancel>("escape", BOOKMARKS_CONTEXT),
+        bind::<PickerSelectNext>("down", BOOKMARKS_CONTEXT),
+        bind::<PickerSelectPrev>("up", BOOKMARKS_CONTEXT),
+        bind::<PickerBackspace>("backspace", BOOKMARKS_CONTEXT),
+        bind::<PickerDelete>("delete", BOOKMARKS_CONTEXT),
+        bind::<PickerRemove>("shift-delete", BOOKMARKS_CONTEXT),
+        bind::<PickerLeft>("left", BOOKMARKS_CONTEXT),
+        bind::<PickerRight>("right", BOOKMARKS_CONTEXT),
+        bind::<PickerHome>("home", BOOKMARKS_CONTEXT),
+        bind::<PickerEnd>("end", BOOKMARKS_CONTEXT),
+        bind::<PickerSelectAll>("ctrl-a", BOOKMARKS_CONTEXT),
+        bind::<PickerSelectAll>("cmd-a", BOOKMARKS_CONTEXT),
+        bind::<PickerPaste>("ctrl-v", BOOKMARKS_CONTEXT),
+        bind::<PickerPaste>("cmd-v", BOOKMARKS_CONTEXT),
+        bind::<PickerConfirm>("enter", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerCancel>("escape", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerBackspace>("backspace", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerDelete>("delete", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerLeft>("left", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerRight>("right", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerHome>("home", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerEnd>("end", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerSelectAll>("ctrl-a", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerSelectAll>("cmd-a", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerPaste>("ctrl-v", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerPaste>("cmd-v", BOOKMARK_PROMPT_CONTEXT),
     ]);
 
     bindings
@@ -350,6 +403,21 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["open-settings", "settings"],
             context: Some(PDF_NO_SEARCH_CONTEXT),
             build: boxed::<OpenSettings>,
+        },
+        ActionSpec {
+            aliases: &["open-history", "history", "recent-files"],
+            context: Some(PDF_NO_SEARCH_CONTEXT),
+            build: boxed::<OpenHistory>,
+        },
+        ActionSpec {
+            aliases: &["open-bookmarks", "bookmarks"],
+            context: Some(PDF_NO_SEARCH_CONTEXT),
+            build: boxed::<OpenBookmarks>,
+        },
+        ActionSpec {
+            aliases: &["add-bookmark", "bookmark-page"],
+            context: Some(PDF_CONTEXT),
+            build: boxed::<AddBookmark>,
         },
         ActionSpec {
             aliases: &["palette-confirm"],
