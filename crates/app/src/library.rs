@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -6,13 +7,15 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use gpui::Global;
-use kdl::{KdlDocument, KdlNode, KdlValue};
-
-use crate::theme::{push_value_node, value_to_f32};
+use redb::{Database, ReadableTable, TableDefinition};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 const MAX_HISTORY_ENTRIES: usize = 100;
+const HISTORY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("history");
+const BOOKMARKS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("bookmarks");
+const HIGHLIGHTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("highlights");
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentPosition {
     pub scroll_x_doc: f32,
     pub scroll_y_doc: f32,
@@ -20,14 +23,14 @@ pub struct DocumentPosition {
     pub page: usize,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub path: PathBuf,
     pub opened: u64,
     pub position: DocumentPosition,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bookmark {
     pub id: u64,
     pub path: PathBuf,
@@ -36,16 +39,63 @@ pub struct Bookmark {
     pub created: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum HighlightColor {
+    Yellow,
+    Green,
+    Blue,
+    Pink,
+    Orange,
+}
+
+impl HighlightColor {
+    pub const ALL: [Self; 5] = [
+        Self::Yellow,
+        Self::Green,
+        Self::Blue,
+        Self::Pink,
+        Self::Orange,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HighlightRect {
+    pub page_idx: usize,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+impl HighlightRect {
+    pub fn contains(&self, page_idx: usize, x: f32, y: f32) -> bool {
+        self.page_idx == page_idx && x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Highlight {
+    pub id: u64,
+    pub path: PathBuf,
+    pub color: HighlightColor,
+    pub rects: Vec<HighlightRect>,
+    pub text: String,
+    pub note: String,
+    pub created: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Library {
     pub history: Vec<HistoryEntry>,
     pub bookmarks: Vec<Bookmark>,
+    pub highlights: Vec<Highlight>,
     next_bookmark_id: u64,
+    next_highlight_id: u64,
 }
 
 pub struct LibraryStore {
     pub library: Library,
-    pub path: PathBuf,
+    database: Database,
 }
 
 impl Global for LibraryStore {}
@@ -53,15 +103,27 @@ impl Global for LibraryStore {}
 impl LibraryStore {
     pub fn load() -> Self {
         let path = library_path();
-        let library = match load_library(&path) {
-            Ok(library) => library,
-            Err(error) => {
-                eprintln!("failed to load library from {}: {error:#}", path.display());
-                Library::default()
-            }
-        };
+        Self::open(path).expect("failed to open PDF library database")
+    }
 
-        Self { library, path }
+    fn open(path: PathBuf) -> Result<Self> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        let database = if path.exists() {
+            Database::open(&path).with_context(|| format!("failed to open {}", path.display()))?
+        } else {
+            Database::create(&path)
+                .with_context(|| format!("failed to create {}", path.display()))?
+        };
+        ensure_tables(&database)?;
+        let library = load_library(&database)?;
+
+        Ok(Self { library, database })
     }
 
     pub fn history_entries(&self) -> &[HistoryEntry] {
@@ -70,6 +132,16 @@ impl LibraryStore {
 
     pub fn bookmarks(&self) -> &[Bookmark] {
         &self.library.bookmarks
+    }
+
+    pub fn highlights_for(&self, path: &Path) -> Vec<Highlight> {
+        let path = normalize_path(path);
+        self.library
+            .highlights
+            .iter()
+            .filter(|highlight| highlight.path == path)
+            .cloned()
+            .collect()
     }
 
     pub fn history_position(&self, path: &Path) -> Option<DocumentPosition> {
@@ -92,23 +164,141 @@ impl LibraryStore {
         label: impl Into<String>,
         position: DocumentPosition,
     ) -> Result<u64> {
-        let id = self
+        let bookmark = self
             .library
-            .add_bookmark_at(path, label, position, current_timestamp());
-        self.save()?;
-        Ok(id)
+            .build_bookmark(path, label, position, current_timestamp());
+        self.write_bookmark(&bookmark)?;
+        self.library.bookmarks.push(bookmark.clone());
+        self.library.sanitize();
+        Ok(bookmark.id)
     }
 
     pub fn remove_bookmark(&mut self, id: u64) -> Result<bool> {
         let removed = self.library.remove_bookmark(id);
         if removed {
-            self.save()?;
+            self.remove_bookmark_from_database(id)?;
         }
         Ok(removed)
     }
 
+    pub fn add_highlight(
+        &mut self,
+        path: &Path,
+        color: HighlightColor,
+        rects: Vec<HighlightRect>,
+        text: impl Into<String>,
+        note: impl Into<String>,
+    ) -> Result<Highlight> {
+        let highlight =
+            self.library
+                .build_highlight(path, color, rects, text, note, current_timestamp());
+        self.write_highlight(&highlight)?;
+        self.library.highlights.push(highlight.clone());
+        self.library.sanitize();
+        Ok(highlight)
+    }
+
+    pub fn remove_highlight(&mut self, id: u64) -> Result<bool> {
+        let removed = self.library.remove_highlight(id);
+        if removed {
+            self.remove_highlight_from_database(id)?;
+        }
+        Ok(removed)
+    }
+
+    pub fn set_highlight_color(&mut self, id: u64, color: HighlightColor) -> Result<bool> {
+        let Some(highlight_ix) = self
+            .library
+            .highlights
+            .iter()
+            .position(|highlight| highlight.id == id)
+        else {
+            return Ok(false);
+        };
+
+        let mut highlight = self.library.highlights[highlight_ix].clone();
+        highlight.color = color;
+        self.write_highlight(&highlight)?;
+        self.library.highlights[highlight_ix] = highlight;
+        Ok(true)
+    }
+
     pub fn save(&self) -> Result<()> {
-        write_kdl(&self.path, self.library.to_kdl_string())
+        self.write_history()
+    }
+
+    fn write_history(&self) -> Result<()> {
+        let valid_paths = self
+            .library
+            .history
+            .iter()
+            .map(|entry| entry.path.to_string_lossy().to_string())
+            .collect::<HashSet<_>>();
+        let write_txn = self.database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(HISTORY_TABLE)?;
+            let mut existing_paths = Vec::new();
+            for entry in table.iter()? {
+                let (path, _) = entry?;
+                existing_paths.push(path.value().to_string());
+            }
+
+            for path in existing_paths {
+                if !valid_paths.contains(&path) {
+                    table.remove(path.as_str())?;
+                }
+            }
+
+            for entry in &self.library.history {
+                let key = entry.path.to_string_lossy();
+                let encoded = encode(entry)?;
+                table.insert(key.as_ref(), encoded.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn write_bookmark(&self, bookmark: &Bookmark) -> Result<()> {
+        let write_txn = self.database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(BOOKMARKS_TABLE)?;
+            let encoded = encode(bookmark)?;
+            table.insert(bookmark.id, encoded.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn remove_bookmark_from_database(&self, id: u64) -> Result<()> {
+        let write_txn = self.database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(BOOKMARKS_TABLE)?;
+            table.remove(id)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn write_highlight(&self, highlight: &Highlight) -> Result<()> {
+        let write_txn = self.database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(HIGHLIGHTS_TABLE)?;
+            let encoded = encode(highlight)?;
+            table.insert(highlight.id, encoded.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn remove_highlight_from_database(&self, id: u64) -> Result<()> {
+        let write_txn = self.database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(HIGHLIGHTS_TABLE)?;
+            table.remove(id)?;
+        }
+        write_txn.commit()?;
+        Ok(())
     }
 }
 
@@ -124,30 +314,56 @@ impl Library {
         self.sanitize();
     }
 
-    fn add_bookmark_at(
+    fn build_bookmark(
         &mut self,
         path: &Path,
         label: impl Into<String>,
         position: DocumentPosition,
         created: u64,
-    ) -> u64 {
+    ) -> Bookmark {
         let id = self.next_bookmark_id.max(1);
         self.next_bookmark_id = id + 1;
-        self.bookmarks.push(Bookmark {
+        Bookmark {
             id,
             path: normalize_path(path),
             label: label.into(),
             position,
             created,
-        });
-        self.sanitize();
-        id
+        }
+    }
+
+    fn build_highlight(
+        &mut self,
+        path: &Path,
+        color: HighlightColor,
+        rects: Vec<HighlightRect>,
+        text: impl Into<String>,
+        note: impl Into<String>,
+        created: u64,
+    ) -> Highlight {
+        let id = self.next_highlight_id.max(1);
+        self.next_highlight_id = id + 1;
+        Highlight {
+            id,
+            path: normalize_path(path),
+            color,
+            rects,
+            text: text.into(),
+            note: note.into(),
+            created,
+        }
     }
 
     fn remove_bookmark(&mut self, id: u64) -> bool {
         let before = self.bookmarks.len();
         self.bookmarks.retain(|bookmark| bookmark.id != id);
         before != self.bookmarks.len()
+    }
+
+    fn remove_highlight(&mut self, id: u64) -> bool {
+        let before = self.highlights.len();
+        self.highlights.retain(|highlight| highlight.id != id);
+        before != self.highlights.len()
     }
 
     fn sanitize(&mut self) {
@@ -174,6 +390,17 @@ impl Library {
                 .then_with(|| left.id.cmp(&right.id))
         });
 
+        self.highlights.retain_mut(|highlight| {
+            highlight.text = highlight.text.trim().to_string();
+            highlight.note = highlight.note.trim().to_string();
+            !highlight.path.as_os_str().is_empty() && !highlight.rects.is_empty()
+        });
+        self.highlights.sort_by(|left, right| {
+            left.created
+                .cmp(&right.created)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
         self.next_bookmark_id = self.next_bookmark_id.max(
             self.bookmarks
                 .iter()
@@ -182,68 +409,14 @@ impl Library {
                 .unwrap_or(0)
                 + 1,
         );
-    }
-
-    fn from_document(document: &KdlDocument) -> Self {
-        let mut library = Self::default();
-
-        if let Some(history) = document.get("history").and_then(KdlNode::children) {
-            library.history = history
-                .nodes()
+        self.next_highlight_id = self.next_highlight_id.max(
+            self.highlights
                 .iter()
-                .filter(|node| node.name().value() == "entry")
-                .filter_map(parse_history_entry)
-                .collect();
-        }
-
-        if let Some(bookmarks) = document.get("bookmarks").and_then(KdlNode::children) {
-            library.bookmarks = bookmarks
-                .nodes()
-                .iter()
-                .filter(|node| node.name().value() == "bookmark")
-                .filter_map(parse_bookmark)
-                .collect();
-        }
-
-        library.sanitize();
-        library
-    }
-
-    fn to_kdl_string(&self) -> String {
-        let mut document = KdlDocument::new();
-
-        if !self.history.is_empty() {
-            let mut history = KdlNode::new("history");
-            let children = history.ensure_children();
-            for entry in &self.history {
-                let mut node = KdlNode::new("entry");
-                node.push(entry.path.to_string_lossy().to_string());
-                let entry_children = node.ensure_children();
-                push_value_node(entry_children, "opened", entry.opened as i128);
-                write_position(entry_children, entry.position);
-                children.nodes_mut().push(node);
-            }
-            document.nodes_mut().push(history);
-        }
-
-        if !self.bookmarks.is_empty() {
-            let mut bookmarks = KdlNode::new("bookmarks");
-            let children = bookmarks.ensure_children();
-            for bookmark in &self.bookmarks {
-                let mut node = KdlNode::new("bookmark");
-                node.push(bookmark.id as i128);
-                node.push(bookmark.path.to_string_lossy().to_string());
-                let bookmark_children = node.ensure_children();
-                push_value_node(bookmark_children, "label", bookmark.label.clone());
-                push_value_node(bookmark_children, "created", bookmark.created as i128);
-                write_position(bookmark_children, bookmark.position);
-                children.nodes_mut().push(node);
-            }
-            document.nodes_mut().push(bookmarks);
-        }
-
-        document.autoformat();
-        document.to_string()
+                .map(|highlight| highlight.id)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
     }
 }
 
@@ -264,102 +437,80 @@ fn library_path() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from("."))
         .join("glyphst")
-        .join("library.kdl")
+        .join("library.redb")
 }
 
-fn load_library(path: &Path) -> Result<Library> {
-    if !path.exists() {
-        return Ok(Library::default());
-    }
-
-    fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))
-        .and_then(|text| parse_library(&text))
-}
-
-fn parse_library(text: &str) -> Result<Library> {
-    let document = text.parse::<KdlDocument>()?;
-    Ok(Library::from_document(&document))
-}
-
-fn write_kdl(path: &Path, contents: String) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
+fn ensure_tables(database: &Database) -> Result<()> {
+    let write_txn = database.begin_write()?;
     {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+        write_txn.open_table(HISTORY_TABLE)?;
+    }
+    {
+        write_txn.open_table(BOOKMARKS_TABLE)?;
+    }
+    {
+        write_txn.open_table(HIGHLIGHTS_TABLE)?;
+    }
+    write_txn.commit()?;
+    Ok(())
+}
+
+fn load_library(database: &Database) -> Result<Library> {
+    let read_txn = database.begin_read()?;
+    let mut library = Library::default();
+
+    {
+        let table = read_txn.open_table(HISTORY_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<HistoryEntry>(value.value()) {
+                Ok(mut history_entry) => {
+                    history_entry.path = normalize_path(&history_entry.path);
+                    library.history.push(history_entry);
+                }
+                Err(error) => eprintln!("failed to decode PDF history entry: {error:#}"),
+            }
+        }
     }
 
-    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))
+    {
+        let table = read_txn.open_table(BOOKMARKS_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<Bookmark>(value.value()) {
+                Ok(mut bookmark) => {
+                    bookmark.path = normalize_path(&bookmark.path);
+                    library.bookmarks.push(bookmark);
+                }
+                Err(error) => eprintln!("failed to decode PDF bookmark: {error:#}"),
+            }
+        }
+    }
+
+    {
+        let table = read_txn.open_table(HIGHLIGHTS_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<Highlight>(value.value()) {
+                Ok(mut highlight) => {
+                    highlight.path = normalize_path(&highlight.path);
+                    library.highlights.push(highlight);
+                }
+                Err(error) => eprintln!("failed to decode PDF highlight: {error:#}"),
+            }
+        }
+    }
+
+    library.sanitize();
+    Ok(library)
 }
 
-fn parse_history_entry(node: &KdlNode) -> Option<HistoryEntry> {
-    let path = PathBuf::from(node.get(0)?.as_string()?);
-    let children = node.children()?;
-    Some(HistoryEntry {
-        path: normalize_path(&path),
-        opened: child_u64(children, "opened")?,
-        position: parse_position(children)?,
-    })
+fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    bincode::serialize(value).context("failed to encode library value")
 }
 
-fn parse_bookmark(node: &KdlNode) -> Option<Bookmark> {
-    let id = child_arg_u64(node, 0)?;
-    let path = PathBuf::from(node.get(1)?.as_string()?);
-    let children = node.children()?;
-    Some(Bookmark {
-        id,
-        path: normalize_path(&path),
-        label: child_string(children, "label")?.to_string(),
-        created: child_u64(children, "created")?,
-        position: parse_position(children)?,
-    })
-}
-
-fn parse_position(document: &KdlDocument) -> Option<DocumentPosition> {
-    Some(DocumentPosition {
-        scroll_x_doc: child_f32(document, "scroll-x").unwrap_or(0.0),
-        scroll_y_doc: child_f32(document, "scroll-y").unwrap_or(0.0),
-        zoom: child_f32(document, "zoom").unwrap_or(1.0),
-        page: child_usize(document, "page").unwrap_or(1).max(1),
-    })
-}
-
-fn write_position(document: &mut KdlDocument, position: DocumentPosition) {
-    push_value_node(document, "scroll-x", position.scroll_x_doc as f64);
-    push_value_node(document, "scroll-y", position.scroll_y_doc as f64);
-    push_value_node(document, "zoom", position.zoom as f64);
-    push_value_node(document, "page", position.page as i128);
-}
-
-fn child_value<'a>(document: &'a KdlDocument, name: &str) -> Option<&'a KdlValue> {
-    document.get(name)?.get(0)
-}
-
-fn child_string<'a>(document: &'a KdlDocument, name: &str) -> Option<&'a str> {
-    child_value(document, name)?.as_string()
-}
-
-fn child_u64(document: &KdlDocument, name: &str) -> Option<u64> {
-    child_value(document, name)?
-        .as_integer()
-        .and_then(|value| u64::try_from(value).ok())
-}
-
-fn child_usize(document: &KdlDocument, name: &str) -> Option<usize> {
-    child_value(document, name)?
-        .as_integer()
-        .and_then(|value| usize::try_from(value).ok())
-}
-
-fn child_arg_u64(node: &KdlNode, ix: usize) -> Option<u64> {
-    node.get(ix)?
-        .as_integer()
-        .and_then(|value| u64::try_from(value).ok())
-}
-
-fn child_f32(document: &KdlDocument, name: &str) -> Option<f32> {
-    child_value(document, name).and_then(value_to_f32)
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    bincode::deserialize(bytes).context("failed to decode library value")
 }
 
 fn current_timestamp() -> u64 {
@@ -382,6 +533,17 @@ mod tests {
         }
     }
 
+    fn temp_library_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "glyphst-{name}-{}-{nanos}.redb",
+            std::process::id()
+        ))
+    }
+
     #[test]
     fn history_is_deduplicated_and_sorted() {
         let mut library = Library::default();
@@ -402,19 +564,6 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_library_kdl() {
-        let mut library = Library::default();
-        library.record_history_at(Path::new("/tmp/a.pdf"), position(4), 20);
-        library.add_bookmark_at(Path::new("/tmp/a.pdf"), "Chapter 1", position(5), 21);
-
-        let exported = library.to_kdl_string();
-        let parsed = parse_library(&exported).unwrap();
-
-        assert_eq!(parsed.history, library.history);
-        assert_eq!(parsed.bookmarks, library.bookmarks);
-    }
-
-    #[test]
     fn caps_history_entries() {
         let mut library = Library::default();
         for ix in 0..MAX_HISTORY_ENTRIES + 5 {
@@ -427,5 +576,66 @@ mod tests {
 
         assert_eq!(library.history.len(), MAX_HISTORY_ENTRIES);
         assert_eq!(library.history[0].opened, (MAX_HISTORY_ENTRIES + 4) as u64);
+    }
+
+    #[test]
+    fn persists_history_bookmarks_and_highlights() {
+        let path = temp_library_path("round-trip");
+        let document_path = Path::new("/tmp/a.pdf");
+        let highlight_rect = HighlightRect {
+            page_idx: 0,
+            x0: 10.0,
+            y0: 20.0,
+            x1: 30.0,
+            y1: 40.0,
+        };
+        let highlight_id;
+        let bookmark_id;
+
+        {
+            let mut store = LibraryStore::open(path.clone()).unwrap();
+            store.record_history(document_path, position(4));
+            store.save().unwrap();
+            bookmark_id = store
+                .add_bookmark(document_path, "Chapter 1", position(5))
+                .unwrap();
+            let highlight = store
+                .add_highlight(
+                    document_path,
+                    HighlightColor::Yellow,
+                    vec![highlight_rect],
+                    "selected text",
+                    "",
+                )
+                .unwrap();
+            highlight_id = highlight.id;
+            assert!(
+                store
+                    .set_highlight_color(highlight_id, HighlightColor::Blue)
+                    .unwrap()
+            );
+        }
+
+        {
+            let mut store = LibraryStore::open(path.clone()).unwrap();
+            assert_eq!(store.history_position(document_path).unwrap().page, 4);
+            assert_eq!(store.bookmarks()[0].id, bookmark_id);
+            let highlights = store.highlights_for(document_path);
+            assert_eq!(highlights.len(), 1);
+            assert_eq!(highlights[0].id, highlight_id);
+            assert_eq!(highlights[0].color, HighlightColor::Blue);
+            assert_eq!(highlights[0].rects, vec![highlight_rect]);
+
+            assert!(store.remove_highlight(highlight_id).unwrap());
+            assert!(store.remove_bookmark(bookmark_id).unwrap());
+        }
+
+        {
+            let store = LibraryStore::open(path.clone()).unwrap();
+            assert!(store.bookmarks().is_empty());
+            assert!(store.highlights_for(document_path).is_empty());
+        }
+
+        let _ = fs::remove_file(path);
     }
 }

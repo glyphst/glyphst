@@ -82,6 +82,7 @@ fn main() {
                             zoom: behavior.default_zoom,
                             page: 1,
                         });
+                    let highlights = cx.global::<LibraryStore>().highlights_for(&path);
                     let pdf_view = PdfView::open(
                         &path,
                         focus_handle,
@@ -89,6 +90,7 @@ fn main() {
                         window_settings,
                         theme,
                         Some(initial_position),
+                        highlights,
                     )
                     .expect("failed to open PDF");
                     cx.global_mut::<LibraryStore>()

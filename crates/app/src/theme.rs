@@ -6,6 +6,8 @@ use std::{
 use anyhow::{Context as _, Result};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 
+use crate::library::HighlightColor;
+
 pub const DEFAULT_THEME_ID: &str = "glyphst-dark";
 pub const DEFAULT_PAGE_GAP: f32 = 24.0;
 
@@ -50,6 +52,11 @@ pub struct Theme {
     pub background: u32,
     pub page: u32,
     pub selection_highlight: u32,
+    pub highlight_yellow: u32,
+    pub highlight_green: u32,
+    pub highlight_blue: u32,
+    pub highlight_pink: u32,
+    pub highlight_orange: u32,
     pub overlay: u32,
     pub footer_background: u32,
     pub footer_border: u32,
@@ -83,6 +90,11 @@ impl Theme {
         apply!(background);
         apply!(page);
         apply!(selection_highlight);
+        apply!(highlight_yellow);
+        apply!(highlight_green);
+        apply!(highlight_blue);
+        apply!(highlight_pink);
+        apply!(highlight_orange);
         apply!(overlay);
         apply!(footer_background);
         apply!(footer_border);
@@ -113,6 +125,11 @@ impl Theme {
         mask_rgb(&mut self.background);
         mask_rgb(&mut self.page);
         mask_rgba(&mut self.selection_highlight);
+        mask_rgba(&mut self.highlight_yellow);
+        mask_rgba(&mut self.highlight_green);
+        mask_rgba(&mut self.highlight_blue);
+        mask_rgba(&mut self.highlight_pink);
+        mask_rgba(&mut self.highlight_orange);
         mask_rgba(&mut self.overlay);
         mask_rgb(&mut self.footer_background);
         mask_rgb(&mut self.footer_border);
@@ -132,6 +149,16 @@ impl Theme {
         mask_rgb(&mut self.error);
         self.page_gap = self.page_gap.clamp(MIN_PAGE_GAP, MAX_PAGE_GAP);
     }
+
+    pub fn highlight_color(self, color: HighlightColor) -> u32 {
+        match color {
+            HighlightColor::Yellow => self.highlight_yellow,
+            HighlightColor::Green => self.highlight_green,
+            HighlightColor::Blue => self.highlight_blue,
+            HighlightColor::Pink => self.highlight_pink,
+            HighlightColor::Orange => self.highlight_orange,
+        }
+    }
 }
 
 impl Default for Theme {
@@ -144,6 +171,11 @@ pub const DEFAULT_THEME: Theme = Theme {
     background: 0x202020,
     page: 0xffffff,
     selection_highlight: 0x61afef66,
+    highlight_yellow: 0xe5c07b66,
+    highlight_green: 0x98c37966,
+    highlight_blue: 0x61afef66,
+    highlight_pink: 0xc678dd66,
+    highlight_orange: 0xd19a6666,
     overlay: 0x00000066,
     footer_background: 0x181818,
     footer_border: 0x303030,
@@ -169,6 +201,11 @@ pub struct PartialTheme {
     pub background: Option<u32>,
     pub page: Option<u32>,
     pub selection_highlight: Option<u32>,
+    pub highlight_yellow: Option<u32>,
+    pub highlight_green: Option<u32>,
+    pub highlight_blue: Option<u32>,
+    pub highlight_pink: Option<u32>,
+    pub highlight_orange: Option<u32>,
     pub overlay: Option<u32>,
     pub footer_background: Option<u32>,
     pub footer_border: Option<u32>,
@@ -209,6 +246,11 @@ impl PartialTheme {
         mask_rgb_option(&mut self.background);
         mask_rgb_option(&mut self.page);
         mask_rgba_option(&mut self.selection_highlight);
+        mask_rgba_option(&mut self.highlight_yellow);
+        mask_rgba_option(&mut self.highlight_green);
+        mask_rgba_option(&mut self.highlight_blue);
+        mask_rgba_option(&mut self.highlight_pink);
+        mask_rgba_option(&mut self.highlight_orange);
         mask_rgba_option(&mut self.overlay);
         mask_rgb_option(&mut self.footer_background);
         mask_rgb_option(&mut self.footer_border);
@@ -251,6 +293,11 @@ impl PartialTheme {
         write_color!(background, "background", format_rgb_hex);
         write_color!(page, "page", format_rgb_hex);
         write_color!(selection_highlight, "selection-highlight", format_rgba_hex);
+        write_color!(highlight_yellow, "highlight-yellow", format_rgba_hex);
+        write_color!(highlight_green, "highlight-green", format_rgba_hex);
+        write_color!(highlight_blue, "highlight-blue", format_rgba_hex);
+        write_color!(highlight_pink, "highlight-pink", format_rgba_hex);
+        write_color!(highlight_orange, "highlight-orange", format_rgba_hex);
         write_color!(overlay, "overlay", format_rgba_hex);
         write_color!(footer_background, "footer-background", format_rgb_hex);
         write_color!(footer_border, "footer-border", format_rgb_hex);
@@ -294,6 +341,11 @@ impl PartialTheme {
         read_color!(background, "background", false);
         read_color!(page, "page", false);
         read_color!(selection_highlight, "selection-highlight", true);
+        read_color!(highlight_yellow, "highlight-yellow", true);
+        read_color!(highlight_green, "highlight-green", true);
+        read_color!(highlight_blue, "highlight-blue", true);
+        read_color!(highlight_pink, "highlight-pink", true);
+        read_color!(highlight_orange, "highlight-orange", true);
         read_color!(overlay, "overlay", true);
         read_color!(footer_background, "footer-background", false);
         read_color!(footer_border, "footer-border", false);

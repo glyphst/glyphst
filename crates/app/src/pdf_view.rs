@@ -15,7 +15,9 @@ use crate::bookmarks::{
 use crate::command_palette::{CommandPalette, CommandPaletteDelegate};
 use crate::history::{HistoryPalette, HistoryPaletteDelegate};
 use crate::keybindings;
-use crate::library::{DocumentPosition, LibraryStore, normalize_path};
+use crate::library::{
+    DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore, normalize_path,
+};
 use crate::picker::{Picker, PickerEvent};
 use crate::search::{SearchBar, SearchEvent};
 use crate::settings::{BehaviorSettings, SettingsStore, WindowSettings};
@@ -157,8 +159,12 @@ struct PaintPage {
     image: Option<Arc<RenderImage>>,
 }
 
+type HighlightOverlay = (Bounds<Pixels>, HighlightColor);
+
 struct PaintData {
     pages: Vec<PaintPage>,
+    highlight_overlays: Vec<HighlightOverlay>,
+    selected_highlight_borders: Vec<Bounds<Pixels>>,
     link_highlights: Vec<Bounds<Pixels>>,
     selection_highlights: Vec<Bounds<Pixels>>,
     search_highlights: Vec<Bounds<Pixels>>,
@@ -178,6 +184,12 @@ struct Glyph {
 struct Selection {
     anchor: usize,
     head: usize,
+}
+
+#[derive(Clone, Copy)]
+enum HighlightColorAction {
+    Create,
+    Change,
 }
 
 struct SearchMatch {
@@ -250,6 +262,8 @@ pub struct PdfView {
     content_height_doc: f32,
     glyphs: Vec<Glyph>,
     links: Vec<PdfLink>,
+    highlights: Vec<Highlight>,
+    selected_highlight: Option<u64>,
     selection: Option<Selection>,
     dragging: bool,
     hovered_link: Option<usize>,
@@ -291,6 +305,7 @@ pub struct PdfView {
     position_save_task: Option<Task<()>>,
     context_menu_position: Option<GpuiPoint<Pixels>>,
     context_menu_image: Option<(usize, usize)>,
+    context_menu_highlight: Option<u64>,
     _image_clipboard: Option<Clipboard>,
     // Must drop after pages: Type3 fonts in display lists reference the document.
     _document: mupdf::Document,
@@ -304,6 +319,7 @@ impl PdfView {
         window_settings: WindowSettings,
         theme: Theme,
         initial_position: Option<DocumentPosition>,
+        highlights: Vec<Highlight>,
     ) -> Result<Self> {
         let path = normalize_path(path.as_ref());
         let file_name = path
@@ -398,6 +414,8 @@ impl PdfView {
             content_height_doc,
             glyphs,
             links,
+            highlights,
+            selected_highlight: None,
             selection: None,
             dragging: false,
             hovered_link: None,
@@ -439,6 +457,7 @@ impl PdfView {
             position_save_task: None,
             context_menu_position: None,
             context_menu_image: None,
+            context_menu_highlight: None,
             _image_clipboard: None,
             _document: document,
         };
@@ -863,12 +882,15 @@ impl PdfView {
             });
         }
 
+        let (highlight_overlays, selected_highlight_borders) = self.highlight_overlays();
         let selection_highlights = self.selection_highlights();
         let (search_highlights, active_search_highlights) = self.search_highlights();
         let link_highlights = self.link_highlights();
 
         Ok(PaintData {
             pages,
+            highlight_overlays,
+            selected_highlight_borders,
             link_highlights,
             selection_highlights,
             search_highlights,
@@ -1409,6 +1431,26 @@ impl PdfView {
         })
     }
 
+    fn highlight_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<u64> {
+        let page_idx = self.page_at_screen(point)?;
+        let pdf_point = self.screen_to_pdf(page_idx, point)?;
+
+        self.highlights.iter().rev().find_map(|highlight| {
+            highlight
+                .rects
+                .iter()
+                .any(|rect| rect.contains(page_idx, pdf_point.x, pdf_point.y))
+                .then_some(highlight.id)
+        })
+    }
+
+    fn highlight_color_for_id(&self, id: u64) -> Option<HighlightColor> {
+        self.highlights
+            .iter()
+            .find(|highlight| highlight.id == id)
+            .map(|highlight| highlight.color)
+    }
+
     fn set_hovered_link(&mut self, link_ix: Option<usize>, cx: &mut Context<Self>) {
         if self.hovered_link == link_ix {
             return;
@@ -1797,6 +1839,7 @@ impl PdfView {
     }
 
     fn select_all(&mut self) {
+        self.selected_highlight = None;
         if self.glyphs.is_empty() {
             self.selection = None;
             return;
@@ -1806,6 +1849,76 @@ impl PdfView {
             anchor: 0,
             head: self.glyphs.len() - 1,
         });
+    }
+
+    fn create_highlight_from_selection(&mut self, color: HighlightColor, cx: &mut Context<Self>) {
+        let Some((start, end)) = self.selection_bounds() else {
+            return;
+        };
+        let Some(text) = self.selected_text() else {
+            return;
+        };
+        let rects = self.highlight_rects_for_range(start..end + 1);
+        if rects.is_empty() {
+            return;
+        }
+
+        match cx
+            .global_mut::<LibraryStore>()
+            .add_highlight(&self.path, color, rects, text, "")
+        {
+            Ok(highlight) => {
+                self.selected_highlight = Some(highlight.id);
+                self.highlights.push(highlight);
+                self.selection = None;
+                cx.notify();
+            }
+            Err(error) => eprintln!("failed to add PDF highlight: {error:#}"),
+        }
+    }
+
+    fn set_context_highlight_color(&mut self, color: HighlightColor, cx: &mut Context<Self>) {
+        let Some(id) = self.context_menu_highlight.or(self.selected_highlight) else {
+            return;
+        };
+
+        match cx
+            .global_mut::<LibraryStore>()
+            .set_highlight_color(id, color)
+        {
+            Ok(true) => {
+                if let Some(highlight) = self
+                    .highlights
+                    .iter_mut()
+                    .find(|highlight| highlight.id == id)
+                {
+                    highlight.color = color;
+                }
+                self.selected_highlight = Some(id);
+                cx.notify();
+            }
+            Ok(false) => {}
+            Err(error) => eprintln!("failed to update PDF highlight: {error:#}"),
+        }
+    }
+
+    fn remove_context_highlight(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.context_menu_highlight.or(self.selected_highlight) else {
+            return;
+        };
+
+        match cx.global_mut::<LibraryStore>().remove_highlight(id) {
+            Ok(true) => {
+                self.highlights.retain(|highlight| highlight.id != id);
+                if self.selected_highlight == Some(id) {
+                    self.selected_highlight = None;
+                }
+                self.context_menu_highlight = None;
+                cx.notify();
+            }
+            Ok(false) => {}
+            Err(error) => eprintln!("failed to remove PDF highlight: {error:#}"),
+        }
     }
 
     fn deploy_search_query(&mut self, query: SharedString, previous: bool, cx: &mut Context<Self>) {
@@ -2642,6 +2755,7 @@ impl PdfView {
                 store.resolved_theme,
             )
         };
+        let highlights = cx.global::<LibraryStore>().highlights_for(&path);
 
         match Self::open(
             &path,
@@ -2650,6 +2764,7 @@ impl PdfView {
             window_settings,
             theme,
             initial_position,
+            highlights,
         ) {
             Ok(mut pdf_view) => {
                 pdf_view.transparency_enabled = transparency_enabled;
@@ -2701,7 +2816,11 @@ impl PdfView {
         self.focus_handle.focus(window, cx);
         self.dragging = false;
         self.panning = None;
-        self.context_menu_image = self.image_at_screen(position);
+        self.context_menu_image = if self.context_menu_highlight.is_some() {
+            None
+        } else {
+            self.image_at_screen(position)
+        };
         self.context_menu_position = Some(position);
         window.prevent_default();
         cx.stop_propagation();
@@ -2711,6 +2830,7 @@ impl PdfView {
     fn close_context_menu(&mut self, cx: &mut Context<Self>) -> bool {
         let was_open = self.context_menu_position.take().is_some();
         self.context_menu_image = None;
+        self.context_menu_highlight = None;
         if was_open {
             cx.notify();
         }
@@ -2743,6 +2863,71 @@ impl PdfView {
             .child(label)
     }
 
+    fn context_menu_label(label: &'static str, theme: Theme) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .h(px(24.0))
+            .px_3()
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text_muted))
+            .child(label)
+    }
+
+    fn context_menu_highlight_color_row(
+        action: HighlightColorAction,
+        current: Option<HighlightColor>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut row = div().flex().flex_row().gap_2().px_3().pb_2();
+
+        for color in HighlightColor::ALL {
+            row = row.child(Self::context_menu_highlight_swatch(
+                color, current, action, theme, cx,
+            ));
+        }
+
+        row
+    }
+
+    fn context_menu_highlight_swatch(
+        color: HighlightColor,
+        current: Option<HighlightColor>,
+        action: HighlightColorAction,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .w(px(22.0))
+            .h(px(22.0))
+            .rounded_sm()
+            .border_1()
+            .border_color(if current == Some(color) {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.panel_border)
+            })
+            .bg(rgba(theme.highlight_color(color)))
+            .cursor_pointer()
+            .hover(move |style| style.border_color(rgb(theme.accent)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    match action {
+                        HighlightColorAction::Create => {
+                            this.create_highlight_from_selection(color, cx);
+                        }
+                        HighlightColorAction::Change => {
+                            this.set_context_highlight_color(color, cx);
+                        }
+                    }
+                    this.close_context_menu(cx);
+                    cx.stop_propagation();
+                }),
+            )
+    }
+
     fn context_menu_separator(theme: Theme) -> impl IntoElement {
         div().h(px(1.0)).my_1().mx_1().bg(rgb(theme.panel_border))
     }
@@ -2750,6 +2935,7 @@ impl PdfView {
     fn render_context_menu(
         has_image: bool,
         has_selection: bool,
+        highlight_color: Option<HighlightColor>,
         is_fullscreen: bool,
         theme: Theme,
         cx: &mut Context<Self>,
@@ -2782,6 +2968,32 @@ impl PdfView {
                 window.prevent_default();
                 cx.stop_propagation();
             })
+            .when_some(highlight_color, |menu, color| {
+                menu.child(Self::context_menu_label("Change Highlight Color", theme))
+                    .child(Self::context_menu_highlight_color_row(
+                        HighlightColorAction::Change,
+                        Some(color),
+                        theme,
+                        cx,
+                    ))
+                    .child(Self::context_menu_entry(
+                        "Remove Highlight",
+                        theme,
+                        |this, _, cx| this.remove_context_highlight(cx),
+                        cx,
+                    ))
+                    .child(Self::context_menu_separator(theme))
+            })
+            .when(highlight_color.is_none() && has_selection, |menu| {
+                menu.child(Self::context_menu_label("Highlight", theme))
+                    .child(Self::context_menu_highlight_color_row(
+                        HighlightColorAction::Create,
+                        None,
+                        theme,
+                        cx,
+                    ))
+                    .child(Self::context_menu_separator(theme))
+            })
             .when(has_image, |menu| {
                 menu.child(Self::context_menu_entry(
                     "Copy Image",
@@ -2797,7 +3009,7 @@ impl PdfView {
                 ))
                 .child(Self::context_menu_separator(theme))
             })
-            .when(has_selection, |menu| {
+            .when(highlight_color.is_none() && has_selection, |menu| {
                 menu.child(Self::context_menu_entry(
                     "Copy",
                     theme,
@@ -3105,6 +3317,34 @@ impl PdfView {
             )
     }
 
+    fn highlight_overlays(&self) -> (Vec<HighlightOverlay>, Vec<Bounds<Pixels>>) {
+        let mut overlays = Vec::new();
+        let mut selected_borders = Vec::new();
+
+        for highlight in &self.highlights {
+            for rect in &highlight.rects {
+                let Some(bounds) = self.highlight_rect_to_screen(rect) else {
+                    continue;
+                };
+                overlays.push((bounds, highlight.color));
+                if self.selected_highlight == Some(highlight.id) {
+                    selected_borders.push(bounds);
+                }
+            }
+        }
+
+        (overlays, selected_borders)
+    }
+
+    fn highlight_rect_to_screen(&self, rect: &HighlightRect) -> Option<Bounds<Pixels>> {
+        let image_bounds = *self.page_image_bounds.get(rect.page_idx)?.as_ref()?;
+        Some(self.pdf_rect_to_screen(
+            rect.page_idx,
+            Rect::new(rect.x0, rect.y0, rect.x1, rect.y1),
+            image_bounds,
+        ))
+    }
+
     fn selection_highlights(&self) -> Vec<Bounds<Pixels>> {
         let Some((start, end)) = self.selection_bounds() else {
             return Vec::new();
@@ -3143,6 +3383,46 @@ impl PdfView {
         }
 
         (highlights, active_highlights)
+    }
+
+    fn highlight_rects_for_range(&self, range: Range<usize>) -> Vec<HighlightRect> {
+        if range.start >= range.end || range.end > self.glyphs.len() {
+            return Vec::new();
+        }
+
+        let mut rects = Vec::new();
+        let mut current_page = None;
+        let mut current_line = None;
+        let mut current_rect = None;
+
+        for glyph in &self.glyphs[range] {
+            let rect = Self::quad_rect(&glyph.quad);
+
+            match (current_page, current_line, current_rect) {
+                (Some(page), Some(line), Some(existing))
+                    if page == glyph.page_idx && line == glyph.line_idx =>
+                {
+                    current_rect = Some(Self::union_rect(existing, rect));
+                }
+                (Some(page), Some(_), Some(existing)) => {
+                    Self::push_highlight_rect(&mut rects, page, existing);
+                    current_page = Some(glyph.page_idx);
+                    current_line = Some(glyph.line_idx);
+                    current_rect = Some(rect);
+                }
+                _ => {
+                    current_page = Some(glyph.page_idx);
+                    current_line = Some(glyph.line_idx);
+                    current_rect = Some(rect);
+                }
+            }
+        }
+
+        if let (Some(page), Some(rect)) = (current_page, current_rect) {
+            Self::push_highlight_rect(&mut rects, page, rect);
+        }
+
+        rects
     }
 
     fn highlight_bounds_for_range(&self, range: Range<usize>) -> Vec<Bounds<Pixels>> {
@@ -3191,6 +3471,20 @@ impl PdfView {
         };
 
         highlights.push(self.pdf_rect_to_screen(page_idx, rect, *image_bounds));
+    }
+
+    fn push_highlight_rect(rects: &mut Vec<HighlightRect>, page_idx: usize, rect: Rect) {
+        let Some(rect) = Self::normalized_rect(rect) else {
+            return;
+        };
+
+        rects.push(HighlightRect {
+            page_idx,
+            x0: rect.x0,
+            y0: rect.y0,
+            x1: rect.x1,
+            y1: rect.y1,
+        });
     }
 
     fn pdf_rect_to_screen(
@@ -3278,6 +3572,9 @@ impl Render for PdfView {
         };
         let opacity = window_settings.effective_opacity(self.transparency_enabled);
         self.step_scroll_animation(window, cx);
+        let context_menu_highlight_color = self
+            .context_menu_highlight
+            .and_then(|id| self.highlight_color_for_id(id));
         let context_menu = self.context_menu_position.map(|position| {
             deferred(
                 anchored()
@@ -3287,6 +3584,7 @@ impl Render for PdfView {
                     .child(Self::render_context_menu(
                         self.context_menu_image.is_some(),
                         self.selected_text().is_some(),
+                        context_menu_highlight_color,
                         window.is_fullscreen(),
                         theme,
                         cx,
@@ -3390,6 +3688,7 @@ impl Render for PdfView {
 
                     if let Some(link_ix) = this.link_at_screen(event.position) {
                         this.selection = None;
+                        this.selected_highlight = None;
                         this.pending_link = Some(link_ix);
                         this.set_hovered_link(Some(link_ix), cx);
                         cx.stop_propagation();
@@ -3399,11 +3698,20 @@ impl Render for PdfView {
                     this.set_hovered_link(None, cx);
                     if !this.point_in_image(event.position) {
                         this.selection = None;
+                        this.selected_highlight = None;
+                        cx.notify();
+                        return;
+                    }
+
+                    if let Some(highlight_id) = this.highlight_at_screen(event.position) {
+                        this.selection = None;
+                        this.selected_highlight = Some(highlight_id);
                         cx.notify();
                         return;
                     }
 
                     if let Some(ix) = this.nearby_glyph_at_screen(event.position) {
+                        this.selected_highlight = None;
                         this.selection = Some(Selection {
                             anchor: ix,
                             head: ix,
@@ -3411,6 +3719,7 @@ impl Render for PdfView {
                         this.dragging = true;
                     } else {
                         this.selection = None;
+                        this.selected_highlight = None;
                     }
 
                     cx.notify();
@@ -3448,6 +3757,13 @@ impl Render for PdfView {
                         return;
                     }
 
+                    this.context_menu_highlight = this.highlight_at_screen(event.position);
+                    if let Some(highlight_id) = this.context_menu_highlight {
+                        this.selected_highlight = Some(highlight_id);
+                        this.selection = None;
+                    } else {
+                        this.selected_highlight = None;
+                    }
                     this.open_context_menu(event.position, window, cx);
                 }),
             )
@@ -3542,6 +3858,14 @@ impl Render for PdfView {
                                                 }
                                             }
 
+                                            for (highlight, color) in paint_data.highlight_overlays
+                                            {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    rgba(theme.highlight_color(color)),
+                                                ));
+                                            }
+
                                             for highlight in paint_data.search_highlights {
                                                 window.paint_quad(fill(
                                                     highlight,
@@ -3563,6 +3887,48 @@ impl Render for PdfView {
                                                 window.paint_quad(fill(
                                                     highlight,
                                                     rgba(Self::with_alpha(theme.accent, 0x33)),
+                                                ));
+                                            }
+
+                                            for border in paint_data.selected_highlight_borders {
+                                                let color =
+                                                    rgba(Self::with_alpha(theme.accent, 0xdd));
+                                                let thickness = px(1.0);
+                                                window.paint_quad(fill(
+                                                    Bounds::new(
+                                                        border.origin,
+                                                        size(border.size.width, thickness),
+                                                    ),
+                                                    color,
+                                                ));
+                                                window.paint_quad(fill(
+                                                    Bounds::new(
+                                                        point(
+                                                            border.origin.x,
+                                                            border.origin.y + border.size.height
+                                                                - thickness,
+                                                        ),
+                                                        size(border.size.width, thickness),
+                                                    ),
+                                                    color,
+                                                ));
+                                                window.paint_quad(fill(
+                                                    Bounds::new(
+                                                        border.origin,
+                                                        size(thickness, border.size.height),
+                                                    ),
+                                                    color,
+                                                ));
+                                                window.paint_quad(fill(
+                                                    Bounds::new(
+                                                        point(
+                                                            border.origin.x + border.size.width
+                                                                - thickness,
+                                                            border.origin.y,
+                                                        ),
+                                                        size(thickness, border.size.height),
+                                                    ),
+                                                    color,
                                                 ));
                                             }
 
