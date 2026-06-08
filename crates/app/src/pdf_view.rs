@@ -82,6 +82,8 @@ const MAX_JUMP_HISTORY: usize = 128;
 const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
 const TOC_SIDEBAR_WIDTH: f32 = 280.0;
 const TOC_SIDEBAR_ROW_HEIGHT: f32 = 30.0;
+const INFERRED_SPACE_WIDTH_RATIO: f32 = 0.75;
+const INFERRED_SPACE_HEIGHT_RATIO: f32 = 0.20;
 
 struct PdfPage {
     display_list: Arc<DisplayList>,
@@ -1757,6 +1759,121 @@ impl PdfView {
             .and_then(|point| self.glyph_at_pdf(page_idx, point))
     }
 
+    fn word_bounds_at_glyph(&self, ix: usize) -> Option<Range<usize>> {
+        Self::word_bounds_in_glyphs(&self.glyphs, ix)
+    }
+
+    fn word_bounds_in_glyphs(glyphs: &[Glyph], ix: usize) -> Option<Range<usize>> {
+        let glyph = glyphs.get(ix)?;
+        if !Self::is_word_char(glyph.c) {
+            return None;
+        }
+
+        let mut start = ix;
+        while start > 0 {
+            let previous = &glyphs[start - 1];
+            if !Self::same_word_segment(previous, glyph)
+                || !Self::is_word_char(previous.c)
+                || Self::has_inferred_space_between(glyphs, start - 1, start)
+            {
+                break;
+            }
+            start -= 1;
+        }
+
+        let mut end = ix + 1;
+        while end < glyphs.len() {
+            let next = &glyphs[end];
+            if !Self::same_word_segment(next, glyph)
+                || !Self::is_word_char(next.c)
+                || Self::has_inferred_space_between(glyphs, end - 1, end)
+            {
+                break;
+            }
+            end += 1;
+        }
+
+        Some(start..end)
+    }
+
+    #[cfg(test)]
+    fn word_bounds_in_chars(chars: &[char], ix: usize) -> Option<Range<usize>> {
+        if !Self::is_word_char(*chars.get(ix)?) {
+            return None;
+        }
+
+        let mut start = ix;
+        while start > 0 && Self::is_word_char(chars[start - 1]) {
+            start -= 1;
+        }
+
+        let mut end = ix + 1;
+        while end < chars.len() && Self::is_word_char(chars[end]) {
+            end += 1;
+        }
+
+        Some(start..end)
+    }
+
+    fn same_word_segment(a: &Glyph, b: &Glyph) -> bool {
+        a.page_idx == b.page_idx && a.block_idx == b.block_idx && a.line_idx == b.line_idx
+    }
+
+    fn is_word_char(c: char) -> bool {
+        c.is_alphanumeric() || matches!(c, '_' | '\'' | '’')
+    }
+
+    fn has_inferred_space_between(glyphs: &[Glyph], left_ix: usize, right_ix: usize) -> bool {
+        let Some(left) = glyphs.get(left_ix) else {
+            return false;
+        };
+        let Some(right) = glyphs.get(right_ix) else {
+            return false;
+        };
+
+        if !Self::same_word_segment(left, right)
+            || left.c.is_whitespace()
+            || right.c.is_whitespace()
+            || left.c.is_control()
+            || right.c.is_control()
+        {
+            return false;
+        }
+
+        let left_rect = Self::quad_rect(&left.quad);
+        let right_rect = Self::quad_rect(&right.quad);
+        let gap = right_rect.x0 - left_rect.x1;
+        if gap <= 0.0 {
+            return false;
+        }
+
+        gap >= Self::inferred_space_threshold(glyphs, left_ix)
+    }
+
+    fn inferred_space_threshold(glyphs: &[Glyph], ix: usize) -> f32 {
+        let Some(glyph) = glyphs.get(ix) else {
+            return 0.0;
+        };
+        let mut space_widths = glyphs
+            .iter()
+            .filter(|candidate| Self::same_word_segment(candidate, glyph))
+            .filter(|candidate| candidate.c.is_whitespace() && !candidate.c.is_control())
+            .filter_map(|candidate| {
+                let rect = Self::quad_rect(&candidate.quad);
+                let width = rect.x1 - rect.x0;
+                (width > 0.0).then_some(width)
+            })
+            .collect::<Vec<_>>();
+
+        if !space_widths.is_empty() {
+            space_widths.sort_by(|a, b| a.total_cmp(b));
+            return space_widths[space_widths.len() / 2] * INFERRED_SPACE_WIDTH_RATIO;
+        }
+
+        let rect = Self::quad_rect(&glyph.quad);
+        (rect.y1 - rect.y0) * INFERRED_SPACE_HEIGHT_RATIO
+    }
+
     fn nearby_glyph_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<usize> {
         let page_idx = self.page_at_screen(point)?;
         let bounds = self.page_image_bounds.get(page_idx)?.as_ref()?;
@@ -1888,20 +2005,33 @@ impl PdfView {
 
     fn selected_text(&self) -> Option<String> {
         let (start, end) = self.selection_bounds()?;
-        let mut text = String::new();
-        let mut previous: Option<&Glyph> = None;
+        Self::text_for_glyph_range(&self.glyphs, start..end + 1)
+    }
 
-        for glyph in &self.glyphs[start..=end] {
-            if let Some(previous) = previous {
+    fn text_for_glyph_range(glyphs: &[Glyph], range: Range<usize>) -> Option<String> {
+        if range.start >= range.end || range.end > glyphs.len() {
+            return None;
+        }
+
+        let mut text = String::new();
+        let mut previous_ix: Option<usize> = None;
+
+        for glyph_ix in range {
+            let glyph = &glyphs[glyph_ix];
+            if let Some(previous_ix) = previous_ix {
+                let previous = &glyphs[previous_ix];
+
                 if glyph.block_idx != previous.block_idx {
                     text.push_str("\n\n");
                 } else if glyph.line_idx != previous.line_idx {
                     text.push('\n');
+                } else if Self::has_inferred_space_between(glyphs, previous_ix, glyph_ix) {
+                    text.push(' ');
                 }
             }
 
             text.push(glyph.c);
-            previous = Some(glyph);
+            previous_ix = Some(glyph_ix);
         }
 
         (!text.is_empty()).then_some(text)
@@ -4031,11 +4161,26 @@ impl Render for PdfView {
 
                     if let Some(ix) = this.nearby_glyph_at_screen(event.position) {
                         this.selected_highlight = None;
-                        this.selection = Some(Selection {
-                            anchor: ix,
-                            head: ix,
-                        });
-                        this.dragging = true;
+                        if event.click_count == 2 {
+                            if let Some(range) = this.word_bounds_at_glyph(ix) {
+                                this.selection = Some(Selection {
+                                    anchor: range.start,
+                                    head: range.end - 1,
+                                });
+                            } else {
+                                this.selection = Some(Selection {
+                                    anchor: ix,
+                                    head: ix,
+                                });
+                                this.dragging = true;
+                            }
+                        } else {
+                            this.selection = Some(Selection {
+                                anchor: ix,
+                                head: ix,
+                            });
+                            this.dragging = true;
+                        }
                     } else {
                         this.selection = None;
                         this.selected_highlight = None;
@@ -4511,7 +4656,43 @@ impl Render for PdfView {
 
 #[cfg(test)]
 mod tests {
-    use super::PdfView;
+    use super::{Glyph, PdfView};
+    use mupdf::{Point, Quad};
+
+    fn test_glyph(c: char, x0: f32, x1: f32) -> Glyph {
+        Glyph {
+            c,
+            quad: Quad::new(
+                Point::new(x0, 0.0),
+                Point::new(x1, 0.0),
+                Point::new(x0, 6.0),
+                Point::new(x1, 6.0),
+            ),
+            page_idx: 0,
+            line_idx: 0,
+            block_idx: 0,
+        }
+    }
+
+    fn missing_space_glyphs() -> Vec<Glyph> {
+        [
+            ('1', 0.0, 5.0),
+            ('0', 5.0, 10.0),
+            ('0', 10.0, 15.0),
+            ('b', 16.6, 21.6),
+            ('y', 21.6, 26.6),
+            ('d', 28.2, 33.2),
+            ('e', 33.2, 38.2),
+            ('f', 38.2, 43.2),
+            ('a', 43.2, 48.2),
+            ('u', 48.2, 53.2),
+            ('l', 53.2, 58.2),
+            ('t', 58.2, 63.2),
+        ]
+        .into_iter()
+        .map(|(c, x0, x1)| test_glyph(c, x0, x1))
+        .collect()
+    }
 
     #[test]
     fn url_start_accepts_label_and_punctuation_boundaries() {
@@ -4530,5 +4711,65 @@ mod tests {
         let chars = "abchttps://example.com/x".chars().collect::<Vec<_>>();
         let ix = chars.iter().position(|c| *c == 'h').unwrap();
         assert!(!PdfView::url_start_boundary(&chars, ix));
+    }
+
+    #[test]
+    fn word_bounds_selects_words_between_punctuation() {
+        let chars = "hello, world".chars().collect::<Vec<_>>();
+
+        assert_eq!(PdfView::word_bounds_in_chars(&chars, 1), Some(0..5));
+        assert_eq!(PdfView::word_bounds_in_chars(&chars, 8), Some(7..12));
+        assert_eq!(PdfView::word_bounds_in_chars(&chars, 5), None);
+        assert_eq!(PdfView::word_bounds_in_chars(&chars, 6), None);
+    }
+
+    #[test]
+    fn word_bounds_includes_apostrophes_underscores_and_unicode() {
+        let chars = "can't rust_lang café".chars().collect::<Vec<_>>();
+        let apostrophe = chars.iter().position(|c| *c == '\'').unwrap();
+        let underscore = chars.iter().position(|c| *c == '_').unwrap();
+        let accented = chars.iter().position(|c| *c == 'é').unwrap();
+
+        assert_eq!(
+            PdfView::word_bounds_in_chars(&chars, apostrophe),
+            Some(0..5)
+        );
+        assert_eq!(
+            PdfView::word_bounds_in_chars(&chars, underscore),
+            Some(6..15)
+        );
+        assert_eq!(
+            PdfView::word_bounds_in_chars(&chars, accented),
+            Some(16..20)
+        );
+    }
+
+    #[test]
+    fn word_bounds_stops_at_hyphens_and_empty_input() {
+        let chars = "foo-bar".chars().collect::<Vec<_>>();
+
+        assert_eq!(PdfView::word_bounds_in_chars(&chars, 1), Some(0..3));
+        assert_eq!(PdfView::word_bounds_in_chars(&chars, 5), Some(4..7));
+        assert_eq!(PdfView::word_bounds_in_chars(&chars, 3), None);
+        assert_eq!(PdfView::word_bounds_in_chars(&[], 0), None);
+    }
+
+    #[test]
+    fn word_bounds_stop_at_inferred_visual_spaces() {
+        let glyphs = missing_space_glyphs();
+
+        assert_eq!(PdfView::word_bounds_in_glyphs(&glyphs, 0), Some(0..3));
+        assert_eq!(PdfView::word_bounds_in_glyphs(&glyphs, 3), Some(3..5));
+        assert_eq!(PdfView::word_bounds_in_glyphs(&glyphs, 8), Some(5..12));
+    }
+
+    #[test]
+    fn selected_text_inserts_inferred_visual_spaces() {
+        let glyphs = missing_space_glyphs();
+
+        assert_eq!(
+            PdfView::text_for_glyph_range(&glyphs, 0..glyphs.len()).as_deref(),
+            Some("100 by default")
+        );
     }
 }
