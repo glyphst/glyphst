@@ -12,7 +12,7 @@ use crate::theme::{
 };
 
 pub const DEFAULT_ZOOM: f32 = 1.0;
-pub const DEFAULT_ZOOM_STEP: f32 = 1.05;
+pub const DEFAULT_ZOOM_STEP: f32 = 1.1;
 pub const DEFAULT_SMOOTH_SCROLLING: bool = true;
 
 const MIN_ZOOM_SETTING: f32 = 0.25;
@@ -20,7 +20,7 @@ const MAX_ZOOM_SETTING: f32 = 8.0;
 const MIN_ZOOM_STEP: f32 = 1.01;
 const MAX_ZOOM_STEP: f32 = 4.0;
 const DEFAULT_WINDOW_OPACITY: f32 = 1.0;
-const MIN_WINDOW_OPACITY: f32 = 0.3;
+const MIN_WINDOW_OPACITY: f32 = 0.1;
 const MAX_WINDOW_OPACITY: f32 = 1.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
