@@ -19,6 +19,7 @@ use crate::library::{
     DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore, Note, normalize_path,
 };
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
+use crate::notes::{NotePaletteEntry, NotesPalette, NotesPaletteDelegate};
 use crate::picker::{Picker, PickerEvent};
 use crate::search::{SearchBar, SearchEvent};
 use crate::settings::{BehaviorSettings, SettingsStore, WindowSettings};
@@ -62,6 +63,8 @@ gpui::actions!(
         JumpForward,
         Toc,
         ToggleToc,
+        OpenNotes,
+        ToggleNotes,
         ToggleCommandPalette,
         ToggleFullScreen,
         ToggleTransparency,
@@ -82,6 +85,9 @@ const MAX_JUMP_HISTORY: usize = 128;
 const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
 const TOC_SIDEBAR_WIDTH: f32 = 280.0;
 const TOC_SIDEBAR_ROW_HEIGHT: f32 = 30.0;
+const NOTES_SIDEBAR_WIDTH: f32 = 300.0;
+const NOTES_SIDEBAR_ROW_HEIGHT: f32 = 52.0;
+const SIDEBAR_PAGE_NUMBER_WIDTH: f32 = 38.0;
 const INFERRED_SPACE_WIDTH_RATIO: f32 = 0.75;
 const INFERRED_SPACE_HEIGHT_RATIO: f32 = 0.20;
 
@@ -309,6 +315,7 @@ pub struct PdfView {
     settings_panel: Option<Entity<SettingsPanel>>,
     search_bar: Option<Entity<SearchBar>>,
     toc_palette: Option<Entity<TocPalette>>,
+    notes_palette: Option<Entity<NotesPalette>>,
     history_palette: Option<Entity<HistoryPalette>>,
     bookmark_palette: Option<Entity<BookmarkPalette>>,
     bookmark_prompt: Option<Entity<BookmarkPrompt>>,
@@ -320,6 +327,10 @@ pub struct PdfView {
     toc_sidebar_scroll: UniformListScrollHandle,
     toc_sidebar_visible_entry_ixs: Vec<usize>,
     toc_sidebar_entries_dirty: bool,
+    notes_sidebar_open: bool,
+    notes_sidebar_scroll: UniformListScrollHandle,
+    notes_sidebar_entries: Vec<NotePaletteEntry>,
+    notes_sidebar_selected: Option<u64>,
     jump_back: Vec<JumpPosition>,
     jump_forward: Vec<JumpPosition>,
     position_from_search: bool,
@@ -467,6 +478,7 @@ impl PdfView {
             settings_panel: None,
             search_bar: None,
             toc_palette: None,
+            notes_palette: None,
             history_palette: None,
             bookmark_palette: None,
             bookmark_prompt: None,
@@ -478,6 +490,10 @@ impl PdfView {
             toc_sidebar_scroll: UniformListScrollHandle::new(),
             toc_sidebar_visible_entry_ixs: Vec::new(),
             toc_sidebar_entries_dirty: true,
+            notes_sidebar_open: false,
+            notes_sidebar_scroll: UniformListScrollHandle::new(),
+            notes_sidebar_entries: Vec::new(),
+            notes_sidebar_selected: None,
             jump_back: Vec::new(),
             jump_forward: Vec::new(),
             position_from_search: false,
@@ -2172,13 +2188,7 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) {
         self.close_context_menu(cx);
-        self.close_command_palette(window, cx);
-        self.close_settings_panel(window, cx);
-        self.close_search_bar(window, cx);
-        self.close_toc_palette(window, cx);
-        self.close_history_palette(window, cx);
-        self.close_bookmark_palette(window, cx);
-        self.close_bookmark_prompt(window, cx);
+        self.close_all_overlays(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
         let editor =
@@ -2225,7 +2235,10 @@ impl PdfView {
                     .add_note(&self.path, color, rects, text, body)
                 {
                     Ok(note) => {
+                        let note_id = note.id;
                         self.notes.push(note);
+                        self.notes_sidebar_selected = Some(note_id);
+                        self.refresh_notes_sidebar_entries();
                         self.selection = None;
                     }
                     Err(error) => eprintln!("failed to add PDF note: {error:#}"),
@@ -2240,6 +2253,8 @@ impl PdfView {
                         if let Some(note) = self.notes.iter_mut().find(|note| note.id == id) {
                             note.body = body;
                             note.color = color;
+                            self.notes_sidebar_selected = Some(id);
+                            self.refresh_notes_sidebar_entries();
                         }
                     }
                     Ok(false) => {}
@@ -2269,6 +2284,10 @@ impl PdfView {
         match cx.global_mut::<LibraryStore>().remove_note(id) {
             Ok(true) => {
                 self.notes.retain(|note| note.id != id);
+                if self.notes_sidebar_selected == Some(id) {
+                    self.notes_sidebar_selected = None;
+                }
+                self.refresh_notes_sidebar_entries();
                 if self.hovered_note == Some(id) {
                     self.hovered_note = None;
                     self.hovered_note_position = None;
@@ -2704,12 +2723,7 @@ impl PdfView {
             self.close_command_palette(window, cx);
             return;
         }
-        self.close_settings_panel(window, cx);
-        self.close_search_bar(window, cx);
-        self.close_toc_palette(window, cx);
-        self.close_history_palette(window, cx);
-        self.close_bookmark_palette(window, cx);
-        self.close_bookmark_prompt(window, cx);
+        self.close_all_overlays(window, cx);
 
         let actions = window
             .available_actions(cx)
@@ -2737,17 +2751,23 @@ impl PdfView {
         }
     }
 
+    fn close_all_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_command_palette(window, cx);
+        self.close_settings_panel(window, cx);
+        self.close_search_bar(window, cx);
+        self.close_toc_palette(window, cx);
+        self.close_notes_palette(window, cx);
+        self.close_history_palette(window, cx);
+        self.close_bookmark_palette(window, cx);
+        self.close_bookmark_prompt(window, cx);
+    }
+
     fn toggle_settings_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_panel.is_some() {
             self.close_settings_panel(window, cx);
             return;
         }
-        self.close_command_palette(window, cx);
-        self.close_search_bar(window, cx);
-        self.close_toc_palette(window, cx);
-        self.close_history_palette(window, cx);
-        self.close_bookmark_palette(window, cx);
-        self.close_bookmark_prompt(window, cx);
+        self.close_all_overlays(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
         let panel = cx.new(|cx| SettingsPanel::new(previous_focus_handle.clone(), cx));
@@ -2809,12 +2829,7 @@ impl PdfView {
             return;
         }
 
-        self.close_command_palette(window, cx);
-        self.close_settings_panel(window, cx);
-        self.close_toc_palette(window, cx);
-        self.close_history_palette(window, cx);
-        self.close_bookmark_palette(window, cx);
-        self.close_bookmark_prompt(window, cx);
+        self.close_all_overlays(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
         let query = self.search.query.clone();
@@ -2880,12 +2895,7 @@ impl PdfView {
             return;
         }
 
-        self.close_command_palette(window, cx);
-        self.close_settings_panel(window, cx);
-        self.close_search_bar(window, cx);
-        self.close_history_palette(window, cx);
-        self.close_bookmark_palette(window, cx);
-        self.close_bookmark_prompt(window, cx);
+        self.close_all_overlays(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
         let selected_ix = self.current_toc_palette_match_ix(&entries);
@@ -2911,18 +2921,78 @@ impl PdfView {
         }
     }
 
+    fn toggle_notes_sidebar(&mut self, cx: &mut Context<Self>) {
+        if !self.has_navigable_notes() {
+            return;
+        }
+
+        if !self.notes_sidebar_open {
+            self.refresh_notes_sidebar_entries();
+        }
+
+        self.notes_sidebar_open = !self.notes_sidebar_open;
+        cx.notify();
+    }
+
+    fn toggle_notes_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.notes_palette.is_some() {
+            self.close_notes_palette(window, cx);
+            return;
+        }
+
+        let entries = self.note_palette_entries();
+        if entries.is_empty() {
+            return;
+        }
+
+        self.close_all_overlays(window, cx);
+
+        let previous_focus_handle = self.focus_handle.clone();
+        let delegate = NotesPaletteDelegate::new(cx.entity().downgrade(), entries);
+        let palette = cx.new(|cx| Picker::new(previous_focus_handle.clone(), delegate, cx));
+
+        cx.subscribe_in(&palette, window, |this, _, _: &PickerEvent, window, cx| {
+            this.close_notes_palette(window, cx);
+        })
+        .detach();
+
+        palette.focus_handle(cx).focus(window, cx);
+        self.notes_palette = Some(palette);
+        cx.notify();
+    }
+
+    fn close_notes_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.notes_palette.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn note_palette_entries(&self) -> Vec<NotePaletteEntry> {
+        NotePaletteEntry::for_notes(&self.notes)
+    }
+
+    fn refresh_notes_sidebar_entries(&mut self) {
+        let entries = self.note_palette_entries();
+        if let Some(selected) = self.notes_sidebar_selected
+            && !entries.iter().any(|entry| entry.id == selected)
+        {
+            self.notes_sidebar_selected = None;
+        }
+        self.notes_sidebar_entries = entries;
+    }
+
+    fn has_navigable_notes(&self) -> bool {
+        self.notes.iter().any(|note| !note.rects.is_empty())
+    }
+
     fn toggle_history_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.history_palette.is_some() {
             self.close_history_palette(window, cx);
             return;
         }
 
-        self.close_command_palette(window, cx);
-        self.close_settings_panel(window, cx);
-        self.close_search_bar(window, cx);
-        self.close_toc_palette(window, cx);
-        self.close_bookmark_palette(window, cx);
-        self.close_bookmark_prompt(window, cx);
+        self.close_all_overlays(window, cx);
 
         let entries = cx.global::<LibraryStore>().history_entries().to_vec();
         let previous_focus_handle = self.focus_handle.clone();
@@ -2952,12 +3022,7 @@ impl PdfView {
             return;
         }
 
-        self.close_command_palette(window, cx);
-        self.close_settings_panel(window, cx);
-        self.close_search_bar(window, cx);
-        self.close_toc_palette(window, cx);
-        self.close_history_palette(window, cx);
-        self.close_bookmark_prompt(window, cx);
+        self.close_all_overlays(window, cx);
 
         let bookmarks = cx.global::<LibraryStore>().bookmarks().to_vec();
         let previous_focus_handle = self.focus_handle.clone();
@@ -2988,12 +3053,7 @@ impl PdfView {
             return;
         }
 
-        self.close_command_palette(window, cx);
-        self.close_settings_panel(window, cx);
-        self.close_search_bar(window, cx);
-        self.close_toc_palette(window, cx);
-        self.close_history_palette(window, cx);
-        self.close_bookmark_palette(window, cx);
+        self.close_all_overlays(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
         let default_label = self.default_bookmark_label();
@@ -3155,6 +3215,26 @@ impl PdfView {
         self.navigate_to_pdf_destination(page_idx, target_top, target_left, cx);
     }
 
+    pub(crate) fn navigate_to_note(&mut self, note_ix: usize, cx: &mut Context<Self>) {
+        let Some((note_id, page_idx, target_top)) = self.notes.get(note_ix).and_then(|note| {
+            note.rects
+                .iter()
+                .min_by(|left, right| {
+                    left.page_idx
+                        .cmp(&right.page_idx)
+                        .then_with(|| left.y0.total_cmp(&right.y0))
+                        .then_with(|| left.x0.total_cmp(&right.x0))
+                })
+                .map(|rect| (note.id, rect.page_idx, rect.y0))
+        }) else {
+            return;
+        };
+
+        self.notes_sidebar_selected = Some(note_id);
+        cx.notify();
+        self.navigate_to_pdf_destination(page_idx, Some(target_top), None, cx);
+    }
+
     fn activate_link(&mut self, link_ix: usize, cx: &mut Context<Self>) {
         let Some(target) = self.links.get(link_ix).map(|link| link.target.clone()) else {
             return;
@@ -3260,6 +3340,100 @@ impl PdfView {
         }
 
         note
+    }
+
+    fn render_centered_overlay(
+        content: impl IntoElement + 'static,
+        close: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(theme.overlay))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| close(this, window, cx)),
+            )
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(content)
+    }
+
+    fn render_top_aligned_overlay(
+        content: impl IntoElement + 'static,
+        close: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt(px(96.0))
+            .bg(rgba(theme.overlay))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| close(this, window, cx)),
+            )
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(content)
+    }
+
+    fn render_sidebar_shell(
+        title: &'static str,
+        count: usize,
+        width: f32,
+        content: impl IntoElement + 'static,
+        theme: Theme,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .min_h_0()
+            .w(px(width))
+            .border_r(px(1.0))
+            .border_color(rgb(theme.panel_border))
+            .bg(rgb(theme.panel_background))
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(40.0))
+                    .px_3()
+                    .border_b(px(1.0))
+                    .border_color(rgb(theme.panel_border))
+                    .child(div().text_size(px(13.0)).child(title))
+                    .child(
+                        div()
+                            .text_color(rgb(theme.text_muted))
+                            .child(format!("{} items", count)),
+                    ),
+            )
+            .child(content)
     }
 
     fn context_menu_highlight_color_row(
@@ -3531,6 +3705,40 @@ impl PdfView {
             .child("☰")
     }
 
+    fn render_notes_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.notes_sidebar_open && self.has_navigable_notes();
+
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .h(px(20.0))
+            .px_2()
+            .mr_2()
+            .rounded_sm()
+            .text_color(rgb(if open {
+                theme.accent
+            } else {
+                theme.footer_text
+            }))
+            .bg(if open {
+                rgba(theme.selected_row)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_notes_sidebar(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child("✎")
+    }
+
     fn render_toc_sidebar(
         &mut self,
         theme: Theme,
@@ -3541,193 +3749,253 @@ impl PdfView {
         let visible_len = self.toc_sidebar_visible_entry_ixs.len();
         let scroll_handle = self.toc_sidebar_scroll.clone();
 
-        div()
-            .flex()
-            .flex_none()
-            .flex_col()
+        let content = div()
+            .id("toc-sidebar-content")
+            .flex_1()
             .min_h_0()
-            .w(px(TOC_SIDEBAR_WIDTH))
-            .border_r(px(1.0))
-            .border_color(rgb(theme.panel_border))
-            .bg(rgb(theme.panel_background))
-            .text_size(px(12.0))
-            .text_color(rgb(theme.text))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
-            .on_scroll_wheel(|_, _, cx| {
-                cx.stop_propagation();
-            })
+            .overflow_hidden()
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(40.0))
-                    .px_3()
-                    .border_b(px(1.0))
-                    .border_color(rgb(theme.panel_border))
-                    .child(div().text_size(px(13.0)).child("Table of Contents"))
-                    .child(
-                        div()
-                            .text_color(rgb(theme.text_muted))
-                            .child(format!("{} items", self.toc.len())),
-                    ),
-            )
-            .child(
-                div()
-                    .id("toc-sidebar-content")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(
-                        uniform_list(
-                            "toc-sidebar-list",
-                            visible_len,
-                            cx.processor(
-                                |this, visible_range: Range<usize>, _window, cx| {
-                                    let theme = cx.global::<SettingsStore>().resolved_theme;
-                                    let current_page = this.current_page_index();
+                uniform_list(
+                    "toc-sidebar-list",
+                    visible_len,
+                    cx.processor(|this, visible_range: Range<usize>, _window, cx| {
+                        let theme = cx.global::<SettingsStore>().resolved_theme;
+                        let current_page = this.current_page_index();
 
-                                    visible_range
-                                        .filter_map(|visible_ix| {
-                                            let entry_ix = this
-                                                .toc_sidebar_visible_entry_ixs
-                                                .get(visible_ix)
-                                                .copied()?;
-                                            let entry = &this.toc[entry_ix];
-                                            let collapsed =
-                                                this.toc_collapsed.contains(&entry_ix);
-                                            let current =
-                                                entry.navigable && entry.page_idx == current_page;
-                                            let title = entry.title.clone();
-                                            let title_color = if entry.navigable {
-                                                theme.text
-                                            } else {
-                                                theme.text_muted
-                                            };
-                                            let depth = entry.depth;
-                                            let has_children = entry.has_children;
-                                            let navigable = entry.navigable;
-                                            let page_number = entry.page_idx + 1;
+                        visible_range
+                            .filter_map(|visible_ix| {
+                                let entry_ix = this
+                                    .toc_sidebar_visible_entry_ixs
+                                    .get(visible_ix)
+                                    .copied()?;
+                                let entry = &this.toc[entry_ix];
+                                let collapsed = this.toc_collapsed.contains(&entry_ix);
+                                let current = entry.navigable && entry.page_idx == current_page;
+                                let title = entry.title.clone();
+                                let title_color = if entry.navigable {
+                                    theme.text
+                                } else {
+                                    theme.text_muted
+                                };
+                                let depth = entry.depth;
+                                let has_children = entry.has_children;
+                                let navigable = entry.navigable;
+                                let page_number = entry.page_idx + 1;
 
-                                            Some(
-                                                div()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .h(px(TOC_SIDEBAR_ROW_HEIGHT))
-                                                    .px_2()
-                                                    .bg(if current {
-                                                        rgba(theme.selected_row)
-                                                    } else {
-                                                        rgba(0x00000000)
-                                                    })
-                                                    .child(
-                                                        div()
-                                                            .flex_none()
-                                                            .w(px(depth as f32 * 14.0)),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_none()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .w(px(18.0))
-                                                            .h(px(24.0))
-                                                            .rounded_sm()
-                                                            .text_color(rgb(theme.text_muted))
-                                                            .when(has_children, |this| {
-                                                                this.cursor_pointer()
-                                                                    .hover(move |style| {
-                                                                        style.bg(rgb(
-                                                                            theme.control_hover,
-                                                                        ))
-                                                                    })
-                                                                    .on_mouse_down(
-                                                                        MouseButton::Left,
-                                                                        cx.listener(
-                                                                            move |this, _, _, cx| {
-                                                                                if !this
-                                                                                    .toc_collapsed
-                                                                                    .remove(
-                                                                                        &entry_ix,
-                                                                                    )
-                                                                                {
-                                                                                    this.toc_collapsed
-                                                                                        .insert(
-                                                                                            entry_ix,
-                                                                                        );
-                                                                                }
-                                                                                this.toc_sidebar_entries_dirty =
-                                                                                    true;
-                                                                                cx.stop_propagation();
-                                                                                cx.notify();
-                                                                            },
-                                                                        ),
-                                                                    )
-                                                            })
-                                                            .child(if has_children {
-                                                                if collapsed { "▸" } else { "▾" }
-                                                            } else {
-                                                                ""
-                                                            }),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .items_center()
-                                                            .h(px(28.0))
-                                                            .rounded_sm()
-                                                            .px_1()
-                                                            .truncate()
-                                                            .text_color(rgb(title_color))
-                                                            .when(navigable, |this| {
-                                                                this.cursor_pointer()
-                                                                    .hover(move |style| {
-                                                                        style.bg(rgb(
-                                                                            theme.control_hover,
-                                                                        ))
-                                                                    })
-                                                                    .on_mouse_down(
-                                                                        MouseButton::Left,
-                                                                        cx.listener(
-                                                                            move |this, _, _, cx| {
-                                                                                this.navigate_to_toc_entry(
-                                                                                    entry_ix,
-                                                                                    cx,
-                                                                                );
-                                                                                cx.stop_propagation();
-                                                                            },
-                                                                        ),
-                                                                    )
-                                                            })
-                                                            .child(title),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex_none()
-                                                            .ml_2()
-                                                            .text_color(rgb(theme.text_muted))
-                                                            .child(if navigable {
-                                                                format!("{}", page_number)
-                                                            } else {
-                                                                String::new()
-                                                            }),
-                                                    ),
-                                            )
+                                Some(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .w_full()
+                                        .items_center()
+                                        .h(px(TOC_SIDEBAR_ROW_HEIGHT))
+                                        .px_2()
+                                        .bg(if current {
+                                            rgba(theme.selected_row)
+                                        } else {
+                                            rgba(0x00000000)
                                         })
-                                        .collect::<Vec<_>>()
-                                },
-                            ),
-                        )
-                        .track_scroll(&scroll_handle)
-                        .size_full(),
-                    ),
-            )
+                                        .child(div().flex_none().w(px(depth as f32 * 14.0)))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_none()
+                                                .items_center()
+                                                .justify_center()
+                                                .w(px(18.0))
+                                                .h(px(24.0))
+                                                .rounded_sm()
+                                                .text_color(rgb(theme.text_muted))
+                                                .when(has_children, |this| {
+                                                    this.cursor_pointer()
+                                                        .hover(move |style| {
+                                                            style.bg(rgb(theme.control_hover))
+                                                        })
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(move |this, _, _, cx| {
+                                                                if !this
+                                                                    .toc_collapsed
+                                                                    .remove(&entry_ix)
+                                                                {
+                                                                    this.toc_collapsed
+                                                                        .insert(entry_ix);
+                                                                }
+                                                                this.toc_sidebar_entries_dirty =
+                                                                    true;
+                                                                cx.stop_propagation();
+                                                                cx.notify();
+                                                            }),
+                                                        )
+                                                })
+                                                .child(if has_children {
+                                                    if collapsed { "▸" } else { "▾" }
+                                                } else {
+                                                    ""
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .items_center()
+                                                .h(px(28.0))
+                                                .rounded_sm()
+                                                .px_1()
+                                                .truncate()
+                                                .text_color(rgb(title_color))
+                                                .when(navigable, |this| {
+                                                    this.cursor_pointer()
+                                                        .hover(move |style| {
+                                                            style.bg(rgb(theme.control_hover))
+                                                        })
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(move |this, _, _, cx| {
+                                                                this.navigate_to_toc_entry(
+                                                                    entry_ix, cx,
+                                                                );
+                                                                cx.stop_propagation();
+                                                            }),
+                                                        )
+                                                })
+                                                .child(title),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .ml_2()
+                                                .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
+                                                .text_align(gpui::TextAlign::Right)
+                                                .text_color(rgb(theme.text_muted))
+                                                .child(if navigable {
+                                                    format!("{}", page_number)
+                                                } else {
+                                                    String::new()
+                                                }),
+                                        ),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(&scroll_handle)
+                .size_full(),
+            );
+
+        Self::render_sidebar_shell(
+            "Table of Contents",
+            self.toc.len(),
+            TOC_SIDEBAR_WIDTH,
+            content,
+            theme,
+        )
+    }
+
+    fn render_notes_sidebar(
+        &mut self,
+        theme: Theme,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let visible_len = self.notes_sidebar_entries.len();
+        let scroll_handle = self.notes_sidebar_scroll.clone();
+        let content = div()
+            .id("notes-sidebar-content")
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .child(
+                uniform_list(
+                    "notes-sidebar-list",
+                    visible_len,
+                    cx.processor(|this, visible_range: Range<usize>, _window, cx| {
+                        let theme = cx.global::<SettingsStore>().resolved_theme;
+                        let selected = this.notes_sidebar_selected;
+
+                        visible_range
+                            .filter_map(|visible_ix| {
+                                let entry = this.notes_sidebar_entries.get(visible_ix)?;
+                                let note_ix = entry.note_ix;
+                                let note_id = entry.id;
+                                let body = entry.body.clone();
+                                let text = entry.text.clone();
+                                let page = entry.page;
+                                let color = entry.color;
+                                let current = selected == Some(note_id);
+
+                                Some(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .w_full()
+                                        .items_center()
+                                        .h(px(NOTES_SIDEBAR_ROW_HEIGHT))
+                                        .px_2()
+                                        .gap_2()
+                                        .bg(if current {
+                                            rgba(theme.selected_row)
+                                        } else {
+                                            rgba(0x00000000)
+                                        })
+                                        .cursor_pointer()
+                                        .hover(move |style| style.bg(rgb(theme.control_hover)))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.navigate_to_note(note_ix, cx);
+                                                cx.stop_propagation();
+                                            }),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .w(px(8.0))
+                                                .h(px(8.0))
+                                                .rounded_sm()
+                                                .bg(rgba(theme.note_color(color))),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .flex_col()
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_size(px(13.0))
+                                                        .text_color(rgb(theme.text))
+                                                        .child(body),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_size(px(11.0))
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .child(text),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .ml_2()
+                                                .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
+                                                .text_align(gpui::TextAlign::Right)
+                                                .text_color(rgb(theme.text_muted))
+                                                .child(format!("{}", page)),
+                                        ),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(&scroll_handle)
+                .size_full(),
+            );
+
+        Self::render_sidebar_shell("Notes", visible_len, NOTES_SIDEBAR_WIDTH, content, theme)
     }
 
     fn highlight_overlays(&self) -> (Vec<HighlightOverlay>, Vec<Bounds<Pixels>>) {
@@ -4099,6 +4367,12 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &ToggleToc, _, cx| {
                 this.toggle_toc_sidebar(cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenNotes, window, cx| {
+                this.toggle_notes_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleNotes, _, cx| {
+                this.toggle_notes_sidebar(cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
@@ -4303,8 +4577,12 @@ impl Render for PdfView {
                             .when(self.toc_sidebar_open && !self.toc.is_empty(), |this| {
                                 this.child(self.render_toc_sidebar(theme, window, cx))
                             })
+                            .when(
+                                self.notes_sidebar_open && self.has_navigable_notes(),
+                                |this| this.child(self.render_notes_sidebar(theme, window, cx)),
+                            )
                             .child(
-                                div().flex_1().min_w_0().min_h_0().child(
+                                div().flex_1().min_w_0().min_h_0().overflow_hidden().child(
                                     canvas(
                                         move |bounds, window, cx| {
                                             prepaint_view.update(cx, |this, cx| {
@@ -4465,6 +4743,7 @@ impl Render for PdfView {
                                     .flex()
                                     .items_center()
                                     .child(self.render_toc_button(theme, cx))
+                                    .child(self.render_notes_button(theme, cx))
                                     .child(
                                         div()
                                             .flex_1()
@@ -4481,49 +4760,20 @@ impl Render for PdfView {
                     ),
             )
             .when_some(self.command_palette.clone(), |this, palette| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .flex()
-                        .items_start()
-                        .justify_center()
-                        .pt(px(96.0))
-                        .bg(rgba(theme.overlay))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.close_command_palette(window, cx);
-                            }),
-                        )
-                        .on_scroll_wheel(|_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(palette),
-                )
+                this.child(Self::render_top_aligned_overlay(
+                    palette,
+                    |this, window, cx| this.close_command_palette(window, cx),
+                    theme,
+                    cx,
+                ))
             })
             .when_some(self.settings_panel.clone(), |this, panel| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .flex()
-                        .items_start()
-                        .justify_center()
-                        .pt(px(96.0))
-                        .bg(rgba(theme.overlay))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.close_settings_panel(window, cx);
-                            }),
-                        )
-                        .child(panel),
-                )
+                this.child(Self::render_top_aligned_overlay(
+                    panel,
+                    |this, window, cx| this.close_settings_panel(window, cx),
+                    theme,
+                    cx,
+                ))
             })
             .when_some(self.search_bar.clone(), |this, search_bar| {
                 this.child(
@@ -4535,119 +4785,52 @@ impl Render for PdfView {
                 )
             })
             .when_some(self.toc_palette.clone(), |this, palette| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(rgba(theme.overlay))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.close_toc_palette(window, cx);
-                            }),
-                        )
-                        .on_scroll_wheel(|_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(palette),
-                )
+                this.child(Self::render_centered_overlay(
+                    palette,
+                    |this, window, cx| this.close_toc_palette(window, cx),
+                    theme,
+                    cx,
+                ))
+            })
+            .when_some(self.notes_palette.clone(), |this, palette| {
+                this.child(Self::render_centered_overlay(
+                    palette,
+                    |this, window, cx| this.close_notes_palette(window, cx),
+                    theme,
+                    cx,
+                ))
             })
             .when_some(self.history_palette.clone(), |this, palette| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(rgba(theme.overlay))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.close_history_palette(window, cx);
-                            }),
-                        )
-                        .on_scroll_wheel(|_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(palette),
-                )
+                this.child(Self::render_centered_overlay(
+                    palette,
+                    |this, window, cx| this.close_history_palette(window, cx),
+                    theme,
+                    cx,
+                ))
             })
             .when_some(self.bookmark_palette.clone(), |this, palette| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(rgba(theme.overlay))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.close_bookmark_palette(window, cx);
-                            }),
-                        )
-                        .on_scroll_wheel(|_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(palette),
-                )
+                this.child(Self::render_centered_overlay(
+                    palette,
+                    |this, window, cx| this.close_bookmark_palette(window, cx),
+                    theme,
+                    cx,
+                ))
             })
             .when_some(self.bookmark_prompt.clone(), |this, prompt| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(rgba(theme.overlay))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.close_bookmark_prompt(window, cx);
-                            }),
-                        )
-                        .on_scroll_wheel(|_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(prompt),
-                )
+                this.child(Self::render_centered_overlay(
+                    prompt,
+                    |this, window, cx| this.close_bookmark_prompt(window, cx),
+                    theme,
+                    cx,
+                ))
             })
             .when_some(self.note_editor.clone(), |this, editor| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(rgba(theme.overlay))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.close_note_editor(window, cx);
-                            }),
-                        )
-                        .on_scroll_wheel(|_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(editor),
-                )
+                this.child(Self::render_centered_overlay(
+                    editor,
+                    |this, window, cx| this.close_note_editor(window, cx),
+                    theme,
+                    cx,
+                ))
             })
             .children(note_popup)
             .children(context_menu)

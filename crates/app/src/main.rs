@@ -9,6 +9,7 @@ mod history;
 mod keybindings;
 mod library;
 mod note_editor;
+mod notes;
 mod pdf_view;
 mod picker;
 mod search;

@@ -7,9 +7,9 @@ use crate::{
     },
     pdf_view::{
         AddBookmark, CopySelection, JumpBackward, JumpForward, NextHalfPage, NextPage,
-        OpenBookmarks, OpenHistory, OpenSettings, PreviousHalfPage, PreviousPage, ResetZoom,
-        Search, SearchNext, SearchPrev, SelectAll, Toc, ToggleCommandPalette, ToggleFullScreen,
-        ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
+        OpenBookmarks, OpenHistory, OpenNotes, OpenSettings, PreviousHalfPage, PreviousPage,
+        ResetZoom, Search, SearchNext, SearchPrev, SelectAll, Toc, ToggleCommandPalette,
+        ToggleFullScreen, ToggleNotes, ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
     },
     picker::{
         PickerBackspace, PickerCancel, PickerConfirm, PickerDelete, PickerEnd, PickerHome,
@@ -26,13 +26,13 @@ use crate::{
 };
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
 
-const PDF_CONTEXT: &str = "PdfView && !CommandPalette && !Search && !Toc && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor";
-const PDF_NO_SEARCH_CONTEXT: &str =
-    "PdfView && !Search && !Toc && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor";
+const PDF_CONTEXT: &str = "PdfView && !CommandPalette && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor";
+const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor";
 const PALETTE_CONTEXT: &str = "CommandPalette";
 const SEARCH_CONTEXT: &str = "Search";
 const SETTINGS_CONTEXT: &str = "SettingsPanel";
 const TOC_CONTEXT: &str = "Toc";
+const NOTES_CONTEXT: &str = "Notes";
 const HISTORY_CONTEXT: &str = "History";
 const BOOKMARKS_CONTEXT: &str = "Bookmarks";
 const BOOKMARK_PROMPT_CONTEXT: &str = "BookmarkPrompt";
@@ -150,6 +150,21 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<PickerSelectAll>("cmd-a", TOC_CONTEXT),
         bind::<PickerPaste>("ctrl-v", TOC_CONTEXT),
         bind::<PickerPaste>("cmd-v", TOC_CONTEXT),
+        bind::<PickerConfirm>("enter", NOTES_CONTEXT),
+        bind::<PickerCancel>("escape", NOTES_CONTEXT),
+        bind::<PickerSelectNext>("down", NOTES_CONTEXT),
+        bind::<PickerSelectPrev>("up", NOTES_CONTEXT),
+        bind::<PickerBackspace>("backspace", NOTES_CONTEXT),
+        bind::<PickerDelete>("delete", NOTES_CONTEXT),
+        bind::<PickerRemove>("shift-delete", NOTES_CONTEXT),
+        bind::<PickerLeft>("left", NOTES_CONTEXT),
+        bind::<PickerRight>("right", NOTES_CONTEXT),
+        bind::<PickerHome>("home", NOTES_CONTEXT),
+        bind::<PickerEnd>("end", NOTES_CONTEXT),
+        bind::<PickerSelectAll>("ctrl-a", NOTES_CONTEXT),
+        bind::<PickerSelectAll>("cmd-a", NOTES_CONTEXT),
+        bind::<PickerPaste>("ctrl-v", NOTES_CONTEXT),
+        bind::<PickerPaste>("cmd-v", NOTES_CONTEXT),
         bind::<PickerConfirm>("enter", HISTORY_CONTEXT),
         bind::<PickerCancel>("escape", HISTORY_CONTEXT),
         bind::<PickerSelectNext>("down", HISTORY_CONTEXT),
@@ -403,6 +418,16 @@ fn action_specs() -> &'static [ActionSpec] {
             ],
             context: Some(PDF_NO_SEARCH_CONTEXT),
             build: boxed::<ToggleToc>,
+        },
+        ActionSpec {
+            aliases: &["open-notes", "notes"],
+            context: Some(PDF_NO_SEARCH_CONTEXT),
+            build: boxed::<OpenNotes>,
+        },
+        ActionSpec {
+            aliases: &["toggle-notes", "toggle-notes-sidebar"],
+            context: Some(PDF_NO_SEARCH_CONTEXT),
+            build: boxed::<ToggleNotes>,
         },
         ActionSpec {
             aliases: &["toggle-command-palette", "command-palette"],
