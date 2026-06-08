@@ -31,10 +31,10 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use arboard::{Clipboard, ImageData};
 use gpui::{
     Anchor, Bounds, ClipboardItem, Context, Corners, Entity, FocusHandle, Focusable, IntoElement,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Task,
-    UniformListScrollHandle, Window, anchored, canvas, deferred, div, fill, point, prelude::*, px,
-    rgb, rgba, size, uniform_list,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathPromptOptions, Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta,
+    ScrollWheelEvent, SharedString, Task, UniformListScrollHandle, Window, anchored, canvas,
+    deferred, div, fill, point, prelude::*, px, rgb, rgba, size, uniform_list,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
@@ -71,6 +71,7 @@ gpui::actions!(
         OpenSettings,
         OpenHistory,
         OpenBookmarks,
+        OpenFile,
         AddBookmark
     ]
 );
@@ -1649,6 +1650,41 @@ impl PdfView {
             Ok(Ok(None)) | Err(_) => {}
         })
         .detach();
+    }
+
+    fn open_file(&mut self, cx: &mut Context<Self>) {
+        let dialog = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open PDF".into()),
+        });
+
+        cx.spawn(async move |this, cx| match dialog.await {
+            Ok(Ok(Some(paths))) => {
+                let Some(path) = paths.into_iter().next() else {
+                    return;
+                };
+                if !Self::is_supported_document_path(&path) {
+                    eprintln!("unsupported file type: {}", path.display());
+                    return;
+                }
+                if let Err(error) = this.update(cx, |this, cx| {
+                    this.open_library_document(path, None, cx);
+                }) {
+                    eprintln!("failed to open selected PDF: {error:#}");
+                }
+            }
+            Ok(Err(error)) => eprintln!("failed to open file dialog: {error:#}"),
+            Ok(Ok(None)) | Err(_) => {}
+        })
+        .detach();
+    }
+
+    fn is_supported_document_path(path: &Path) -> bool {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
     }
 
     fn save_image_to_path(
@@ -4386,6 +4422,9 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &OpenBookmarks, window, cx| {
                 this.toggle_bookmark_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenFile, _, cx| {
+                this.open_file(cx);
             }))
             .on_action(cx.listener(|this, _: &AddBookmark, window, cx| {
                 this.toggle_bookmark_prompt(window, cx);

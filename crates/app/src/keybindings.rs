@@ -7,9 +7,10 @@ use crate::{
     },
     pdf_view::{
         AddBookmark, CopySelection, JumpBackward, JumpForward, NextHalfPage, NextPage,
-        OpenBookmarks, OpenHistory, OpenNotes, OpenSettings, PreviousHalfPage, PreviousPage,
-        ResetZoom, Search, SearchNext, SearchPrev, SelectAll, Toc, ToggleCommandPalette,
-        ToggleFullScreen, ToggleNotes, ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
+        OpenBookmarks, OpenFile, OpenHistory, OpenNotes, OpenSettings, PreviousHalfPage,
+        PreviousPage, ResetZoom, Search, SearchNext, SearchPrev, SelectAll, Toc,
+        ToggleCommandPalette, ToggleFullScreen, ToggleNotes, ToggleToc, ToggleTransparency, ZoomIn,
+        ZoomOut,
     },
     picker::{
         PickerBackspace, PickerCancel, PickerConfirm, PickerDelete, PickerEnd, PickerHome,
@@ -76,10 +77,12 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<OpenSettings>("ctrl-,", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenSettings>("cmd-,", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenHistory>("ctrl-h", PDF_NO_SEARCH_CONTEXT),
+        bind::<OpenFile>("cmd-o", PDF_NO_SEARCH_CONTEXT),
     ]);
 
     match preset {
         KeymapPreset::Modern => bindings.extend([
+            bind::<OpenFile>("ctrl-o", PDF_NO_SEARCH_CONTEXT),
             bind::<Search>("ctrl-f", PDF_CONTEXT),
             bind::<Search>("cmd-f", PDF_CONTEXT),
             bind::<Search>("/", PDF_CONTEXT),
@@ -458,6 +461,11 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["open-bookmarks", "bookmarks"],
             context: Some(PDF_NO_SEARCH_CONTEXT),
             build: boxed::<OpenBookmarks>,
+        },
+        ActionSpec {
+            aliases: &["open-file", "open-pdf"],
+            context: Some(PDF_NO_SEARCH_CONTEXT),
+            build: boxed::<OpenFile>,
         },
         ActionSpec {
             aliases: &["add-bookmark", "bookmark-page"],
