@@ -603,6 +603,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                                                         .flex_row()
                                                         .items_center()
                                                         .justify_between()
+                                                        .w_full()
                                                         .h(px(row_height))
                                                         .px_3()
                                                         .text_size(px(13.0))
