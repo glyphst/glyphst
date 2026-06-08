@@ -8,8 +8,8 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 
 use crate::library::HighlightColor;
 
-pub const DEFAULT_THEME_ID: &str = "glyphst-dark";
-pub const DEFAULT_PAGE_GAP: f32 = 4.0;
+pub const DEFAULT_THEME_ID: &str = "glyphst-light";
+pub const DEFAULT_PAGE_GAP: f32 = 24.0;
 
 const MIN_PAGE_GAP: f32 = 0.0;
 const MAX_PAGE_GAP: f32 = 240.0;
@@ -174,31 +174,31 @@ impl Default for Theme {
 }
 
 pub const DEFAULT_THEME: Theme = Theme {
-    background: 0x202020,
+    background: 0xe8e8e8,
     page: 0xffffff,
-    selection_highlight: 0x61afef66,
-    highlight_yellow: 0xe5c07b66,
-    highlight_green: 0x98c37966,
-    highlight_blue: 0x61afef66,
-    highlight_pink: 0xc678dd66,
-    highlight_orange: 0xd19a6666,
-    overlay: 0x00000066,
-    footer_background: 0x181818,
-    footer_border: 0x303030,
-    footer_text: 0xaaaaaa,
-    panel_background: 0x181818,
-    panel_border: 0x343434,
-    text: 0xd4d4d4,
-    text_muted: 0x888888,
-    placeholder_text: 0x888888aa,
-    accent: 0x61afef,
-    match_highlight: 0xe5c07b,
-    selected_row: 0x3a3f4bcc,
-    control_background: 0x242424,
-    control_border: 0x3a3a3a,
-    control_hover: 0x303030,
-    success: 0x98c379,
-    error: 0xe06c75,
+    selection_highlight: 0x0969da4d,
+    highlight_yellow: 0xfff8c54d,
+    highlight_green: 0xdafbe14d,
+    highlight_blue: 0xddf4ff4d,
+    highlight_pink: 0xffeff74d,
+    highlight_orange: 0xfff1e54d,
+    overlay: 0x00000033,
+    footer_background: 0xf6f8fa,
+    footer_border: 0xd0d7de,
+    footer_text: 0x57606a,
+    panel_background: 0xf8f8f8,
+    panel_border: 0xd0d7de,
+    text: 0x24292f,
+    text_muted: 0x57606a,
+    placeholder_text: 0x6e7781aa,
+    accent: 0x0969da,
+    match_highlight: 0x9a6700,
+    selected_row: 0x0969da1f,
+    control_background: 0xffffff,
+    control_border: 0xd0d7de,
+    control_hover: 0xf3f4f6,
+    success: 0x1a7f37,
+    error: 0xcf222e,
     page_gap: DEFAULT_PAGE_GAP,
 };
 
@@ -430,8 +430,8 @@ impl ThemeRegistry {
         if registry.theme(DEFAULT_THEME_ID).is_none() {
             registry.insert_theme(ThemeEntry {
                 id: DEFAULT_THEME_ID.to_string(),
-                name: "Glyphst Dark".to_string(),
-                appearance: ThemeAppearance::Dark,
+                name: "Glyphst Light".to_string(),
+                appearance: ThemeAppearance::Light,
                 theme: DEFAULT_THEME,
             });
         }
