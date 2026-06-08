@@ -101,6 +101,7 @@ const GRID_OVERVIEW_CELL_GAP: f32 = 12.0;
 const GRID_OVERVIEW_ROW_PADDING_Y: f32 = 16.0;
 const GRID_OVERVIEW_LABEL_HEIGHT: f32 = 18.0;
 const GRID_OVERVIEW_HEADER_HEIGHT: f32 = 40.0;
+const GRID_OVERVIEW_VIEWPORT_WIDTH_EPSILON: f32 = 0.5;
 const SIDEBAR_PAGE_NUMBER_WIDTH: f32 = 38.0;
 const INFERRED_SPACE_WIDTH_RATIO: f32 = 0.75;
 const INFERRED_SPACE_HEIGHT_RATIO: f32 = 0.20;
@@ -3894,9 +3895,7 @@ impl PdfView {
     }
 
     fn grid_overview_cell_width(zoom: f32) -> f32 {
-        Self::grid_overview_thumbnail_max_width(zoom)
-            + GRID_OVERVIEW_CELL_PADDING
-            + GRID_OVERVIEW_CELL_GAP
+        Self::grid_overview_thumbnail_max_width(zoom) + GRID_OVERVIEW_CELL_PADDING
     }
 
     fn grid_overview_row_height(zoom: f32) -> f32 {
@@ -3913,7 +3912,19 @@ impl PdfView {
 
         let available_width = (viewport_width - GRID_OVERVIEW_CELL_GAP * 2.0).max(1.0);
         let cell_width = Self::grid_overview_cell_width(zoom).max(1.0);
-        ((available_width / cell_width).floor() as usize).max(1)
+        (((available_width + GRID_OVERVIEW_CELL_GAP) / (cell_width + GRID_OVERVIEW_CELL_GAP))
+            .floor() as usize)
+            .max(1)
+    }
+
+    fn grid_overview_horizontal_gap(viewport_width: f32, cols: usize, zoom: f32) -> f32 {
+        if cols <= 1 || !viewport_width.is_finite() || viewport_width <= 0.0 {
+            return GRID_OVERVIEW_CELL_GAP;
+        }
+
+        let available_width = (viewport_width - GRID_OVERVIEW_CELL_GAP * 2.0).max(1.0);
+        let cells_width = Self::grid_overview_cell_width(zoom) * cols as f32;
+        ((available_width - cells_width) / (cols - 1) as f32).max(GRID_OVERVIEW_CELL_GAP)
     }
 
     fn update_grid_overview_cols(&mut self, viewport_width: f32, cx: &mut Context<Self>) -> bool {
@@ -3921,9 +3932,11 @@ impl PdfView {
             return false;
         }
 
+        let viewport_width_changed = (viewport_width - self.grid_overview_viewport_width).abs()
+            > GRID_OVERVIEW_VIEWPORT_WIDTH_EPSILON;
         self.grid_overview_viewport_width = viewport_width;
         let cols = Self::grid_overview_cols_for_width(viewport_width, self.grid_overview_zoom);
-        if cols == self.grid_overview_cols {
+        if cols == self.grid_overview_cols && !viewport_width_changed {
             return false;
         }
 
@@ -3956,6 +3969,8 @@ impl PdfView {
         let thumbnail_max_height = Self::grid_overview_thumbnail_max_height(zoom);
         let thumbnail_box_width = thumbnail_max_width + GRID_OVERVIEW_CELL_PADDING;
         let thumbnail_box_height = thumbnail_max_height + GRID_OVERVIEW_CELL_PADDING;
+        let horizontal_gap =
+            Self::grid_overview_horizontal_gap(self.grid_overview_viewport_width, cols, zoom);
         let page_count = self.pages.len();
         let scroll_handle = self.grid_overview_scroll.clone();
         let measure_view = cx.entity();
@@ -4042,9 +4057,10 @@ impl PdfView {
                                             .flex_row()
                                             .items_start()
                                             .justify_center()
-                                            .gap_3()
+                                            .gap(px(horizontal_gap))
+                                            .w_full()
                                             .h(px(row_height))
-                                            .px_3()
+                                            .px(px(GRID_OVERVIEW_CELL_GAP))
                                             .py_2();
 
                                         for col_ix in 0..cols {
