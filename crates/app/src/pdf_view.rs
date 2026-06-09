@@ -3155,10 +3155,6 @@ impl PdfView {
     }
 
     fn toggle_toc_sidebar(&mut self, cx: &mut Context<Self>) {
-        if self.toc.is_empty() {
-            return;
-        }
-
         self.toc_sidebar_open = !self.toc_sidebar_open;
         cx.notify();
     }
@@ -3170,10 +3166,6 @@ impl PdfView {
         }
 
         let entries = self.toc_palette_entries();
-        if entries.is_empty() {
-            return;
-        }
-
         self.close_all_overlays(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
@@ -3201,10 +3193,6 @@ impl PdfView {
     }
 
     fn toggle_notes_sidebar(&mut self, cx: &mut Context<Self>) {
-        if !self.has_navigable_notes() {
-            return;
-        }
-
         if !self.notes_sidebar_open {
             self.refresh_notes_sidebar_entries();
         }
@@ -3224,10 +3212,6 @@ impl PdfView {
         }
 
         let entries = self.note_palette_entries();
-        if entries.is_empty() {
-            return;
-        }
-
         self.close_all_overlays(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
@@ -3263,10 +3247,6 @@ impl PdfView {
             self.notes_sidebar_selected = None;
         }
         self.notes_sidebar_entries = entries;
-    }
-
-    fn has_navigable_notes(&self) -> bool {
-        self.notes.iter().any(|note| !note.rects.is_empty())
     }
 
     fn toggle_history_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3719,6 +3699,18 @@ impl PdfView {
             .child(content)
     }
 
+    fn render_sidebar_empty_message(message: &'static str, theme: Theme) -> impl IntoElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .px_3()
+            .text_color(rgb(theme.text_muted))
+            .child(message)
+    }
+
     fn context_menu_highlight_color_row(
         action: HighlightColorAction,
         current: Option<HighlightColor>,
@@ -3989,7 +3981,7 @@ impl PdfView {
     }
 
     fn render_notes_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let open = self.notes_sidebar_open && self.has_navigable_notes();
+        let open = self.notes_sidebar_open;
 
         div()
             .flex()
@@ -4426,60 +4418,69 @@ impl PdfView {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .child(
-                uniform_list(
-                    "toc-sidebar-list",
-                    visible_len,
-                    cx.processor(|this, visible_range: Range<usize>, _window, cx| {
-                        let theme = cx.global::<SettingsStore>().resolved_theme;
-                        let current_page = this.current_page_index();
+            .flex()
+            .flex_col()
+            .when(visible_len == 0, |this| {
+                this.child(Self::render_sidebar_empty_message(
+                    "No table of contents entries found",
+                    theme,
+                ))
+            })
+            .when(visible_len > 0, |this| {
+                this.child(
+                    uniform_list(
+                        "toc-sidebar-list",
+                        visible_len,
+                        cx.processor(|this, visible_range: Range<usize>, _window, cx| {
+                            let theme = cx.global::<SettingsStore>().resolved_theme;
+                            let current_page = this.current_page_index();
 
-                        visible_range
-                            .filter_map(|visible_ix| {
-                                let entry_ix = this
-                                    .toc_sidebar_visible_entry_ixs
-                                    .get(visible_ix)
-                                    .copied()?;
-                                let entry = &this.toc[entry_ix];
-                                let collapsed = this.toc_collapsed.contains(&entry_ix);
-                                let current = entry.navigable && entry.page_idx == current_page;
-                                let title = entry.title.clone();
-                                let title_color = if entry.navigable {
-                                    theme.text
-                                } else {
-                                    theme.text_muted
-                                };
-                                let depth = entry.depth;
-                                let has_children = entry.has_children;
-                                let navigable = entry.navigable;
-                                let page_number = entry.page_idx + 1;
+                            visible_range
+                                .filter_map(|visible_ix| {
+                                    let entry_ix = this
+                                        .toc_sidebar_visible_entry_ixs
+                                        .get(visible_ix)
+                                        .copied()?;
+                                    let entry = &this.toc[entry_ix];
+                                    let collapsed = this.toc_collapsed.contains(&entry_ix);
+                                    let current = entry.navigable && entry.page_idx == current_page;
+                                    let title = entry.title.clone();
+                                    let title_color = if entry.navigable {
+                                        theme.text
+                                    } else {
+                                        theme.text_muted
+                                    };
+                                    let depth = entry.depth;
+                                    let has_children = entry.has_children;
+                                    let navigable = entry.navigable;
+                                    let page_number = entry.page_idx + 1;
 
-                                Some(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .w_full()
-                                        .items_center()
-                                        .h(px(TOC_SIDEBAR_ROW_HEIGHT))
-                                        .px_2()
-                                        .bg(if current {
-                                            rgba(theme.selected_row)
-                                        } else {
-                                            rgba(0x00000000)
-                                        })
-                                        .child(div().flex_none().w(px(depth as f32 * 14.0)))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_none()
-                                                .items_center()
-                                                .justify_center()
-                                                .w(px(18.0))
-                                                .h(px(24.0))
-                                                .rounded_sm()
-                                                .text_color(rgb(theme.text_muted))
-                                                .when(has_children, |this| {
-                                                    this.cursor_pointer()
+                                    Some(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .w_full()
+                                            .items_center()
+                                            .h(px(TOC_SIDEBAR_ROW_HEIGHT))
+                                            .px_2()
+                                            .bg(if current {
+                                                rgba(theme.selected_row)
+                                            } else {
+                                                rgba(0x00000000)
+                                            })
+                                            .child(div().flex_none().w(px(depth as f32 * 14.0)))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_none()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .w(px(18.0))
+                                                    .h(px(24.0))
+                                                    .rounded_sm()
+                                                    .text_color(rgb(theme.text_muted))
+                                                    .when(has_children, |this| {
+                                                        this.cursor_pointer()
                                                         .hover(move |style| {
                                                             style.bg(rgb(theme.control_hover))
                                                         })
@@ -4499,62 +4500,65 @@ impl PdfView {
                                                                 cx.notify();
                                                             }),
                                                         )
-                                                })
-                                                .child(if has_children {
-                                                    if collapsed { "▸" } else { "▾" }
-                                                } else {
-                                                    ""
-                                                }),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .items_center()
-                                                .h(px(28.0))
-                                                .rounded_sm()
-                                                .px_1()
-                                                .truncate()
-                                                .text_color(rgb(title_color))
-                                                .when(navigable, |this| {
-                                                    this.cursor_pointer()
-                                                        .hover(move |style| {
-                                                            style.bg(rgb(theme.control_hover))
-                                                        })
-                                                        .on_mouse_down(
-                                                            MouseButton::Left,
-                                                            cx.listener(move |this, _, _, cx| {
-                                                                this.navigate_to_toc_entry(
-                                                                    entry_ix, cx,
-                                                                );
-                                                                cx.stop_propagation();
-                                                            }),
-                                                        )
-                                                })
-                                                .child(title),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .ml_2()
-                                                .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
-                                                .text_align(gpui::TextAlign::Right)
-                                                .text_color(rgb(theme.text_muted))
-                                                .child(if navigable {
-                                                    format!("{}", page_number)
-                                                } else {
-                                                    String::new()
-                                                }),
-                                        ),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    }),
+                                                    })
+                                                    .child(if has_children {
+                                                        if collapsed { "▸" } else { "▾" }
+                                                    } else {
+                                                        ""
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .items_center()
+                                                    .h(px(28.0))
+                                                    .rounded_sm()
+                                                    .px_1()
+                                                    .truncate()
+                                                    .text_color(rgb(title_color))
+                                                    .when(navigable, |this| {
+                                                        this.cursor_pointer()
+                                                            .hover(move |style| {
+                                                                style.bg(rgb(theme.control_hover))
+                                                            })
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this.navigate_to_toc_entry(
+                                                                            entry_ix, cx,
+                                                                        );
+                                                                        cx.stop_propagation();
+                                                                    },
+                                                                ),
+                                                            )
+                                                    })
+                                                    .child(title),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .ml_2()
+                                                    .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
+                                                    .text_align(gpui::TextAlign::Right)
+                                                    .text_color(rgb(theme.text_muted))
+                                                    .child(if navigable {
+                                                        format!("{}", page_number)
+                                                    } else {
+                                                        String::new()
+                                                    }),
+                                            ),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&scroll_handle)
+                    .size_full(),
                 )
-                .track_scroll(&scroll_handle)
-                .size_full(),
-            );
+            });
 
         Self::render_sidebar_shell(
             "Table of Contents",
@@ -4578,94 +4582,101 @@ impl PdfView {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .child(
-                uniform_list(
-                    "notes-sidebar-list",
-                    visible_len,
-                    cx.processor(|this, visible_range: Range<usize>, _window, cx| {
-                        let theme = cx.global::<SettingsStore>().resolved_theme;
-                        let selected = this.notes_sidebar_selected;
+            .flex()
+            .flex_col()
+            .when(visible_len == 0, |this| {
+                this.child(Self::render_sidebar_empty_message("No notes found", theme))
+            })
+            .when(visible_len > 0, |this| {
+                this.child(
+                    uniform_list(
+                        "notes-sidebar-list",
+                        visible_len,
+                        cx.processor(|this, visible_range: Range<usize>, _window, cx| {
+                            let theme = cx.global::<SettingsStore>().resolved_theme;
+                            let selected = this.notes_sidebar_selected;
 
-                        visible_range
-                            .filter_map(|visible_ix| {
-                                let entry = this.notes_sidebar_entries.get(visible_ix)?;
-                                let note_ix = entry.note_ix;
-                                let note_id = entry.id;
-                                let body = entry.body.clone();
-                                let text = entry.text.clone();
-                                let page = entry.page;
-                                let color = entry.color;
-                                let current = selected == Some(note_id);
+                            visible_range
+                                .filter_map(|visible_ix| {
+                                    let entry = this.notes_sidebar_entries.get(visible_ix)?;
+                                    let note_ix = entry.note_ix;
+                                    let note_id = entry.id;
+                                    let body = entry.body.clone();
+                                    let text = entry.text.clone();
+                                    let page = entry.page;
+                                    let color = entry.color;
+                                    let current = selected == Some(note_id);
 
-                                Some(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .w_full()
-                                        .items_center()
-                                        .h(px(NOTES_SIDEBAR_ROW_HEIGHT))
-                                        .px_2()
-                                        .gap_2()
-                                        .bg(if current {
-                                            rgba(theme.selected_row)
-                                        } else {
-                                            rgba(0x00000000)
-                                        })
-                                        .cursor_pointer()
-                                        .hover(move |style| style.bg(rgb(theme.control_hover)))
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.navigate_to_note(note_ix, cx);
-                                                cx.stop_propagation();
-                                            }),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .w(px(8.0))
-                                                .h(px(8.0))
-                                                .rounded_sm()
-                                                .bg(rgba(theme.note_color(color))),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .flex_col()
-                                                .child(
-                                                    div()
-                                                        .truncate()
-                                                        .text_size(px(13.0))
-                                                        .text_color(rgb(theme.text))
-                                                        .child(body),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .truncate()
-                                                        .text_size(px(11.0))
-                                                        .text_color(rgb(theme.text_muted))
-                                                        .child(text),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .ml_2()
-                                                .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
-                                                .text_align(gpui::TextAlign::Right)
-                                                .text_color(rgb(theme.text_muted))
-                                                .child(format!("{}", page)),
-                                        ),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    }),
+                                    Some(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .w_full()
+                                            .items_center()
+                                            .h(px(NOTES_SIDEBAR_ROW_HEIGHT))
+                                            .px_2()
+                                            .gap_2()
+                                            .bg(if current {
+                                                rgba(theme.selected_row)
+                                            } else {
+                                                rgba(0x00000000)
+                                            })
+                                            .cursor_pointer()
+                                            .hover(move |style| style.bg(rgb(theme.control_hover)))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    this.navigate_to_note(note_ix, cx);
+                                                    cx.stop_propagation();
+                                                }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .w(px(8.0))
+                                                    .h(px(8.0))
+                                                    .rounded_sm()
+                                                    .bg(rgba(theme.note_color(color))),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .flex_col()
+                                                    .child(
+                                                        div()
+                                                            .truncate()
+                                                            .text_size(px(13.0))
+                                                            .text_color(rgb(theme.text))
+                                                            .child(body),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .truncate()
+                                                            .text_size(px(11.0))
+                                                            .text_color(rgb(theme.text_muted))
+                                                            .child(text),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .ml_2()
+                                                    .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
+                                                    .text_align(gpui::TextAlign::Right)
+                                                    .text_color(rgb(theme.text_muted))
+                                                    .child(format!("{}", page)),
+                                            ),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&scroll_handle)
+                    .size_full(),
                 )
-                .track_scroll(&scroll_handle)
-                .size_full(),
-            );
+            });
 
         Self::render_sidebar_shell("Notes", visible_len, NOTES_SIDEBAR_WIDTH, content, theme)
     }
@@ -5280,13 +5291,12 @@ impl Render for PdfView {
                             .min_h_0()
                             .flex()
                             .flex_row()
-                            .when(self.toc_sidebar_open && !self.toc.is_empty(), |this| {
+                            .when(self.toc_sidebar_open, |this| {
                                 this.child(self.render_toc_sidebar(theme, window, cx))
                             })
-                            .when(
-                                self.notes_sidebar_open && self.has_navigable_notes(),
-                                |this| this.child(self.render_notes_sidebar(theme, window, cx)),
-                            )
+                            .when(self.notes_sidebar_open, |this| {
+                                this.child(self.render_notes_sidebar(theme, window, cx))
+                            })
                             .child(
                                 div().flex_1().min_w_0().min_h_0().overflow_hidden().child(
                                     canvas(
