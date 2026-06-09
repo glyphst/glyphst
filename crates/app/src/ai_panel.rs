@@ -9,12 +9,12 @@ use crate::{
 use anyhow::{Context as _, Result, anyhow};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{
-    App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point as GpuiPoint, Render, ScrollHandle, SharedString, Style, Task, TextRun,
-    UTF16Selection, WeakEntity, Window, WrappedLine, div, fill, point, prelude::*, px, relative,
-    rgb, rgba, size,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollHandle, SharedString, Style,
+    Task, TextRun, UTF16Selection, WeakEntity, Window, WrappedLine, div, fill, point, prelude::*,
+    px, relative, rgb, rgba, size,
 };
 use serde_json::{Value, json};
 
@@ -33,13 +33,27 @@ gpui::actions!(
         AiPanelHome,
         AiPanelEnd,
         AiPanelSelectAll,
+        AiPanelSelectLeft,
+        AiPanelSelectRight,
+        AiPanelSelectUp,
+        AiPanelSelectDown,
+        AiPanelSelectHome,
+        AiPanelSelectEnd,
+        AiPanelCopy,
+        AiPanelCut,
         AiPanelPaste
     ]
 );
 
 const AI_PANEL_WIDTH: f32 = 320.0;
+const COMPLETION_MENU_WIDTH: f32 = 248.0;
+const COMPLETION_MENU_ROW_HEIGHT: f32 = 46.0;
 const MAX_CONTEXT_CHARS: usize = 12_000;
 const DEFAULT_SESSION_TITLE: &str = "New Chat";
+const TITLE_GENERATION_PROMPT: &str = "Generate a concise 3-7 word title for this conversation, \
+omitting punctuation. Go straight to the title, without any preamble or prefix like `Title:`. \
+If the conversation is about a specific subject, include it in the title. Be descriptive. \
+Do not speak in the first person.";
 
 #[derive(Clone, PartialEq, Eq)]
 enum Role {
@@ -124,6 +138,7 @@ pub struct AiPanel {
     loading: bool,
     scroll_handle: ScrollHandle,
     pending_stream: Option<Task<()>>,
+    pending_title_task: Option<Task<()>>,
     pdf_view: WeakEntity<PdfView>,
     document_path: PathBuf,
     current_page: usize,
@@ -134,6 +149,7 @@ pub struct AiPanel {
     sessions: Vec<AiSession>,
     view: AiPanelView,
     mention_completion: Option<MentionCompletion>,
+    last_cursor_pos: Option<GpuiPoint<Pixels>>,
 }
 
 struct LaidOutLine {
@@ -148,6 +164,7 @@ struct AiInputElement {
 struct PrepaintState {
     lines: Option<Vec<LaidOutLine>>,
     cursor: Option<PaintQuad>,
+    cursor_position: Option<GpuiPoint<Pixels>>,
     selections: Vec<PaintQuad>,
 }
 
@@ -175,6 +192,7 @@ impl AiPanel {
             loading: false,
             scroll_handle: ScrollHandle::new(),
             pending_stream: None,
+            pending_title_task: None,
             pdf_view,
             document_path,
             current_page,
@@ -185,6 +203,7 @@ impl AiPanel {
             sessions,
             view: AiPanelView::Chat,
             mention_completion: None,
+            last_cursor_pos: None,
         }
     }
 
@@ -244,37 +263,61 @@ impl AiPanel {
         if self.select_previous_mention_completion(cx) {
             return;
         }
-        self.move_vertically(-1, window, cx);
+        self.move_vertically(-1, false, window, cx);
     }
 
     fn down(&mut self, _: &AiPanelDown, window: &mut Window, cx: &mut Context<Self>) {
         if self.select_next_mention_completion(cx) {
             return;
         }
-        self.move_vertically(1, window, cx);
+        self.move_vertically(1, false, window, cx);
     }
 
     fn home(&mut self, _: &AiPanelHome, _: &mut Window, cx: &mut Context<Self>) {
-        let cursor = self.cursor_offset();
-        let start = self.content[..cursor]
-            .rfind('\n')
-            .map(|ix| ix + '\n'.len_utf8())
-            .unwrap_or(0);
-        self.move_to(start, cx);
+        self.move_to(self.line_start_offset(), cx);
     }
 
     fn end(&mut self, _: &AiPanelEnd, _: &mut Window, cx: &mut Context<Self>) {
-        let cursor = self.cursor_offset();
-        let end = self.content[cursor..]
-            .find('\n')
-            .map(|ix| cursor + ix)
-            .unwrap_or(self.content.len());
-        self.move_to(end, cx);
+        self.move_to(self.line_end_offset(), cx);
     }
 
     fn select_all(&mut self, _: &AiPanelSelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
+    }
+
+    fn select_left(&mut self, _: &AiPanelSelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_right(&mut self, _: &AiPanelSelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_up(&mut self, _: &AiPanelSelectUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertically(-1, true, window, cx);
+    }
+
+    fn select_down(&mut self, _: &AiPanelSelectDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertically(1, true, window, cx);
+    }
+
+    fn select_home(&mut self, _: &AiPanelSelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_start_offset(), cx);
+    }
+
+    fn select_end(&mut self, _: &AiPanelSelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_end_offset(), cx);
+    }
+
+    fn copy(&mut self, _: &AiPanelCopy, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selected_text(cx);
+    }
+
+    fn cut(&mut self, _: &AiPanelCut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.copy_selected_text(cx) {
+            self.replace_text_in_range(None, "", window, cx);
+        }
     }
 
     fn paste(&mut self, _: &AiPanelPaste, window: &mut Window, cx: &mut Context<Self>) {
@@ -305,6 +348,7 @@ impl AiPanel {
         self.selection_reversed = false;
         self.marked_range = None;
         self.mention_completion = None;
+        self.last_cursor_pos = None;
         self.messages.push(ChatMessage {
             role: Role::User,
             content: prompt,
@@ -373,9 +417,83 @@ impl AiPanel {
             AiStreamEvent::Done => {
                 self.loading = false;
                 self.pending_stream = None;
+                self.maybe_generate_title(cx);
                 self.save_current_session(cx);
             }
         }
+    }
+
+    fn maybe_generate_title(&mut self, cx: &mut Context<Self>) {
+        if self.pending_title_task.is_some() || !self.is_first_turn() {
+            return;
+        }
+
+        let Some(title_settings) = cx.global::<SettingsStore>().settings.ai_title_model.clone()
+        else {
+            return;
+        };
+        if !title_settings.can_request() {
+            return;
+        }
+
+        let session_id = self.session_id;
+        let mut title_messages = self.messages.clone();
+        title_messages.push(ChatMessage {
+            role: Role::User,
+            content: TITLE_GENERATION_PROMPT.to_string(),
+            request_content: None,
+        });
+
+        let settings: AiSettings = title_settings.into();
+        let (tx, mut rx) = mpsc::unbounded::<AiStreamEvent>();
+
+        thread::spawn(move || {
+            let mut send_event = |event| tx.unbounded_send(event).map_err(|_| anyhow!("closed"));
+            let result = stream_completion(settings, title_messages, &mut send_event);
+            match result {
+                Ok(()) => {
+                    let _ = send_event(AiStreamEvent::Done);
+                }
+                Err(error) if error.to_string() != "closed" => {
+                    let _ = send_event(AiStreamEvent::Error(format!("{error:#}")));
+                }
+                Err(_) => {}
+            }
+        });
+
+        let mut title_response = String::new();
+        self.pending_title_task = Some(cx.spawn(async move |this, cx| {
+            while let Some(event) = rx.next().await {
+                match event {
+                    AiStreamEvent::Delta(delta) => title_response.push_str(&delta),
+                    AiStreamEvent::Done => {
+                        if let Some(title) = title_from_response(&title_response) {
+                            let _ = this.update(cx, |this, cx| {
+                                if this.session_id == session_id {
+                                    this.session_title = title;
+                                    this.save_current_session(cx);
+                                    cx.notify();
+                                }
+                            });
+                        }
+                        break;
+                    }
+                    AiStreamEvent::Error(_) => break,
+                }
+            }
+
+            let _ = this.update(cx, |this, _| {
+                if this.session_id == session_id {
+                    this.pending_title_task = None;
+                }
+            });
+        }));
+    }
+
+    fn is_first_turn(&self) -> bool {
+        self.messages.len() == 2
+            && self.messages[0].role == Role::User
+            && self.messages[1].role == Role::Assistant
     }
 
     fn request_content_for_prompt(&self, prompt: &str, cx: &mut Context<Self>) -> String {
@@ -512,6 +630,8 @@ impl AiPanel {
         self.selection_reversed = false;
         self.marked_range = None;
         self.mention_completion = None;
+        self.last_cursor_pos = None;
+        self.pending_title_task = None;
         self.view = AiPanelView::Chat;
         self.focus_handle.focus(window, cx);
         self.refresh_sessions(cx);
@@ -555,6 +675,8 @@ impl AiPanel {
         self.selection_reversed = false;
         self.marked_range = None;
         self.mention_completion = None;
+        self.last_cursor_pos = None;
+        self.pending_title_task = None;
         self.view = AiPanelView::Chat;
         self.focus_handle.focus(window, cx);
         cx.notify();
@@ -674,6 +796,22 @@ impl AiPanel {
         self.insert_mention_at_range(mention, range, cx);
     }
 
+    fn open_context_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_handle.focus(window, cx);
+        if self.mention_completion.is_some() {
+            return;
+        }
+
+        let cursor = self.cursor_offset().min(self.content.len());
+        let needs_space = cursor > 0
+            && self.content[..cursor]
+                .chars()
+                .last()
+                .is_some_and(|ch| !ch.is_whitespace());
+        let trigger = if needs_space { " @" } else { "@" };
+        self.replace_text_in_range(None, trigger, window, cx);
+    }
+
     fn insert_mention_at_range(
         &mut self,
         mention: MentionKind,
@@ -760,7 +898,13 @@ impl AiPanel {
         cx.notify();
     }
 
-    fn move_vertically(&mut self, direction: isize, window: &mut Window, cx: &mut Context<Self>) {
+    fn move_vertically(
+        &mut self,
+        direction: isize,
+        extend_selection: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (Some(bounds), Some(cursor)) = (
             self.last_bounds,
             self.position_for_offset(self.cursor_offset(), window),
@@ -773,7 +917,39 @@ impl AiPanel {
             bounds.left() + cursor.x,
             bounds.top() + cursor.y + line_height * direction as f32,
         );
-        self.move_to(self.index_for_mouse_position(target, window), cx);
+        let offset = self.index_for_mouse_position(target, window);
+        if extend_selection {
+            self.select_to(offset, cx);
+        } else {
+            self.move_to(offset, cx);
+        }
+    }
+
+    fn line_start_offset(&self) -> usize {
+        let cursor = self.cursor_offset();
+        self.content[..cursor]
+            .rfind('\n')
+            .map(|ix| ix + '\n'.len_utf8())
+            .unwrap_or(0)
+    }
+
+    fn line_end_offset(&self) -> usize {
+        let cursor = self.cursor_offset();
+        self.content[cursor..]
+            .find('\n')
+            .map(|ix| cursor + ix)
+            .unwrap_or(self.content.len())
+    }
+
+    fn copy_selected_text(&self, cx: &mut Context<Self>) -> bool {
+        if self.selected_range.is_empty() {
+            return false;
+        }
+
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            self.content[self.selected_range.clone()].to_string(),
+        ));
+        true
     }
 
     fn index_for_mouse_position(&self, position: GpuiPoint<Pixels>, window: &mut Window) -> usize {
@@ -865,21 +1041,8 @@ impl AiPanel {
     fn render_message(message: ChatMessage, theme: crate::theme::Theme) -> impl IntoElement {
         let is_user = message.role == Role::User;
         let label = if is_user { "You" } else { "Assistant" };
-        let background = if is_user {
-            rgba(with_alpha(theme.accent, 0x22))
-        } else {
-            rgba(theme.control_background)
-        };
-        let border = if is_user {
-            rgba(with_alpha(theme.accent, 0x55))
-        } else {
-            rgba(theme.control_border)
-        };
-        let content = if message.content.is_empty() {
-            "…".to_string()
-        } else {
-            message.content
-        };
+        let content = message.content;
+        let is_loading = content.is_empty();
 
         div()
             .flex()
@@ -895,17 +1058,43 @@ impl AiPanel {
             )
             .child(
                 div()
-                    .max_w(px(260.0))
-                    .rounded_md()
-                    .border_1()
-                    .border_color(border)
-                    .bg(background)
-                    .px_2()
-                    .py_1()
+                    .max_w(px(280.0))
+                    .when(is_user, |this| {
+                        this.rounded_md()
+                            .border_1()
+                            .border_color(rgba(with_alpha(theme.accent, 0x55)))
+                            .bg(rgba(with_alpha(theme.accent, 0x22)))
+                            .px_2()
+                            .py_1()
+                    })
+                    .when(!is_user, |this| this.px_1().py_1())
                     .text_size(px(13.0))
                     .text_color(rgb(theme.text))
-                    .child(render_text_lines(&content)),
+                    .when(is_loading, |this| {
+                        this.child(Self::render_loading_indicator(theme))
+                    })
+                    .when(!is_loading, |this| this.child(render_text_lines(&content))),
             )
+    }
+
+    fn render_loading_indicator(theme: crate::theme::Theme) -> impl IntoElement {
+        let dot = move |opacity| {
+            div()
+                .w(px(4.0))
+                .h(px(4.0))
+                .rounded_sm()
+                .bg(rgb(theme.text_muted))
+                .opacity(opacity)
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(18.0))
+            .child(dot(0.45))
+            .child(dot(0.7))
+            .child(dot(1.0))
     }
 
     fn render_sessions_view(
@@ -1013,16 +1202,23 @@ impl AiPanel {
     fn render_mention_completion_menu(
         matches: Vec<MentionKind>,
         selected_ix: usize,
+        left: Pixels,
+        top: Pixels,
         theme: crate::theme::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut menu = div()
+            .absolute()
+            .top(top)
+            .left(left)
+            .w(px(COMPLETION_MENU_WIDTH))
             .flex()
             .flex_col()
-            .rounded_sm()
+            .rounded_md()
             .border_1()
             .border_color(rgb(theme.panel_border))
             .bg(rgb(theme.control_background))
+            .shadow_lg()
             .overflow_hidden()
             .text_size(px(12.0));
 
@@ -1033,8 +1229,9 @@ impl AiPanel {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .px_2()
-                    .py_1()
+                    .min_h(px(COMPLETION_MENU_ROW_HEIGHT))
+                    .px_3()
+                    .py_2()
                     .bg(if selected {
                         rgba(theme.selected_row)
                     } else {
@@ -1051,8 +1248,27 @@ impl AiPanel {
                     )
                     .child(
                         div()
-                            .text_color(rgb(if selected { theme.accent } else { theme.text }))
-                            .child(mention.label()),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_color(rgb(if selected {
+                                        theme.accent
+                                    } else {
+                                        theme.text
+                                    }))
+                                    .child("@"),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(if selected {
+                                        theme.accent
+                                    } else {
+                                        theme.text
+                                    }))
+                                    .child(mention.label()),
+                            ),
                     )
                     .child(
                         div()
@@ -1212,6 +1428,25 @@ impl Render for AiPanel {
         let showing_sessions = self.view == AiPanelView::Sessions;
         let loading = self.loading;
         let mention_completion_open = self.mention_completion.is_some();
+        let completion_menu_height = (completion_matches.len() as f32 * COMPLETION_MENU_ROW_HEIGHT)
+            .max(COMPLETION_MENU_ROW_HEIGHT);
+        let completion_left = self
+            .last_cursor_pos
+            .map(|position| {
+                let max_left = px((AI_PANEL_WIDTH - COMPLETION_MENU_WIDTH - 24.0).max(0.0));
+                if position.x < px(0.0) {
+                    px(0.0)
+                } else if position.x > max_left {
+                    max_left
+                } else {
+                    position.x
+                }
+            })
+            .unwrap_or(px(0.0));
+        let completion_top = self
+            .last_cursor_pos
+            .map(|position| position.y - px(completion_menu_height + 8.0))
+            .unwrap_or(px(-completion_menu_height - 8.0));
 
         let mut messages = div().flex().flex_col().gap_3().p_3();
         if self.messages.is_empty() {
@@ -1253,28 +1488,41 @@ impl Render for AiPanel {
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::select_left))
+            .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .h(px(44.0))
-                    .px_3()
+                    .h(px(42.0))
+                    .px_2()
                     .border_b(px(1.0))
                     .border_color(rgb(theme.panel_border))
-                    .text_size(px(14.0))
+                    .text_size(px(12.0))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .min_w_0()
-                            .child("AI Assistant")
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("AI"),
+                            )
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(theme.text_muted))
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(theme.text))
                                     .child(session_title),
                             ),
                     )
@@ -1285,10 +1533,13 @@ impl Render for AiPanel {
                             .gap_1()
                             .child(
                                 div()
-                                    .px_2()
-                                    .py_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(24.0))
+                                    .h(px(24.0))
                                     .rounded_sm()
-                                    .text_size(px(12.0))
+                                    .text_size(px(14.0))
                                     .text_color(if loading {
                                         rgb(theme.text_muted)
                                     } else {
@@ -1303,14 +1554,17 @@ impl Render for AiPanel {
                                             cx.stop_propagation();
                                         }),
                                     )
-                                    .child("New"),
+                                    .child("+"),
                             )
                             .child(
                                 div()
-                                    .px_2()
-                                    .py_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(24.0))
+                                    .h(px(24.0))
                                     .rounded_sm()
-                                    .text_size(px(12.0))
+                                    .text_size(px(14.0))
                                     .text_color(rgb(if showing_sessions {
                                         theme.accent
                                     } else {
@@ -1329,14 +1583,17 @@ impl Render for AiPanel {
                                             cx.stop_propagation();
                                         }),
                                     )
-                                    .child(if showing_sessions { "Chat" } else { "Sessions" }),
+                                    .child(if showing_sessions { "←" } else { "≡" }),
                             )
                             .child(
                                 div()
-                                    .px_2()
-                                    .py_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(24.0))
+                                    .h(px(24.0))
                                     .rounded_sm()
-                                    .text_size(px(12.0))
+                                    .text_size(px(14.0))
                                     .text_color(rgb(theme.text_muted))
                                     .cursor_pointer()
                                     .hover(move |style| style.bg(rgba(theme.control_hover)))
@@ -1347,7 +1604,7 @@ impl Render for AiPanel {
                                             cx.stop_propagation();
                                         }),
                                     )
-                                    .child("Close"),
+                                    .child("×"),
                             ),
                     ),
             )
@@ -1380,8 +1637,8 @@ impl Render for AiPanel {
                         .border_color(rgb(theme.panel_border))
                         .child(
                             div()
-                                .h(px(92.0))
-                                .rounded_sm()
+                                .relative()
+                                .rounded_md()
                                 .border_1()
                                 .border_color(rgb(theme.control_border))
                                 .bg(rgb(theme.control_background))
@@ -1391,16 +1648,18 @@ impl Render for AiPanel {
                                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                                 .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                                 .on_mouse_move(cx.listener(Self::on_mouse_move))
-                                .child(AiInputElement { panel: entity }),
+                                .child(AiInputElement { panel: entity })
+                                .when(!completion_matches.is_empty(), |this| {
+                                    this.child(Self::render_mention_completion_menu(
+                                        completion_matches,
+                                        completion_selected,
+                                        completion_left,
+                                        completion_top,
+                                        theme,
+                                        cx,
+                                    ))
+                                }),
                         )
-                        .when(!completion_matches.is_empty(), |this| {
-                            this.child(Self::render_mention_completion_menu(
-                                completion_matches,
-                                completion_selected,
-                                theme,
-                                cx,
-                            ))
-                        })
                         .child(
                             div()
                                 .flex()
@@ -1409,11 +1668,41 @@ impl Render for AiPanel {
                                 .gap_2()
                                 .text_size(px(11.0))
                                 .text_color(rgb(theme.text_muted))
-                                .child(if mention_completion_open {
-                                    "Enter inserts context · Esc closes panel"
-                                } else {
-                                    "Ctrl+Enter sends · @ adds context"
-                                })
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_size(px(11.0))
+                                                .text_color(rgb(if mention_completion_open {
+                                                    theme.accent
+                                                } else {
+                                                    theme.text_muted
+                                                }))
+                                                .cursor_pointer()
+                                                .hover(move |style| {
+                                                    style.bg(rgba(theme.control_hover))
+                                                })
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, window, cx| {
+                                                        this.open_context_completion(window, cx);
+                                                        cx.stop_propagation();
+                                                    }),
+                                                )
+                                                .child("@ Add context"),
+                                        )
+                                        .child(if mention_completion_open {
+                                            "Enter inserts context"
+                                        } else {
+                                            "Ctrl+Enter sends"
+                                        }),
+                                )
                                 .child(
                                     div()
                                         .px_3()
@@ -1478,9 +1767,21 @@ impl Element for AiInputElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let content = self.panel.read(cx).content.clone();
+        let text = content.as_ref();
+        let estimated_lines = if text.is_empty() {
+            3
+        } else {
+            text.lines()
+                .map(|line| line.chars().count().saturating_sub(1) / 36 + 1)
+                .sum::<usize>()
+                + usize::from(text.ends_with('\n'))
+        }
+        .clamp(3, 8);
+
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
-        style.size.height = relative(1.0).into();
+        style.size.height = (window.line_height() * estimated_lines as f32).into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -1542,6 +1843,7 @@ impl Element for AiInputElement {
                 return PrepaintState {
                     lines: Some(Vec::new()),
                     cursor: None,
+                    cursor_position: None,
                     selections: Vec::new(),
                 };
             }
@@ -1553,6 +1855,12 @@ impl Element for AiInputElement {
             let start = starts.next().unwrap_or(0);
             laid_out_lines.push(LaidOutLine { start, line });
         }
+
+        let cursor_position = if selected_range.is_empty() {
+            cursor_position_for_lines(&laid_out_lines, cursor, line_height)
+        } else {
+            None
+        };
 
         let selections = if input.content.is_empty() || selected_range.is_empty() {
             Vec::new()
@@ -1581,6 +1889,7 @@ impl Element for AiInputElement {
         PrepaintState {
             lines: Some(laid_out_lines),
             cursor,
+            cursor_position,
             selections,
         }
     }
@@ -1637,6 +1946,7 @@ impl Element for AiInputElement {
         self.panel.update(cx, |input, _| {
             input.last_lines = lines;
             input.last_bounds = Some(bounds);
+            input.last_cursor_pos = prepaint.cursor_position;
         });
     }
 }
@@ -1933,6 +2243,20 @@ fn session_title_for_prompt(prompt: &str) -> String {
     }
 }
 
+fn title_from_response(response: &str) -> Option<String> {
+    let title = response
+        .lines()
+        .find(|line| !line.trim().is_empty())?
+        .trim()
+        .trim_matches(['"', '\'', '`'])
+        .trim()
+        .trim_end_matches(['.', '!', '?', ':'])
+        .chars()
+        .take(80)
+        .collect::<String>();
+    (!title.is_empty()).then_some(title)
+}
+
 fn input_text_runs(
     text: &str,
     base_run: TextRun,
@@ -2006,6 +2330,31 @@ fn line_starts(text: &str) -> impl Iterator<Item = usize> + '_ {
         text.char_indices()
             .filter_map(|(ix, ch)| (ch == '\n').then_some(ix + ch.len_utf8())),
     )
+}
+
+fn cursor_position_for_lines(
+    lines: &[LaidOutLine],
+    cursor: usize,
+    line_height: Pixels,
+) -> Option<GpuiPoint<Pixels>> {
+    let mut line_top = px(0.0);
+    for laid_out in lines {
+        let line_end = laid_out.start + laid_out.line.len();
+        if cursor <= line_end {
+            let local_cursor = cursor.saturating_sub(laid_out.start);
+            return laid_out
+                .line
+                .position_for_index(local_cursor, line_height)
+                .map(|position| point(position.x, line_top + position.y));
+        }
+        line_top += laid_out.line.size(line_height).height;
+    }
+
+    lines.last().and_then(|line| {
+        line.line
+            .position_for_index(line.line.len(), line_height)
+            .map(|position| point(position.x, line_top + position.y))
+    })
 }
 
 fn cursor_quad(
@@ -2163,5 +2512,14 @@ mod tests {
             "Explain the introduction in detail"
         );
         assert_eq!(session_title_for_prompt(""), DEFAULT_SESSION_TITLE);
+    }
+
+    #[test]
+    fn extracts_generated_title_from_first_response_line() {
+        assert_eq!(
+            title_from_response("  `Fourier Transform Basics`\n\nOther text"),
+            Some("Fourier Transform Basics".to_string())
+        );
+        assert_eq!(title_from_response("   \n"), None);
     }
 }

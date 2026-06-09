@@ -2,13 +2,15 @@ use std::rc::Rc;
 
 use crate::{
     ai_panel::{
-        AiPanelBackspace, AiPanelClose, AiPanelDelete, AiPanelDown, AiPanelEnd, AiPanelHome,
-        AiPanelLeft, AiPanelNewline, AiPanelPaste, AiPanelRight, AiPanelSelectAll, AiPanelSubmit,
-        AiPanelUp,
+        AiPanelBackspace, AiPanelClose, AiPanelCopy, AiPanelCut, AiPanelDelete, AiPanelDown,
+        AiPanelEnd, AiPanelHome, AiPanelLeft, AiPanelNewline, AiPanelPaste, AiPanelRight,
+        AiPanelSelectAll, AiPanelSelectDown, AiPanelSelectEnd, AiPanelSelectHome,
+        AiPanelSelectLeft, AiPanelSelectRight, AiPanelSelectUp, AiPanelSubmit, AiPanelUp,
     },
     note_editor::{
-        NoteBackspace, NoteCancel, NoteDelete, NoteDown, NoteEnd, NoteHome, NoteLeft, NoteNewline,
-        NotePaste, NoteRight, NoteSave, NoteSelectAll, NoteUp,
+        NoteBackspace, NoteCancel, NoteCopy, NoteCut, NoteDelete, NoteDown, NoteEnd, NoteHome,
+        NoteLeft, NoteNewline, NotePaste, NoteRight, NoteSave, NoteSelectAll, NoteSelectDown,
+        NoteSelectEnd, NoteSelectHome, NoteSelectLeft, NoteSelectRight, NoteSelectUp, NoteUp,
     },
     pdf_view::{
         AddBookmark, CopySelection, GoToBeginning, GoToEnd, GridCursorDown, GridCursorLeft,
@@ -19,20 +21,23 @@ use crate::{
         ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
     },
     picker::{
-        PickerBackspace, PickerCancel, PickerConfirm, PickerDelete, PickerEnd, PickerHome,
-        PickerLeft, PickerPaste, PickerRemove, PickerRight, PickerSelectAll, PickerSelectNext,
-        PickerSelectPrev,
+        PickerBackspace, PickerCancel, PickerConfirm, PickerCopy, PickerCut, PickerDelete,
+        PickerEnd, PickerHome, PickerLeft, PickerPaste, PickerRemove, PickerRight, PickerSelectAll,
+        PickerSelectEnd, PickerSelectHome, PickerSelectLeft, PickerSelectNext, PickerSelectPrev,
+        PickerSelectRight,
     },
     search::{
-        SearchInputBackspace, SearchInputCancel, SearchInputConfirm, SearchInputDelete,
-        SearchInputEnd, SearchInputHome, SearchInputLeft, SearchInputPaste, SearchInputPrevious,
-        SearchInputRight, SearchInputSelectAll,
+        SearchInputBackspace, SearchInputCancel, SearchInputConfirm, SearchInputCopy,
+        SearchInputCut, SearchInputDelete, SearchInputEnd, SearchInputHome, SearchInputLeft,
+        SearchInputPaste, SearchInputPrevious, SearchInputRight, SearchInputSelectAll,
+        SearchInputSelectEnd, SearchInputSelectHome, SearchInputSelectLeft, SearchInputSelectRight,
     },
     settings::{KeyBindingOverride, KeymapPreset},
     settings_panel::{
-        PanelClose, SettingsInputBackspace, SettingsInputDelete, SettingsInputEnd,
-        SettingsInputHome, SettingsInputLeft, SettingsInputPaste, SettingsInputRight,
-        SettingsInputSelectAll,
+        PanelClose, SettingsInputBackspace, SettingsInputCopy, SettingsInputCut,
+        SettingsInputDelete, SettingsInputEnd, SettingsInputHome, SettingsInputLeft,
+        SettingsInputPaste, SettingsInputRight, SettingsInputSelectAll, SettingsInputSelectEnd,
+        SettingsInputSelectHome, SettingsInputSelectLeft, SettingsInputSelectRight,
     },
 };
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
@@ -60,11 +65,9 @@ struct ActionSpec {
 
 pub fn apply(cx: &mut App, preset: KeymapPreset, overrides: &[KeyBindingOverride]) {
     let mut bindings = base_bindings(preset);
-    bindings.extend(
-        overrides
-            .iter()
-            .filter_map(|binding| binding_for_override(cx, binding)),
-    );
+    for binding in overrides {
+        bindings.extend(bindings_for_override(cx, binding));
+    }
 
     cx.clear_key_bindings();
     cx.bind_keys(bindings);
@@ -173,6 +176,14 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<PickerEnd>("end", PALETTE_CONTEXT),
         bind::<PickerSelectAll>("ctrl-a", PALETTE_CONTEXT),
         bind::<PickerSelectAll>("cmd-a", PALETTE_CONTEXT),
+        bind::<PickerSelectLeft>("shift-left", PALETTE_CONTEXT),
+        bind::<PickerSelectRight>("shift-right", PALETTE_CONTEXT),
+        bind::<PickerSelectHome>("shift-home", PALETTE_CONTEXT),
+        bind::<PickerSelectEnd>("shift-end", PALETTE_CONTEXT),
+        bind::<PickerCopy>("ctrl-c", PALETTE_CONTEXT),
+        bind::<PickerCopy>("cmd-c", PALETTE_CONTEXT),
+        bind::<PickerCut>("ctrl-x", PALETTE_CONTEXT),
+        bind::<PickerCut>("cmd-x", PALETTE_CONTEXT),
         bind::<PickerPaste>("ctrl-v", PALETTE_CONTEXT),
         bind::<PickerPaste>("cmd-v", PALETTE_CONTEXT),
         bind::<SearchInputConfirm>("enter", SEARCH_CONTEXT),
@@ -186,6 +197,14 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<SearchInputEnd>("end", SEARCH_CONTEXT),
         bind::<SearchInputSelectAll>("ctrl-a", SEARCH_CONTEXT),
         bind::<SearchInputSelectAll>("cmd-a", SEARCH_CONTEXT),
+        bind::<SearchInputSelectLeft>("shift-left", SEARCH_CONTEXT),
+        bind::<SearchInputSelectRight>("shift-right", SEARCH_CONTEXT),
+        bind::<SearchInputSelectHome>("shift-home", SEARCH_CONTEXT),
+        bind::<SearchInputSelectEnd>("shift-end", SEARCH_CONTEXT),
+        bind::<SearchInputCopy>("ctrl-c", SEARCH_CONTEXT),
+        bind::<SearchInputCopy>("cmd-c", SEARCH_CONTEXT),
+        bind::<SearchInputCut>("ctrl-x", SEARCH_CONTEXT),
+        bind::<SearchInputCut>("cmd-x", SEARCH_CONTEXT),
         bind::<SearchInputPaste>("ctrl-v", SEARCH_CONTEXT),
         bind::<SearchInputPaste>("cmd-v", SEARCH_CONTEXT),
         bind::<PanelClose>("escape", SETTINGS_CONTEXT),
@@ -197,6 +216,14 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<SettingsInputEnd>("end", SETTINGS_INPUT_CONTEXT),
         bind::<SettingsInputSelectAll>("ctrl-a", SETTINGS_INPUT_CONTEXT),
         bind::<SettingsInputSelectAll>("cmd-a", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputSelectLeft>("shift-left", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputSelectRight>("shift-right", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputSelectHome>("shift-home", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputSelectEnd>("shift-end", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputCopy>("ctrl-c", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputCopy>("cmd-c", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputCut>("ctrl-x", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputCut>("cmd-x", SETTINGS_INPUT_CONTEXT),
         bind::<SettingsInputPaste>("ctrl-v", SETTINGS_INPUT_CONTEXT),
         bind::<SettingsInputPaste>("cmd-v", SETTINGS_INPUT_CONTEXT),
         bind::<PickerConfirm>("enter", TOC_CONTEXT),
@@ -211,6 +238,14 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<PickerEnd>("end", TOC_CONTEXT),
         bind::<PickerSelectAll>("ctrl-a", TOC_CONTEXT),
         bind::<PickerSelectAll>("cmd-a", TOC_CONTEXT),
+        bind::<PickerSelectLeft>("shift-left", TOC_CONTEXT),
+        bind::<PickerSelectRight>("shift-right", TOC_CONTEXT),
+        bind::<PickerSelectHome>("shift-home", TOC_CONTEXT),
+        bind::<PickerSelectEnd>("shift-end", TOC_CONTEXT),
+        bind::<PickerCopy>("ctrl-c", TOC_CONTEXT),
+        bind::<PickerCopy>("cmd-c", TOC_CONTEXT),
+        bind::<PickerCut>("ctrl-x", TOC_CONTEXT),
+        bind::<PickerCut>("cmd-x", TOC_CONTEXT),
         bind::<PickerPaste>("ctrl-v", TOC_CONTEXT),
         bind::<PickerPaste>("cmd-v", TOC_CONTEXT),
         bind::<PickerConfirm>("enter", NOTES_CONTEXT),
@@ -226,6 +261,14 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<PickerEnd>("end", NOTES_CONTEXT),
         bind::<PickerSelectAll>("ctrl-a", NOTES_CONTEXT),
         bind::<PickerSelectAll>("cmd-a", NOTES_CONTEXT),
+        bind::<PickerSelectLeft>("shift-left", NOTES_CONTEXT),
+        bind::<PickerSelectRight>("shift-right", NOTES_CONTEXT),
+        bind::<PickerSelectHome>("shift-home", NOTES_CONTEXT),
+        bind::<PickerSelectEnd>("shift-end", NOTES_CONTEXT),
+        bind::<PickerCopy>("ctrl-c", NOTES_CONTEXT),
+        bind::<PickerCopy>("cmd-c", NOTES_CONTEXT),
+        bind::<PickerCut>("ctrl-x", NOTES_CONTEXT),
+        bind::<PickerCut>("cmd-x", NOTES_CONTEXT),
         bind::<PickerPaste>("ctrl-v", NOTES_CONTEXT),
         bind::<PickerPaste>("cmd-v", NOTES_CONTEXT),
         bind::<PickerConfirm>("enter", HISTORY_CONTEXT),
@@ -240,6 +283,14 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<PickerEnd>("end", HISTORY_CONTEXT),
         bind::<PickerSelectAll>("ctrl-a", HISTORY_CONTEXT),
         bind::<PickerSelectAll>("cmd-a", HISTORY_CONTEXT),
+        bind::<PickerSelectLeft>("shift-left", HISTORY_CONTEXT),
+        bind::<PickerSelectRight>("shift-right", HISTORY_CONTEXT),
+        bind::<PickerSelectHome>("shift-home", HISTORY_CONTEXT),
+        bind::<PickerSelectEnd>("shift-end", HISTORY_CONTEXT),
+        bind::<PickerCopy>("ctrl-c", HISTORY_CONTEXT),
+        bind::<PickerCopy>("cmd-c", HISTORY_CONTEXT),
+        bind::<PickerCut>("ctrl-x", HISTORY_CONTEXT),
+        bind::<PickerCut>("cmd-x", HISTORY_CONTEXT),
         bind::<PickerPaste>("ctrl-v", HISTORY_CONTEXT),
         bind::<PickerPaste>("cmd-v", HISTORY_CONTEXT),
         bind::<PickerConfirm>("enter", BOOKMARKS_CONTEXT),
@@ -255,6 +306,14 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<PickerEnd>("end", BOOKMARKS_CONTEXT),
         bind::<PickerSelectAll>("ctrl-a", BOOKMARKS_CONTEXT),
         bind::<PickerSelectAll>("cmd-a", BOOKMARKS_CONTEXT),
+        bind::<PickerSelectLeft>("shift-left", BOOKMARKS_CONTEXT),
+        bind::<PickerSelectRight>("shift-right", BOOKMARKS_CONTEXT),
+        bind::<PickerSelectHome>("shift-home", BOOKMARKS_CONTEXT),
+        bind::<PickerSelectEnd>("shift-end", BOOKMARKS_CONTEXT),
+        bind::<PickerCopy>("ctrl-c", BOOKMARKS_CONTEXT),
+        bind::<PickerCopy>("cmd-c", BOOKMARKS_CONTEXT),
+        bind::<PickerCut>("ctrl-x", BOOKMARKS_CONTEXT),
+        bind::<PickerCut>("cmd-x", BOOKMARKS_CONTEXT),
         bind::<PickerPaste>("ctrl-v", BOOKMARKS_CONTEXT),
         bind::<PickerPaste>("cmd-v", BOOKMARKS_CONTEXT),
         bind::<PickerConfirm>("enter", BOOKMARK_PROMPT_CONTEXT),
@@ -267,6 +326,14 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<PickerEnd>("end", BOOKMARK_PROMPT_CONTEXT),
         bind::<PickerSelectAll>("ctrl-a", BOOKMARK_PROMPT_CONTEXT),
         bind::<PickerSelectAll>("cmd-a", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerSelectLeft>("shift-left", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerSelectRight>("shift-right", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerSelectHome>("shift-home", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerSelectEnd>("shift-end", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerCopy>("ctrl-c", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerCopy>("cmd-c", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerCut>("ctrl-x", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerCut>("cmd-x", BOOKMARK_PROMPT_CONTEXT),
         bind::<PickerPaste>("ctrl-v", BOOKMARK_PROMPT_CONTEXT),
         bind::<PickerPaste>("cmd-v", BOOKMARK_PROMPT_CONTEXT),
         bind::<NoteSave>("ctrl-enter", NOTE_EDITOR_CONTEXT),
@@ -283,6 +350,16 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<NoteEnd>("end", NOTE_EDITOR_CONTEXT),
         bind::<NoteSelectAll>("ctrl-a", NOTE_EDITOR_CONTEXT),
         bind::<NoteSelectAll>("cmd-a", NOTE_EDITOR_CONTEXT),
+        bind::<NoteSelectLeft>("shift-left", NOTE_EDITOR_CONTEXT),
+        bind::<NoteSelectRight>("shift-right", NOTE_EDITOR_CONTEXT),
+        bind::<NoteSelectUp>("shift-up", NOTE_EDITOR_CONTEXT),
+        bind::<NoteSelectDown>("shift-down", NOTE_EDITOR_CONTEXT),
+        bind::<NoteSelectHome>("shift-home", NOTE_EDITOR_CONTEXT),
+        bind::<NoteSelectEnd>("shift-end", NOTE_EDITOR_CONTEXT),
+        bind::<NoteCopy>("ctrl-c", NOTE_EDITOR_CONTEXT),
+        bind::<NoteCopy>("cmd-c", NOTE_EDITOR_CONTEXT),
+        bind::<NoteCut>("ctrl-x", NOTE_EDITOR_CONTEXT),
+        bind::<NoteCut>("cmd-x", NOTE_EDITOR_CONTEXT),
         bind::<NotePaste>("ctrl-v", NOTE_EDITOR_CONTEXT),
         bind::<NotePaste>("cmd-v", NOTE_EDITOR_CONTEXT),
         bind::<AiPanelSubmit>("ctrl-enter", AI_PANEL_CONTEXT),
@@ -300,6 +377,16 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<AiPanelEnd>("end", AI_PANEL_CONTEXT),
         bind::<AiPanelSelectAll>("ctrl-a", AI_PANEL_CONTEXT),
         bind::<AiPanelSelectAll>("cmd-a", AI_PANEL_CONTEXT),
+        bind::<AiPanelSelectLeft>("shift-left", AI_PANEL_CONTEXT),
+        bind::<AiPanelSelectRight>("shift-right", AI_PANEL_CONTEXT),
+        bind::<AiPanelSelectUp>("shift-up", AI_PANEL_CONTEXT),
+        bind::<AiPanelSelectDown>("shift-down", AI_PANEL_CONTEXT),
+        bind::<AiPanelSelectHome>("shift-home", AI_PANEL_CONTEXT),
+        bind::<AiPanelSelectEnd>("shift-end", AI_PANEL_CONTEXT),
+        bind::<AiPanelCopy>("ctrl-c", AI_PANEL_CONTEXT),
+        bind::<AiPanelCopy>("cmd-c", AI_PANEL_CONTEXT),
+        bind::<AiPanelCut>("ctrl-x", AI_PANEL_CONTEXT),
+        bind::<AiPanelCut>("cmd-x", AI_PANEL_CONTEXT),
         bind::<AiPanelPaste>("ctrl-v", AI_PANEL_CONTEXT),
         bind::<AiPanelPaste>("cmd-v", AI_PANEL_CONTEXT),
     ]);
@@ -314,24 +401,39 @@ where
     KeyBinding::new(keystrokes, A::default(), Some(context))
 }
 
-fn binding_for_override(cx: &mut App, binding: &KeyBindingOverride) -> Option<KeyBinding> {
+fn bindings_for_override(cx: &mut App, binding: &KeyBindingOverride) -> Vec<KeyBinding> {
     let action_name = binding.action.trim();
     let keystrokes = binding.keystrokes.trim();
     if keystrokes.is_empty() {
-        return None;
+        return Vec::new();
     }
 
-    let (action, context) = match known_action(action_name) {
-        Some(action) => action,
-        None => match cx.build_action(action_name, None) {
-            Ok(action) => (action, None),
+    let mut actions = known_actions(action_name);
+    if actions.is_empty() {
+        match cx.build_action(action_name, None) {
+            Ok(action) => actions.push((action, None)),
             Err(error) => {
                 eprintln!("failed to build action for keybinding `{action_name}`: {error}");
-                return None;
+                return Vec::new();
             }
-        },
-    };
+        }
+    }
 
+    actions
+        .into_iter()
+        .filter_map(|(action, context)| {
+            binding_for_action(cx, action_name, keystrokes, action, context)
+        })
+        .collect()
+}
+
+fn binding_for_action(
+    cx: &mut App,
+    action_name: &str,
+    keystrokes: &str,
+    action: Box<dyn Action>,
+    context: Option<&'static str>,
+) -> Option<KeyBinding> {
     let context = match context {
         Some(context) => match KeyBindingContextPredicate::parse(context) {
             Ok(predicate) => Some(Rc::new(predicate)),
@@ -359,22 +461,29 @@ fn binding_for_override(cx: &mut App, binding: &KeyBindingOverride) -> Option<Ke
     }
 }
 
-fn known_action(action_name: &str) -> Option<(Box<dyn Action>, Option<&'static str>)> {
+fn known_actions(action_name: &str) -> Vec<(Box<dyn Action>, Option<&'static str>)> {
     let action_name = action_name.trim();
-    for spec in action_specs() {
-        let action = (spec.build)();
-        if action.name() == action_name {
-            return Some((action, spec.context));
-        }
+    let exact: Vec<_> = action_specs()
+        .iter()
+        .filter_map(|spec| {
+            let action = (spec.build)();
+            (action.name() == action_name).then_some((action, spec.context))
+        })
+        .collect();
+    if !exact.is_empty() {
+        return exact;
     }
 
     let normalized = normalize_action_key(action_name);
-    action_specs().iter().find_map(|spec| {
-        spec.aliases
-            .iter()
-            .any(|alias| normalize_action_key(alias) == normalized)
-            .then(|| ((spec.build)(), spec.context))
-    })
+    action_specs()
+        .iter()
+        .filter(|spec| {
+            spec.aliases
+                .iter()
+                .any(|alias| normalize_action_key(alias) == normalized)
+        })
+        .map(|spec| ((spec.build)(), spec.context))
+        .collect()
 }
 
 fn normalize_action_key(value: &str) -> String {
@@ -670,6 +779,46 @@ fn action_specs() -> &'static [ActionSpec] {
             build: boxed::<NoteSelectAll>,
         },
         ActionSpec {
+            aliases: &["note-select-left"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteSelectLeft>,
+        },
+        ActionSpec {
+            aliases: &["note-select-right"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteSelectRight>,
+        },
+        ActionSpec {
+            aliases: &["note-select-up"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteSelectUp>,
+        },
+        ActionSpec {
+            aliases: &["note-select-down"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteSelectDown>,
+        },
+        ActionSpec {
+            aliases: &["note-select-home"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteSelectHome>,
+        },
+        ActionSpec {
+            aliases: &["note-select-end"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteSelectEnd>,
+        },
+        ActionSpec {
+            aliases: &["note-copy", "copy"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteCopy>,
+        },
+        ActionSpec {
+            aliases: &["note-cut", "cut"],
+            context: Some(NOTE_EDITOR_CONTEXT),
+            build: boxed::<NoteCut>,
+        },
+        ActionSpec {
             aliases: &["note-paste"],
             context: Some(NOTE_EDITOR_CONTEXT),
             build: boxed::<NotePaste>,
@@ -735,6 +884,46 @@ fn action_specs() -> &'static [ActionSpec] {
             build: boxed::<AiPanelSelectAll>,
         },
         ActionSpec {
+            aliases: &["ai-panel-select-left", "ai-select-left"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelSelectLeft>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-select-right", "ai-select-right"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelSelectRight>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-select-up", "ai-select-up"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelSelectUp>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-select-down", "ai-select-down"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelSelectDown>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-select-home", "ai-select-home"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelSelectHome>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-select-end", "ai-select-end"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelSelectEnd>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-copy", "ai-copy", "copy"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelCopy>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-cut", "ai-cut", "cut"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelCut>,
+        },
+        ActionSpec {
             aliases: &["ai-panel-paste", "ai-paste"],
             context: Some(AI_PANEL_CONTEXT),
             build: boxed::<AiPanelPaste>,
@@ -795,6 +984,36 @@ fn action_specs() -> &'static [ActionSpec] {
             build: boxed::<PickerSelectAll>,
         },
         ActionSpec {
+            aliases: &["palette-select-left"],
+            context: Some(PALETTE_CONTEXT),
+            build: boxed::<PickerSelectLeft>,
+        },
+        ActionSpec {
+            aliases: &["palette-select-right"],
+            context: Some(PALETTE_CONTEXT),
+            build: boxed::<PickerSelectRight>,
+        },
+        ActionSpec {
+            aliases: &["palette-select-home"],
+            context: Some(PALETTE_CONTEXT),
+            build: boxed::<PickerSelectHome>,
+        },
+        ActionSpec {
+            aliases: &["palette-select-end"],
+            context: Some(PALETTE_CONTEXT),
+            build: boxed::<PickerSelectEnd>,
+        },
+        ActionSpec {
+            aliases: &["palette-copy", "copy"],
+            context: Some(PALETTE_CONTEXT),
+            build: boxed::<PickerCopy>,
+        },
+        ActionSpec {
+            aliases: &["palette-cut", "cut"],
+            context: Some(PALETTE_CONTEXT),
+            build: boxed::<PickerCut>,
+        },
+        ActionSpec {
             aliases: &["palette-paste"],
             context: Some(PALETTE_CONTEXT),
             build: boxed::<PickerPaste>,
@@ -848,6 +1067,36 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["search-input-select-all"],
             context: Some(SEARCH_CONTEXT),
             build: boxed::<SearchInputSelectAll>,
+        },
+        ActionSpec {
+            aliases: &["search-input-select-left"],
+            context: Some(SEARCH_CONTEXT),
+            build: boxed::<SearchInputSelectLeft>,
+        },
+        ActionSpec {
+            aliases: &["search-input-select-right"],
+            context: Some(SEARCH_CONTEXT),
+            build: boxed::<SearchInputSelectRight>,
+        },
+        ActionSpec {
+            aliases: &["search-input-select-home"],
+            context: Some(SEARCH_CONTEXT),
+            build: boxed::<SearchInputSelectHome>,
+        },
+        ActionSpec {
+            aliases: &["search-input-select-end"],
+            context: Some(SEARCH_CONTEXT),
+            build: boxed::<SearchInputSelectEnd>,
+        },
+        ActionSpec {
+            aliases: &["search-input-copy", "copy"],
+            context: Some(SEARCH_CONTEXT),
+            build: boxed::<SearchInputCopy>,
+        },
+        ActionSpec {
+            aliases: &["search-input-cut", "cut"],
+            context: Some(SEARCH_CONTEXT),
+            build: boxed::<SearchInputCut>,
         },
         ActionSpec {
             aliases: &["search-input-paste"],
@@ -910,9 +1159,189 @@ fn action_specs() -> &'static [ActionSpec] {
             build: boxed::<PickerSelectAll>,
         },
         ActionSpec {
+            aliases: &["toc-select-left"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<PickerSelectLeft>,
+        },
+        ActionSpec {
+            aliases: &["toc-select-right"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<PickerSelectRight>,
+        },
+        ActionSpec {
+            aliases: &["toc-select-home"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<PickerSelectHome>,
+        },
+        ActionSpec {
+            aliases: &["toc-select-end"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<PickerSelectEnd>,
+        },
+        ActionSpec {
+            aliases: &["toc-copy", "copy"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<PickerCopy>,
+        },
+        ActionSpec {
+            aliases: &["toc-cut", "cut"],
+            context: Some(TOC_CONTEXT),
+            build: boxed::<PickerCut>,
+        },
+        ActionSpec {
             aliases: &["toc-paste"],
             context: Some(TOC_CONTEXT),
             build: boxed::<PickerPaste>,
+        },
+        ActionSpec {
+            aliases: &["notes-select-left"],
+            context: Some(NOTES_CONTEXT),
+            build: boxed::<PickerSelectLeft>,
+        },
+        ActionSpec {
+            aliases: &["notes-select-right"],
+            context: Some(NOTES_CONTEXT),
+            build: boxed::<PickerSelectRight>,
+        },
+        ActionSpec {
+            aliases: &["notes-select-home"],
+            context: Some(NOTES_CONTEXT),
+            build: boxed::<PickerSelectHome>,
+        },
+        ActionSpec {
+            aliases: &["notes-select-end"],
+            context: Some(NOTES_CONTEXT),
+            build: boxed::<PickerSelectEnd>,
+        },
+        ActionSpec {
+            aliases: &["notes-copy", "copy"],
+            context: Some(NOTES_CONTEXT),
+            build: boxed::<PickerCopy>,
+        },
+        ActionSpec {
+            aliases: &["notes-cut", "cut"],
+            context: Some(NOTES_CONTEXT),
+            build: boxed::<PickerCut>,
+        },
+        ActionSpec {
+            aliases: &["history-select-left"],
+            context: Some(HISTORY_CONTEXT),
+            build: boxed::<PickerSelectLeft>,
+        },
+        ActionSpec {
+            aliases: &["history-select-right"],
+            context: Some(HISTORY_CONTEXT),
+            build: boxed::<PickerSelectRight>,
+        },
+        ActionSpec {
+            aliases: &["history-select-home"],
+            context: Some(HISTORY_CONTEXT),
+            build: boxed::<PickerSelectHome>,
+        },
+        ActionSpec {
+            aliases: &["history-select-end"],
+            context: Some(HISTORY_CONTEXT),
+            build: boxed::<PickerSelectEnd>,
+        },
+        ActionSpec {
+            aliases: &["history-copy", "copy"],
+            context: Some(HISTORY_CONTEXT),
+            build: boxed::<PickerCopy>,
+        },
+        ActionSpec {
+            aliases: &["history-cut", "cut"],
+            context: Some(HISTORY_CONTEXT),
+            build: boxed::<PickerCut>,
+        },
+        ActionSpec {
+            aliases: &["bookmarks-select-left"],
+            context: Some(BOOKMARKS_CONTEXT),
+            build: boxed::<PickerSelectLeft>,
+        },
+        ActionSpec {
+            aliases: &["bookmarks-select-right"],
+            context: Some(BOOKMARKS_CONTEXT),
+            build: boxed::<PickerSelectRight>,
+        },
+        ActionSpec {
+            aliases: &["bookmarks-select-home"],
+            context: Some(BOOKMARKS_CONTEXT),
+            build: boxed::<PickerSelectHome>,
+        },
+        ActionSpec {
+            aliases: &["bookmarks-select-end"],
+            context: Some(BOOKMARKS_CONTEXT),
+            build: boxed::<PickerSelectEnd>,
+        },
+        ActionSpec {
+            aliases: &["bookmarks-copy", "copy"],
+            context: Some(BOOKMARKS_CONTEXT),
+            build: boxed::<PickerCopy>,
+        },
+        ActionSpec {
+            aliases: &["bookmarks-cut", "cut"],
+            context: Some(BOOKMARKS_CONTEXT),
+            build: boxed::<PickerCut>,
+        },
+        ActionSpec {
+            aliases: &["bookmark-prompt-select-left"],
+            context: Some(BOOKMARK_PROMPT_CONTEXT),
+            build: boxed::<PickerSelectLeft>,
+        },
+        ActionSpec {
+            aliases: &["bookmark-prompt-select-right"],
+            context: Some(BOOKMARK_PROMPT_CONTEXT),
+            build: boxed::<PickerSelectRight>,
+        },
+        ActionSpec {
+            aliases: &["bookmark-prompt-select-home"],
+            context: Some(BOOKMARK_PROMPT_CONTEXT),
+            build: boxed::<PickerSelectHome>,
+        },
+        ActionSpec {
+            aliases: &["bookmark-prompt-select-end"],
+            context: Some(BOOKMARK_PROMPT_CONTEXT),
+            build: boxed::<PickerSelectEnd>,
+        },
+        ActionSpec {
+            aliases: &["bookmark-prompt-copy", "copy"],
+            context: Some(BOOKMARK_PROMPT_CONTEXT),
+            build: boxed::<PickerCopy>,
+        },
+        ActionSpec {
+            aliases: &["bookmark-prompt-cut", "cut"],
+            context: Some(BOOKMARK_PROMPT_CONTEXT),
+            build: boxed::<PickerCut>,
+        },
+        ActionSpec {
+            aliases: &["settings-input-select-left"],
+            context: Some(SETTINGS_INPUT_CONTEXT),
+            build: boxed::<SettingsInputSelectLeft>,
+        },
+        ActionSpec {
+            aliases: &["settings-input-select-right"],
+            context: Some(SETTINGS_INPUT_CONTEXT),
+            build: boxed::<SettingsInputSelectRight>,
+        },
+        ActionSpec {
+            aliases: &["settings-input-select-home"],
+            context: Some(SETTINGS_INPUT_CONTEXT),
+            build: boxed::<SettingsInputSelectHome>,
+        },
+        ActionSpec {
+            aliases: &["settings-input-select-end"],
+            context: Some(SETTINGS_INPUT_CONTEXT),
+            build: boxed::<SettingsInputSelectEnd>,
+        },
+        ActionSpec {
+            aliases: &["settings-input-copy", "copy"],
+            context: Some(SETTINGS_INPUT_CONTEXT),
+            build: boxed::<SettingsInputCopy>,
+        },
+        ActionSpec {
+            aliases: &["settings-input-cut", "cut"],
+            context: Some(SETTINGS_INPUT_CONTEXT),
+            build: boxed::<SettingsInputCut>,
         },
         ActionSpec {
             aliases: &["panel-close", "settings-panel-close"],

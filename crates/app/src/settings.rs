@@ -226,11 +226,65 @@ impl AiSettings {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiTitleModelSettings {
+    pub provider: AiProvider,
+    pub model: String,
+    pub api_key: String,
+    pub base_url: Option<String>,
+}
+
+impl Default for AiTitleModelSettings {
+    fn default() -> Self {
+        let provider = AiProvider::OpenAi;
+        Self {
+            provider,
+            model: provider.default_model().to_string(),
+            api_key: String::new(),
+            base_url: None,
+        }
+    }
+}
+
+impl AiTitleModelSettings {
+    fn sanitize(&mut self) {
+        self.model = self.model.trim().to_string();
+        self.api_key = self.api_key.trim().to_string();
+        self.base_url = self
+            .base_url
+            .take()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
+        if self.model.is_empty() {
+            self.model = self.provider.default_model().to_string();
+        }
+    }
+
+    pub fn can_request(&self) -> bool {
+        match self.provider {
+            AiProvider::OpenAi => !self.api_key.is_empty() || self.base_url.is_some(),
+            AiProvider::Anthropic => !self.api_key.is_empty(),
+        }
+    }
+}
+
+impl From<AiTitleModelSettings> for AiSettings {
+    fn from(settings: AiTitleModelSettings) -> Self {
+        Self {
+            provider: settings.provider,
+            model: settings.model,
+            api_key: settings.api_key,
+            base_url: settings.base_url,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub behavior: BehaviorSettings,
     pub window: WindowSettings,
     pub ai: AiSettings,
+    pub ai_title_model: Option<AiTitleModelSettings>,
     pub keymap_preset: KeymapPreset,
     pub keybinding_overrides: Vec<KeyBindingOverride>,
     pub theme_name: String,
@@ -243,6 +297,7 @@ impl Default for Settings {
             behavior: BehaviorSettings::default(),
             window: WindowSettings::default(),
             ai: AiSettings::default(),
+            ai_title_model: None,
             keymap_preset: KeymapPreset::default(),
             keybinding_overrides: Vec::new(),
             theme_name: DEFAULT_THEME_ID.to_string(),
@@ -256,6 +311,9 @@ impl Settings {
         self.behavior.sanitize();
         self.window.sanitize();
         self.ai.sanitize();
+        if let Some(title_model) = self.ai_title_model.as_mut() {
+            title_model.sanitize();
+        }
         self.overrides.sanitize();
         if self.theme_name.trim().is_empty() {
             self.theme_name = DEFAULT_THEME_ID.to_string();
@@ -328,6 +386,28 @@ impl Settings {
                 .get_arg("base_url")
                 .and_then(KdlValue::as_string)
                 .map(str::to_string);
+
+            if let Some(title_model) = ai.get("title_model").and_then(KdlNode::children) {
+                let mut settings_title_model = AiTitleModelSettings::default();
+                if let Some(value) = title_model
+                    .get_arg("provider")
+                    .and_then(KdlValue::as_string)
+                    .and_then(AiProvider::from_str)
+                {
+                    settings_title_model.provider = value;
+                }
+                if let Some(value) = title_model.get_arg("model").and_then(KdlValue::as_string) {
+                    settings_title_model.model = value.to_string();
+                }
+                if let Some(value) = title_model.get_arg("api_key").and_then(KdlValue::as_string) {
+                    settings_title_model.api_key = value.to_string();
+                }
+                settings_title_model.base_url = title_model
+                    .get_arg("base_url")
+                    .and_then(KdlValue::as_string)
+                    .map(str::to_string);
+                settings.ai_title_model = Some(settings_title_model);
+            }
         }
 
         if let Some(overrides) = document.get("theme-overrides").and_then(KdlNode::children) {
@@ -379,7 +459,7 @@ impl Settings {
         );
         document.nodes_mut().push(window);
 
-        if self.ai != AiSettings::default() {
+        if self.ai != AiSettings::default() || self.ai_title_model.is_some() {
             let mut ai = KdlNode::new("ai");
             let ai_children = ai.ensure_children();
             push_value_node(ai_children, "provider", self.ai.provider.as_str());
@@ -389,6 +469,23 @@ impl Settings {
             }
             if let Some(base_url) = &self.ai.base_url {
                 push_value_node(ai_children, "base_url", base_url.clone());
+            }
+            if let Some(title_model) = &self.ai_title_model {
+                let mut title_model_node = KdlNode::new("title_model");
+                let title_model_children = title_model_node.ensure_children();
+                push_value_node(
+                    title_model_children,
+                    "provider",
+                    title_model.provider.as_str(),
+                );
+                push_value_node(title_model_children, "model", title_model.model.clone());
+                if !title_model.api_key.is_empty() {
+                    push_value_node(title_model_children, "api_key", title_model.api_key.clone());
+                }
+                if let Some(base_url) = &title_model.base_url {
+                    push_value_node(title_model_children, "base_url", base_url.clone());
+                }
+                ai_children.nodes_mut().push(title_model_node);
             }
             document.nodes_mut().push(ai);
         }
@@ -661,6 +758,33 @@ ai {
         assert_eq!(
             settings.ai.base_url,
             Some("https://api.example.com".to_string())
+        );
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn parses_and_exports_ai_title_model_settings() {
+        let settings = parse_settings(
+            r##"
+ai {
+    title_model {
+        provider "openai"
+        model "gpt-4o-mini"
+        api_key "title-key"
+        base_url "https://api.example.com/v1/"
+    }
+}
+"##,
+        )
+        .unwrap();
+
+        let title_model = settings.ai_title_model.as_ref().unwrap();
+        assert_eq!(title_model.provider, AiProvider::OpenAi);
+        assert_eq!(title_model.model, "gpt-4o-mini");
+        assert_eq!(title_model.api_key, "title-key");
+        assert_eq!(
+            title_model.base_url,
+            Some("https://api.example.com/v1".to_string())
         );
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }

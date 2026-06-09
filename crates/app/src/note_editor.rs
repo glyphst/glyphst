@@ -2,11 +2,12 @@ use std::ops::Range;
 
 use crate::{library::HighlightColor, settings::SettingsStore};
 use gpui::{
-    App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point as GpuiPoint, Render, SharedString, Style, TextRun, UTF16Selection, Window,
-    WrappedLine, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, SharedString, Style, TextRun,
+    UTF16Selection, Window, WrappedLine, div, fill, point, prelude::*, px, relative, rgb, rgba,
+    size,
 };
 
 gpui::actions!(
@@ -24,6 +25,14 @@ gpui::actions!(
         NoteHome,
         NoteEnd,
         NoteSelectAll,
+        NoteSelectLeft,
+        NoteSelectRight,
+        NoteSelectUp,
+        NoteSelectDown,
+        NoteSelectHome,
+        NoteSelectEnd,
+        NoteCopy,
+        NoteCut,
         NotePaste
     ]
 );
@@ -134,34 +143,58 @@ impl NoteEditor {
     }
 
     fn up(&mut self, _: &NoteUp, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertically(-1, window, cx);
+        self.move_vertically(-1, false, window, cx);
     }
 
     fn down(&mut self, _: &NoteDown, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertically(1, window, cx);
+        self.move_vertically(1, false, window, cx);
     }
 
     fn home(&mut self, _: &NoteHome, _: &mut Window, cx: &mut Context<Self>) {
-        let cursor = self.cursor_offset();
-        let start = self.content[..cursor]
-            .rfind('\n')
-            .map(|ix| ix + '\n'.len_utf8())
-            .unwrap_or(0);
-        self.move_to(start, cx);
+        self.move_to(self.line_start_offset(), cx);
     }
 
     fn end(&mut self, _: &NoteEnd, _: &mut Window, cx: &mut Context<Self>) {
-        let cursor = self.cursor_offset();
-        let end = self.content[cursor..]
-            .find('\n')
-            .map(|ix| cursor + ix)
-            .unwrap_or(self.content.len());
-        self.move_to(end, cx);
+        self.move_to(self.line_end_offset(), cx);
     }
 
     fn select_all(&mut self, _: &NoteSelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
+    }
+
+    fn select_left(&mut self, _: &NoteSelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_right(&mut self, _: &NoteSelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_up(&mut self, _: &NoteSelectUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertically(-1, true, window, cx);
+    }
+
+    fn select_down(&mut self, _: &NoteSelectDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertically(1, true, window, cx);
+    }
+
+    fn select_home(&mut self, _: &NoteSelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_start_offset(), cx);
+    }
+
+    fn select_end(&mut self, _: &NoteSelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_end_offset(), cx);
+    }
+
+    fn copy(&mut self, _: &NoteCopy, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selected_text(cx);
+    }
+
+    fn cut(&mut self, _: &NoteCut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.copy_selected_text(cx) {
+            self.replace_text_in_range(None, "", window, cx);
+        }
     }
 
     fn paste(&mut self, _: &NotePaste, window: &mut Window, cx: &mut Context<Self>) {
@@ -244,7 +277,13 @@ impl NoteEditor {
         cx.notify();
     }
 
-    fn move_vertically(&mut self, direction: isize, window: &mut Window, cx: &mut Context<Self>) {
+    fn move_vertically(
+        &mut self,
+        direction: isize,
+        extend_selection: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (Some(bounds), Some(cursor)) = (
             self.last_bounds,
             self.position_for_offset(self.cursor_offset(), window),
@@ -257,7 +296,39 @@ impl NoteEditor {
             bounds.left() + cursor.x,
             bounds.top() + cursor.y + line_height * direction as f32,
         );
-        self.move_to(self.index_for_mouse_position(target, window), cx);
+        let offset = self.index_for_mouse_position(target, window);
+        if extend_selection {
+            self.select_to(offset, cx);
+        } else {
+            self.move_to(offset, cx);
+        }
+    }
+
+    fn line_start_offset(&self) -> usize {
+        let cursor = self.cursor_offset();
+        self.content[..cursor]
+            .rfind('\n')
+            .map(|ix| ix + '\n'.len_utf8())
+            .unwrap_or(0)
+    }
+
+    fn line_end_offset(&self) -> usize {
+        let cursor = self.cursor_offset();
+        self.content[cursor..]
+            .find('\n')
+            .map(|ix| cursor + ix)
+            .unwrap_or(self.content.len())
+    }
+
+    fn copy_selected_text(&self, cx: &mut Context<Self>) -> bool {
+        if self.selected_range.is_empty() {
+            return false;
+        }
+
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            self.content[self.selected_range.clone()].to_string(),
+        ));
+        true
     }
 
     fn index_for_mouse_position(&self, position: GpuiPoint<Pixels>, window: &mut Window) -> usize {
@@ -532,6 +603,14 @@ impl Render for NoteEditor {
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::select_left))
+            .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .child(
                 div()

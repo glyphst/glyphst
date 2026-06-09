@@ -3,12 +3,12 @@ use std::ops::Range;
 use crate::settings::SettingsStore;
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point as GpuiPoint, Render, ScrollStrategy, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, UniformListScrollHandle, Window, div, fill, point, prelude::*, px, relative,
-    rgb, rgba, size, uniform_list,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollStrategy,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UniformListScrollHandle, Window, div,
+    fill, point, prelude::*, px, relative, rgb, rgba, size, uniform_list,
 };
 
 gpui::actions!(
@@ -25,6 +25,12 @@ gpui::actions!(
         PickerHome,
         PickerEnd,
         PickerSelectAll,
+        PickerSelectLeft,
+        PickerSelectRight,
+        PickerSelectHome,
+        PickerSelectEnd,
+        PickerCopy,
+        PickerCut,
         PickerPaste,
         PickerRemove
     ]
@@ -235,6 +241,32 @@ impl<D: PickerDelegate> Picker<D> {
         self.select_to(self.content.len(), cx);
     }
 
+    fn select_left(&mut self, _: &PickerSelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_right(&mut self, _: &PickerSelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_home(&mut self, _: &PickerSelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_end(&mut self, _: &PickerSelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    fn copy(&mut self, _: &PickerCopy, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selected_text(cx);
+    }
+
+    fn cut(&mut self, _: &PickerCut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.copy_selected_text(cx) {
+            self.replace_text_in_range(None, "", window, cx);
+        }
+    }
+
     fn home(&mut self, _: &PickerHome, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
     }
@@ -302,6 +334,7 @@ impl<D: PickerDelegate> Picker<D> {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = offset.min(self.content.len());
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         cx.notify();
@@ -336,6 +369,7 @@ impl<D: PickerDelegate> Picker<D> {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = offset.min(self.content.len());
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -348,6 +382,17 @@ impl<D: PickerDelegate> Picker<D> {
         }
 
         cx.notify();
+    }
+
+    fn copy_selected_text(&self, cx: &mut Context<Self>) -> bool {
+        if self.selected_range.is_empty() {
+            return false;
+        }
+
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            self.content[self.selected_range.clone()].to_string(),
+        ));
+        true
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
@@ -573,6 +618,12 @@ impl<D: PickerDelegate> Render for Picker<D> {
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::select_left))
+            .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::remove_selected))
             .child(

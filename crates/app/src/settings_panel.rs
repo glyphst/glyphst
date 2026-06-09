@@ -1,13 +1,17 @@
 use crate::{
-    settings::{AiProvider, KeymapPreset, Settings, SettingsStore, WindowBackgroundMode},
+    settings::{
+        AiProvider, AiTitleModelSettings, KeymapPreset, Settings, SettingsStore,
+        WindowBackgroundMode,
+    },
     theme::{PartialTheme, Theme, ThemeMetadata, format_rgb_hex, format_rgba_hex},
 };
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point as GpuiPoint, Render, SharedString, Style, TextRun, UTF16Selection, Window, div,
-    fill, point, prelude::*, px, relative, rgb, rgba, size,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, SharedString,
+    Style, TextRun, UTF16Selection, Window, div, fill, point, prelude::*, px, relative, rgb, rgba,
+    size,
 };
 use std::{ops::Range, path::Path};
 
@@ -22,6 +26,12 @@ gpui::actions!(
         SettingsInputBackspace,
         SettingsInputDelete,
         SettingsInputSelectAll,
+        SettingsInputSelectLeft,
+        SettingsInputSelectRight,
+        SettingsInputSelectHome,
+        SettingsInputSelectEnd,
+        SettingsInputCopy,
+        SettingsInputCut,
         SettingsInputPaste
     ]
 );
@@ -65,6 +75,15 @@ impl SettingsTextInput {
             last_bounds: None,
             is_selecting: false,
         }
+    }
+
+    fn set_content(&mut self, content: SharedString, cx: &mut Context<Self>) {
+        let len = content.len();
+        self.content = content;
+        self.selected_range = len..len;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
     }
 
     fn left(&mut self, _: &SettingsInputLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -115,6 +134,37 @@ impl SettingsTextInput {
         self.select_to(self.content.len(), cx);
     }
 
+    fn select_left(&mut self, _: &SettingsInputSelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_right(
+        &mut self,
+        _: &SettingsInputSelectRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(self.next_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_home(&mut self, _: &SettingsInputSelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_end(&mut self, _: &SettingsInputSelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    fn copy(&mut self, _: &SettingsInputCopy, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selected_text(cx);
+    }
+
+    fn cut(&mut self, _: &SettingsInputCut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.copy_selected_text(cx) {
+            self.replace_text_in_range(None, "", window, cx);
+        }
+    }
+
     fn paste(&mut self, _: &SettingsInputPaste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace(['\n', '\r'], " ");
@@ -151,6 +201,7 @@ impl SettingsTextInput {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = offset.min(self.content.len());
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         cx.notify();
@@ -182,6 +233,7 @@ impl SettingsTextInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = offset.min(self.content.len());
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -192,6 +244,17 @@ impl SettingsTextInput {
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
         cx.notify();
+    }
+
+    fn copy_selected_text(&self, cx: &mut Context<Self>) -> bool {
+        if self.selected_range.is_empty() {
+            return false;
+        }
+
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            self.content[self.selected_range.clone()].to_string(),
+        ));
+        true
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
@@ -403,6 +466,12 @@ impl Render for SettingsTextInput {
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::select_left))
+            .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -676,16 +745,33 @@ pub struct SettingsPanel {
     ai_model_input: Entity<SettingsTextInput>,
     ai_key_input: Entity<SettingsTextInput>,
     ai_base_url_input: Entity<SettingsTextInput>,
+    ai_title_model_input: Entity<SettingsTextInput>,
+    ai_title_key_input: Entity<SettingsTextInput>,
+    ai_title_base_url_input: Entity<SettingsTextInput>,
 }
 
 impl SettingsPanel {
     pub fn new(previous_focus_handle: FocusHandle, cx: &mut Context<Self>) -> Self {
-        let (model, api_key, base_url) = {
-            let ai = &cx.global::<SettingsStore>().settings.ai;
+        let (model, api_key, base_url, title_model, title_api_key, title_base_url) = {
+            let settings = &cx.global::<SettingsStore>().settings;
+            let ai = &settings.ai;
+            let title = settings.ai_title_model.as_ref();
             (
                 ai.model.clone().into(),
                 ai.api_key.clone().into(),
                 ai.base_url.clone().unwrap_or_default().into(),
+                title
+                    .map(|settings| settings.model.clone())
+                    .unwrap_or_default()
+                    .into(),
+                title
+                    .map(|settings| settings.api_key.clone())
+                    .unwrap_or_default()
+                    .into(),
+                title
+                    .and_then(|settings| settings.base_url.clone())
+                    .unwrap_or_default()
+                    .into(),
             )
         };
 
@@ -696,6 +782,19 @@ impl SettingsPanel {
         let ai_base_url_input = cx.new(|cx| {
             SettingsTextInput::new(
                 base_url,
+                "https://api.openai.com (leave empty for default)".into(),
+                false,
+                cx,
+            )
+        });
+        let ai_title_model_input =
+            cx.new(|cx| SettingsTextInput::new(title_model, "small model name".into(), false, cx));
+        let ai_title_key_input = cx.new(|cx| {
+            SettingsTextInput::new(title_api_key, "paste title API key…".into(), true, cx)
+        });
+        let ai_title_base_url_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                title_base_url,
                 "https://api.openai.com (leave empty for default)".into(),
                 false,
                 cx,
@@ -733,6 +832,37 @@ impl SettingsPanel {
         })
         .detach();
 
+        cx.subscribe(&ai_title_model_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let value = value.to_string();
+            this.update_title_model_settings(|title| title.model = value, cx);
+        })
+        .detach();
+
+        cx.subscribe(&ai_title_key_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let value = value.to_string();
+            this.update_title_model_settings(|title| title.api_key = value, cx);
+        })
+        .detach();
+
+        cx.subscribe(&ai_title_base_url_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let value = value.to_string();
+            this.update_title_model_settings(
+                |title| {
+                    let trimmed = value.trim().trim_end_matches('/').to_string();
+                    title.base_url = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    };
+                },
+                cx,
+            );
+        })
+        .detach();
+
         Self {
             focus_handle: cx.focus_handle(),
             previous_focus_handle,
@@ -742,6 +872,9 @@ impl SettingsPanel {
             ai_model_input,
             ai_key_input,
             ai_base_url_input,
+            ai_title_model_input,
+            ai_title_key_input,
+            ai_title_base_url_input,
         }
     }
 
@@ -754,6 +887,41 @@ impl SettingsPanel {
         update(&mut settings.ai);
         let result = cx.global_mut::<SettingsStore>().set_settings(settings);
         self.save_error = result.err().map(|e| format!("{e:#}").into());
+        cx.emit(PanelEvent::Changed);
+        cx.notify();
+    }
+
+    fn update_title_model_settings(
+        &mut self,
+        update: impl FnOnce(&mut AiTitleModelSettings),
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        update(
+            settings
+                .ai_title_model
+                .get_or_insert_with(AiTitleModelSettings::default),
+        );
+        let result = cx.global_mut::<SettingsStore>().set_settings(settings);
+        self.save_error = result.err().map(|e| format!("{e:#}").into());
+        cx.emit(PanelEvent::Changed);
+        cx.notify();
+    }
+
+    fn clear_title_model_settings(&mut self, cx: &mut Context<Self>) {
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        settings.ai_title_model = None;
+        let result = cx.global_mut::<SettingsStore>().set_settings(settings);
+        self.save_error = result.err().map(|e| format!("{e:#}").into());
+        self.ai_title_model_input.update(cx, |input, cx| {
+            input.set_content(SharedString::default(), cx)
+        });
+        self.ai_title_key_input.update(cx, |input, cx| {
+            input.set_content(SharedString::default(), cx)
+        });
+        self.ai_title_base_url_input.update(cx, |input, cx| {
+            input.set_content(SharedString::default(), cx)
+        });
         cx.emit(PanelEvent::Changed);
         cx.notify();
     }
@@ -1232,6 +1400,123 @@ impl SettingsPanel {
             .child(label)
     }
 
+    fn title_model_provider_option(
+        &self,
+        label: &'static str,
+        provider: AiProvider,
+        selected_provider: AiProvider,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = provider == selected_provider;
+
+        div()
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(if selected {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.control_border)
+            })
+            .bg(if selected {
+                rgba(theme.selected_row)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    let model = provider.default_model().to_string();
+                    this.ai_title_model_input
+                        .update(cx, |input, cx| input.set_content(model.clone().into(), cx));
+                    this.change_settings(
+                        move |settings| {
+                            let title_model = settings
+                                .ai_title_model
+                                .get_or_insert_with(AiTitleModelSettings::default);
+                            title_model.provider = provider;
+                            title_model.model = model;
+                        },
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
+    fn title_model_default_button(
+        &self,
+        provider: AiProvider,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .h(px(28.0))
+            .min_w(px(30.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(theme.control_border))
+            .bg(rgb(theme.control_background))
+            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    let model = provider.default_model().to_string();
+                    this.ai_title_model_input
+                        .update(cx, |input, cx| input.set_content(model.clone().into(), cx));
+                    this.change_settings(
+                        move |settings| {
+                            let title_model = settings
+                                .ai_title_model
+                                .get_or_insert_with(AiTitleModelSettings::default);
+                            title_model.model = model;
+                        },
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .child("Default")
+    }
+
+    fn title_model_clear_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .h(px(28.0))
+            .min_w(px(30.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(theme.control_border))
+            .bg(rgb(theme.control_background))
+            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.clear_title_model_settings(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child("Clear")
+    }
+
     fn section_title(label: &'static str, theme: Theme) -> impl IntoElement {
         div()
             .pt_2()
@@ -1350,6 +1635,11 @@ impl SettingsPanel {
 
     fn ai_tab(&self, settings: &Settings, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         let default_model = settings.ai.provider.default_model();
+        let title_provider = settings
+            .ai_title_model
+            .as_ref()
+            .map(|settings| settings.provider)
+            .unwrap_or(AiProvider::OpenAi);
 
         let input_row = |label: &'static str, child: AnyElement| {
             div()
@@ -1436,6 +1726,72 @@ impl SettingsPanel {
                         theme,
                         cx,
                     ))
+                    .into_any_element(),
+            ))
+            .child(Self::section_title("Title model", theme))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .min_h(px(32.0))
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child("Optional small model for generated chat titles"),
+                    )
+                    .child(self.title_model_clear_button(theme, cx)),
+            )
+            .child(input_row(
+                "Provider",
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(self.title_model_provider_option(
+                        "OpenAI",
+                        AiProvider::OpenAi,
+                        title_provider,
+                        theme,
+                        cx,
+                    ))
+                    .child(self.title_model_provider_option(
+                        "Anthropic",
+                        AiProvider::Anthropic,
+                        title_provider,
+                        theme,
+                        cx,
+                    ))
+                    .into_any_element(),
+            ))
+            .child(input_row(
+                "Model",
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .child(self.ai_title_model_input.clone())
+                    .child(self.title_model_default_button(title_provider, theme, cx))
+                    .into_any_element(),
+            ))
+            .child(input_row(
+                "API key",
+                self.ai_title_key_input.clone().into_any_element(),
+            ))
+            .child(input_row(
+                "Base URL",
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .child(self.ai_title_base_url_input.clone())
                     .into_any_element(),
             ))
             .into_any_element()
