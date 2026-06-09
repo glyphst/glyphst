@@ -160,10 +160,77 @@ pub struct KeyBindingOverride {
     pub keystrokes: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AiProvider {
+    #[default]
+    OpenAi,
+    Anthropic,
+}
+
+impl AiProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "openai" | "open-ai" | "open_ai" => Some(Self::OpenAi),
+            "anthropic" | "claude" => Some(Self::Anthropic),
+            _ => None,
+        }
+    }
+
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::OpenAi => "gpt-4o",
+            Self::Anthropic => "claude-3-5-sonnet-latest",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiSettings {
+    pub provider: AiProvider,
+    pub model: String,
+    pub api_key: String,
+    pub base_url: Option<String>,
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        let provider = AiProvider::OpenAi;
+        Self {
+            provider,
+            model: provider.default_model().to_string(),
+            api_key: String::new(),
+            base_url: None,
+        }
+    }
+}
+
+impl AiSettings {
+    fn sanitize(&mut self) {
+        self.model = self.model.trim().to_string();
+        self.api_key = self.api_key.trim().to_string();
+        self.base_url = self
+            .base_url
+            .take()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
+        if self.model.is_empty() {
+            self.model = self.provider.default_model().to_string();
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub behavior: BehaviorSettings,
     pub window: WindowSettings,
+    pub ai: AiSettings,
     pub keymap_preset: KeymapPreset,
     pub keybinding_overrides: Vec<KeyBindingOverride>,
     pub theme_name: String,
@@ -175,6 +242,7 @@ impl Default for Settings {
         Self {
             behavior: BehaviorSettings::default(),
             window: WindowSettings::default(),
+            ai: AiSettings::default(),
             keymap_preset: KeymapPreset::default(),
             keybinding_overrides: Vec::new(),
             theme_name: DEFAULT_THEME_ID.to_string(),
@@ -187,6 +255,7 @@ impl Settings {
     pub fn sanitize(&mut self) {
         self.behavior.sanitize();
         self.window.sanitize();
+        self.ai.sanitize();
         self.overrides.sanitize();
         if self.theme_name.trim().is_empty() {
             self.theme_name = DEFAULT_THEME_ID.to_string();
@@ -241,6 +310,26 @@ impl Settings {
             }
         }
 
+        if let Some(ai) = document.get("ai").and_then(KdlNode::children) {
+            if let Some(value) = ai
+                .get_arg("provider")
+                .and_then(KdlValue::as_string)
+                .and_then(AiProvider::from_str)
+            {
+                settings.ai.provider = value;
+            }
+            if let Some(value) = ai.get_arg("model").and_then(KdlValue::as_string) {
+                settings.ai.model = value.to_string();
+            }
+            if let Some(value) = ai.get_arg("api_key").and_then(KdlValue::as_string) {
+                settings.ai.api_key = value.to_string();
+            }
+            settings.ai.base_url = ai
+                .get_arg("base_url")
+                .and_then(KdlValue::as_string)
+                .map(str::to_string);
+        }
+
         if let Some(overrides) = document.get("theme-overrides").and_then(KdlNode::children) {
             settings.overrides = PartialTheme::from_document(overrides);
         }
@@ -289,6 +378,20 @@ impl Settings {
             self.window.background.as_str(),
         );
         document.nodes_mut().push(window);
+
+        if self.ai != AiSettings::default() {
+            let mut ai = KdlNode::new("ai");
+            let ai_children = ai.ensure_children();
+            push_value_node(ai_children, "provider", self.ai.provider.as_str());
+            push_value_node(ai_children, "model", self.ai.model.clone());
+            if !self.ai.api_key.is_empty() {
+                push_value_node(ai_children, "api_key", self.ai.api_key.clone());
+            }
+            if let Some(base_url) = &self.ai.base_url {
+                push_value_node(ai_children, "base_url", base_url.clone());
+            }
+            document.nodes_mut().push(ai);
+        }
 
         if !self.keybinding_overrides.is_empty() {
             let mut keybindings = KdlNode::new("keybindings");
@@ -535,6 +638,30 @@ keybindings {
             ]
         );
 
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn parses_and_exports_ai_settings() {
+        let settings = parse_settings(
+            r##"
+ai {
+    provider "anthropic"
+    model "claude-3-5-sonnet-latest"
+    api_key "test-key"
+    base_url "https://api.example.com/"
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.ai.provider, AiProvider::Anthropic);
+        assert_eq!(settings.ai.model, "claude-3-5-sonnet-latest");
+        assert_eq!(settings.ai.api_key, "test-key");
+        assert_eq!(
+            settings.ai.base_url,
+            Some("https://api.example.com".to_string())
+        );
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 

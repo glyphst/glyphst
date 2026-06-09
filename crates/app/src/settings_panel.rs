@@ -1,14 +1,637 @@
 use crate::{
-    settings::{KeymapPreset, Settings, SettingsStore, WindowBackgroundMode},
+    settings::{AiProvider, KeymapPreset, Settings, SettingsStore, WindowBackgroundMode},
     theme::{PartialTheme, Theme, ThemeMetadata, format_rgb_hex, format_rgba_hex},
 };
 use gpui::{
-    AnyElement, Context, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, Render,
-    SharedString, Window, div, prelude::*, px, rgb, rgba,
+    AnyElement, App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point as GpuiPoint, Render, SharedString, Style, TextRun, UTF16Selection, Window, div,
+    fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
-use std::path::Path;
+use std::{ops::Range, path::Path};
 
-gpui::actions!(settings_panel, [PanelClose]);
+gpui::actions!(
+    settings_panel,
+    [
+        PanelClose,
+        SettingsInputLeft,
+        SettingsInputRight,
+        SettingsInputHome,
+        SettingsInputEnd,
+        SettingsInputBackspace,
+        SettingsInputDelete,
+        SettingsInputSelectAll,
+        SettingsInputPaste
+    ]
+);
+
+// ---- inline text input used in the AI settings tab ----
+
+pub enum SettingsInputEvent {
+    Changed(SharedString),
+}
+
+pub struct SettingsTextInput {
+    pub focus_handle: FocusHandle,
+    pub content: SharedString,
+    pub placeholder: SharedString,
+    pub mask: bool,
+    selected_range: Range<usize>,
+    selection_reversed: bool,
+    marked_range: Option<Range<usize>>,
+    last_layout: Option<gpui::ShapedLine>,
+    last_bounds: Option<Bounds<Pixels>>,
+    is_selecting: bool,
+}
+
+impl SettingsTextInput {
+    pub fn new(
+        content: SharedString,
+        placeholder: SharedString,
+        mask: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let len = content.len();
+        Self {
+            focus_handle: cx.focus_handle(),
+            content,
+            placeholder,
+            mask,
+            selected_range: len..len,
+            selection_reversed: false,
+            marked_range: None,
+            last_layout: None,
+            last_bounds: None,
+            is_selecting: false,
+        }
+    }
+
+    fn left(&mut self, _: &SettingsInputLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.previous_boundary(self.cursor_offset()), cx);
+        } else {
+            self.move_to(self.selected_range.start, cx);
+        }
+    }
+
+    fn right(&mut self, _: &SettingsInputRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.next_boundary(self.selected_range.end), cx);
+        } else {
+            self.move_to(self.selected_range.end, cx);
+        }
+    }
+
+    fn home(&mut self, _: &SettingsInputHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+    }
+
+    fn end(&mut self, _: &SettingsInputEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.content.len(), cx);
+    }
+
+    fn backspace(
+        &mut self,
+        _: &SettingsInputBackspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(self.previous_boundary(self.cursor_offset()), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete(&mut self, _: &SettingsInputDelete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.select_to(self.next_boundary(self.cursor_offset()), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn select_all(&mut self, _: &SettingsInputSelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+        self.select_to(self.content.len(), cx);
+    }
+
+    fn paste(&mut self, _: &SettingsInputPaste, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            let text = text.replace(['\n', '\r'], " ");
+            self.replace_text_in_range(None, &text, window, cx);
+        }
+    }
+
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_handle.focus(window, cx);
+        self.is_selecting = true;
+        if event.modifiers.shift {
+            self.select_to(self.index_for_mouse_position(event.position), cx);
+        } else {
+            self.move_to(self.index_for_mouse_position(event.position), cx);
+        }
+        cx.stop_propagation();
+    }
+
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.is_selecting = false;
+        cx.stop_propagation();
+    }
+
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_selecting {
+            self.select_to(self.index_for_mouse_position(event.position), cx);
+            cx.stop_propagation();
+        }
+    }
+
+    fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.selected_range = offset..offset;
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
+    fn cursor_offset(&self) -> usize {
+        if self.selection_reversed {
+            self.selected_range.start
+        } else {
+            self.selected_range.end
+        }
+    }
+
+    fn index_for_mouse_position(&self, position: GpuiPoint<Pixels>) -> usize {
+        if self.content.is_empty() {
+            return 0;
+        }
+        let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
+        else {
+            return 0;
+        };
+        if position.y < bounds.top() {
+            return 0;
+        }
+        if position.y > bounds.bottom() {
+            return self.content.len();
+        }
+        line.closest_index_for_x(position.x - bounds.left())
+    }
+
+    fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if self.selection_reversed {
+            self.selected_range.start = offset;
+        } else {
+            self.selected_range.end = offset;
+        }
+        if self.selected_range.end < self.selected_range.start {
+            self.selection_reversed = !self.selection_reversed;
+            self.selected_range = self.selected_range.end..self.selected_range.start;
+        }
+        cx.notify();
+    }
+
+    fn offset_from_utf16(&self, offset: usize) -> usize {
+        let mut utf8_offset = 0;
+        let mut utf16_count = 0;
+        for ch in self.content.chars() {
+            if utf16_count >= offset {
+                break;
+            }
+            utf16_count += ch.len_utf16();
+            utf8_offset += ch.len_utf8();
+        }
+        utf8_offset
+    }
+
+    fn offset_to_utf16(&self, offset: usize) -> usize {
+        let mut utf16_offset = 0;
+        let mut utf8_count = 0;
+        for ch in self.content.chars() {
+            if utf8_count >= offset {
+                break;
+            }
+            utf8_count += ch.len_utf8();
+            utf16_offset += ch.len_utf16();
+        }
+        utf16_offset
+    }
+
+    fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
+    }
+
+    fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
+        self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
+    }
+
+    fn previous_boundary(&self, offset: usize) -> usize {
+        self.content
+            .char_indices()
+            .rev()
+            .find_map(|(idx, _)| (idx < offset).then_some(idx))
+            .unwrap_or(0)
+    }
+
+    fn next_boundary(&self, offset: usize) -> usize {
+        self.content
+            .char_indices()
+            .find_map(|(idx, _)| (idx > offset).then_some(idx))
+            .unwrap_or(self.content.len())
+    }
+}
+
+impl EntityInputHandler for SettingsTextInput {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        let range = self.range_from_utf16(&range_utf16);
+        actual_range.replace(self.range_to_utf16(&range));
+        Some(self.content[range].to_string())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: self.range_to_utf16(&self.selected_range),
+            reversed: self.selection_reversed,
+        })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        self.marked_range
+            .as_ref()
+            .map(|range| self.range_to_utf16(range))
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
+        self.marked_range = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = range_utf16
+            .as_ref()
+            .map(|r| self.range_from_utf16(r))
+            .or_else(|| self.marked_range.clone())
+            .unwrap_or_else(|| self.selected_range.clone());
+
+        self.content =
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
+        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.emit(SettingsInputEvent::Changed(self.content.clone()));
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = range_utf16
+            .as_ref()
+            .map(|r| self.range_from_utf16(r))
+            .or_else(|| self.marked_range.clone())
+            .unwrap_or_else(|| self.selected_range.clone());
+        let selected_start = range.start;
+
+        self.content =
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
+        self.marked_range =
+            (!new_text.is_empty()).then_some(range.start..range.start + new_text.len());
+        self.selected_range = new_selected_range_utf16
+            .as_ref()
+            .map(|r| {
+                let start = offset_from_utf16_in_text(new_text, r.start);
+                let end = offset_from_utf16_in_text(new_text, r.end);
+                selected_start + start..selected_start + end
+            })
+            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.selection_reversed = false;
+        cx.emit(SettingsInputEvent::Changed(self.content.clone()));
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        bounds: Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let line = self.last_layout.as_ref()?;
+        let range = self.range_from_utf16(&range_utf16);
+        Some(Bounds::from_corners(
+            point(bounds.left() + line.x_for_index(range.start), bounds.top()),
+            point(bounds.left() + line.x_for_index(range.end), bounds.bottom()),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        pt: GpuiPoint<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
+        let bounds = self.last_bounds?;
+        let line = self.last_layout.as_ref()?;
+        let _local = bounds.localize(&pt)?;
+        let utf8_index = line.index_for_x(pt.x - bounds.left())?;
+        Some(self.offset_to_utf16(utf8_index))
+    }
+}
+
+impl EventEmitter<SettingsInputEvent> for SettingsTextInput {}
+
+impl Focusable for SettingsTextInput {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for SettingsTextInput {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
+        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let focused = self.focus_handle.is_focused(window);
+
+        div()
+            .key_context("SettingsInput")
+            .track_focus(&self.focus_handle)
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .h(px(28.0))
+            .px_2()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(if focused {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.control_border)
+            })
+            .bg(rgb(theme.control_background))
+            .cursor(CursorStyle::IBeam)
+            .on_action(cx.listener(Self::left))
+            .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::home))
+            .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::backspace))
+            .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::paste))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .child(SettingsInputElement { input: entity })
+    }
+}
+
+struct SettingsInputElement {
+    input: Entity<SettingsTextInput>,
+}
+
+struct SettingsInputPrepaint {
+    line: Option<gpui::ShapedLine>,
+    cursor: Option<PaintQuad>,
+    selection: Option<PaintQuad>,
+}
+
+impl IntoElement for SettingsInputElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for SettingsInputElement {
+    type RequestLayoutState = ();
+    type PrepaintState = SettingsInputPrepaint;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let mut style = Style::default();
+        style.size.width = relative(1.0).into();
+        style.size.height = window.line_height().into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> SettingsInputPrepaint {
+        let input = self.input.read(cx);
+        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let style = window.text_style();
+
+        let display_text: SharedString = if input.mask && !input.content.is_empty() {
+            "•".repeat(input.content.chars().count()).into()
+        } else {
+            input.content.clone()
+        };
+
+        let (display_text, text_color) = if display_text.is_empty() {
+            (
+                input.placeholder.clone(),
+                rgba(theme.placeholder_text).into(),
+            )
+        } else {
+            (display_text, style.color)
+        };
+
+        let run = TextRun {
+            len: display_text.len(),
+            font: style.font(),
+            color: text_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+
+        let runs = if !input.content.is_empty() {
+            if let Some(marked_range) = input.marked_range.as_ref() {
+                vec![
+                    TextRun {
+                        len: marked_range.start,
+                        ..run.clone()
+                    },
+                    TextRun {
+                        len: marked_range.end - marked_range.start,
+                        underline: Some(gpui::UnderlineStyle {
+                            color: Some(run.color),
+                            thickness: px(1.0),
+                            wavy: false,
+                        }),
+                        ..run.clone()
+                    },
+                    TextRun {
+                        len: display_text.len() - marked_range.end,
+                        ..run
+                    },
+                ]
+                .into_iter()
+                .filter(|r| r.len > 0)
+                .collect()
+            } else {
+                vec![run]
+            }
+        } else {
+            vec![run]
+        };
+
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let display_text_len = display_text.len();
+        let line = window
+            .text_system()
+            .shape_line(display_text, font_size, &runs, None);
+
+        let cursor = input.cursor_offset();
+        let display_cursor = if input.mask && !input.content.is_empty() {
+            display_text_len
+        } else {
+            cursor
+        };
+        let cursor_pos = line.x_for_index(display_cursor);
+        let selected_range = &input.selected_range;
+
+        let (selection, cursor_quad) = if selected_range.is_empty() || input.mask {
+            let quad = fill(
+                Bounds::new(
+                    point(bounds.left() + cursor_pos, bounds.top()),
+                    size(px(2.0), bounds.bottom() - bounds.top()),
+                ),
+                rgb(theme.accent),
+            );
+            (None, Some(quad))
+        } else {
+            let quad = fill(
+                Bounds::from_corners(
+                    point(
+                        bounds.left() + line.x_for_index(selected_range.start),
+                        bounds.top(),
+                    ),
+                    point(
+                        bounds.left() + line.x_for_index(selected_range.end),
+                        bounds.bottom(),
+                    ),
+                ),
+                rgba(theme.selection_highlight),
+            );
+            (Some(quad), None)
+        };
+
+        SettingsInputPrepaint {
+            line: Some(line),
+            cursor: cursor_quad,
+            selection,
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        prepaint: &mut SettingsInputPrepaint,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let focus_handle = self.input.read(cx).focus_handle.clone();
+        window.handle_input(
+            &focus_handle,
+            ElementInputHandler::new(bounds, self.input.clone()),
+            cx,
+        );
+
+        if let Some(sel) = prepaint.selection.take() {
+            window.paint_quad(sel);
+        }
+
+        if let Some(line) = prepaint.line.take() {
+            if let Err(e) = line.paint(
+                bounds.origin,
+                window.line_height(),
+                gpui::TextAlign::Left,
+                None,
+                window,
+                cx,
+            ) {
+                eprintln!("settings input paint error: {e:#}");
+            }
+
+            if focus_handle.is_focused(window)
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
+
+            self.input.update(cx, |input, _| {
+                input.last_layout = Some(line);
+                input.last_bounds = Some(bounds);
+            });
+        }
+    }
+}
+
+fn offset_from_utf16_in_text(text: &str, offset: usize) -> usize {
+    let mut utf8_offset = 0;
+    let mut utf16_count = 0;
+    for ch in text.chars() {
+        if utf16_count >= offset {
+            break;
+        }
+        utf16_count += ch.len_utf16();
+        utf8_offset += ch.len_utf8();
+    }
+    utf8_offset
+}
+
+// ---- settings panel ----
 
 const NUMBER_STEP_SMALL: f32 = 0.05;
 const OPACITY_STEP: f32 = 0.05;
@@ -41,6 +664,7 @@ pub enum PanelEvent {
 enum SettingsTab {
     General,
     Appearance,
+    Ai,
 }
 
 pub struct SettingsPanel {
@@ -49,17 +673,89 @@ pub struct SettingsPanel {
     active_tab: SettingsTab,
     status: Option<SharedString>,
     save_error: Option<SharedString>,
+    ai_model_input: Entity<SettingsTextInput>,
+    ai_key_input: Entity<SettingsTextInput>,
+    ai_base_url_input: Entity<SettingsTextInput>,
 }
 
 impl SettingsPanel {
     pub fn new(previous_focus_handle: FocusHandle, cx: &mut Context<Self>) -> Self {
+        let (model, api_key, base_url) = {
+            let ai = &cx.global::<SettingsStore>().settings.ai;
+            (
+                ai.model.clone().into(),
+                ai.api_key.clone().into(),
+                ai.base_url.clone().unwrap_or_default().into(),
+            )
+        };
+
+        let ai_model_input =
+            cx.new(|cx| SettingsTextInput::new(model, "model name".into(), false, cx));
+        let ai_key_input =
+            cx.new(|cx| SettingsTextInput::new(api_key, "paste API key…".into(), true, cx));
+        let ai_base_url_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                base_url,
+                "https://api.openai.com (leave empty for default)".into(),
+                false,
+                cx,
+            )
+        });
+
+        cx.subscribe(&ai_model_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let value = value.to_string();
+            this.update_ai_settings(|ai| ai.model = value, cx);
+        })
+        .detach();
+
+        cx.subscribe(&ai_key_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let value = value.to_string();
+            this.update_ai_settings(|ai| ai.api_key = value, cx);
+        })
+        .detach();
+
+        cx.subscribe(&ai_base_url_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let value = value.to_string();
+            this.update_ai_settings(
+                |ai| {
+                    let trimmed = value.trim().trim_end_matches('/').to_string();
+                    ai.base_url = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    };
+                },
+                cx,
+            );
+        })
+        .detach();
+
         Self {
             focus_handle: cx.focus_handle(),
             previous_focus_handle,
             active_tab: SettingsTab::General,
             status: None,
             save_error: None,
+            ai_model_input,
+            ai_key_input,
+            ai_base_url_input,
         }
+    }
+
+    fn update_ai_settings(
+        &mut self,
+        update: impl FnOnce(&mut crate::settings::AiSettings),
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        update(&mut settings.ai);
+        let result = cx.global_mut::<SettingsStore>().set_settings(settings);
+        self.save_error = result.err().map(|e| format!("{e:#}").into());
+        cx.emit(PanelEvent::Changed);
+        cx.notify();
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -491,6 +1187,51 @@ impl SettingsPanel {
             .child(preset.label())
     }
 
+    fn ai_provider_option(
+        &self,
+        label: &'static str,
+        provider: AiProvider,
+        selected_provider: AiProvider,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = provider == selected_provider;
+
+        div()
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(if selected {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.control_border)
+            })
+            .bg(if selected {
+                rgba(theme.selected_row)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.change_settings(
+                        move |settings| {
+                            settings.ai.provider = provider;
+                        },
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
     fn section_title(label: &'static str, theme: Theme) -> impl IntoElement {
         div()
             .pt_2()
@@ -604,6 +1345,99 @@ impl SettingsPanel {
                             )),
                     ),
             )
+            .into_any_element()
+    }
+
+    fn ai_tab(&self, settings: &Settings, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let default_model = settings.ai.provider.default_model();
+
+        let input_row = |label: &'static str, child: AnyElement| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .h(px(44.0))
+                .gap_3()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(80.0))
+                        .text_color(rgb(theme.text))
+                        .child(label),
+                )
+                .child(child)
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(Self::section_title("Provider", theme))
+            .child(input_row(
+                "Provider",
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(self.ai_provider_option(
+                        "OpenAI",
+                        AiProvider::OpenAi,
+                        settings.ai.provider,
+                        theme,
+                        cx,
+                    ))
+                    .child(self.ai_provider_option(
+                        "Anthropic",
+                        AiProvider::Anthropic,
+                        settings.ai.provider,
+                        theme,
+                        cx,
+                    ))
+                    .into_any_element(),
+            ))
+            .child(Self::section_title("Model", theme))
+            .child(input_row(
+                "Model",
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .child(self.ai_model_input.clone())
+                    .child(self.small_button(
+                        "Default",
+                        move |settings| settings.ai.model = default_model.to_string(),
+                        theme,
+                        cx,
+                    ))
+                    .into_any_element(),
+            ))
+            .child(Self::section_title("Credentials", theme))
+            .child(input_row(
+                "API key",
+                self.ai_key_input.clone().into_any_element(),
+            ))
+            .child(Self::section_title("Endpoint", theme))
+            .child(input_row(
+                "Base URL",
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .child(self.ai_base_url_input.clone())
+                    .child(self.small_button(
+                        "Clear",
+                        |settings| settings.ai.base_url = None,
+                        theme,
+                        cx,
+                    ))
+                    .into_any_element(),
+            ))
             .into_any_element()
     }
 
@@ -955,6 +1789,7 @@ impl Render for SettingsPanel {
         let content = match self.active_tab {
             SettingsTab::General => self.general_tab(&settings, resolved, cx),
             SettingsTab::Appearance => self.appearance_tab(&settings, resolved, themes, cx),
+            SettingsTab::Ai => self.ai_tab(&settings, resolved, cx),
         };
 
         div()
@@ -1010,7 +1845,8 @@ impl Render for SettingsPanel {
                                 "Appearance",
                                 resolved,
                                 cx,
-                            )),
+                            ))
+                            .child(self.tab_button(SettingsTab::Ai, "AI", resolved, cx)),
                     )
                     .child(
                         div()

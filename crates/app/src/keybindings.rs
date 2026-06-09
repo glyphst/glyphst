@@ -1,6 +1,11 @@
 use std::rc::Rc;
 
 use crate::{
+    ai_panel::{
+        AiPanelBackspace, AiPanelClose, AiPanelDelete, AiPanelDown, AiPanelEnd, AiPanelHome,
+        AiPanelLeft, AiPanelNewline, AiPanelPaste, AiPanelRight, AiPanelSelectAll, AiPanelSubmit,
+        AiPanelUp,
+    },
     note_editor::{
         NoteBackspace, NoteCancel, NoteDelete, NoteDown, NoteEnd, NoteHome, NoteLeft, NoteNewline,
         NotePaste, NoteRight, NoteSave, NoteSelectAll, NoteUp,
@@ -10,8 +15,8 @@ use crate::{
         GridCursorRight, GridCursorUp, GridOverviewConfirm, JumpBackward, JumpForward,
         NextHalfPage, NextPage, OpenBookmarks, OpenFile, OpenHistory, OpenNotes, OpenSettings,
         PreviousHalfPage, PreviousPage, ResetZoom, Search, SearchNext, SearchPrev, SelectAll, Toc,
-        ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview, ToggleNotes, ToggleToc,
-        ToggleTransparency, ZoomIn, ZoomOut,
+        ToggleAiPanel, ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview, ToggleNotes,
+        ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
     },
     picker::{
         PickerBackspace, PickerCancel, PickerConfirm, PickerDelete, PickerEnd, PickerHome,
@@ -24,16 +29,22 @@ use crate::{
         SearchInputRight, SearchInputSelectAll,
     },
     settings::{KeyBindingOverride, KeymapPreset},
-    settings_panel::PanelClose,
+    settings_panel::{
+        PanelClose, SettingsInputBackspace, SettingsInputDelete, SettingsInputEnd,
+        SettingsInputHome, SettingsInputLeft, SettingsInputPaste, SettingsInputRight,
+        SettingsInputSelectAll,
+    },
 };
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
 
-const PDF_CONTEXT: &str = "PdfView && !GridOverview && !CommandPalette && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor";
-const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !GridOverview && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor";
-const GRID_OVERVIEW_CONTEXT: &str = "GridOverview";
+const PDF_CONTEXT: &str = "PdfView && !GridOverview && !CommandPalette && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
+const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !GridOverview && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
+const GRID_OVERVIEW_CONTEXT: &str = "GridOverview && !SettingsPanel";
 const PALETTE_CONTEXT: &str = "CommandPalette";
 const SEARCH_CONTEXT: &str = "Search";
 const SETTINGS_CONTEXT: &str = "SettingsPanel";
+const SETTINGS_INPUT_CONTEXT: &str = "SettingsInput";
+const AI_PANEL_CONTEXT: &str = "AiPanel";
 const TOC_CONTEXT: &str = "Toc";
 const NOTES_CONTEXT: &str = "Notes";
 const HISTORY_CONTEXT: &str = "History";
@@ -84,6 +95,8 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<ToggleTransparency>("cmd-shift-t", PDF_CONTEXT),
         bind::<OpenSettings>("ctrl-,", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenSettings>("cmd-,", PDF_NO_SEARCH_CONTEXT),
+        bind::<ToggleAiPanel>("ctrl-shift-a", PDF_NO_SEARCH_CONTEXT),
+        bind::<ToggleAiPanel>("cmd-shift-a", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenHistory>("ctrl-h", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenFile>("cmd-o", PDF_NO_SEARCH_CONTEXT),
         bind::<ToggleGridOverview>("ctrl-g", PDF_NO_SEARCH_CONTEXT),
@@ -176,6 +189,16 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<SearchInputPaste>("ctrl-v", SEARCH_CONTEXT),
         bind::<SearchInputPaste>("cmd-v", SEARCH_CONTEXT),
         bind::<PanelClose>("escape", SETTINGS_CONTEXT),
+        bind::<SettingsInputBackspace>("backspace", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputDelete>("delete", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputLeft>("left", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputRight>("right", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputHome>("home", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputEnd>("end", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputSelectAll>("ctrl-a", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputSelectAll>("cmd-a", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputPaste>("ctrl-v", SETTINGS_INPUT_CONTEXT),
+        bind::<SettingsInputPaste>("cmd-v", SETTINGS_INPUT_CONTEXT),
         bind::<PickerConfirm>("enter", TOC_CONTEXT),
         bind::<PickerCancel>("escape", TOC_CONTEXT),
         bind::<PickerSelectNext>("down", TOC_CONTEXT),
@@ -262,6 +285,23 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<NoteSelectAll>("cmd-a", NOTE_EDITOR_CONTEXT),
         bind::<NotePaste>("ctrl-v", NOTE_EDITOR_CONTEXT),
         bind::<NotePaste>("cmd-v", NOTE_EDITOR_CONTEXT),
+        bind::<AiPanelSubmit>("ctrl-enter", AI_PANEL_CONTEXT),
+        bind::<AiPanelSubmit>("cmd-enter", AI_PANEL_CONTEXT),
+        bind::<AiPanelClose>("escape", AI_PANEL_CONTEXT),
+        bind::<AiPanelNewline>("enter", AI_PANEL_CONTEXT),
+        bind::<AiPanelNewline>("shift-enter", AI_PANEL_CONTEXT),
+        bind::<AiPanelBackspace>("backspace", AI_PANEL_CONTEXT),
+        bind::<AiPanelDelete>("delete", AI_PANEL_CONTEXT),
+        bind::<AiPanelLeft>("left", AI_PANEL_CONTEXT),
+        bind::<AiPanelRight>("right", AI_PANEL_CONTEXT),
+        bind::<AiPanelUp>("up", AI_PANEL_CONTEXT),
+        bind::<AiPanelDown>("down", AI_PANEL_CONTEXT),
+        bind::<AiPanelHome>("home", AI_PANEL_CONTEXT),
+        bind::<AiPanelEnd>("end", AI_PANEL_CONTEXT),
+        bind::<AiPanelSelectAll>("ctrl-a", AI_PANEL_CONTEXT),
+        bind::<AiPanelSelectAll>("cmd-a", AI_PANEL_CONTEXT),
+        bind::<AiPanelPaste>("ctrl-v", AI_PANEL_CONTEXT),
+        bind::<AiPanelPaste>("cmd-v", AI_PANEL_CONTEXT),
     ]);
 
     bindings
@@ -545,6 +585,11 @@ fn action_specs() -> &'static [ActionSpec] {
             build: boxed::<OpenSettings>,
         },
         ActionSpec {
+            aliases: &["toggle-ai-panel", "ai-panel", "ai", "assistant"],
+            context: Some(PDF_NO_SEARCH_CONTEXT),
+            build: boxed::<ToggleAiPanel>,
+        },
+        ActionSpec {
             aliases: &["open-history", "history", "recent-files"],
             context: Some(PDF_NO_SEARCH_CONTEXT),
             build: boxed::<OpenHistory>,
@@ -628,6 +673,71 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["note-paste"],
             context: Some(NOTE_EDITOR_CONTEXT),
             build: boxed::<NotePaste>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-submit", "ai-submit", "send-ai-message"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelSubmit>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-close", "close-ai-panel"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelClose>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-newline", "ai-newline"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelNewline>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-backspace", "ai-backspace"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelBackspace>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-delete", "ai-delete"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelDelete>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-left", "ai-left"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelLeft>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-right", "ai-right"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelRight>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-up", "ai-up"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelUp>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-down", "ai-down"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelDown>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-home", "ai-home"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelHome>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-end", "ai-end"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelEnd>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-select-all", "ai-select-all"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelSelectAll>,
+        },
+        ActionSpec {
+            aliases: &["ai-panel-paste", "ai-paste"],
+            context: Some(AI_PANEL_CONTEXT),
+            build: boxed::<AiPanelPaste>,
         },
         ActionSpec {
             aliases: &["palette-confirm"],

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
 
+mod ai_panel;
 mod bookmarks;
 mod command_palette;
 mod history;

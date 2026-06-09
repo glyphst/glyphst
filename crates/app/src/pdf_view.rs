@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use crate::ai_panel::AiPanel;
 use crate::bookmarks::{
     BookmarkPalette, BookmarkPaletteDelegate, BookmarkPrompt, BookmarkPromptDelegate,
 };
@@ -71,6 +72,7 @@ gpui::actions!(
         ToggleFullScreen,
         ToggleTransparency,
         OpenSettings,
+        ToggleAiPanel,
         OpenHistory,
         OpenBookmarks,
         OpenFile,
@@ -335,6 +337,7 @@ pub struct PdfView {
     target_scroll_y_doc: f32,
     command_palette: Option<Entity<CommandPalette>>,
     settings_panel: Option<Entity<SettingsPanel>>,
+    ai_panel: Option<Entity<AiPanel>>,
     search_bar: Option<Entity<SearchBar>>,
     toc_palette: Option<Entity<TocPalette>>,
     notes_palette: Option<Entity<NotesPalette>>,
@@ -504,6 +507,7 @@ impl PdfView {
             target_scroll_y_doc: 0.0,
             command_palette: None,
             settings_panel: None,
+            ai_panel: None,
             search_bar: None,
             toc_palette: None,
             notes_palette: None,
@@ -3064,6 +3068,40 @@ impl PdfView {
         }
     }
 
+    fn toggle_ai_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ai_panel.is_some() {
+            self.close_ai_panel(window, cx);
+            return;
+        }
+
+        self.close_all_overlays(window, cx);
+
+        let previous_focus_handle = self.focus_handle.clone();
+        let selection = self.selected_text();
+        let panel = cx.new(|cx| AiPanel::new(previous_focus_handle.clone(), selection, cx));
+
+        cx.subscribe_in(
+            &panel,
+            window,
+            |this, _, event: &PanelEvent, window, cx| match event {
+                PanelEvent::Dismissed => this.close_ai_panel(window, cx),
+                PanelEvent::Changed => {}
+            },
+        )
+        .detach();
+
+        panel.focus_handle(cx).focus(window, cx);
+        self.ai_panel = Some(panel);
+        cx.notify();
+    }
+
+    fn close_ai_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ai_panel.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
     fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.search_bar.is_some() {
             self.close_search_bar(window, cx);
@@ -4020,6 +4058,40 @@ impl PdfView {
                 }),
             )
             .child("⊞")
+    }
+
+    fn render_ai_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.ai_panel.is_some();
+
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .h(px(20.0))
+            .px_2()
+            .mr_2()
+            .rounded_sm()
+            .text_color(rgb(if open {
+                theme.accent
+            } else {
+                theme.footer_text
+            }))
+            .bg(if open {
+                rgba(theme.selected_row)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.toggle_ai_panel(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child("AI")
     }
 
     fn set_grid_overview_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -5013,6 +5085,9 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.toggle_settings_panel(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleAiPanel, window, cx| {
+                this.toggle_ai_panel(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &OpenHistory, window, cx| {
                 this.toggle_history_palette(window, cx);
             }))
@@ -5350,7 +5425,8 @@ impl Render for PdfView {
                                     )
                                     .size_full(),
                                 ),
-                            ),
+                            )
+                            .when_some(self.ai_panel.clone(), |this, panel| this.child(panel)),
                     )
                     .child(
                         div()
@@ -5376,6 +5452,7 @@ impl Render for PdfView {
                                     .child(self.render_toc_button(theme, cx))
                                     .child(self.render_notes_button(theme, cx))
                                     .child(self.render_grid_overview_button(theme, cx))
+                                    .child(self.render_ai_button(theme, cx))
                                     .child(
                                         div()
                                             .flex_1()
