@@ -92,7 +92,8 @@ const MAX_ZOOM: f32 = 8.0;
 const SCROLL_LINE_MULTIPLIER: f32 = 20.0;
 const CTRL_SCROLL_ZOOM_STEP_MULTIPLIER: f32 = 0.25;
 const MAX_CACHED_RENDERS: usize = 2048;
-const MAX_CACHED_RENDER_PIXELS: u64 = 80_000_000;
+const MAX_CACHED_RENDER_PIXELS: u64 = 30_000_000;
+const MAX_CACHED_DISPLAY_LISTS: usize = 50;
 const MAX_JUMP_HISTORY: usize = 128;
 const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
 const TOC_SIDEBAR_WIDTH: f32 = 280.0;
@@ -116,7 +117,6 @@ const INFERRED_SPACE_WIDTH_RATIO: f32 = 0.75;
 const INFERRED_SPACE_HEIGHT_RATIO: f32 = 0.20;
 
 struct PdfPage {
-    display_list: Arc<DisplayList>,
     bounds: Rect,
     width: f32,
     height: f32,
@@ -136,6 +136,12 @@ struct CachedRender {
     render_scale: f32,
     last_access: u64,
     image: Arc<RenderImage>,
+}
+
+struct CachedDisplayList {
+    page_idx: usize,
+    display_list: Arc<DisplayList>,
+    last_access: u64,
 }
 
 struct PendingRender {
@@ -307,6 +313,7 @@ pub struct PdfView {
     path: PathBuf,
     file_name: SharedString,
     pages: Vec<PdfPage>,
+    display_lists: Vec<CachedDisplayList>,
     max_page_width: f32,
     content_height_doc: f32,
     glyphs: Vec<Glyph>,
@@ -375,7 +382,7 @@ pub struct PdfView {
     context_menu_highlight: Option<u64>,
     context_menu_note: Option<u64>,
     _image_clipboard: Option<Clipboard>,
-    // Must drop after pages: Type3 fonts in display lists reference the document.
+    // Must drop after display lists because Type3 fonts can reference the document.
     _document: mupdf::Document,
 }
 
@@ -459,7 +466,6 @@ impl PdfView {
             links.extend(detected_links);
 
             pages.push(PdfPage {
-                display_list,
                 bounds: page_bounds,
                 width: page_width,
                 height: page_height,
@@ -478,6 +484,7 @@ impl PdfView {
             path,
             file_name,
             pages,
+            display_lists: Vec::new(),
             max_page_width,
             content_height_doc,
             glyphs,
@@ -1368,6 +1375,47 @@ impl PdfView {
         self.cache_access_counter
     }
 
+    fn get_or_create_display_list(&mut self, page_idx: usize) -> Result<Arc<DisplayList>> {
+        if let Some(index) = self
+            .display_lists
+            .iter()
+            .position(|cached| cached.page_idx == page_idx)
+        {
+            let last_access = self.next_cache_access();
+            self.display_lists[index].last_access = last_access;
+            return Ok(self.display_lists[index].display_list.clone());
+        }
+
+        let page = self._document.load_page(page_idx as i32)?;
+        let page_bounds = self.pages[page_idx].bounds;
+        let display_list = Arc::new(DisplayList::new(page_bounds)?);
+        let device = Device::from_display_list(&display_list)?;
+        page.run(&device, &Matrix::IDENTITY)?;
+
+        let last_access = self.next_cache_access();
+        self.display_lists.push(CachedDisplayList {
+            page_idx,
+            display_list: display_list.clone(),
+            last_access,
+        });
+
+        while self.display_lists.len() > MAX_CACHED_DISPLAY_LISTS {
+            if let Some(index) = self
+                .display_lists
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, cached)| cached.last_access)
+                .map(|(index, _)| index)
+            {
+                self.display_lists.remove(index);
+            } else {
+                break;
+            }
+        }
+
+        Ok(display_list)
+    }
+
     fn start_background_render(&mut self, key: RenderKey, cx: &mut Context<Self>) {
         if self
             .pending_renders
@@ -1380,10 +1428,16 @@ impl PdfView {
             .retain(|pending| pending.key.page_idx != key.page_idx);
 
         let page = &self.pages[key.page_idx];
-        let display_list = page.display_list.clone();
         let page_bounds = page.bounds;
         let page_width = page.width;
         let page_height = page.height;
+        let display_list = match self.get_or_create_display_list(key.page_idx) {
+            Ok(display_list) => display_list,
+            Err(error) => {
+                eprintln!("failed to load PDF page for render: {error:#}");
+                return;
+            }
+        };
 
         let task = cx.spawn(async move |this, cx| {
             let result = cx
@@ -1497,10 +1551,17 @@ impl PdfView {
         Ok(std::mem::take(&mut collector.borrow_mut().images))
     }
 
-    fn image_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<(usize, usize)> {
+    fn image_at_screen(&mut self, point: GpuiPoint<Pixels>) -> Option<(usize, usize)> {
         let page_idx = self.page_at_screen(point)?;
         let pdf_point = self.screen_to_pdf(page_idx, point)?;
-        let images = match Self::collect_images(&self.pages[page_idx].display_list) {
+        let display_list = match self.get_or_create_display_list(page_idx) {
+            Ok(display_list) => display_list,
+            Err(error) => {
+                eprintln!("failed to load PDF page for image hit-test: {error:#}");
+                return None;
+            }
+        };
+        let images = match Self::collect_images(&display_list) {
             Ok(images) => images,
             Err(error) => {
                 eprintln!("failed to hit-test PDF images: {error:#}");
@@ -1630,10 +1691,16 @@ impl PdfView {
         let Some((page_idx, image_idx)) = self.context_menu_image else {
             return;
         };
-        let Some(page) = self.pages.get(page_idx) else {
+        if page_idx >= self.pages.len() {
             return;
         };
-        let display_list = page.display_list.clone();
+        let display_list = match self.get_or_create_display_list(page_idx) {
+            Ok(display_list) => display_list,
+            Err(error) => {
+                eprintln!("failed to load PDF page for image copy: {error:#}");
+                return;
+            }
+        };
 
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -1677,10 +1744,16 @@ impl PdfView {
         let Some((page_idx, image_idx)) = self.context_menu_image else {
             return;
         };
-        let Some(page) = self.pages.get(page_idx) else {
+        if page_idx >= self.pages.len() {
             return;
         };
-        let display_list = page.display_list.clone();
+        let display_list = match self.get_or_create_display_list(page_idx) {
+            Ok(display_list) => display_list,
+            Err(error) => {
+                eprintln!("failed to load PDF page for image save: {error:#}");
+                return;
+            }
+        };
         let suggested_name = format!("page-{}-image-{}.png", page_idx + 1, image_idx + 1);
         let directory = dirs::picture_dir()
             .or_else(dirs::download_dir)
