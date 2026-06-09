@@ -352,6 +352,7 @@ pub struct PdfView {
     toc_sidebar_scroll: UniformListScrollHandle,
     toc_sidebar_visible_entry_ixs: Vec<usize>,
     toc_sidebar_entries_dirty: bool,
+    toc_sidebar_selected: Option<usize>,
     notes_sidebar_open: bool,
     notes_sidebar_scroll: UniformListScrollHandle,
     notes_sidebar_entries: Vec<NotePaletteEntry>,
@@ -522,6 +523,7 @@ impl PdfView {
             toc_sidebar_scroll: UniformListScrollHandle::new(),
             toc_sidebar_visible_entry_ixs: Vec::new(),
             toc_sidebar_entries_dirty: true,
+            toc_sidebar_selected: None,
             notes_sidebar_open: false,
             notes_sidebar_scroll: UniformListScrollHandle::new(),
             notes_sidebar_entries: Vec::new(),
@@ -3367,6 +3369,12 @@ impl PdfView {
     }
 
     fn current_toc_palette_match_ix(&self, entries: &[TocPaletteEntry]) -> usize {
+        if let Some(selected) = self.toc_sidebar_selected
+            && let Some(match_ix) = entries.iter().position(|entry| entry.entry_ix == selected)
+        {
+            return match_ix;
+        }
+
         let current_page_number = self.current_page_index() + 1;
         entries
             .iter()
@@ -3475,6 +3483,8 @@ impl PdfView {
         let page_idx = entry.page_idx;
         let target_top = entry.target_top;
         let target_left = entry.target_left;
+        self.toc_sidebar_selected = Some(entry_ix);
+        cx.notify();
         self.navigate_to_pdf_destination(page_idx, target_top, target_left, cx);
     }
 
@@ -4433,7 +4443,7 @@ impl PdfView {
                         visible_len,
                         cx.processor(|this, visible_range: Range<usize>, _window, cx| {
                             let theme = cx.global::<SettingsStore>().resolved_theme;
-                            let current_page = this.current_page_index();
+                            let selected = this.toc_sidebar_selected;
 
                             visible_range
                                 .filter_map(|visible_ix| {
@@ -4443,7 +4453,7 @@ impl PdfView {
                                         .copied()?;
                                     let entry = &this.toc[entry_ix];
                                     let collapsed = this.toc_collapsed.contains(&entry_ix);
-                                    let current = entry.navigable && entry.page_idx == current_page;
+                                    let current = selected == Some(entry_ix);
                                     let title = entry.title.clone();
                                     let title_color = if entry.navigable {
                                         theme.text
@@ -4467,6 +4477,21 @@ impl PdfView {
                                                 rgba(theme.selected_row)
                                             } else {
                                                 rgba(0x00000000)
+                                            })
+                                            .when(navigable, |this| {
+                                                this.cursor_pointer()
+                                                    .hover(move |style| {
+                                                        style.bg(rgb(theme.control_hover))
+                                                    })
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(move |this, _, _, cx| {
+                                                            this.navigate_to_toc_entry(
+                                                                entry_ix, cx,
+                                                            );
+                                                            cx.stop_propagation();
+                                                        }),
+                                                    )
                                             })
                                             .child(div().flex_none().w(px(depth as f32 * 14.0)))
                                             .child(
@@ -4518,23 +4543,6 @@ impl PdfView {
                                                     .px_1()
                                                     .truncate()
                                                     .text_color(rgb(title_color))
-                                                    .when(navigable, |this| {
-                                                        this.cursor_pointer()
-                                                            .hover(move |style| {
-                                                                style.bg(rgb(theme.control_hover))
-                                                            })
-                                                            .on_mouse_down(
-                                                                MouseButton::Left,
-                                                                cx.listener(
-                                                                    move |this, _, _, cx| {
-                                                                        this.navigate_to_toc_entry(
-                                                                            entry_ix, cx,
-                                                                        );
-                                                                        cx.stop_propagation();
-                                                                    },
-                                                                ),
-                                                            )
-                                                    })
                                                     .child(title),
                                             )
                                             .child(
