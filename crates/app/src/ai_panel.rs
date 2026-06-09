@@ -54,6 +54,7 @@ const TITLE_GENERATION_PROMPT: &str = "Generate a concise 3-7 word title for thi
 omitting punctuation. Go straight to the title, without any preamble or prefix like `Title:`. \
 If the conversation is about a specific subject, include it in the title. Be descriptive. \
 Do not speak in the first person.";
+const DRAG_SELECT_THRESHOLD: f32 = 2.0;
 
 #[derive(Clone, PartialEq, Eq)]
 enum Role {
@@ -134,7 +135,7 @@ pub struct AiPanel {
     marked_range: Option<Range<usize>>,
     last_lines: Vec<LaidOutLine>,
     last_bounds: Option<Bounds<Pixels>>,
-    is_selecting: bool,
+    drag_origin: Option<GpuiPoint<Pixels>>,
     loading: bool,
     scroll_handle: ScrollHandle,
     pending_stream: Option<Task<()>>,
@@ -188,7 +189,7 @@ impl AiPanel {
             marked_range: None,
             last_lines: Vec::new(),
             last_bounds: None,
-            is_selecting: false,
+            drag_origin: None,
             loading: false,
             scroll_handle: ScrollHandle::new(),
             pending_stream: None,
@@ -837,7 +838,7 @@ impl AiPanel {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window, cx);
-        self.is_selecting = true;
+        self.drag_origin = Some(event.position);
 
         let offset = self.index_for_mouse_position(event.position, window);
         if event.modifiers.shift {
@@ -849,8 +850,12 @@ impl AiPanel {
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.is_selecting = false;
+        self.drag_origin = None;
         cx.stop_propagation();
+    }
+
+    fn on_mouse_down_out(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_selection(cx);
     }
 
     fn on_mouse_move(
@@ -859,9 +864,28 @@ impl AiPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_selecting {
+        if !event.dragging() {
+            self.drag_origin = None;
+            return;
+        }
+
+        let should_select = if let Some(origin) = self.drag_origin.as_ref() {
+            (event.position.x - origin.x).as_f32().abs() > DRAG_SELECT_THRESHOLD
+                || (event.position.y - origin.y).as_f32().abs() > DRAG_SELECT_THRESHOLD
+        } else {
+            false
+        };
+
+        if should_select {
             self.select_to(self.index_for_mouse_position(event.position, window), cx);
             cx.stop_propagation();
+        }
+    }
+
+    fn cancel_selection(&mut self, cx: &mut Context<Self>) {
+        self.drag_origin = None;
+        if !self.selected_range.is_empty() {
+            self.move_to(self.cursor_offset(), cx);
         }
     }
 
@@ -1647,6 +1671,7 @@ impl Render for AiPanel {
                                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                                 .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                                .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
                                 .on_mouse_move(cx.listener(Self::on_mouse_move))
                                 .child(AiInputElement { panel: entity })
                                 .when(!completion_matches.is_empty(), |this| {

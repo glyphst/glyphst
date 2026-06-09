@@ -32,6 +32,8 @@ gpui::actions!(
     ]
 );
 
+const DRAG_SELECT_THRESHOLD: f32 = 2.0;
+
 pub enum SearchEvent {
     Activate {
         previous: bool,
@@ -57,7 +59,7 @@ pub struct SearchBar {
     marked_range: Option<Range<usize>>,
     last_layout: Option<gpui::ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
-    is_selecting: bool,
+    drag_origin: Option<GpuiPoint<Pixels>>,
     applied_query: SharedString,
     active_match: Option<usize>,
     match_count: usize,
@@ -88,7 +90,7 @@ impl SearchBar {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
-            is_selecting: false,
+            drag_origin: None,
             active_match,
             match_count,
             ignore_case,
@@ -248,7 +250,7 @@ impl SearchBar {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window, cx);
-        self.is_selecting = true;
+        self.drag_origin = Some(event.position);
 
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
@@ -259,14 +261,37 @@ impl SearchBar {
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.is_selecting = false;
+        self.drag_origin = None;
         cx.stop_propagation();
     }
 
+    fn on_mouse_down_out(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_selection(cx);
+    }
+
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_selecting {
+        if !event.dragging() {
+            self.drag_origin = None;
+            return;
+        }
+
+        let should_select = if let Some(origin) = self.drag_origin.as_ref() {
+            (event.position.x - origin.x).as_f32().abs() > DRAG_SELECT_THRESHOLD
+                || (event.position.y - origin.y).as_f32().abs() > DRAG_SELECT_THRESHOLD
+        } else {
+            false
+        };
+
+        if should_select {
             self.select_to(self.index_for_mouse_position(event.position), cx);
             cx.stop_propagation();
+        }
+    }
+
+    fn cancel_selection(&mut self, cx: &mut Context<Self>) {
+        self.drag_origin = None;
+        if !self.selected_range.is_empty() {
+            self.move_to(self.cursor_offset(), cx);
         }
     }
 
@@ -590,6 +615,7 @@ impl Render for SearchBar {
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .child(SearchTextElement { search: entity }),
             )

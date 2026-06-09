@@ -37,6 +37,7 @@ gpui::actions!(
 );
 
 const INPUT_HEIGHT: f32 = 50.0;
+const DRAG_SELECT_THRESHOLD: f32 = 2.0;
 
 pub enum PickerEvent {
     Dismissed,
@@ -85,7 +86,7 @@ pub struct Picker<D: PickerDelegate> {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
-    is_selecting: bool,
+    drag_origin: Option<GpuiPoint<Pixels>>,
     selected_ix: usize,
     list_scroll_handle: UniformListScrollHandle,
     delegate: D,
@@ -137,7 +138,7 @@ impl<D: PickerDelegate> Picker<D> {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
-            is_selecting: false,
+            drag_origin: None,
             selected_ix,
             list_scroll_handle: UniformListScrollHandle::new(),
             delegate,
@@ -311,7 +312,7 @@ impl<D: PickerDelegate> Picker<D> {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window, cx);
-        self.is_selecting = true;
+        self.drag_origin = Some(event.position);
 
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
@@ -322,14 +323,37 @@ impl<D: PickerDelegate> Picker<D> {
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.is_selecting = false;
+        self.drag_origin = None;
         cx.stop_propagation();
     }
 
+    fn on_mouse_down_out(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_selection(cx);
+    }
+
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_selecting {
+        if !event.dragging() {
+            self.drag_origin = None;
+            return;
+        }
+
+        let should_select = if let Some(origin) = self.drag_origin.as_ref() {
+            (event.position.x - origin.x).as_f32().abs() > DRAG_SELECT_THRESHOLD
+                || (event.position.y - origin.y).as_f32().abs() > DRAG_SELECT_THRESHOLD
+        } else {
+            false
+        };
+
+        if should_select {
             self.select_to(self.index_for_mouse_position(event.position), cx);
             cx.stop_propagation();
+        }
+    }
+
+    fn cancel_selection(&mut self, cx: &mut Context<Self>) {
+        self.drag_origin = None;
+        if !self.selected_range.is_empty() {
+            self.move_to(self.cursor_offset(), cx);
         }
     }
 
@@ -638,6 +662,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .child(PickerTextElement { picker: entity }),
             )

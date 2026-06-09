@@ -52,8 +52,11 @@ pub struct SettingsTextInput {
     marked_range: Option<Range<usize>>,
     last_layout: Option<gpui::ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
-    is_selecting: bool,
+    drag_origin: Option<GpuiPoint<Pixels>>,
 }
+
+const MASK_GLYPH: &str = "•";
+const DRAG_SELECT_THRESHOLD: f32 = 2.0;
 
 impl SettingsTextInput {
     pub fn new(
@@ -73,7 +76,7 @@ impl SettingsTextInput {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
-            is_selecting: false,
+            drag_origin: None,
         }
     }
 
@@ -179,7 +182,7 @@ impl SettingsTextInput {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window, cx);
-        self.is_selecting = true;
+        self.drag_origin = Some(event.position);
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
         } else {
@@ -189,14 +192,43 @@ impl SettingsTextInput {
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.is_selecting = false;
+        self.drag_origin = None;
         cx.stop_propagation();
     }
 
+    fn on_mouse_down_out(
+        &mut self,
+        _: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.blur();
+        self.cancel_selection(cx);
+    }
+
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_selecting {
+        if !event.dragging() {
+            self.drag_origin = None;
+            return;
+        }
+
+        let should_select = if let Some(origin) = self.drag_origin.as_ref() {
+            (event.position.x - origin.x).as_f32().abs() > DRAG_SELECT_THRESHOLD
+                || (event.position.y - origin.y).as_f32().abs() > DRAG_SELECT_THRESHOLD
+        } else {
+            false
+        };
+
+        if should_select {
             self.select_to(self.index_for_mouse_position(event.position), cx);
             cx.stop_propagation();
+        }
+    }
+
+    fn cancel_selection(&mut self, cx: &mut Context<Self>) {
+        self.drag_origin = None;
+        if !self.selected_range.is_empty() {
+            self.move_to(self.cursor_offset(), cx);
         }
     }
 
@@ -229,7 +261,7 @@ impl SettingsTextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        self.content_offset_for_display_offset(line.closest_index_for_x(position.x - bounds.left()))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -247,7 +279,7 @@ impl SettingsTextInput {
     }
 
     fn copy_selected_text(&self, cx: &mut Context<Self>) -> bool {
-        if self.selected_range.is_empty() {
+        if self.selected_range.is_empty() || self.mask {
             return false;
         }
 
@@ -255,6 +287,35 @@ impl SettingsTextInput {
             self.content[self.selected_range.clone()].to_string(),
         ));
         true
+    }
+
+    fn display_offset(&self, offset: usize) -> usize {
+        if !self.mask {
+            return offset.min(self.content.len());
+        }
+
+        self.content
+            .char_indices()
+            .take_while(|(ix, _)| *ix < offset)
+            .count()
+            * MASK_GLYPH.len()
+    }
+
+    fn display_range(&self, range: &Range<usize>) -> Range<usize> {
+        self.display_offset(range.start)..self.display_offset(range.end)
+    }
+
+    fn content_offset_for_display_offset(&self, offset: usize) -> usize {
+        if !self.mask {
+            return offset.min(self.content.len());
+        }
+
+        let char_ix = (offset / MASK_GLYPH.len()).min(self.content.chars().count());
+        self.content
+            .char_indices()
+            .nth(char_ix)
+            .map(|(offset, _)| offset)
+            .unwrap_or_else(|| self.content.len())
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
@@ -476,6 +537,7 @@ impl Render for SettingsTextInput {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(SettingsInputElement { input: entity })
     }
@@ -538,7 +600,7 @@ impl Element for SettingsInputElement {
         let style = window.text_style();
 
         let display_text: SharedString = if input.mask && !input.content.is_empty() {
-            "•".repeat(input.content.chars().count()).into()
+            MASK_GLYPH.repeat(input.content.chars().count()).into()
         } else {
             input.content.clone()
         };
@@ -563,6 +625,7 @@ impl Element for SettingsInputElement {
 
         let runs = if !input.content.is_empty() {
             if let Some(marked_range) = input.marked_range.as_ref() {
+                let marked_range = input.display_range(marked_range);
                 vec![
                     TextRun {
                         len: marked_range.start,
@@ -593,21 +656,16 @@ impl Element for SettingsInputElement {
         };
 
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let display_text_len = display_text.len();
         let line = window
             .text_system()
             .shape_line(display_text, font_size, &runs, None);
 
         let cursor = input.cursor_offset();
-        let display_cursor = if input.mask && !input.content.is_empty() {
-            display_text_len
-        } else {
-            cursor
-        };
+        let display_cursor = input.display_offset(cursor);
         let cursor_pos = line.x_for_index(display_cursor);
         let selected_range = &input.selected_range;
 
-        let (selection, cursor_quad) = if selected_range.is_empty() || input.mask {
+        let (selection, cursor_quad) = if selected_range.is_empty() {
             let quad = fill(
                 Bounds::new(
                     point(bounds.left() + cursor_pos, bounds.top()),
@@ -617,6 +675,7 @@ impl Element for SettingsInputElement {
             );
             (None, Some(quad))
         } else {
+            let selected_range = input.display_range(selected_range);
             let quad = fill(
                 Bounds::from_corners(
                     point(
@@ -2147,6 +2206,7 @@ impl Render for SettingsPanel {
             SettingsTab::Appearance => self.appearance_tab(&settings, resolved, themes, cx),
             SettingsTab::Ai => self.ai_tab(&settings, resolved, cx),
         };
+        let focus_handle = self.focus_handle.clone();
 
         div()
             .key_context("SettingsPanel")
@@ -2163,7 +2223,8 @@ impl Render for SettingsPanel {
             .bg(rgb(resolved.panel_background))
             .text_color(rgb(resolved.text))
             .text_size(px(13.0))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                focus_handle.focus(window, cx);
                 cx.stop_propagation();
             })
             .on_action(cx.listener(Self::close))
