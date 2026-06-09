@@ -15,6 +15,8 @@ const HISTORY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("histor
 const BOOKMARKS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("bookmarks");
 const HIGHLIGHTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("highlights");
 const NOTES_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("notes");
+const AI_SESSIONS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions");
+const MAX_AI_SESSIONS: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentPosition {
@@ -96,15 +98,41 @@ pub struct Note {
     pub created: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AiSessionRole {
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiSessionMessage {
+    pub role: AiSessionRole,
+    pub content: String,
+    pub request_content: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiSession {
+    pub id: u64,
+    pub path: PathBuf,
+    pub title: String,
+    pub page: usize,
+    pub messages: Vec<AiSessionMessage>,
+    pub created: u64,
+    pub updated: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Library {
     pub history: Vec<HistoryEntry>,
     pub bookmarks: Vec<Bookmark>,
     pub highlights: Vec<Highlight>,
     pub notes: Vec<Note>,
+    pub ai_sessions: Vec<AiSession>,
     next_bookmark_id: u64,
     next_highlight_id: u64,
     next_note_id: u64,
+    next_ai_session_id: u64,
 }
 
 pub struct LibraryStore {
@@ -166,6 +194,22 @@ impl LibraryStore {
             .filter(|note| note.path == path)
             .cloned()
             .collect()
+    }
+
+    pub fn ai_sessions_for(&self, path: &Path) -> Vec<AiSession> {
+        let path = normalize_path(path);
+        self.library
+            .ai_sessions
+            .iter()
+            .filter(|session| session.path == path)
+            .cloned()
+            .collect()
+    }
+
+    pub fn next_ai_session_id(&mut self) -> u64 {
+        let id = self.library.next_ai_session_id.max(1);
+        self.library.next_ai_session_id = id + 1;
+        id
     }
 
     pub fn history_position(&self, path: &Path) -> Option<DocumentPosition> {
@@ -291,6 +335,28 @@ impl LibraryStore {
         Ok(true)
     }
 
+    pub fn save_ai_session(&mut self, mut session: AiSession) -> Result<()> {
+        session.path = normalize_path(&session.path);
+        session.title = session.title.trim().to_string();
+        if session.title.is_empty() {
+            session.title = "New Chat".to_string();
+        }
+        self.write_ai_session(&session)?;
+
+        if let Some(session_ix) = self
+            .library
+            .ai_sessions
+            .iter()
+            .position(|existing| existing.id == session.id)
+        {
+            self.library.ai_sessions[session_ix] = session;
+        } else {
+            self.library.ai_sessions.push(session);
+        }
+        self.library.sanitize();
+        Ok(())
+    }
+
     pub fn save(&self) -> Result<()> {
         self.write_history()
     }
@@ -385,6 +451,17 @@ impl LibraryStore {
         {
             let mut table = write_txn.open_table(NOTES_TABLE)?;
             table.remove(id)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn write_ai_session(&self, session: &AiSession) -> Result<()> {
+        let write_txn = self.database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(AI_SESSIONS_TABLE)?;
+            let encoded = encode(session)?;
+            table.insert(session.id, encoded.as_slice())?;
         }
         write_txn.commit()?;
         Ok(())
@@ -529,6 +606,37 @@ impl Library {
                 .then_with(|| left.id.cmp(&right.id))
         });
 
+        self.ai_sessions.retain_mut(|session| {
+            session.path = normalize_path(&session.path);
+            session.title = session.title.trim().to_string();
+            if session.title.is_empty() {
+                session.title = "New Chat".to_string();
+            }
+            session.messages.retain_mut(|message| {
+                message.content = message.content.trim().to_string();
+                message.request_content = message
+                    .request_content
+                    .take()
+                    .map(|content| content.trim().to_string())
+                    .filter(|content| !content.is_empty() && *content != message.content);
+                !message.content.is_empty()
+            });
+            !session.path.as_os_str().is_empty()
+                && session.id > 0
+                && !session.messages.is_empty()
+                && session.created > 0
+                && session.updated > 0
+        });
+        self.ai_sessions.sort_by(|left, right| {
+            right
+                .updated
+                .cmp(&left.updated)
+                .then_with(|| right.created.cmp(&left.created))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.ai_sessions.dedup_by(|left, right| left.id == right.id);
+        self.ai_sessions.truncate(MAX_AI_SESSIONS);
+
         self.next_bookmark_id = self.next_bookmark_id.max(
             self.bookmarks
                 .iter()
@@ -548,6 +656,14 @@ impl Library {
         self.next_note_id = self
             .next_note_id
             .max(self.notes.iter().map(|note| note.id).max().unwrap_or(0) + 1);
+        self.next_ai_session_id = self.next_ai_session_id.max(
+            self.ai_sessions
+                .iter()
+                .map(|session| session.id)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
     }
 }
 
@@ -584,6 +700,9 @@ fn ensure_tables(database: &Database) -> Result<()> {
     }
     {
         write_txn.open_table(NOTES_TABLE)?;
+    }
+    {
+        write_txn.open_table(AI_SESSIONS_TABLE)?;
     }
     write_txn.commit()?;
     Ok(())
@@ -649,6 +768,20 @@ fn load_library(database: &Database) -> Result<Library> {
         }
     }
 
+    {
+        let table = read_txn.open_table(AI_SESSIONS_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<AiSession>(value.value()) {
+                Ok(mut session) => {
+                    session.path = normalize_path(&session.path);
+                    library.ai_sessions.push(session);
+                }
+                Err(error) => eprintln!("failed to decode AI session: {error:#}"),
+            }
+        }
+    }
+
     library.sanitize();
     Ok(library)
 }
@@ -661,7 +794,7 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     bincode::deserialize(bytes).context("failed to decode library value")
 }
 
-fn current_timestamp() -> u64 {
+pub fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -740,6 +873,7 @@ mod tests {
         let highlight_id;
         let bookmark_id;
         let note_id;
+        let ai_session_id;
 
         {
             let mut store = LibraryStore::open(path.clone()).unwrap();
@@ -778,6 +912,31 @@ mod tests {
                     .update_note(note_id, "updated note", HighlightColor::Green)
                     .unwrap()
             );
+            ai_session_id = store.next_ai_session_id();
+            store
+                .save_ai_session(AiSession {
+                    id: ai_session_id,
+                    path: document_path.to_path_buf(),
+                    title: "Explain section".to_string(),
+                    page: 4,
+                    messages: vec![
+                        AiSessionMessage {
+                            role: AiSessionRole::User,
+                            content: "Explain @selection".to_string(),
+                            request_content: Some(
+                                "Explain @selection\n\nAttached context".to_string(),
+                            ),
+                        },
+                        AiSessionMessage {
+                            role: AiSessionRole::Assistant,
+                            content: "Explanation".to_string(),
+                            request_content: None,
+                        },
+                    ],
+                    created: 100,
+                    updated: 101,
+                })
+                .unwrap();
         }
 
         {
@@ -795,6 +954,15 @@ mod tests {
             assert_eq!(notes[0].color, HighlightColor::Green);
             assert_eq!(notes[0].rects, vec![highlight_rect]);
             assert_eq!(notes[0].body, "updated note");
+            let ai_sessions = store.ai_sessions_for(document_path);
+            assert_eq!(ai_sessions.len(), 1);
+            assert_eq!(ai_sessions[0].id, ai_session_id);
+            assert_eq!(ai_sessions[0].title, "Explain section");
+            assert_eq!(ai_sessions[0].messages.len(), 2);
+            assert_eq!(
+                ai_sessions[0].messages[0].request_content.as_deref(),
+                Some("Explain @selection\n\nAttached context")
+            );
 
             assert!(store.remove_highlight(highlight_id).unwrap());
             assert!(store.remove_note(note_id).unwrap());

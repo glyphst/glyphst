@@ -2105,9 +2105,14 @@ impl PdfView {
         }
     }
 
-    fn selected_text(&self) -> Option<String> {
+    pub(crate) fn selected_text(&self) -> Option<String> {
         let (start, end) = self.selection_bounds()?;
         Self::text_for_glyph_range(&self.glyphs, start..end + 1)
+    }
+
+    pub(crate) fn current_page_text(&self) -> Option<String> {
+        let page = self.pages.get(self.current_page_index())?;
+        Self::text_for_glyph_range(&self.glyphs, page.glyph_range.clone())
     }
 
     fn text_for_glyph_range(glyphs: &[Glyph], range: Range<usize>) -> Option<String> {
@@ -2736,7 +2741,7 @@ impl PdfView {
         self.page_index_for_scroll_y(self.scroll_y_doc)
     }
 
-    fn current_page(&self) -> usize {
+    pub(crate) fn current_page(&self) -> usize {
         self.current_page_index() + 1
     }
 
@@ -3079,8 +3084,18 @@ impl PdfView {
         self.close_all_overlays(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
-        let selection = self.selected_text();
-        let panel = cx.new(|cx| AiPanel::new(previous_focus_handle.clone(), selection, cx));
+        let document_path = self.path.clone();
+        let current_page = self.current_page();
+        let pdf_view = cx.entity().downgrade();
+        let panel = cx.new(|cx| {
+            AiPanel::new(
+                previous_focus_handle.clone(),
+                pdf_view.clone(),
+                document_path.clone(),
+                current_page,
+                cx,
+            )
+        });
 
         cx.subscribe_in(
             &panel,
@@ -3098,7 +3113,8 @@ impl PdfView {
     }
 
     fn close_ai_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.ai_panel.take().is_some() {
+        if let Some(panel) = self.ai_panel.take() {
+            panel.update(cx, |panel, cx| panel.save_current_session(cx));
             self.focus_handle.focus(window, cx);
             cx.notify();
         }

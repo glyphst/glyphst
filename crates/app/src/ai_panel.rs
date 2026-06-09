@@ -1,6 +1,8 @@
-use std::{io::Read as _, ops::Range, thread};
+use std::{collections::HashSet, io::Read as _, ops::Range, path::PathBuf, thread};
 
 use crate::{
+    library::{AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp},
+    pdf_view::PdfView,
     settings::{AiProvider, AiSettings, SettingsStore},
     settings_panel::PanelEvent,
 };
@@ -11,8 +13,8 @@ use gpui::{
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
     IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
     Pixels, Point as GpuiPoint, Render, ScrollHandle, SharedString, Style, Task, TextRun,
-    UTF16Selection, Window, WrappedLine, div, fill, point, prelude::*, px, relative, rgb, rgba,
-    size,
+    UTF16Selection, WeakEntity, Window, WrappedLine, div, fill, point, prelude::*, px, relative,
+    rgb, rgba, size,
 };
 use serde_json::{Value, json};
 
@@ -37,6 +39,7 @@ gpui::actions!(
 
 const AI_PANEL_WIDTH: f32 = 320.0;
 const MAX_CONTEXT_CHARS: usize = 12_000;
+const DEFAULT_SESSION_TITLE: &str = "New Chat";
 
 #[derive(Clone, PartialEq, Eq)]
 enum Role {
@@ -48,6 +51,57 @@ enum Role {
 struct ChatMessage {
     role: Role,
     content: String,
+    request_content: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum MentionKind {
+    CurrentPageText,
+    Selection,
+}
+
+impl MentionKind {
+    const ALL: [Self; 2] = [Self::CurrentPageText, Self::Selection];
+
+    fn token(self) -> &'static str {
+        match self {
+            Self::CurrentPageText => "@current page text",
+            Self::Selection => "@selection",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::CurrentPageText => "Current page text",
+            Self::Selection => "Selection",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::CurrentPageText => "Attach text from the visible page",
+            Self::Selection => "Attach the selected PDF text",
+        }
+    }
+
+    fn context_title(self) -> &'static str {
+        match self {
+            Self::CurrentPageText => "Current page text",
+            Self::Selection => "Selection",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct MentionCompletion {
+    source_range: Range<usize>,
+    selected_ix: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AiPanelView {
+    Chat,
+    Sessions,
 }
 
 enum AiStreamEvent {
@@ -70,7 +124,16 @@ pub struct AiPanel {
     loading: bool,
     scroll_handle: ScrollHandle,
     pending_stream: Option<Task<()>>,
-    pdf_selection: Option<String>,
+    pdf_view: WeakEntity<PdfView>,
+    document_path: PathBuf,
+    current_page: usize,
+    session_id: u64,
+    session_title: String,
+    session_created: u64,
+    session_updated: u64,
+    sessions: Vec<AiSession>,
+    view: AiPanelView,
+    mention_completion: Option<MentionCompletion>,
 }
 
 struct LaidOutLine {
@@ -91,9 +154,13 @@ struct PrepaintState {
 impl AiPanel {
     pub fn new(
         previous_focus_handle: FocusHandle,
-        pdf_selection: Option<String>,
+        pdf_view: WeakEntity<PdfView>,
+        document_path: PathBuf,
+        current_page: usize,
         cx: &mut Context<Self>,
     ) -> Self {
+        let session_id = cx.global_mut::<LibraryStore>().next_ai_session_id();
+        let sessions = cx.global::<LibraryStore>().ai_sessions_for(&document_path);
         Self {
             focus_handle: cx.focus_handle(),
             previous_focus_handle,
@@ -108,14 +175,22 @@ impl AiPanel {
             loading: false,
             scroll_handle: ScrollHandle::new(),
             pending_stream: None,
-            pdf_selection: pdf_selection.and_then(|selection| {
-                let selection = selection.trim();
-                (!selection.is_empty()).then(|| selection.chars().take(MAX_CONTEXT_CHARS).collect())
-            }),
+            pdf_view,
+            document_path,
+            current_page,
+            session_id,
+            session_title: DEFAULT_SESSION_TITLE.to_string(),
+            session_created: 0,
+            session_updated: 0,
+            sessions,
+            view: AiPanelView::Chat,
+            mention_completion: None,
         }
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_current_page(cx);
+        self.save_current_session(cx);
         self.previous_focus_handle.focus(window, cx);
         cx.emit(PanelEvent::Dismissed);
     }
@@ -129,6 +204,9 @@ impl AiPanel {
     }
 
     fn newline(&mut self, _: &AiPanelNewline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm_mention_completion(cx) {
+            return;
+        }
         self.replace_text_in_range(None, "\n", window, cx);
     }
 
@@ -163,10 +241,16 @@ impl AiPanel {
     }
 
     fn up(&mut self, _: &AiPanelUp, window: &mut Window, cx: &mut Context<Self>) {
+        if self.select_previous_mention_completion(cx) {
+            return;
+        }
         self.move_vertically(-1, window, cx);
     }
 
     fn down(&mut self, _: &AiPanelDown, window: &mut Window, cx: &mut Context<Self>) {
+        if self.select_next_mention_completion(cx) {
+            return;
+        }
         self.move_vertically(1, window, cx);
     }
 
@@ -211,29 +295,36 @@ impl AiPanel {
         }
 
         let settings = cx.global::<SettingsStore>().settings.ai.clone();
+        self.update_current_page(cx);
+        let request_content = self.request_content_for_prompt(&prompt, cx);
+        if self.messages.is_empty() {
+            self.session_title = session_title_for_prompt(&prompt);
+        }
         self.content = SharedString::default();
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.mention_completion = None;
         self.messages.push(ChatMessage {
             role: Role::User,
             content: prompt,
+            request_content: Some(request_content),
         });
         self.messages.push(ChatMessage {
             role: Role::Assistant,
             content: String::new(),
+            request_content: None,
         });
         self.loading = true;
+        self.save_current_session(cx);
         cx.notify();
 
         let request_messages = self.messages[..self.messages.len().saturating_sub(1)].to_vec();
-        let pdf_selection = self.pdf_selection.clone();
         let (tx, mut rx) = mpsc::unbounded::<AiStreamEvent>();
 
         thread::spawn(move || {
             let mut send_event = |event| tx.unbounded_send(event).map_err(|_| anyhow!("closed"));
-            let result =
-                stream_completion(settings, pdf_selection, request_messages, &mut send_event);
+            let result = stream_completion(settings, request_messages, &mut send_event);
             match result {
                 Ok(()) => {
                     let _ = send_event(AiStreamEvent::Done);
@@ -249,7 +340,7 @@ impl AiPanel {
             while let Some(event) = rx.next().await {
                 if this
                     .update(cx, |this, cx| {
-                        this.apply_stream_event(event);
+                        this.apply_stream_event(event, cx);
                         cx.notify();
                     })
                     .is_err()
@@ -260,7 +351,7 @@ impl AiPanel {
         }));
     }
 
-    fn apply_stream_event(&mut self, event: AiStreamEvent) {
+    fn apply_stream_event(&mut self, event: AiStreamEvent, cx: &mut Context<Self>) {
         match event {
             AiStreamEvent::Delta(delta) => {
                 if let Some(message) = self.messages.last_mut() {
@@ -277,12 +368,328 @@ impl AiPanel {
                     message.content.push_str(&error);
                 }
                 self.pending_stream = None;
+                self.save_current_session(cx);
             }
             AiStreamEvent::Done => {
                 self.loading = false;
                 self.pending_stream = None;
+                self.save_current_session(cx);
             }
         }
+    }
+
+    fn request_content_for_prompt(&self, prompt: &str, cx: &mut Context<Self>) -> String {
+        let mentions = mentioned_kinds(prompt);
+        if mentions.is_empty() {
+            return prompt.to_string();
+        }
+
+        let mut request = prompt.to_string();
+        request.push_str("\n\nAttached PDF context from @ mentions:");
+        for mention in mentions {
+            let context = self.resolve_mention(mention, cx);
+            request.push_str("\n\n### ");
+            request.push_str(mention.context_title());
+            request.push('\n');
+            request.push_str(&context);
+        }
+        request
+    }
+
+    fn resolve_mention(&self, mention: MentionKind, cx: &mut Context<Self>) -> String {
+        let resolved = self
+            .pdf_view
+            .update(cx, |pdf_view, _| match mention {
+                MentionKind::CurrentPageText => pdf_view.current_page_text().map(|text| {
+                    let page = pdf_view.current_page();
+                    format!(
+                        "Page {page}:\n{}",
+                        truncate_context(text).unwrap_or_else(|| {
+                            "No text is available on the current page.".to_string()
+                        })
+                    )
+                }),
+                MentionKind::Selection => pdf_view.selected_text().map(|text| {
+                    truncate_context(text)
+                        .unwrap_or_else(|| "No selected text is currently available.".to_string())
+                }),
+            })
+            .ok()
+            .flatten();
+
+        resolved.unwrap_or_else(|| match mention {
+            MentionKind::CurrentPageText => "No current page text is available.".to_string(),
+            MentionKind::Selection => "No selected text is currently available.".to_string(),
+        })
+    }
+
+    fn update_current_page(&mut self, cx: &mut Context<Self>) {
+        if let Ok(page) = self
+            .pdf_view
+            .update(cx, |pdf_view, _| pdf_view.current_page())
+        {
+            self.current_page = page;
+        }
+    }
+
+    pub(crate) fn save_current_session(&mut self, cx: &mut Context<Self>) {
+        if self
+            .messages
+            .iter()
+            .all(|message| message.content.trim().is_empty())
+        {
+            return;
+        }
+
+        let now = current_timestamp();
+        if self.session_created == 0 {
+            self.session_created = now;
+        }
+        self.session_updated = now;
+
+        let session = AiSession {
+            id: self.session_id,
+            path: self.document_path.clone(),
+            title: self.session_title.clone(),
+            page: self.current_page,
+            messages: self
+                .messages
+                .iter()
+                .map(|message| AiSessionMessage {
+                    role: match message.role {
+                        Role::User => AiSessionRole::User,
+                        Role::Assistant => AiSessionRole::Assistant,
+                    },
+                    content: message.content.clone(),
+                    request_content: message
+                        .request_content
+                        .clone()
+                        .filter(|content| content != &message.content),
+                })
+                .collect(),
+            created: self.session_created,
+            updated: self.session_updated,
+        };
+
+        if let Err(error) = cx.global_mut::<LibraryStore>().save_ai_session(session) {
+            eprintln!("failed to save AI session: {error:#}");
+        }
+        self.refresh_sessions(cx);
+    }
+
+    fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
+        self.sessions = cx
+            .global::<LibraryStore>()
+            .ai_sessions_for(&self.document_path);
+    }
+
+    fn show_sessions(&mut self, cx: &mut Context<Self>) {
+        self.update_current_page(cx);
+        self.save_current_session(cx);
+        self.refresh_sessions(cx);
+        self.view = AiPanelView::Sessions;
+        cx.notify();
+    }
+
+    fn show_chat(&mut self, cx: &mut Context<Self>) {
+        self.view = AiPanelView::Chat;
+        cx.notify();
+    }
+
+    fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.update_current_page(cx);
+        self.save_current_session(cx);
+        self.session_id = cx.global_mut::<LibraryStore>().next_ai_session_id();
+        self.session_title = DEFAULT_SESSION_TITLE.to_string();
+        self.session_created = 0;
+        self.session_updated = 0;
+        self.messages.clear();
+        self.content = SharedString::default();
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.mention_completion = None;
+        self.view = AiPanelView::Chat;
+        self.focus_handle.focus(window, cx);
+        self.refresh_sessions(cx);
+        cx.notify();
+    }
+
+    fn load_session(&mut self, session_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        let Some(session) = self
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        self.update_current_page(cx);
+        self.save_current_session(cx);
+        self.session_id = session.id;
+        self.session_title = session.title;
+        self.session_created = session.created;
+        self.session_updated = session.updated;
+        self.current_page = session.page;
+        self.messages = session
+            .messages
+            .into_iter()
+            .map(|message| ChatMessage {
+                role: match message.role {
+                    AiSessionRole::User => Role::User,
+                    AiSessionRole::Assistant => Role::Assistant,
+                },
+                content: message.content,
+                request_content: message.request_content,
+            })
+            .collect();
+        self.content = SharedString::default();
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.mention_completion = None;
+        self.view = AiPanelView::Chat;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn update_mention_completion(&mut self) {
+        let Some(source_range) = self.active_mention_source_range() else {
+            self.mention_completion = None;
+            return;
+        };
+        let matches = self.mention_matches_for_range(&source_range);
+        if matches.is_empty() {
+            self.mention_completion = None;
+            return;
+        }
+
+        let selected_ix = self
+            .mention_completion
+            .as_ref()
+            .map(|completion| completion.selected_ix)
+            .unwrap_or(0)
+            .min(matches.len().saturating_sub(1));
+        self.mention_completion = Some(MentionCompletion {
+            source_range,
+            selected_ix,
+        });
+    }
+
+    fn active_mention_source_range(&self) -> Option<Range<usize>> {
+        if !self.selected_range.is_empty() {
+            return None;
+        }
+
+        let cursor = self.cursor_offset().min(self.content.len());
+        let line_start = self.content[..cursor]
+            .rfind('\n')
+            .map(|ix| ix + '\n'.len_utf8())
+            .unwrap_or(0);
+        let line = &self.content[line_start..cursor];
+        let at_offset = line.rfind('@')?;
+        Some(line_start + at_offset..cursor)
+    }
+
+    fn mention_matches_for_range(&self, source_range: &Range<usize>) -> Vec<MentionKind> {
+        if source_range.start >= source_range.end || source_range.end > self.content.len() {
+            return Vec::new();
+        }
+        let query_start = source_range.start + '@'.len_utf8();
+        if query_start > source_range.end {
+            return Vec::new();
+        }
+        let query = &self.content[query_start..source_range.end];
+        MentionKind::ALL
+            .into_iter()
+            .filter(|mention| mention_matches_query(*mention, query))
+            .collect()
+    }
+
+    fn mention_completion_matches(&self) -> Vec<MentionKind> {
+        self.mention_completion
+            .as_ref()
+            .map(|completion| self.mention_matches_for_range(&completion.source_range))
+            .unwrap_or_default()
+    }
+
+    fn confirm_mention_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(completion) = self.mention_completion.clone() else {
+            return false;
+        };
+        let matches = self.mention_matches_for_range(&completion.source_range);
+        let Some(mention) = matches.get(completion.selected_ix).copied() else {
+            return false;
+        };
+        self.insert_mention_at_range(mention, completion.source_range, cx);
+        true
+    }
+
+    fn select_previous_mention_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        let match_count = self.mention_completion_matches().len();
+        let Some(completion) = self.mention_completion.as_mut() else {
+            return false;
+        };
+        if match_count == 0 {
+            return false;
+        }
+        completion.selected_ix = if completion.selected_ix == 0 {
+            match_count - 1
+        } else {
+            completion.selected_ix - 1
+        };
+        cx.notify();
+        true
+    }
+
+    fn select_next_mention_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        let match_count = self.mention_completion_matches().len();
+        let Some(completion) = self.mention_completion.as_mut() else {
+            return false;
+        };
+        if match_count == 0 {
+            return false;
+        }
+        completion.selected_ix = (completion.selected_ix + 1) % match_count;
+        cx.notify();
+        true
+    }
+
+    fn insert_mention(&mut self, mention: MentionKind, cx: &mut Context<Self>) {
+        let range = self
+            .mention_completion
+            .as_ref()
+            .map(|completion| completion.source_range.clone())
+            .unwrap_or_else(|| {
+                let cursor = self.cursor_offset().min(self.content.len());
+                cursor..cursor
+            });
+        self.insert_mention_at_range(mention, range, cx);
+    }
+
+    fn insert_mention_at_range(
+        &mut self,
+        mention: MentionKind,
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let new_text = format!("{} ", mention.token());
+        self.content =
+            (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..])
+                .into();
+        let cursor = range.start + new_text.len();
+        self.selected_range = cursor..cursor;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.mention_completion = None;
+        cx.notify();
     }
 
     fn on_mouse_down(
@@ -324,6 +731,7 @@ impl AiPanel {
         let offset = offset.min(self.content.len());
         self.selected_range = offset..offset;
         self.selection_reversed = false;
+        self.update_mention_completion();
         cx.notify();
     }
 
@@ -348,6 +756,7 @@ impl AiPanel {
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
 
+        self.update_mention_completion();
         cx.notify();
     }
 
@@ -498,6 +907,164 @@ impl AiPanel {
                     .child(render_text_lines(&content)),
             )
     }
+
+    fn render_sessions_view(
+        sessions: Vec<AiSession>,
+        current_session_id: u64,
+        loading: bool,
+        theme: crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut list = div().flex().flex_col().gap_1().p_2();
+        list = list.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .rounded_sm()
+                .border_1()
+                .border_color(rgb(theme.accent))
+                .bg(rgba(with_alpha(theme.accent, 0x18)))
+                .px_2()
+                .py_2()
+                .text_size(px(13.0))
+                .text_color(if loading {
+                    rgb(theme.text_muted)
+                } else {
+                    rgb(theme.text)
+                })
+                .cursor_pointer()
+                .hover(move |style| style.bg(rgba(with_alpha(theme.accent, 0x24))))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.new_session(window, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .child("New chat")
+                .child("+"),
+        );
+
+        if sessions.is_empty() {
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(120.0))
+                    .text_size(px(13.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child("No previous AI sessions for this PDF"),
+            );
+        }
+
+        for session in sessions {
+            let active = session.id == current_session_id;
+            let session_id = session.id;
+            let title = session.title.clone();
+            let meta = format!("p. {} · {} messages", session.page, session.messages.len());
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .rounded_sm()
+                    .px_2()
+                    .py_2()
+                    .bg(if active {
+                        rgba(theme.selected_row)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.control_hover)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.load_session(session_id, window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .text_color(rgb(if active { theme.accent } else { theme.text }))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(meta),
+                    ),
+            );
+        }
+
+        div()
+            .id("ai-panel-sessions")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(list)
+    }
+
+    fn render_mention_completion_menu(
+        matches: Vec<MentionKind>,
+        selected_ix: usize,
+        theme: crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut menu = div()
+            .flex()
+            .flex_col()
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(theme.panel_border))
+            .bg(rgb(theme.control_background))
+            .overflow_hidden()
+            .text_size(px(12.0));
+
+        for (ix, mention) in matches.into_iter().enumerate() {
+            let selected = ix == selected_ix;
+            menu = menu.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .bg(if selected {
+                        rgba(theme.selected_row)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.control_hover)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.insert_mention(mention, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(if selected { theme.accent } else { theme.text }))
+                            .child(mention.label()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(mention.description()),
+                    ),
+            );
+        }
+
+        menu
+    }
 }
 
 impl EntityInputHandler for AiPanel {
@@ -554,6 +1121,7 @@ impl EntityInputHandler for AiPanel {
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.selection_reversed = false;
         self.marked_range.take();
+        self.update_mention_completion();
         cx.notify();
     }
 
@@ -586,6 +1154,7 @@ impl EntityInputHandler for AiPanel {
             })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         self.selection_reversed = false;
+        self.update_mention_completion();
         cx.notify();
     }
 
@@ -631,6 +1200,18 @@ impl Render for AiPanel {
         let entity = cx.entity();
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let can_send = !self.loading && !self.content.trim().is_empty();
+        let completion_matches = self.mention_completion_matches();
+        let completion_selected = self
+            .mention_completion
+            .as_ref()
+            .map(|completion| completion.selected_ix)
+            .unwrap_or(0);
+        let sessions = self.sessions.clone();
+        let current_session_id = self.session_id;
+        let session_title = self.session_title.clone();
+        let showing_sessions = self.view == AiPanelView::Sessions;
+        let loading = self.loading;
+        let mention_completion_open = self.mention_completion.is_some();
 
         let mut messages = div().flex().flex_col().gap_3().p_3();
         if self.messages.is_empty() {
@@ -638,7 +1219,7 @@ impl Render for AiPanel {
                 div()
                     .text_size(px(13.0))
                     .text_color(rgb(theme.text_muted))
-                    .child("Ask questions about the PDF. Selected text is included as context."),
+                    .child("Ask questions about the PDF. Type @ to add selection or current page text."),
             );
         }
         for message in self.messages.clone() {
@@ -678,105 +1259,195 @@ impl Render for AiPanel {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .h(px(38.0))
+                    .h(px(44.0))
                     .px_3()
                     .border_b(px(1.0))
                     .border_color(rgb(theme.panel_border))
                     .text_size(px(14.0))
-                    .child("AI Assistant")
                     .child(
                         div()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme.text_muted))
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(rgba(theme.control_hover)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, window, cx| {
-                                    this.dismiss(window, cx);
-                                    cx.stop_propagation();
-                                }),
-                            )
-                            .child("Close"),
-                    ),
-            )
-            .child(
-                div()
-                    .id("ai-panel-messages")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll_handle)
-                    .child(messages),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_2()
-                    .border_t(px(1.0))
-                    .border_color(rgb(theme.panel_border))
-                    .child(
-                        div()
-                            .h(px(92.0))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.control_border))
-                            .bg(rgb(theme.control_background))
-                            .p_2()
-                            .cursor(CursorStyle::IBeam)
-                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                            .on_mouse_move(cx.listener(Self::on_mouse_move))
-                            .child(AiInputElement { panel: entity }),
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .child("AI Assistant")
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(session_title),
+                            ),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .text_size(px(11.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child("Ctrl+Enter sends · Shift+Enter newline")
+                            .gap_1()
                             .child(
                                 div()
-                                    .px_3()
+                                    .px_2()
                                     .py_1()
                                     .rounded_sm()
-                                    .border_1()
-                                    .border_color(if can_send {
-                                        rgb(theme.accent)
-                                    } else {
-                                        rgb(theme.control_border)
-                                    })
-                                    .bg(if can_send {
-                                        rgba(with_alpha(theme.accent, 0x22))
-                                    } else {
-                                        rgba(theme.control_background)
-                                    })
-                                    .text_color(if can_send {
-                                        rgb(theme.text)
-                                    } else {
+                                    .text_size(px(12.0))
+                                    .text_color(if loading {
                                         rgb(theme.text_muted)
+                                    } else {
+                                        rgb(theme.text)
                                     })
                                     .cursor_pointer()
+                                    .hover(move |style| style.bg(rgba(theme.control_hover)))
                                     .on_mouse_down(
                                         MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.send_message(cx);
+                                        cx.listener(|this, _, window, cx| {
+                                            this.new_session(window, cx);
                                             cx.stop_propagation();
                                         }),
                                     )
-                                    .child(if self.loading { "Sending…" } else { "Send" }),
+                                    .child("New"),
+                            )
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(if showing_sessions {
+                                        theme.accent
+                                    } else {
+                                        theme.text_muted
+                                    }))
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(rgba(theme.control_hover)))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            if this.view == AiPanelView::Sessions {
+                                                this.show_chat(cx);
+                                            } else {
+                                                this.show_sessions(cx);
+                                            }
+                                            cx.stop_propagation();
+                                        }),
+                                    )
+                                    .child(if showing_sessions { "Chat" } else { "Sessions" }),
+                            )
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(theme.text_muted))
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(rgba(theme.control_hover)))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, window, cx| {
+                                            this.dismiss(window, cx);
+                                            cx.stop_propagation();
+                                        }),
+                                    )
+                                    .child("Close"),
                             ),
                     ),
             )
+            .when(showing_sessions, |this| {
+                this.child(Self::render_sessions_view(
+                    sessions,
+                    current_session_id,
+                    loading,
+                    theme,
+                    cx,
+                ))
+            })
+            .when(!showing_sessions, |this| {
+                this.child(
+                    div()
+                        .id("ai-panel-messages")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll_handle)
+                        .child(messages),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_2()
+                        .border_t(px(1.0))
+                        .border_color(rgb(theme.panel_border))
+                        .child(
+                            div()
+                                .h(px(92.0))
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(theme.control_border))
+                                .bg(rgb(theme.control_background))
+                                .p_2()
+                                .cursor(CursorStyle::IBeam)
+                                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                                .on_mouse_move(cx.listener(Self::on_mouse_move))
+                                .child(AiInputElement { panel: entity }),
+                        )
+                        .when(!completion_matches.is_empty(), |this| {
+                            this.child(Self::render_mention_completion_menu(
+                                completion_matches,
+                                completion_selected,
+                                theme,
+                                cx,
+                            ))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .text_size(px(11.0))
+                                .text_color(rgb(theme.text_muted))
+                                .child(if mention_completion_open {
+                                    "Enter inserts context · Esc closes panel"
+                                } else {
+                                    "Ctrl+Enter sends · @ adds context"
+                                })
+                                .child(
+                                    div()
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(if can_send {
+                                            rgb(theme.accent)
+                                        } else {
+                                            rgb(theme.control_border)
+                                        })
+                                        .bg(if can_send {
+                                            rgba(with_alpha(theme.accent, 0x22))
+                                        } else {
+                                            rgba(theme.control_background)
+                                        })
+                                        .text_color(if can_send {
+                                            rgb(theme.text)
+                                        } else {
+                                            rgb(theme.text_muted)
+                                        })
+                                        .cursor_pointer()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.send_message(cx);
+                                                cx.stop_propagation();
+                                            }),
+                                        )
+                                        .child(if loading { "Sending…" } else { "Send" }),
+                                ),
+                        ),
+                )
+            })
     }
 }
 
@@ -846,32 +1517,12 @@ impl Element for AiInputElement {
             strikethrough: None,
         };
         let runs = if !input.content.is_empty() {
-            if let Some(marked_range) = input.marked_range.as_ref() {
-                vec![
-                    TextRun {
-                        len: marked_range.start,
-                        ..base_run.clone()
-                    },
-                    TextRun {
-                        len: marked_range.end - marked_range.start,
-                        underline: Some(gpui::UnderlineStyle {
-                            color: Some(base_run.color),
-                            thickness: px(1.0),
-                            wavy: false,
-                        }),
-                        ..base_run.clone()
-                    },
-                    TextRun {
-                        len: display_text.len() - marked_range.end,
-                        ..base_run
-                    },
-                ]
-                .into_iter()
-                .filter(|run| run.len > 0)
-                .collect()
-            } else {
-                vec![base_run]
-            }
+            input_text_runs(
+                display_text.as_ref(),
+                base_run,
+                theme,
+                input.marked_range.as_ref(),
+            )
         } else {
             vec![base_run]
         };
@@ -992,7 +1643,6 @@ impl Element for AiInputElement {
 
 fn stream_completion(
     settings: AiSettings,
-    pdf_selection: Option<String>,
     messages: Vec<ChatMessage>,
     send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
 ) -> Result<()> {
@@ -1013,35 +1663,30 @@ fn stream_completion(
         .context("failed to create HTTP client")?;
 
     match settings.provider {
-        AiProvider::OpenAi => stream_openai(&client, settings, pdf_selection, messages, send_event),
-        AiProvider::Anthropic => {
-            stream_anthropic(&client, settings, pdf_selection, messages, send_event)
-        }
+        AiProvider::OpenAi => stream_openai(&client, settings, messages, send_event),
+        AiProvider::Anthropic => stream_anthropic(&client, settings, messages, send_event),
     }
 }
 
 fn stream_openai(
     client: &reqwest::blocking::Client,
     settings: AiSettings,
-    pdf_selection: Option<String>,
     messages: Vec<ChatMessage>,
     send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
 ) -> Result<()> {
     let url = openai_chat_url(settings.base_url.as_deref());
     let mut request_messages = Vec::new();
-    if let Some(system) = system_prompt(pdf_selection) {
-        request_messages.push(json!({
-            "role": "system",
-            "content": system,
-        }));
-    }
+    request_messages.push(json!({
+        "role": "system",
+        "content": system_prompt(),
+    }));
     for message in messages {
         request_messages.push(json!({
             "role": match message.role {
                 Role::User => "user",
                 Role::Assistant => "assistant",
             },
-            "content": message.content,
+            "content": message.request_content.unwrap_or(message.content),
         }));
     }
 
@@ -1061,7 +1706,6 @@ fn stream_openai(
 fn stream_anthropic(
     client: &reqwest::blocking::Client,
     settings: AiSettings,
-    pdf_selection: Option<String>,
     messages: Vec<ChatMessage>,
     send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
 ) -> Result<()> {
@@ -1086,7 +1730,7 @@ fn stream_anthropic(
                     Role::User => "user",
                     Role::Assistant => "assistant",
                 },
-                "content": message.content,
+                "content": message.request_content.unwrap_or(message.content),
             })
         })
         .collect::<Vec<_>>();
@@ -1097,9 +1741,7 @@ fn stream_anthropic(
         "max_tokens": 4096,
         "stream": true,
     });
-    if let Some(system) = system_prompt(pdf_selection) {
-        body["system"] = json!(system);
-    }
+    body["system"] = json!(system_prompt());
 
     let response = client
         .post(url)
@@ -1208,12 +1850,140 @@ fn openai_chat_url(base_url: Option<&str>) -> String {
     }
 }
 
-fn system_prompt(pdf_selection: Option<String>) -> Option<String> {
-    pdf_selection.map(|selection| {
-        format!(
-            "You are an AI assistant embedded in a PDF viewer. Help the user understand and work with the document. Relevant selected text:\n\n{selection}"
-        )
+fn system_prompt() -> &'static str {
+    "You are an AI assistant embedded in a PDF viewer. Help the user understand and work with the document. Be conversational but professional. Refer to the user in the second person and yourself in the first person. Format responses in Markdown. Never invent document details; if the needed PDF context is missing, say what context you need. When the user includes @selection or @current page text context, ground your answer in that attached context."
+}
+
+fn mentioned_kinds(text: &str) -> Vec<MentionKind> {
+    let mut seen = HashSet::new();
+    let mut mentions = Vec::new();
+    for (_, mention) in find_mention_ranges(text) {
+        if seen.insert(mention) {
+            mentions.push(mention);
+        }
+    }
+    mentions
+}
+
+fn find_mention_ranges(text: &str) -> Vec<(Range<usize>, MentionKind)> {
+    let mut ranges = Vec::new();
+    for (start, ch) in text.char_indices() {
+        if ch != '@' {
+            continue;
+        }
+        for mention in MentionKind::ALL {
+            let token = mention.token();
+            if text[start..].starts_with(token) {
+                let end = start + token.len();
+                if is_mention_boundary(text[end..].chars().next()) {
+                    ranges.push((start..end, mention));
+                    break;
+                }
+            }
+        }
+    }
+    ranges
+}
+
+fn is_mention_boundary(next: Option<char>) -> bool {
+    next.is_none_or(|ch| {
+        ch.is_whitespace() || matches!(ch, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}')
     })
+}
+
+fn mention_matches_query(mention: MentionKind, query: &str) -> bool {
+    let query = query.trim_start().to_ascii_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+
+    let query_without_trailing = query.trim_end();
+    let label = mention.label().to_ascii_lowercase();
+    let token = mention.token().trim_start_matches('@').to_ascii_lowercase();
+
+    if query.ends_with(' ') && (query_without_trailing == label || query_without_trailing == token)
+    {
+        return false;
+    }
+
+    label.contains(query_without_trailing) || token.contains(query_without_trailing)
+}
+
+fn truncate_context(text: String) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.chars().take(MAX_CONTEXT_CHARS).collect())
+}
+
+fn session_title_for_prompt(prompt: &str) -> String {
+    let title = prompt
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(DEFAULT_SESSION_TITLE)
+        .trim()
+        .chars()
+        .take(48)
+        .collect::<String>();
+    if title.is_empty() {
+        DEFAULT_SESSION_TITLE.to_string()
+    } else {
+        title
+    }
+}
+
+fn input_text_runs(
+    text: &str,
+    base_run: TextRun,
+    theme: crate::theme::Theme,
+    marked_range: Option<&Range<usize>>,
+) -> Vec<TextRun> {
+    let mention_ranges = find_mention_ranges(text);
+    let mut boundaries = vec![0, text.len()];
+    for (range, _) in &mention_ranges {
+        boundaries.push(range.start);
+        boundaries.push(range.end);
+    }
+    if let Some(range) = marked_range {
+        boundaries.push(range.start);
+        boundaries.push(range.end);
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    boundaries
+        .windows(2)
+        .filter_map(|window| {
+            let start = window[0];
+            let end = window[1];
+            if start >= end {
+                return None;
+            }
+
+            let mention = mention_ranges
+                .iter()
+                .any(|(range, _)| start >= range.start && end <= range.end);
+            let marked = marked_range
+                .as_ref()
+                .is_some_and(|range| start >= range.start && end <= range.end);
+            let mut run = TextRun {
+                len: end - start,
+                ..base_run.clone()
+            };
+            if mention {
+                run.color = rgb(theme.accent).into();
+            }
+            if marked {
+                run.underline = Some(gpui::UnderlineStyle {
+                    color: Some(run.color),
+                    thickness: px(1.0),
+                    wavy: false,
+                });
+            }
+            Some(run)
+        })
+        .collect()
 }
 
 fn render_text_lines(content: &str) -> impl IntoElement {
@@ -1355,4 +2125,43 @@ fn offset_to_utf16_in_text(text: &str, offset: usize) -> usize {
 
 fn with_alpha(rgb: u32, alpha: u8) -> u32 {
     (rgb << 8) | u32::from(alpha)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pdf_context_mentions_in_order_without_duplicates() {
+        assert_eq!(
+            mentioned_kinds("Summarize @selection and compare with @current page text"),
+            vec![MentionKind::Selection, MentionKind::CurrentPageText]
+        );
+        assert_eq!(
+            mentioned_kinds("@selection then @selection again"),
+            vec![MentionKind::Selection]
+        );
+    }
+
+    #[test]
+    fn mention_completion_keeps_current_page_space_query_open() {
+        assert!(mention_matches_query(
+            MentionKind::CurrentPageText,
+            "current "
+        ));
+        assert!(mention_matches_query(MentionKind::CurrentPageText, "page"));
+        assert!(!mention_matches_query(
+            MentionKind::CurrentPageText,
+            "current page text "
+        ));
+    }
+
+    #[test]
+    fn derives_session_title_from_first_prompt_line() {
+        assert_eq!(
+            session_title_for_prompt("\n  Explain the introduction in detail"),
+            "Explain the introduction in detail"
+        );
+        assert_eq!(session_title_for_prompt(""), DEFAULT_SESSION_TITLE);
+    }
 }
