@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use crate::ai_panel::AiPanel;
+use crate::ai_panel::{AI_PANEL_WIDTH, AiPanel};
 use crate::bookmarks::{
     BookmarkPalette, BookmarkPaletteDelegate, BookmarkPrompt, BookmarkPromptDelegate,
 };
@@ -31,8 +31,8 @@ use crate::toc::{TocPalette, TocPaletteDelegate, TocPaletteEntry};
 use anyhow::{Context as _, Result, anyhow, bail};
 use arboard::{Clipboard, ImageData};
 use gpui::{
-    Anchor, Bounds, ClipboardItem, Context, Corners, Entity, FocusHandle, Focusable, IntoElement,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Anchor, Bounds, ClipboardItem, Context, Corners, DragMoveEvent, Entity, FocusHandle, Focusable,
+    IntoElement, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathPromptOptions, Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta,
     ScrollStrategy, ScrollWheelEvent, SharedString, Task, UniformListScrollHandle, Window,
     anchored, canvas, deferred, div, fill, point, prelude::*, px, rgb, rgba, size, uniform_list,
@@ -101,6 +101,9 @@ const TOC_SIDEBAR_WIDTH: f32 = 280.0;
 const TOC_SIDEBAR_ROW_HEIGHT: f32 = 30.0;
 const NOTES_SIDEBAR_WIDTH: f32 = 300.0;
 const NOTES_SIDEBAR_ROW_HEIGHT: f32 = 52.0;
+const SIDEBAR_RESIZE_HANDLE_SIZE: f32 = 6.0;
+const SIDEBAR_MIN_WIDTH: f32 = 150.0;
+const SIDEBAR_MAX_WIDTH_RATIO: f32 = 0.5;
 const GRID_OVERVIEW_DEFAULT_ZOOM: f32 = 1.0;
 const GRID_OVERVIEW_MIN_ZOOM: f32 = 0.25;
 const GRID_OVERVIEW_MAX_ZOOM: f32 = 4.0;
@@ -310,6 +313,19 @@ struct JumpPosition {
     scroll_y_doc: f32,
 }
 
+#[derive(Clone, Copy)]
+enum DraggedSidebar {
+    Toc,
+    Notes,
+    AiPanel,
+}
+
+impl Render for DraggedSidebar {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
 pub struct PdfView {
     path: PathBuf,
     file_name: SharedString,
@@ -357,14 +373,17 @@ pub struct PdfView {
     toc: Vec<TocEntry>,
     toc_collapsed: HashSet<usize>,
     toc_sidebar_open: bool,
+    toc_sidebar_width: f32,
     toc_sidebar_scroll: UniformListScrollHandle,
     toc_sidebar_visible_entry_ixs: Vec<usize>,
     toc_sidebar_entries_dirty: bool,
     toc_sidebar_selected: Option<usize>,
     notes_sidebar_open: bool,
+    notes_sidebar_width: f32,
     notes_sidebar_scroll: UniformListScrollHandle,
     notes_sidebar_entries: Vec<NotePaletteEntry>,
     notes_sidebar_selected: Option<u64>,
+    ai_panel_width: f32,
     grid_overview_open: bool,
     grid_overview_scroll: UniformListScrollHandle,
     grid_overview_zoom: f32,
@@ -528,14 +547,17 @@ impl PdfView {
             toc,
             toc_collapsed: HashSet::new(),
             toc_sidebar_open: false,
+            toc_sidebar_width: TOC_SIDEBAR_WIDTH,
             toc_sidebar_scroll: UniformListScrollHandle::new(),
             toc_sidebar_visible_entry_ixs: Vec::new(),
             toc_sidebar_entries_dirty: true,
             toc_sidebar_selected: None,
             notes_sidebar_open: false,
+            notes_sidebar_width: NOTES_SIDEBAR_WIDTH,
             notes_sidebar_scroll: UniformListScrollHandle::new(),
             notes_sidebar_entries: Vec::new(),
             notes_sidebar_selected: None,
+            ai_panel_width: AI_PANEL_WIDTH,
             grid_overview_open: false,
             grid_overview_scroll: UniformListScrollHandle::new(),
             grid_overview_zoom: GRID_OVERVIEW_DEFAULT_ZOOM,
@@ -3175,6 +3197,7 @@ impl PdfView {
                 pdf_view.clone(),
                 document_path.clone(),
                 current_page,
+                self.ai_panel_width,
                 cx,
             )
         });
@@ -3764,14 +3787,49 @@ impl PdfView {
             .child(content)
     }
 
+    fn render_sidebar_resize_handle(
+        id: &'static str,
+        sidebar: DraggedSidebar,
+        on_left: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + 'static {
+        let offset = px(-SIDEBAR_RESIZE_HANDLE_SIZE / 2.0);
+        let handle = div()
+            .id(id)
+            .on_drag(sidebar, |sidebar, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| *sidebar)
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .absolute()
+            .top(px(0.0))
+            .h_full()
+            .w(px(SIDEBAR_RESIZE_HANDLE_SIZE))
+            .cursor_col_resize()
+            .occlude();
+
+        if on_left {
+            deferred(handle.left(offset))
+        } else {
+            deferred(handle.right(offset))
+        }
+    }
+
     fn render_sidebar_shell(
         title: &'static str,
         count: usize,
         width: f32,
         content: impl IntoElement + 'static,
+        resize_handle: impl IntoElement + 'static,
         theme: Theme,
     ) -> impl IntoElement {
         div()
+            .relative()
             .flex()
             .flex_none()
             .flex_col()
@@ -3805,6 +3863,7 @@ impl PdfView {
                     ),
             )
             .child(content)
+            .child(resize_handle)
     }
 
     fn render_sidebar_empty_message(message: &'static str, theme: Theme) -> impl IntoElement {
@@ -4669,8 +4728,14 @@ impl PdfView {
         Self::render_sidebar_shell(
             "Table of Contents",
             self.toc.len(),
-            TOC_SIDEBAR_WIDTH,
+            self.toc_sidebar_width,
             content,
+            Self::render_sidebar_resize_handle(
+                "toc-sidebar-resize-handle",
+                DraggedSidebar::Toc,
+                false,
+                cx,
+            ),
             theme,
         )
     }
@@ -4784,7 +4849,19 @@ impl PdfView {
                 )
             });
 
-        Self::render_sidebar_shell("Notes", visible_len, NOTES_SIDEBAR_WIDTH, content, theme)
+        Self::render_sidebar_shell(
+            "Notes",
+            visible_len,
+            self.notes_sidebar_width,
+            content,
+            Self::render_sidebar_resize_handle(
+                "notes-sidebar-resize-handle",
+                DraggedSidebar::Notes,
+                false,
+                cx,
+            ),
+            theme,
+        )
     }
 
     fn highlight_overlays(&self) -> (Vec<HighlightOverlay>, Vec<Bounds<Pixels>>) {
@@ -5400,6 +5477,51 @@ impl Render for PdfView {
                             .min_h_0()
                             .flex()
                             .flex_row()
+                            .on_drag_move(cx.listener(
+                                |this, e: &DragMoveEvent<DraggedSidebar>, _, cx| {
+                                    let dragged_sidebar = *e.drag(cx);
+                                    let max_width = (e.bounds.size.width.as_f32()
+                                        * SIDEBAR_MAX_WIDTH_RATIO)
+                                        .max(SIDEBAR_MIN_WIDTH);
+                                    let new_width = match dragged_sidebar {
+                                        DraggedSidebar::Toc => {
+                                            (e.event.position.x - e.bounds.left()).as_f32()
+                                        }
+                                        DraggedSidebar::Notes => {
+                                            let toc_offset = if this.toc_sidebar_open {
+                                                this.toc_sidebar_width
+                                            } else {
+                                                0.0
+                                            };
+                                            (e.event.position.x - e.bounds.left()).as_f32()
+                                                - toc_offset
+                                        }
+                                        DraggedSidebar::AiPanel => {
+                                            (e.bounds.right() - e.event.position.x).as_f32()
+                                        }
+                                    }
+                                    .clamp(SIDEBAR_MIN_WIDTH, max_width);
+
+                                    match dragged_sidebar {
+                                        DraggedSidebar::Toc => {
+                                            this.toc_sidebar_width = new_width;
+                                        }
+                                        DraggedSidebar::Notes => {
+                                            this.notes_sidebar_width = new_width;
+                                        }
+                                        DraggedSidebar::AiPanel => {
+                                            this.ai_panel_width = new_width;
+                                            if let Some(panel) = &this.ai_panel {
+                                                panel.update(cx, |panel, cx| {
+                                                    panel.set_width(new_width);
+                                                    cx.notify();
+                                                });
+                                            }
+                                        }
+                                    }
+                                    cx.notify();
+                                },
+                            ))
                             .when(self.toc_sidebar_open, |this| {
                                 this.child(self.render_toc_sidebar(theme, window, cx))
                             })
@@ -5545,7 +5667,24 @@ impl Render for PdfView {
                                     .size_full(),
                                 ),
                             )
-                            .when_some(self.ai_panel.clone(), |this, panel| this.child(panel)),
+                            .when_some(self.ai_panel.clone(), |this, panel| {
+                                this.child(
+                                    div()
+                                        .relative()
+                                        .flex()
+                                        .flex_none()
+                                        .min_h_0()
+                                        .h_full()
+                                        .w(px(self.ai_panel_width))
+                                        .child(panel)
+                                        .child(Self::render_sidebar_resize_handle(
+                                            "ai-panel-resize-handle",
+                                            DraggedSidebar::AiPanel,
+                                            true,
+                                            cx,
+                                        )),
+                                )
+                            }),
                     )
                     .child(
                         div()

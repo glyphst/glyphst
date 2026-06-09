@@ -45,7 +45,7 @@ gpui::actions!(
     ]
 );
 
-const AI_PANEL_WIDTH: f32 = 320.0;
+pub const AI_PANEL_WIDTH: f32 = 320.0;
 const COMPLETION_MENU_WIDTH: f32 = 248.0;
 const COMPLETION_MENU_ROW_HEIGHT: f32 = 46.0;
 const MAX_CONTEXT_CHARS: usize = 12_000;
@@ -129,6 +129,7 @@ pub struct AiPanel {
     focus_handle: FocusHandle,
     previous_focus_handle: FocusHandle,
     messages: Vec<ChatMessage>,
+    width: f32,
     content: SharedString,
     selected_range: Range<usize>,
     selection_reversed: bool,
@@ -175,6 +176,7 @@ impl AiPanel {
         pdf_view: WeakEntity<PdfView>,
         document_path: PathBuf,
         current_page: usize,
+        width: f32,
         cx: &mut Context<Self>,
     ) -> Self {
         let session_id = cx.global_mut::<LibraryStore>().next_ai_session_id();
@@ -183,6 +185,7 @@ impl AiPanel {
             focus_handle: cx.focus_handle(),
             previous_focus_handle,
             messages: Vec::new(),
+            width,
             content: SharedString::default(),
             selected_range: 0..0,
             selection_reversed: false,
@@ -206,6 +209,10 @@ impl AiPanel {
             mention_completion: None,
             last_cursor_pos: None,
         }
+    }
+
+    pub fn set_width(&mut self, width: f32) {
+        self.width = width;
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1457,7 +1464,7 @@ impl Render for AiPanel {
         let completion_left = self
             .last_cursor_pos
             .map(|position| {
-                let max_left = px((AI_PANEL_WIDTH - COMPLETION_MENU_WIDTH - 24.0).max(0.0));
+                let max_left = px((self.width - COMPLETION_MENU_WIDTH - 24.0).max(0.0));
                 if position.x < px(0.0) {
                     px(0.0)
                 } else if position.x > max_left {
@@ -1491,7 +1498,7 @@ impl Render for AiPanel {
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(AI_PANEL_WIDTH))
+            .w(px(self.width))
             .h_full()
             .border_l(px(1.0))
             .border_color(rgb(theme.panel_border))
