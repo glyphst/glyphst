@@ -76,6 +76,7 @@ gpui::actions!(
         OpenHistory,
         OpenBookmarks,
         OpenFile,
+        OpenStartBoard,
         AddBookmark,
         ToggleGridOverview,
         GridCursorUp,
@@ -1806,6 +1807,14 @@ impl PdfView {
             Ok(Ok(None)) | Err(_) => {}
         })
         .detach();
+    }
+
+    fn open_start_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush_current_history_position(cx);
+        match crate::open_start_board_window(cx) {
+            Ok(()) => window.remove_window(),
+            Err(error) => eprintln!("failed to open start board: {error:#}"),
+        }
     }
 
     fn is_supported_document_path(path: &Path) -> bool {
@@ -5204,6 +5213,9 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &OpenFile, _, cx| {
                 this.open_file(cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenStartBoard, window, cx| {
+                this.open_start_board(window, cx);
             }))
             .on_action(cx.listener(|this, _: &AddBookmark, window, cx| {
                 this.toggle_bookmark_prompt(window, cx);

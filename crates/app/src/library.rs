@@ -172,6 +172,12 @@ impl LibraryStore {
         &self.library.history
     }
 
+    pub fn remove_missing_history_entries(&mut self) -> bool {
+        let before = self.library.history.len();
+        self.library.history.retain(|entry| entry.path.exists());
+        before != self.library.history.len()
+    }
+
     pub fn bookmarks(&self) -> &[Bookmark] {
         &self.library.bookmarks
     }
@@ -857,6 +863,31 @@ mod tests {
 
         assert_eq!(library.history.len(), MAX_HISTORY_ENTRIES);
         assert_eq!(library.history[0].opened, (MAX_HISTORY_ENTRIES + 4) as u64);
+    }
+
+    #[test]
+    fn removes_missing_history_entries() {
+        let database_path = temp_library_path("missing-history");
+        let existing_path = temp_library_path("existing-history").with_extension("pdf");
+        let missing_path = temp_library_path("missing-history-pdf").with_extension("pdf");
+        fs::write(&existing_path, b"%PDF-1.4\n").unwrap();
+
+        {
+            let mut store = LibraryStore::open(database_path.clone()).unwrap();
+            store.record_history(&existing_path, position(1));
+            store.record_history(&missing_path, position(2));
+
+            assert!(store.remove_missing_history_entries());
+            assert_eq!(store.history_entries().len(), 1);
+            assert_eq!(
+                store.history_entries()[0].path,
+                normalize_path(&existing_path)
+            );
+            assert!(!store.remove_missing_history_entries());
+        }
+
+        let _ = fs::remove_file(database_path);
+        let _ = fs::remove_file(existing_path);
     }
 
     #[test]

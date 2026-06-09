@@ -16,9 +16,9 @@ use crate::{
         AddBookmark, CopySelection, GoToBeginning, GoToEnd, GridCursorDown, GridCursorLeft,
         GridCursorRight, GridCursorUp, GridOverviewConfirm, JumpBackward, JumpForward,
         NextHalfPage, NextPage, OpenBookmarks, OpenFile, OpenHistory, OpenNotes, OpenSettings,
-        PreviousHalfPage, PreviousPage, ResetZoom, Search, SearchNext, SearchPrev, SelectAll, Toc,
-        ToggleAiPanel, ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview, ToggleNotes,
-        ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
+        OpenStartBoard, PreviousHalfPage, PreviousPage, ResetZoom, Search, SearchNext, SearchPrev,
+        SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview,
+        ToggleNotes, ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
     },
     picker::{
         PickerBackspace, PickerCancel, PickerConfirm, PickerCopy, PickerCut, PickerDelete,
@@ -712,6 +712,11 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["open-file", "open-pdf"],
             context: Some(PDF_NO_SEARCH_CONTEXT),
             build: boxed::<OpenFile>,
+        },
+        ActionSpec {
+            aliases: &["open-start-board", "go-to-start-board", "start-board"],
+            context: Some(PDF_NO_SEARCH_CONTEXT),
+            build: boxed::<OpenStartBoard>,
         },
         ActionSpec {
             aliases: &["add-bookmark", "bookmark-page"],
