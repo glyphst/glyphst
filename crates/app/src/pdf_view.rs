@@ -94,6 +94,7 @@ const INITIAL_SELECTION_TOLERANCE_PX: f32 = 24.0;
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 8.0;
 const SCROLL_LINE_MULTIPLIER: f32 = 20.0;
+const SMOOTH_SCROLL_LARGE_JUMP_VIEWPORTS: f32 = 3.0;
 const CTRL_SCROLL_ZOOM_STEP_MULTIPLIER: f32 = 0.25;
 const MAX_CACHED_RENDERS: usize = 2048;
 const MAX_CACHED_RENDER_PIXELS: u64 = 30_000_000;
@@ -1369,7 +1370,15 @@ impl PdfView {
             .settings
             .behavior
             .smooth_scrolling;
-        if !smooth_scrolling {
+        if smooth_scrolling {
+            let viewport_height_doc = self.viewport_height / self.effective_scale();
+            let max_animated_distance = viewport_height_doc * SMOOTH_SCROLL_LARGE_JUMP_VIEWPORTS;
+            let delta_y = self.target_scroll_y_doc - self.scroll_y_doc;
+            if delta_y.abs() > max_animated_distance {
+                self.scroll_y_doc =
+                    self.target_scroll_y_doc - delta_y.signum() * max_animated_distance;
+            }
+        } else {
             self.scroll_x_doc = self.target_scroll_x_doc;
             self.scroll_y_doc = self.target_scroll_y_doc;
         }
