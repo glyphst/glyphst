@@ -23,7 +23,6 @@ use crate::{
 
 const BOARD_WIDTH: f32 = 900.0;
 const BOARD_HEIGHT: f32 = 700.0;
-const HEADER_HEIGHT: f32 = 56.0;
 const CARD_WIDTH: f32 = 220.0;
 const CARD_HEIGHT: f32 = 330.0;
 const THUMBNAIL_MAX_WIDTH: f32 = 170.0;
@@ -57,7 +56,6 @@ struct StartBoardEntry {
 
 pub(crate) enum StartBoardEvent {
     OpenDocument(PathBuf),
-    OpenFile,
 }
 
 pub struct StartBoard {
@@ -176,29 +174,6 @@ impl StartBoard {
         cx.notify();
     }
 
-    fn render_open_file_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .h(px(32.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(theme.control_border))
-            .bg(rgb(theme.control_background))
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.open_file(cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child("Open file…")
-    }
-
     fn render_card(
         path: PathBuf,
         file_name: SharedString,
@@ -216,11 +191,10 @@ impl StartBoard {
             .w(px(CARD_WIDTH))
             .h(px(CARD_HEIGHT))
             .p_3()
-            .rounded_lg()
             .border_1()
-            .border_color(rgb(theme.panel_border))
-            .bg(rgb(theme.panel_background))
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -283,9 +257,8 @@ impl StartBoard {
                 )
                 .w(px(thumbnail.width))
                 .h(px(thumbnail.height))
-                .rounded_sm()
                 .border_1()
-                .border_color(rgb(theme.panel_border))
+                .border_color(rgb(theme.border))
                 .into_any_element()
             }
             ThumbnailState::Loading => div()
@@ -294,9 +267,8 @@ impl StartBoard {
                 .justify_center()
                 .w(px(THUMBNAIL_MAX_WIDTH))
                 .h(px(THUMBNAIL_MAX_HEIGHT))
-                .rounded_sm()
                 .border_1()
-                .border_color(rgb(theme.panel_border))
+                .border_color(rgb(theme.border))
                 .bg(rgb(theme.page))
                 .text_size(px(11.0))
                 .text_color(rgb(theme.text_muted))
@@ -308,19 +280,14 @@ impl StartBoard {
                 .justify_center()
                 .w(px(THUMBNAIL_MAX_WIDTH))
                 .h(px(THUMBNAIL_MAX_HEIGHT))
-                .rounded_sm()
                 .border_1()
-                .border_color(rgb(theme.panel_border))
+                .border_color(rgb(theme.border))
                 .bg(rgba(((theme.error & 0x00ff_ffff) << 8) | 0x18))
                 .text_size(px(11.0))
                 .text_color(rgb(theme.text_muted))
                 .child("Preview unavailable")
                 .into_any_element(),
         }
-    }
-
-    fn open_file(&mut self, cx: &mut Context<Self>) {
-        cx.emit(StartBoardEvent::OpenFile);
     }
 
     fn open_document(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -467,29 +434,10 @@ impl Render for StartBoard {
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
-            .bg(rgb(theme.background))
+            .bg(rgb(theme.tab_active_background))
             .text_size(px(12.0))
             .text_color(rgb(theme.text))
             .child(measure)
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_between()
-                    .h(px(HEADER_HEIGHT))
-                    .px_4()
-                    .border_b(px(1.0))
-                    .border_color(rgb(theme.panel_border))
-                    .bg(rgb(theme.panel_background))
-                    .child(
-                        div()
-                            .text_size(px(20.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("Glyphst"),
-                    )
-                    .child(self.render_open_file_button(theme, cx)),
-            )
             .child(content)
     }
 }

@@ -580,12 +580,11 @@ impl Render for NoteEditor {
                 div()
                     .w(px(22.0))
                     .h(px(22.0))
-                    .rounded_sm()
                     .border_1()
                     .border_color(if selected_color == color {
                         rgb(theme.accent)
                     } else {
-                        rgb(theme.panel_border)
+                        rgb(theme.border)
                     })
                     .bg(rgba(theme.note_color(color)))
                     .cursor_pointer()
@@ -606,12 +605,10 @@ impl Render for NoteEditor {
             .flex()
             .flex_col()
             .w(px(560.0))
-            .rounded_md()
             .border_1()
-            .border_color(rgb(theme.panel_border))
-            .shadow_lg()
+            .border_color(rgb(theme.border))
             .overflow_hidden()
-            .bg(rgb(theme.panel_background))
+            .bg(rgb(theme.surface_background))
             .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -644,7 +641,7 @@ impl Render for NoteEditor {
                     .h(px(42.0))
                     .px_3()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.panel_border))
+                    .border_color(rgb(theme.border))
                     .text_size(px(14.0))
                     .child("Note"),
             )
@@ -668,7 +665,7 @@ impl Render for NoteEditor {
                     .h(px(36.0))
                     .px_3()
                     .border_t(px(1.0))
-                    .border_color(rgb(theme.panel_border))
+                    .border_color(rgb(theme.border))
                     .text_size(px(12.0))
                     .text_color(rgb(theme.text_muted))
                     .child(color_palette)

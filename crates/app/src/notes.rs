@@ -194,7 +194,6 @@ impl PickerDelegate for NotesPaletteDelegate {
                     .flex_none()
                     .w(px(8.0))
                     .h(px(8.0))
-                    .rounded_sm()
                     .bg(rgba(theme.note_color(entry.color))),
             )
             .child(

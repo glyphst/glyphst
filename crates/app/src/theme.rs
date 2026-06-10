@@ -8,22 +8,15 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 
 use crate::library::HighlightColor;
 
-pub const DEFAULT_THEME_ID: &str = "catppuccin-latte";
+pub const DEFAULT_THEME_ID: &str = "one-light";
 pub const DEFAULT_PAGE_GAP: f32 = 4.0;
 
 const MIN_PAGE_GAP: f32 = 0.0;
 const MAX_PAGE_GAP: f32 = 240.0;
 
-const BUILTIN_THEMES: [(&str, &str); 3] = [
-    (
-        "catppuccin-latte",
-        include_str!("../themes/catppuccin-latte.kdl"),
-    ),
+const BUILTIN_THEMES: [(&str, &str); 2] = [
+    ("one-light", include_str!("../themes/one-light.kdl")),
     ("one-dark", include_str!("../themes/one-dark.kdl")),
-    (
-        "catppuccin-mocha",
-        include_str!("../themes/catppuccin-mocha.kdl"),
-    ),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +58,15 @@ pub struct Theme {
     pub footer_text: u32,
     pub panel_background: u32,
     pub panel_border: u32,
+    pub surface_background: u32,
+    pub border: u32,
+    pub border_variant: u32,
+    pub border_focused: u32,
+    pub tab_bar_background: u32,
+    pub tab_active_background: u32,
+    pub tab_inactive_background: u32,
+    pub element_hover: u32,
+    pub element_selected: u32,
     pub text: u32,
     pub text_muted: u32,
     pub placeholder_text: u32,
@@ -103,6 +105,15 @@ impl Theme {
         apply!(footer_text);
         apply!(panel_background);
         apply!(panel_border);
+        apply!(surface_background);
+        apply!(border);
+        apply!(border_variant);
+        apply!(border_focused);
+        apply!(tab_bar_background);
+        apply!(tab_active_background);
+        apply!(tab_inactive_background);
+        apply!(element_hover);
+        apply!(element_selected);
         apply!(text);
         apply!(text_muted);
         apply!(placeholder_text);
@@ -114,6 +125,8 @@ impl Theme {
         apply!(control_hover);
         apply!(success);
         apply!(error);
+
+        self.apply_legacy_token_fallbacks(partial);
 
         if let Some(page_gap) = partial.page_gap {
             self.page_gap = page_gap;
@@ -138,6 +151,15 @@ impl Theme {
         mask_rgb(&mut self.footer_text);
         mask_rgb(&mut self.panel_background);
         mask_rgb(&mut self.panel_border);
+        mask_rgb(&mut self.surface_background);
+        mask_rgb(&mut self.border);
+        mask_rgb(&mut self.border_variant);
+        mask_rgb(&mut self.border_focused);
+        mask_rgb(&mut self.tab_bar_background);
+        mask_rgb(&mut self.tab_active_background);
+        mask_rgb(&mut self.tab_inactive_background);
+        mask_rgb(&mut self.element_hover);
+        mask_rgb(&mut self.element_selected);
         mask_rgb(&mut self.text);
         mask_rgb(&mut self.text_muted);
         mask_rgba(&mut self.placeholder_text);
@@ -167,6 +189,54 @@ impl Theme {
         let scale = |shift: u32| (((base >> shift) & 0xffu32) as f32 * 0.65) as u32;
         (scale(24) << 24) | (scale(16) << 16) | (scale(8) << 8) | 0xff
     }
+
+    fn apply_legacy_token_fallbacks(&mut self, partial: PartialTheme) {
+        if partial.surface_background.is_none()
+            && let Some(value) = partial.panel_background
+        {
+            self.surface_background = value;
+        }
+        if partial.border.is_none()
+            && let Some(value) = partial.panel_border
+        {
+            self.border = value;
+        }
+        if partial.border_variant.is_none()
+            && let Some(value) = partial.control_border.or(partial.panel_border)
+        {
+            self.border_variant = value;
+        }
+        if partial.border_focused.is_none()
+            && let Some(value) = partial.accent
+        {
+            self.border_focused = value;
+        }
+        if partial.tab_bar_background.is_none()
+            && let Some(value) = partial.panel_background
+        {
+            self.tab_bar_background = value;
+        }
+        if partial.tab_active_background.is_none()
+            && let Some(value) = partial.background
+        {
+            self.tab_active_background = value;
+        }
+        if partial.tab_inactive_background.is_none()
+            && let Some(value) = partial.panel_background
+        {
+            self.tab_inactive_background = value;
+        }
+        if partial.element_hover.is_none()
+            && let Some(value) = partial.control_hover
+        {
+            self.element_hover = value;
+        }
+        if partial.element_selected.is_none()
+            && let Some(value) = partial.selected_row
+        {
+            self.element_selected = rgba_to_rgb(value);
+        }
+    }
 }
 
 impl Default for Theme {
@@ -176,31 +246,40 @@ impl Default for Theme {
 }
 
 pub const DEFAULT_THEME: Theme = Theme {
-    background: 0xeff1f5,
+    background: 0xdcdcdd,
     page: 0xffffff,
-    selection_highlight: 0x1e66f54d,
-    highlight_yellow: 0xdf8e1d4d,
-    highlight_green: 0x40a02b4d,
-    highlight_blue: 0x1e66f54d,
-    highlight_pink: 0xea76cb4d,
-    highlight_orange: 0xfe640b4d,
+    selection_highlight: 0x5c78e23d,
+    highlight_yellow: 0xdec18466,
+    highlight_green: 0x669f5966,
+    highlight_blue: 0x5c78e266,
+    highlight_pink: 0xa349ab66,
+    highlight_orange: 0xad6e2666,
     overlay: 0x00000033,
-    footer_background: 0xe6e9ef,
-    footer_border: 0xdce0e8,
-    footer_text: 0x6c6f85,
-    panel_background: 0xe6e9ef,
-    panel_border: 0xdce0e8,
-    text: 0x4c4f69,
-    text_muted: 0x5c5f77,
-    placeholder_text: 0x7c7f93aa,
-    accent: 0x1e66f5,
-    match_highlight: 0xfe640b,
-    selected_row: 0x1e66f540,
-    control_background: 0xeff1f5,
-    control_border: 0xbcc0cc,
-    control_hover: 0xccd0da,
-    success: 0x40a02b,
-    error: 0xd20f39,
+    footer_background: 0xebebec,
+    footer_border: 0xc9c9ca,
+    footer_text: 0x58585a,
+    panel_background: 0xebebec,
+    panel_border: 0xc9c9ca,
+    surface_background: 0xebebec,
+    border: 0xc9c9ca,
+    border_variant: 0xdfdfe0,
+    border_focused: 0x7d82e8,
+    tab_bar_background: 0xebebec,
+    tab_active_background: 0xfafafa,
+    tab_inactive_background: 0xebebec,
+    element_hover: 0xdfdfe0,
+    element_selected: 0xcacaca,
+    text: 0x242529,
+    text_muted: 0x58585a,
+    placeholder_text: 0x7e8086ff,
+    accent: 0x5c78e2,
+    match_highlight: 0xd0a923,
+    selected_row: 0xcacacaff,
+    control_background: 0xebebec,
+    control_border: 0xdfdfe0,
+    control_hover: 0xdfdfe0,
+    success: 0x669f59,
+    error: 0xd36151,
     page_gap: DEFAULT_PAGE_GAP,
 };
 
@@ -220,6 +299,15 @@ pub struct PartialTheme {
     pub footer_text: Option<u32>,
     pub panel_background: Option<u32>,
     pub panel_border: Option<u32>,
+    pub surface_background: Option<u32>,
+    pub border: Option<u32>,
+    pub border_variant: Option<u32>,
+    pub border_focused: Option<u32>,
+    pub tab_bar_background: Option<u32>,
+    pub tab_active_background: Option<u32>,
+    pub tab_inactive_background: Option<u32>,
+    pub element_hover: Option<u32>,
+    pub element_selected: Option<u32>,
     pub text: Option<u32>,
     pub text_muted: Option<u32>,
     pub placeholder_text: Option<u32>,
@@ -265,6 +353,15 @@ impl PartialTheme {
         mask_rgb_option(&mut self.footer_text);
         mask_rgb_option(&mut self.panel_background);
         mask_rgb_option(&mut self.panel_border);
+        mask_rgb_option(&mut self.surface_background);
+        mask_rgb_option(&mut self.border);
+        mask_rgb_option(&mut self.border_variant);
+        mask_rgb_option(&mut self.border_focused);
+        mask_rgb_option(&mut self.tab_bar_background);
+        mask_rgb_option(&mut self.tab_active_background);
+        mask_rgb_option(&mut self.tab_inactive_background);
+        mask_rgb_option(&mut self.element_hover);
+        mask_rgb_option(&mut self.element_selected);
         mask_rgb_option(&mut self.text);
         mask_rgb_option(&mut self.text_muted);
         mask_rgba_option(&mut self.placeholder_text);
@@ -312,6 +409,23 @@ impl PartialTheme {
         write_color!(footer_text, "footer-text", format_rgb_hex);
         write_color!(panel_background, "panel-background", format_rgb_hex);
         write_color!(panel_border, "panel-border", format_rgb_hex);
+        write_color!(surface_background, "surface-background", format_rgb_hex);
+        write_color!(border, "border", format_rgb_hex);
+        write_color!(border_variant, "border-variant", format_rgb_hex);
+        write_color!(border_focused, "border-focused", format_rgb_hex);
+        write_color!(tab_bar_background, "tab-bar-background", format_rgb_hex);
+        write_color!(
+            tab_active_background,
+            "tab-active-background",
+            format_rgb_hex
+        );
+        write_color!(
+            tab_inactive_background,
+            "tab-inactive-background",
+            format_rgb_hex
+        );
+        write_color!(element_hover, "element-hover", format_rgb_hex);
+        write_color!(element_selected, "element-selected", format_rgb_hex);
         write_color!(text, "text", format_rgb_hex);
         write_color!(text_muted, "text-muted", format_rgb_hex);
         write_color!(placeholder_text, "placeholder-text", format_rgba_hex);
@@ -360,6 +474,15 @@ impl PartialTheme {
         read_color!(footer_text, "footer-text", false);
         read_color!(panel_background, "panel-background", false);
         read_color!(panel_border, "panel-border", false);
+        read_color!(surface_background, "surface-background", false);
+        read_color!(border, "border", false);
+        read_color!(border_variant, "border-variant", false);
+        read_color!(border_focused, "border-focused", false);
+        read_color!(tab_bar_background, "tab-bar-background", false);
+        read_color!(tab_active_background, "tab-active-background", false);
+        read_color!(tab_inactive_background, "tab-inactive-background", false);
+        read_color!(element_hover, "element-hover", false);
+        read_color!(element_selected, "element-selected", false);
         read_color!(text, "text", false);
         read_color!(text_muted, "text-muted", false);
         read_color!(placeholder_text, "placeholder-text", true);
@@ -408,6 +531,10 @@ impl ThemeRegistry {
             .apply(overrides)
     }
 
+    pub fn contains(&self, theme_id: &str) -> bool {
+        self.theme(theme_id).is_some()
+    }
+
     pub fn metadata(&self) -> Vec<ThemeMetadata> {
         self.themes
             .iter()
@@ -432,7 +559,7 @@ impl ThemeRegistry {
         if registry.theme(DEFAULT_THEME_ID).is_none() {
             registry.insert_theme(ThemeEntry {
                 id: DEFAULT_THEME_ID.to_string(),
-                name: "Catppuccin Latte".to_string(),
+                name: "One Light".to_string(),
                 appearance: ThemeAppearance::Light,
                 theme: DEFAULT_THEME,
             });
@@ -532,6 +659,10 @@ pub fn push_value_node(document: &mut KdlDocument, name: &str, value: impl Into<
     let mut node = KdlNode::new(name);
     node.push(value);
     document.nodes_mut().push(node);
+}
+
+fn rgba_to_rgb(value: u32) -> u32 {
+    (value >> 8) & 0x00ff_ffff
 }
 
 fn mask_rgb(value: &mut u32) {

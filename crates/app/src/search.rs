@@ -576,11 +576,9 @@ impl Render for SearchBar {
             .h(px(36.0))
             .pl_3()
             .pr_1()
-            .rounded_md()
             .border_1()
-            .border_color(rgb(theme.panel_border))
-            .shadow_lg()
-            .bg(rgb(theme.panel_background))
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
             .text_size(px(13.0))
             .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -637,7 +635,7 @@ impl Render for SearchBar {
                     .mr_1()
                     .w(px(1.0))
                     .h(px(18.0))
-                    .bg(rgb(theme.control_border)),
+                    .bg(rgb(theme.border_variant)),
             )
             .child(
                 div()
@@ -647,9 +645,8 @@ impl Render for SearchBar {
                     .justify_center()
                     .w(px(28.0))
                     .h(px(28.0))
-                    .rounded_sm()
                     .text_color(rgb(if ignore_case {
-                        theme.panel_background
+                        theme.surface_background
                     } else {
                         theme.text_muted
                     }))
@@ -658,7 +655,7 @@ impl Render for SearchBar {
                         style.bg(rgb(if ignore_case {
                             theme.accent
                         } else {
-                            theme.control_hover
+                            theme.element_hover
                         }))
                     })
                     .cursor_pointer()
@@ -679,9 +676,8 @@ impl Render for SearchBar {
                     .justify_center()
                     .w(px(28.0))
                     .h(px(28.0))
-                    .rounded_sm()
                     .text_color(rgb(theme.text_muted))
-                    .hover(move |style| style.bg(rgb(theme.control_hover)))
+                    .hover(move |style| style.bg(rgb(theme.element_hover)))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -700,9 +696,8 @@ impl Render for SearchBar {
                     .justify_center()
                     .w(px(28.0))
                     .h(px(28.0))
-                    .rounded_sm()
                     .text_color(rgb(theme.text_muted))
-                    .hover(move |style| style.bg(rgb(theme.control_hover)))
+                    .hover(move |style| style.bg(rgb(theme.element_hover)))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -721,9 +716,8 @@ impl Render for SearchBar {
                     .justify_center()
                     .w(px(28.0))
                     .h(px(28.0))
-                    .rounded_sm()
                     .text_color(rgb(theme.text_muted))
-                    .hover(move |style| style.bg(rgb(theme.control_hover)))
+                    .hover(move |style| style.bg(rgb(theme.element_hover)))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,

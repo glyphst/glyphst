@@ -511,14 +511,13 @@ impl Render for SettingsTextInput {
             .h(px(28.0))
             .px_2()
             .items_center()
-            .rounded_md()
             .border_1()
             .border_color(if focused {
                 rgb(theme.accent)
             } else {
-                rgb(theme.control_border)
+                rgb(theme.border_variant)
             })
-            .bg(rgb(theme.control_background))
+            .bg(rgb(theme.surface_background))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
@@ -1060,18 +1059,17 @@ impl SettingsPanel {
             .px_3()
             .flex()
             .items_center()
-            .rounded_md()
             .text_color(if selected {
                 rgb(theme.text)
             } else {
                 rgb(theme.text_muted)
             })
             .bg(if selected {
-                rgba(theme.selected_row)
+                rgb(theme.element_selected)
             } else {
                 rgba(0x00000000)
             })
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1141,20 +1139,19 @@ impl SettingsPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded_md()
                     .border_1()
-                    .border_color(rgb(theme.control_border))
+                    .border_color(rgb(theme.border_variant))
                     .bg(if enabled {
-                        rgba(theme.selected_row)
+                        rgb(theme.element_selected)
                     } else {
-                        rgba(theme.control_background)
+                        rgb(theme.surface_background)
                     })
                     .text_color(rgb(if enabled {
                         theme.accent
                     } else {
                         theme.text_muted
                     }))
-                    .hover(move |style| style.bg(rgb(theme.control_hover)))
+                    .hover(move |style| style.bg(rgb(theme.element_hover)))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1181,11 +1178,10 @@ impl SettingsPanel {
             .flex()
             .items_center()
             .justify_center()
-            .rounded_md()
             .border_1()
-            .border_color(rgb(theme.control_border))
-            .bg(rgb(theme.control_background))
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .border_color(rgb(theme.border_variant))
+            .bg(rgb(theme.surface_background))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1253,12 +1249,11 @@ impl SettingsPanel {
                         div()
                             .w(px(28.0))
                             .h(px(28.0))
-                            .rounded_md()
                             .border_2()
                             .border_color(if selected {
                                 rgb(theme.text)
                             } else {
-                                rgb(theme.control_border)
+                                rgb(theme.border_variant)
                             })
                             .bg(if config.with_alpha {
                                 rgba(color)
@@ -1299,19 +1294,18 @@ impl SettingsPanel {
             .justify_between()
             .h(px(38.0))
             .px_3()
-            .rounded_md()
             .border_1()
             .border_color(if selected {
                 rgb(theme.accent)
             } else {
-                rgb(theme.control_border)
+                rgb(theme.border_variant)
             })
             .bg(if selected {
-                rgba(theme.selected_row)
+                rgb(theme.element_selected)
             } else {
                 rgba(0x00000000)
             })
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1344,19 +1338,18 @@ impl SettingsPanel {
             .px_3()
             .flex()
             .items_center()
-            .rounded_md()
             .border_1()
             .border_color(if selected {
                 rgb(theme.accent)
             } else {
-                rgb(theme.control_border)
+                rgb(theme.border_variant)
             })
             .bg(if selected {
-                rgba(theme.selected_row)
+                rgb(theme.element_selected)
             } else {
                 rgba(0x00000000)
             })
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1387,19 +1380,18 @@ impl SettingsPanel {
             .px_3()
             .flex()
             .items_center()
-            .rounded_md()
             .border_1()
             .border_color(if selected {
                 rgb(theme.accent)
             } else {
-                rgb(theme.control_border)
+                rgb(theme.border_variant)
             })
             .bg(if selected {
-                rgba(theme.selected_row)
+                rgb(theme.element_selected)
             } else {
                 rgba(0x00000000)
             })
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1429,19 +1421,18 @@ impl SettingsPanel {
             .px_3()
             .flex()
             .items_center()
-            .rounded_md()
             .border_1()
             .border_color(if selected {
                 rgb(theme.accent)
             } else {
-                rgb(theme.control_border)
+                rgb(theme.border_variant)
             })
             .bg(if selected {
-                rgba(theme.selected_row)
+                rgb(theme.element_selected)
             } else {
                 rgba(0x00000000)
             })
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1472,19 +1463,18 @@ impl SettingsPanel {
             .px_3()
             .flex()
             .items_center()
-            .rounded_md()
             .border_1()
             .border_color(if selected {
                 rgb(theme.accent)
             } else {
-                rgb(theme.control_border)
+                rgb(theme.border_variant)
             })
             .bg(if selected {
-                rgba(theme.selected_row)
+                rgb(theme.element_selected)
             } else {
                 rgba(0x00000000)
             })
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1517,19 +1507,18 @@ impl SettingsPanel {
             .px_3()
             .flex()
             .items_center()
-            .rounded_md()
             .border_1()
             .border_color(if selected {
                 rgb(theme.accent)
             } else {
-                rgb(theme.control_border)
+                rgb(theme.border_variant)
             })
             .bg(if selected {
-                rgba(theme.selected_row)
+                rgb(theme.element_selected)
             } else {
                 rgba(0x00000000)
             })
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1567,11 +1556,10 @@ impl SettingsPanel {
             .flex()
             .items_center()
             .justify_center()
-            .rounded_md()
             .border_1()
-            .border_color(rgb(theme.control_border))
-            .bg(rgb(theme.control_background))
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .border_color(rgb(theme.border_variant))
+            .bg(rgb(theme.surface_background))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1603,11 +1591,10 @@ impl SettingsPanel {
             .flex()
             .items_center()
             .justify_center()
-            .rounded_md()
             .border_1()
-            .border_color(rgb(theme.control_border))
-            .bg(rgb(theme.control_background))
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .border_color(rgb(theme.border_variant))
+            .bg(rgb(theme.surface_background))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -2075,6 +2062,123 @@ impl SettingsPanel {
             ))
             .child(self.color_row(
                 ColorRowConfig {
+                    label: "Surface background",
+                    current: resolved.surface_background,
+                    override_value: settings.overrides.surface_background,
+                    swatches: &COLOR_SWATCHES,
+                    with_alpha: false,
+                },
+                |overrides, color| overrides.surface_background = Some(color),
+                |overrides| overrides.surface_background = None,
+                resolved,
+                cx,
+            ))
+            .child(self.color_row(
+                ColorRowConfig {
+                    label: "Border",
+                    current: resolved.border,
+                    override_value: settings.overrides.border,
+                    swatches: &COLOR_SWATCHES,
+                    with_alpha: false,
+                },
+                |overrides, color| overrides.border = Some(color),
+                |overrides| overrides.border = None,
+                resolved,
+                cx,
+            ))
+            .child(self.color_row(
+                ColorRowConfig {
+                    label: "Border variant",
+                    current: resolved.border_variant,
+                    override_value: settings.overrides.border_variant,
+                    swatches: &COLOR_SWATCHES,
+                    with_alpha: false,
+                },
+                |overrides, color| overrides.border_variant = Some(color),
+                |overrides| overrides.border_variant = None,
+                resolved,
+                cx,
+            ))
+            .child(self.color_row(
+                ColorRowConfig {
+                    label: "Border focused",
+                    current: resolved.border_focused,
+                    override_value: settings.overrides.border_focused,
+                    swatches: &COLOR_SWATCHES,
+                    with_alpha: false,
+                },
+                |overrides, color| overrides.border_focused = Some(color),
+                |overrides| overrides.border_focused = None,
+                resolved,
+                cx,
+            ))
+            .child(self.color_row(
+                ColorRowConfig {
+                    label: "Tab bar background",
+                    current: resolved.tab_bar_background,
+                    override_value: settings.overrides.tab_bar_background,
+                    swatches: &COLOR_SWATCHES,
+                    with_alpha: false,
+                },
+                |overrides, color| overrides.tab_bar_background = Some(color),
+                |overrides| overrides.tab_bar_background = None,
+                resolved,
+                cx,
+            ))
+            .child(self.color_row(
+                ColorRowConfig {
+                    label: "Tab active background",
+                    current: resolved.tab_active_background,
+                    override_value: settings.overrides.tab_active_background,
+                    swatches: &COLOR_SWATCHES,
+                    with_alpha: false,
+                },
+                |overrides, color| overrides.tab_active_background = Some(color),
+                |overrides| overrides.tab_active_background = None,
+                resolved,
+                cx,
+            ))
+            .child(self.color_row(
+                ColorRowConfig {
+                    label: "Tab inactive background",
+                    current: resolved.tab_inactive_background,
+                    override_value: settings.overrides.tab_inactive_background,
+                    swatches: &COLOR_SWATCHES,
+                    with_alpha: false,
+                },
+                |overrides, color| overrides.tab_inactive_background = Some(color),
+                |overrides| overrides.tab_inactive_background = None,
+                resolved,
+                cx,
+            ))
+            .child(self.color_row(
+                ColorRowConfig {
+                    label: "Element hover",
+                    current: resolved.element_hover,
+                    override_value: settings.overrides.element_hover,
+                    swatches: &COLOR_SWATCHES,
+                    with_alpha: false,
+                },
+                |overrides, color| overrides.element_hover = Some(color),
+                |overrides| overrides.element_hover = None,
+                resolved,
+                cx,
+            ))
+            .child(self.color_row(
+                ColorRowConfig {
+                    label: "Element selected",
+                    current: resolved.element_selected,
+                    override_value: settings.overrides.element_selected,
+                    swatches: &COLOR_SWATCHES,
+                    with_alpha: false,
+                },
+                |overrides, color| overrides.element_selected = Some(color),
+                |overrides| overrides.element_selected = None,
+                resolved,
+                cx,
+            ))
+            .child(self.color_row(
+                ColorRowConfig {
                     label: "Text",
                     current: resolved.text,
                     override_value: settings.overrides.text,
@@ -2240,11 +2344,10 @@ impl SettingsPanel {
             .flex()
             .items_center()
             .justify_center()
-            .rounded_md()
             .border_1()
-            .border_color(rgb(theme.control_border))
-            .bg(rgb(theme.control_background))
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .border_color(rgb(theme.border_variant))
+            .bg(rgb(theme.surface_background))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -2289,12 +2392,10 @@ impl Render for SettingsPanel {
             .flex_col()
             .w(px(680.0))
             .max_h(px(760.0))
-            .rounded_md()
             .border_1()
-            .border_color(rgb(resolved.panel_border))
-            .shadow_lg()
+            .border_color(rgb(resolved.border))
             .overflow_hidden()
-            .bg(rgb(resolved.panel_background))
+            .bg(rgb(resolved.surface_background))
             .text_color(rgb(resolved.text))
             .text_size(px(13.0))
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -2311,7 +2412,7 @@ impl Render for SettingsPanel {
                     .h(px(50.0))
                     .px_4()
                     .border_b(px(1.0))
-                    .border_color(rgb(resolved.panel_border))
+                    .border_color(rgb(resolved.border))
                     .child(div().text_size(px(16.0)).child("Settings"))
                     .child(div().text_color(rgb(resolved.text_muted)).child("Esc")),
             )
@@ -2329,7 +2430,7 @@ impl Render for SettingsPanel {
                             .gap_1()
                             .p_3()
                             .border_r(px(1.0))
-                            .border_color(rgb(resolved.panel_border))
+                            .border_color(rgb(resolved.border))
                             .child(self.tab_button(SettingsTab::General, "General", resolved, cx))
                             .child(self.tab_button(
                                 SettingsTab::Appearance,
@@ -2358,7 +2459,7 @@ impl Render for SettingsPanel {
                     .px_4()
                     .py_3()
                     .border_t(px(1.0))
-                    .border_color(rgb(resolved.panel_border))
+                    .border_color(rgb(resolved.border))
                     .child(
                         div()
                             .flex()

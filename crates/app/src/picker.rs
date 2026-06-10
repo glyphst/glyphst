@@ -621,12 +621,10 @@ impl<D: PickerDelegate> Render for Picker<D> {
             .flex()
             .flex_col()
             .w(px(self.delegate.width()))
-            .rounded_md()
             .border_1()
-            .border_color(rgb(theme.panel_border))
-            .shadow_lg()
+            .border_color(rgb(theme.border))
             .overflow_hidden()
-            .bg(rgb(theme.panel_background))
+            .bg(rgb(theme.surface_background))
             .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -657,7 +655,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                     .h(px(INPUT_HEIGHT))
                     .px_3()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.panel_border))
+                    .border_color(rgb(theme.border))
                     .cursor(CursorStyle::IBeam)
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -709,7 +707,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                                                         .px_3()
                                                         .text_size(px(13.0))
                                                         .bg(if selected {
-                                                            rgba(theme.selected_row)
+                                                            rgb(theme.element_selected)
                                                         } else {
                                                             rgba(0x00000000)
                                                         })

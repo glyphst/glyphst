@@ -10,7 +10,8 @@ use crate::{
     command_palette::{CommandPalette, CommandPaletteDelegate},
     library::{DocumentPosition, LibraryStore, normalize_path},
     pdf_view::{
-        CloseTab, OpenFile, OpenNewTab, PdfAnnotations, PdfView, PdfViewEvent, ToggleCommandPalette,
+        CloseTab, OpenFile, OpenNewTab, OpenSettings, PdfAnnotations, PdfView, PdfViewEvent,
+        ToggleCommandPalette,
     },
     picker::{Picker, PickerEvent},
     settings::{SettingsStore, TabBarVisibility},
@@ -24,12 +25,21 @@ pub(crate) enum Tab {
     Document(Entity<PdfView>),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolbarMenu {
+    Glyphst,
+    File,
+    Tab,
+}
+
 pub(crate) struct Workspace {
     tabs: Vec<Tab>,
     active_tab: usize,
     focus_handle: FocusHandle,
     command_palette: Option<Entity<CommandPalette>>,
     command_palette_previous_focus_handle: Option<FocusHandle>,
+    toolbar_menu_open: bool,
+    toolbar_open_menu: Option<ToolbarMenu>,
 }
 
 impl Workspace {
@@ -44,6 +54,8 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             command_palette: None,
             command_palette_previous_focus_handle: None,
+            toolbar_menu_open: false,
+            toolbar_open_menu: None,
         };
 
         let initial_tab = initial_path
@@ -138,15 +150,13 @@ impl Workspace {
         cx.subscribe_in(
             start_board,
             window,
-            |this, _, event: &StartBoardEvent, window, cx| match event {
-                StartBoardEvent::OpenDocument(path) => {
-                    if let Err(error) =
-                        this.focus_or_open_document(path.clone(), None, true, window, cx)
-                    {
-                        eprintln!("failed to open PDF: {error:#}");
-                    }
+            |this, _, event: &StartBoardEvent, window, cx| {
+                let StartBoardEvent::OpenDocument(path) = event;
+                if let Err(error) =
+                    this.focus_or_open_document(path.clone(), None, true, window, cx)
+                {
+                    eprintln!("failed to open PDF: {error:#}");
                 }
-                StartBoardEvent::OpenFile => this.open_file(window, cx),
             },
         )
         .detach();
@@ -210,6 +220,14 @@ impl Workspace {
                 .take()
                 .unwrap_or_else(|| self.focus_handle.clone())
                 .focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn close_toolbar_menu(&mut self, cx: &mut Context<Self>) {
+        if self.toolbar_menu_open || self.toolbar_open_menu.is_some() {
+            self.toolbar_menu_open = false;
+            self.toolbar_open_menu = None;
             cx.notify();
         }
     }
@@ -403,6 +421,269 @@ impl Workspace {
         }
     }
 
+    fn active_document_label(&self, cx: &Context<Self>) -> Option<SharedString> {
+        match self.tabs.get(self.active_tab) {
+            Some(Tab::Document(pdf_view)) => Some(pdf_view.read(cx).file_name()),
+            Some(Tab::StartBoard(_)) | None => None,
+        }
+    }
+
+    fn render_toolbar_icon_button(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .w(px(32.0))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(14.0))
+            .text_color(rgb(theme.text_muted))
+            .hover(move |style| {
+                style
+                    .bg(rgb(theme.element_hover))
+                    .text_color(rgb(theme.text))
+            })
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.toolbar_menu_open = true;
+                    this.toolbar_open_menu = Some(ToolbarMenu::Glyphst);
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            )
+            .child("☰")
+            .into_any_element()
+    }
+
+    fn render_toolbar_menu_button(
+        &self,
+        label: &'static str,
+        menu: ToolbarMenu,
+        width: f32,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let active = self.toolbar_open_menu == Some(menu);
+
+        div()
+            .w(px(width))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(12.0))
+            .text_color(rgb(if active { theme.text } else { theme.text_muted }))
+            .when(active, |this| this.bg(rgb(theme.element_hover)))
+            .hover(move |style| {
+                style
+                    .bg(rgb(theme.element_hover))
+                    .text_color(rgb(theme.text))
+            })
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.toolbar_menu_open = true;
+                    this.toolbar_open_menu = if this.toolbar_open_menu == Some(menu) {
+                        None
+                    } else {
+                        Some(menu)
+                    };
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+            .into_any_element()
+    }
+
+    fn render_toolbar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let expanded = self.toolbar_menu_open || self.active_tab_is_start_board();
+        let mut toolbar = div()
+            .flex_none()
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .border_b(px(1.0))
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.tab_bar_background))
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_toolbar_menu(cx);
+                    cx.stop_propagation();
+                }),
+            );
+
+        if expanded {
+            toolbar = toolbar
+                .child(self.render_toolbar_menu_button(
+                    "Glyphst",
+                    ToolbarMenu::Glyphst,
+                    64.0,
+                    theme,
+                    cx,
+                ))
+                .child(self.render_toolbar_menu_button("File", ToolbarMenu::File, 44.0, theme, cx))
+                .child(self.render_toolbar_menu_button("Tab", ToolbarMenu::Tab, 42.0, theme, cx));
+        } else {
+            toolbar = toolbar.child(self.render_toolbar_icon_button(theme, cx));
+            if let Some(label) = self.active_document_label(cx) {
+                toolbar = toolbar.child(
+                    div()
+                        .min_w_0()
+                        .max_w(px(360.0))
+                        .truncate()
+                        .px_2()
+                        .text_color(rgb(theme.text_muted))
+                        .child(label),
+                );
+            }
+        }
+
+        toolbar.child(div().flex_1()).into_any_element()
+    }
+
+    fn render_toolbar_menu_item(
+        label: &'static str,
+        theme: Theme,
+        handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .h(px(30.0))
+            .px_3()
+            .text_size(px(13.0))
+            .text_color(rgb(theme.text))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    handler(this, window, cx);
+                    this.close_toolbar_menu(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+            .into_any_element()
+    }
+
+    fn toolbar_menu_left(menu: ToolbarMenu) -> f32 {
+        match menu {
+            ToolbarMenu::Glyphst => 4.0,
+            ToolbarMenu::File => 64.0,
+            ToolbarMenu::Tab => 108.0,
+        }
+    }
+
+    fn render_toolbar_dropdown(
+        &self,
+        menu: ToolbarMenu,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut dropdown = div()
+            .occlude()
+            .absolute()
+            .top_0()
+            .left(px(Self::toolbar_menu_left(menu)))
+            .w(px(190.0))
+            .py_1()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
+            .text_size(px(13.0))
+            .text_color(rgb(theme.text))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            );
+
+        match menu {
+            ToolbarMenu::Glyphst => {
+                dropdown = dropdown
+                    .child(Self::render_toolbar_menu_item(
+                        "About Glyphst",
+                        theme,
+                        |_, _, _| {},
+                        cx,
+                    ))
+                    .child(Self::render_toolbar_menu_item(
+                        "Check for Updates",
+                        theme,
+                        |_, _, _| {},
+                        cx,
+                    ))
+                    .child(Self::render_toolbar_menu_item(
+                        "Open Settings",
+                        theme,
+                        |this, window, cx| {
+                            if matches!(this.tabs.get(this.active_tab), Some(Tab::Document(_))) {
+                                let focus_handle = this.focus_handle.clone();
+                                window.defer(cx, move |window, cx| {
+                                    focus_handle.focus(window, cx);
+                                    focus_handle.dispatch_action(&OpenSettings, window, cx);
+                                });
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(Self::render_toolbar_menu_item(
+                        "Quit Glyphst",
+                        theme,
+                        |_, _, cx| cx.quit(),
+                        cx,
+                    ));
+            }
+            ToolbarMenu::File => {
+                dropdown = dropdown.child(Self::render_toolbar_menu_item(
+                    "Open File",
+                    theme,
+                    |this, window, cx| this.open_file(window, cx),
+                    cx,
+                ));
+            }
+            ToolbarMenu::Tab => {
+                dropdown = dropdown
+                    .child(Self::render_toolbar_menu_item(
+                        "New Tab",
+                        theme,
+                        |this, window, cx| this.open_new_tab(window, cx),
+                        cx,
+                    ))
+                    .child(Self::render_toolbar_menu_item(
+                        "Close Tab",
+                        theme,
+                        |this, window, cx| this.close_active_tab(window, cx),
+                        cx,
+                    ));
+            }
+        }
+
+        div()
+            .absolute()
+            .top(px(32.0))
+            .left_0()
+            .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_toolbar_menu(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(dropdown)
+            .into_any_element()
+    }
+
     fn render_tab(&self, tab_ix: usize, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         let selected = tab_ix == self.active_tab;
         let label = self.tab_label(tab_ix, cx);
@@ -416,23 +697,20 @@ impl Workspace {
             .items_center()
             .justify_between()
             .gap_2()
-            .border_1()
-            .border_color(if selected {
-                rgb(theme.accent)
+            .border_r(px(1.0))
+            .border_color(rgb(theme.border))
+            .when(!selected, |this| this.border_b(px(1.0)))
+            .bg(rgb(if selected {
+                theme.tab_active_background
             } else {
-                rgb(theme.panel_border)
-            })
-            .bg(if selected {
-                rgba(theme.selected_row)
-            } else {
-                rgba(theme.panel_background)
-            })
+                theme.tab_inactive_background
+            }))
             .text_color(rgb(if selected {
                 theme.text
             } else {
                 theme.text_muted
             }))
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -450,11 +728,10 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded_sm()
                     .text_color(rgb(theme.text_muted))
                     .hover(move |style| {
                         style
-                            .bg(rgb(theme.control_hover))
+                            .bg(rgb(theme.element_hover))
                             .text_color(rgb(theme.text))
                     })
                     .on_mouse_down(
@@ -476,28 +753,26 @@ impl Workspace {
 
         div()
             .flex_none()
-            .h(px(40.0))
+            .h(px(32.0))
             .flex()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .border_b(px(1.0))
-            .border_color(rgb(theme.panel_border))
-            .bg(rgb(theme.panel_background))
+            .items_stretch()
+            .bg(rgb(theme.tab_bar_background))
             .children(tabs)
             .child(
                 div()
-                    .w(px(28.0))
-                    .h(px(28.0))
+                    .w(px(32.0))
+                    .h_full()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded_md()
+                    .border_r(px(1.0))
+                    .border_b(px(1.0))
+                    .border_color(rgb(theme.border))
                     .text_size(px(18.0))
                     .text_color(rgb(theme.text_muted))
                     .hover(move |style| {
                         style
-                            .bg(rgb(theme.control_hover))
+                            .bg(rgb(theme.element_hover))
                             .text_color(rgb(theme.text))
                     })
                     .cursor_pointer()
@@ -509,6 +784,13 @@ impl Workspace {
                         }),
                     )
                     .child("+"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .border_b(px(1.0))
+                    .border_color(rgb(theme.border)),
             )
             .into_any_element()
     }
@@ -568,6 +850,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
+            .child(self.render_toolbar(theme, cx))
             .when(show_tab_bar, |this| {
                 this.child(self.render_tab_bar(theme, cx))
             })
@@ -578,6 +861,9 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(self.active_tab_content()),
             )
+            .when_some(self.toolbar_open_menu, |this, menu| {
+                this.child(self.render_toolbar_dropdown(menu, theme, cx))
+            })
             .when_some(self.command_palette.clone(), |this, palette| {
                 this.child(Self::render_top_aligned_overlay(
                     palette,

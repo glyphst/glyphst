@@ -584,7 +584,7 @@ impl SettingsStore {
         } else {
             None
         };
-        let settings = load_path
+        let mut settings = load_path
             .map(|path| match load_settings(path) {
                 Ok(settings) => settings,
                 Err(error) => {
@@ -593,6 +593,9 @@ impl SettingsStore {
                 }
             })
             .unwrap_or_default();
+        if !registry.contains(&settings.theme_name) {
+            settings.theme_name = DEFAULT_THEME_ID.to_string();
+        }
         let resolved_theme = registry.resolve(&settings.theme_name, settings.overrides);
 
         Self {
@@ -737,7 +740,7 @@ window {
                 zoom_step: 1.2,
                 smooth_scrolling: false,
             },
-            theme_name: "catppuccin-mocha".to_string(),
+            theme_name: "one-dark".to_string(),
             overrides: PartialTheme {
                 background: Some(0x181818),
                 selection_highlight: Some(0x61afef66),
@@ -863,7 +866,7 @@ ai {
 
         let theme = registry.resolve(&settings.theme_name, settings.overrides);
 
-        assert_eq!(theme.accent, 0x61afef);
+        assert_eq!(theme.accent, 0x74ade8);
         assert_eq!(theme.background, 0x101010);
         assert_eq!(theme.page_gap, 48.0);
     }

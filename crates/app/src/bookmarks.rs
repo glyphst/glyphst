@@ -212,9 +212,8 @@ impl PickerDelegate for BookmarkPaletteDelegate {
                 this.child(
                     div()
                         .flex_none()
-                        .rounded_sm()
                         .px_1()
-                        .bg(gpui::rgba(theme.selected_row))
+                        .bg(gpui::rgb(theme.element_selected))
                         .text_color(rgb(theme.accent))
                         .child("Current"),
                 )

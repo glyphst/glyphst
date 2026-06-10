@@ -1095,8 +1095,7 @@ impl AiPanel {
                 div()
                     .max_w(px(280.0))
                     .when(is_user, |this| {
-                        this.rounded_md()
-                            .border_1()
+                        this.border_1()
                             .border_color(rgba(with_alpha(theme.accent, 0x55)))
                             .bg(rgba(with_alpha(theme.accent, 0x22)))
                             .px_2()
@@ -1117,7 +1116,6 @@ impl AiPanel {
             div()
                 .w(px(4.0))
                 .h(px(4.0))
-                .rounded_sm()
                 .bg(rgb(theme.text_muted))
                 .opacity(opacity)
         };
@@ -1145,7 +1143,6 @@ impl AiPanel {
                 .flex()
                 .items_center()
                 .justify_between()
-                .rounded_sm()
                 .border_1()
                 .border_color(rgb(theme.accent))
                 .bg(rgba(with_alpha(theme.accent, 0x18)))
@@ -1193,16 +1190,15 @@ impl AiPanel {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .rounded_sm()
                     .px_2()
                     .py_2()
                     .bg(if active {
-                        rgba(theme.selected_row)
+                        rgb(theme.element_selected)
                     } else {
                         rgba(0x00000000)
                     })
                     .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.control_hover)))
+                    .hover(move |style| style.bg(rgb(theme.element_hover)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
@@ -1249,11 +1245,9 @@ impl AiPanel {
             .w(px(COMPLETION_MENU_WIDTH))
             .flex()
             .flex_col()
-            .rounded_md()
             .border_1()
-            .border_color(rgb(theme.panel_border))
-            .bg(rgb(theme.control_background))
-            .shadow_lg()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
             .overflow_hidden()
             .text_size(px(12.0));
 
@@ -1268,12 +1262,12 @@ impl AiPanel {
                     .px_3()
                     .py_2()
                     .bg(if selected {
-                        rgba(theme.selected_row)
+                        rgb(theme.element_selected)
                     } else {
                         rgba(0x00000000)
                     })
                     .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.control_hover)))
+                    .hover(move |style| style.bg(rgb(theme.element_hover)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
@@ -1505,8 +1499,8 @@ impl Render for AiPanel {
             .w(px(self.width))
             .h_full()
             .border_l(px(1.0))
-            .border_color(rgb(theme.panel_border))
-            .bg(rgb(theme.panel_background))
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
             .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -1540,7 +1534,7 @@ impl Render for AiPanel {
                     .h(px(42.0))
                     .px_2()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.panel_border))
+                    .border_color(rgb(theme.border))
                     .text_size(px(12.0))
                     .child(
                         div()
@@ -1573,7 +1567,6 @@ impl Render for AiPanel {
                                     .justify_center()
                                     .w(px(24.0))
                                     .h(px(24.0))
-                                    .rounded_sm()
                                     .text_size(px(14.0))
                                     .text_color(if loading {
                                         rgb(theme.text_muted)
@@ -1581,7 +1574,7 @@ impl Render for AiPanel {
                                         rgb(theme.text)
                                     })
                                     .cursor_pointer()
-                                    .hover(move |style| style.bg(rgba(theme.control_hover)))
+                                    .hover(move |style| style.bg(rgb(theme.element_hover)))
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(|this, _, window, cx| {
@@ -1598,7 +1591,6 @@ impl Render for AiPanel {
                                     .justify_center()
                                     .w(px(24.0))
                                     .h(px(24.0))
-                                    .rounded_sm()
                                     .text_size(px(14.0))
                                     .text_color(rgb(if showing_sessions {
                                         theme.accent
@@ -1606,7 +1598,7 @@ impl Render for AiPanel {
                                         theme.text_muted
                                     }))
                                     .cursor_pointer()
-                                    .hover(move |style| style.bg(rgba(theme.control_hover)))
+                                    .hover(move |style| style.bg(rgb(theme.element_hover)))
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(|this, _, _, cx| {
@@ -1627,11 +1619,10 @@ impl Render for AiPanel {
                                     .justify_center()
                                     .w(px(24.0))
                                     .h(px(24.0))
-                                    .rounded_sm()
                                     .text_size(px(14.0))
                                     .text_color(rgb(theme.text_muted))
                                     .cursor_pointer()
-                                    .hover(move |style| style.bg(rgba(theme.control_hover)))
+                                    .hover(move |style| style.bg(rgb(theme.element_hover)))
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(|this, _, window, cx| {
@@ -1669,14 +1660,13 @@ impl Render for AiPanel {
                         .gap_2()
                         .p_2()
                         .border_t(px(1.0))
-                        .border_color(rgb(theme.panel_border))
+                        .border_color(rgb(theme.border))
                         .child(
                             div()
                                 .relative()
-                                .rounded_md()
                                 .border_1()
-                                .border_color(rgb(theme.control_border))
-                                .bg(rgb(theme.control_background))
+                                .border_color(rgb(theme.border_variant))
+                                .bg(rgb(theme.surface_background))
                                 .p_2()
                                 .cursor(CursorStyle::IBeam)
                                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -1716,7 +1706,6 @@ impl Render for AiPanel {
                                             div()
                                                 .px_2()
                                                 .py_1()
-                                                .rounded_sm()
                                                 .text_size(px(11.0))
                                                 .text_color(rgb(if mention_completion_open {
                                                     theme.accent
@@ -1725,7 +1714,7 @@ impl Render for AiPanel {
                                                 }))
                                                 .cursor_pointer()
                                                 .hover(move |style| {
-                                                    style.bg(rgba(theme.control_hover))
+                                                    style.bg(rgb(theme.element_hover))
                                                 })
                                                 .on_mouse_down(
                                                     MouseButton::Left,
@@ -1746,17 +1735,16 @@ impl Render for AiPanel {
                                     div()
                                         .px_3()
                                         .py_1()
-                                        .rounded_sm()
                                         .border_1()
                                         .border_color(if can_send {
                                             rgb(theme.accent)
                                         } else {
-                                            rgb(theme.control_border)
+                                            rgb(theme.border_variant)
                                         })
                                         .bg(if can_send {
                                             rgba(with_alpha(theme.accent, 0x22))
                                         } else {
-                                            rgba(theme.control_background)
+                                            rgb(theme.surface_background)
                                         })
                                         .text_color(if can_send {
                                             rgb(theme.text)

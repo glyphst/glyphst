@@ -3735,7 +3735,7 @@ impl PdfView {
             .text_size(px(13.0))
             .text_color(rgb(theme.text))
             .cursor_pointer()
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -3766,11 +3766,9 @@ impl PdfView {
             .gap_1()
             .max_w(px(360.0))
             .p_3()
-            .rounded_md()
             .border_1()
-            .border_color(rgb(theme.panel_border))
-            .shadow_lg()
-            .bg(rgb(theme.panel_background))
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
             .text_size(px(13.0))
             .text_color(rgb(theme.text));
 
@@ -3881,8 +3879,8 @@ impl PdfView {
             .min_h_0()
             .w(px(width))
             .border_r(px(1.0))
-            .border_color(rgb(theme.panel_border))
-            .bg(rgb(theme.panel_background))
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
             .text_size(px(12.0))
             .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -3899,7 +3897,7 @@ impl PdfView {
                     .h(px(40.0))
                     .px_3()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.panel_border))
+                    .border_color(rgb(theme.border))
                     .child(div().text_size(px(13.0)).child(title))
                     .child(
                         div()
@@ -3950,12 +3948,11 @@ impl PdfView {
         div()
             .w(px(22.0))
             .h(px(22.0))
-            .rounded_sm()
             .border_1()
             .border_color(if current == Some(color) {
                 rgb(theme.accent)
             } else {
-                rgb(theme.panel_border)
+                rgb(theme.border)
             })
             .bg(rgba(theme.highlight_color(color)))
             .cursor_pointer()
@@ -3978,7 +3975,7 @@ impl PdfView {
     }
 
     fn context_menu_separator(theme: Theme) -> impl IntoElement {
-        div().h(px(1.0)).my_1().mx_1().bg(rgb(theme.panel_border))
+        div().h(px(1.0)).my_1().mx_1().bg(rgb(theme.border))
     }
 
     fn render_context_menu(
@@ -4002,12 +3999,10 @@ impl PdfView {
             .flex_col()
             .w(px(190.0))
             .py_1()
-            .rounded_md()
             .border_1()
-            .border_color(rgb(theme.panel_border))
-            .shadow_lg()
+            .border_color(rgb(theme.border))
             .overflow_hidden()
-            .bg(rgb(theme.panel_background))
+            .bg(rgb(theme.surface_background))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
@@ -4169,18 +4164,17 @@ impl PdfView {
             .h(px(20.0))
             .px_2()
             .mr_2()
-            .rounded_sm()
             .text_color(rgb(if open {
                 theme.accent
             } else {
                 theme.footer_text
             }))
             .bg(if open {
-                rgba(theme.selected_row)
+                rgb(theme.element_selected)
             } else {
                 rgba(0x00000000)
             })
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -4203,18 +4197,17 @@ impl PdfView {
             .h(px(20.0))
             .px_2()
             .mr_2()
-            .rounded_sm()
             .text_color(rgb(if open {
                 theme.accent
             } else {
                 theme.footer_text
             }))
             .bg(if open {
-                rgba(theme.selected_row)
+                rgb(theme.element_selected)
             } else {
                 rgba(0x00000000)
             })
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -4241,18 +4234,17 @@ impl PdfView {
             .h(px(20.0))
             .px_2()
             .mr_2()
-            .rounded_sm()
             .text_color(rgb(if open {
                 theme.accent
             } else {
                 theme.footer_text
             }))
             .bg(if open {
-                rgba(theme.selected_row)
+                rgb(theme.element_selected)
             } else {
                 rgba(0x00000000)
             })
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -4275,18 +4267,17 @@ impl PdfView {
             .h(px(20.0))
             .px_2()
             .mr_2()
-            .rounded_sm()
             .text_color(rgb(if open {
                 theme.accent
             } else {
                 theme.footer_text
             }))
             .bg(if open {
-                rgba(theme.selected_row)
+                rgb(theme.element_selected)
             } else {
                 rgba(0x00000000)
             })
-            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -4430,7 +4421,7 @@ impl PdfView {
             .key_context("GridOverview")
             .flex()
             .flex_col()
-            .bg(rgb(theme.panel_background))
+            .bg(rgb(theme.surface_background))
             .text_size(px(12.0))
             .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -4452,7 +4443,7 @@ impl PdfView {
                     .h(px(GRID_OVERVIEW_HEADER_HEIGHT))
                     .px_3()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.panel_border))
+                    .border_color(rgb(theme.border))
                     .child(div().text_size(px(13.0)).child("Page Overview"))
                     .child(
                         div()
@@ -4502,7 +4493,7 @@ impl PdfView {
                                                 let border_color = if current {
                                                     theme.accent
                                                 } else {
-                                                    theme.panel_border
+                                                    theme.border
                                                 };
                                                 let label_color = if current {
                                                     theme.accent
@@ -4552,10 +4543,9 @@ impl PdfView {
                                                         .flex_col()
                                                         .items_center()
                                                         .w(px(thumbnail_box_width))
-                                                        .rounded_sm()
                                                         .cursor_pointer()
                                                         .hover(move |style| {
-                                                            style.bg(rgb(theme.control_hover))
+                                                            style.bg(rgb(theme.element_hover))
                                                         })
                                                         .on_mouse_down(
                                                             MouseButton::Left,
@@ -4576,7 +4566,6 @@ impl PdfView {
                                                                 .justify_center()
                                                                 .w(px(thumbnail_box_width))
                                                                 .h(px(thumbnail_box_height))
-                                                                .rounded_sm()
                                                                 .border_1()
                                                                 .border_color(rgb(border_color))
                                                                 .bg(if current {
@@ -4676,14 +4665,14 @@ impl PdfView {
                                             .h(px(TOC_SIDEBAR_ROW_HEIGHT))
                                             .px_2()
                                             .bg(if current {
-                                                rgba(theme.selected_row)
+                                                rgb(theme.element_selected)
                                             } else {
                                                 rgba(0x00000000)
                                             })
                                             .when(navigable, |this| {
                                                 this.cursor_pointer()
                                                     .hover(move |style| {
-                                                        style.bg(rgb(theme.control_hover))
+                                                        style.bg(rgb(theme.element_hover))
                                                     })
                                                     .on_mouse_down(
                                                         MouseButton::Left,
@@ -4704,12 +4693,11 @@ impl PdfView {
                                                     .justify_center()
                                                     .w(px(18.0))
                                                     .h(px(24.0))
-                                                    .rounded_sm()
                                                     .text_color(rgb(theme.text_muted))
                                                     .when(has_children, |this| {
                                                         this.cursor_pointer()
                                                         .hover(move |style| {
-                                                            style.bg(rgb(theme.control_hover))
+                                                            style.bg(rgb(theme.element_hover))
                                                         })
                                                         .on_mouse_down(
                                                             MouseButton::Left,
@@ -4741,7 +4729,6 @@ impl PdfView {
                                                     .min_w_0()
                                                     .items_center()
                                                     .h(px(28.0))
-                                                    .rounded_sm()
                                                     .px_1()
                                                     .truncate()
                                                     .text_color(rgb(title_color))
@@ -4833,12 +4820,12 @@ impl PdfView {
                                             .px_2()
                                             .gap_2()
                                             .bg(if current {
-                                                rgba(theme.selected_row)
+                                                rgb(theme.element_selected)
                                             } else {
                                                 rgba(0x00000000)
                                             })
                                             .cursor_pointer()
-                                            .hover(move |style| style.bg(rgb(theme.control_hover)))
+                                            .hover(move |style| style.bg(rgb(theme.element_hover)))
                                             .on_mouse_down(
                                                 MouseButton::Left,
                                                 cx.listener(move |this, _, _, cx| {
@@ -4851,7 +4838,6 @@ impl PdfView {
                                                     .flex_none()
                                                     .w(px(8.0))
                                                     .h(px(8.0))
-                                                    .rounded_sm()
                                                     .bg(rgba(theme.note_color(color))),
                                             )
                                             .child(
@@ -5506,7 +5492,7 @@ impl Render for PdfView {
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .bg(rgb(theme.background))
+                    .bg(rgb(theme.tab_active_background))
                     .when(opacity < 1.0, |this| this.opacity(opacity))
                     .child(
                         div()
@@ -5734,8 +5720,8 @@ impl Render for PdfView {
                             .h(px(26.0))
                             .px_3()
                             .border_t(px(1.0))
-                            .border_color(rgb(theme.footer_border))
-                            .bg(rgb(theme.footer_background))
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.tab_bar_background))
                             .text_size(px(12.0))
                             .text_color(rgb(theme.footer_text))
                             .child(
@@ -5747,14 +5733,7 @@ impl Render for PdfView {
                                     .child(self.render_toc_button(theme, cx))
                                     .child(self.render_notes_button(theme, cx))
                                     .child(self.render_grid_overview_button(theme, cx))
-                                    .child(self.render_ai_button(theme, cx))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(self.file_name.clone()),
-                                    ),
+                                    .child(self.render_ai_button(theme, cx)),
                             )
                             .child(div().flex_none().child(format!(
                                 "{} / {}",
