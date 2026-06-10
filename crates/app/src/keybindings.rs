@@ -13,12 +13,12 @@ use crate::{
         NoteSelectEnd, NoteSelectHome, NoteSelectLeft, NoteSelectRight, NoteSelectUp, NoteUp,
     },
     pdf_view::{
-        AddBookmark, CopySelection, GoToBeginning, GoToEnd, GridCursorDown, GridCursorLeft,
-        GridCursorRight, GridCursorUp, GridOverviewConfirm, JumpBackward, JumpForward,
-        NextHalfPage, NextPage, OpenBookmarks, OpenFile, OpenHistory, OpenNotes, OpenSettings,
-        OpenStartBoard, PreviousHalfPage, PreviousPage, ResetZoom, Search, SearchNext, SearchPrev,
-        SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview,
-        ToggleNotes, ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
+        AddBookmark, CloseTab, CopySelection, GoToBeginning, GoToEnd, GridCursorDown,
+        GridCursorLeft, GridCursorRight, GridCursorUp, GridOverviewConfirm, JumpBackward,
+        JumpForward, NextHalfPage, NextPage, OpenBookmarks, OpenFile, OpenHistory, OpenNewTab,
+        OpenNotes, OpenSettings, PreviousHalfPage, PreviousPage, ResetZoom, Search, SearchNext,
+        SearchPrev, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette, ToggleFullScreen,
+        ToggleGridOverview, ToggleNotes, ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
     },
     picker::{
         PickerBackspace, PickerCancel, PickerConfirm, PickerCopy, PickerCut, PickerDelete,
@@ -44,6 +44,7 @@ use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
 
 const PDF_CONTEXT: &str = "PdfView && !GridOverview && !CommandPalette && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
 const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !GridOverview && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
+const WORKSPACE_CONTEXT: &str = "Workspace && !GridOverview && !CommandPalette && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
 const GRID_OVERVIEW_CONTEXT: &str = "GridOverview && !SettingsPanel";
 const PALETTE_CONTEXT: &str = "CommandPalette";
 const SEARCH_CONTEXT: &str = "Search";
@@ -101,7 +102,11 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<ToggleAiPanel>("ctrl-shift-a", PDF_NO_SEARCH_CONTEXT),
         bind::<ToggleAiPanel>("cmd-shift-a", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenHistory>("ctrl-h", PDF_NO_SEARCH_CONTEXT),
-        bind::<OpenFile>("cmd-o", PDF_NO_SEARCH_CONTEXT),
+        bind::<OpenFile>("cmd-o", WORKSPACE_CONTEXT),
+        bind::<OpenNewTab>("cmd-t", WORKSPACE_CONTEXT),
+        bind::<OpenNewTab>("ctrl-t", WORKSPACE_CONTEXT),
+        bind::<CloseTab>("cmd-w", WORKSPACE_CONTEXT),
+        bind::<CloseTab>("ctrl-w", WORKSPACE_CONTEXT),
         bind::<ToggleGridOverview>("ctrl-g", PDF_NO_SEARCH_CONTEXT),
         bind::<ZoomIn>("+", GRID_OVERVIEW_CONTEXT),
         bind::<ZoomIn>("shift-=", GRID_OVERVIEW_CONTEXT),
@@ -123,7 +128,7 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
 
     match preset {
         KeymapPreset::Modern => bindings.extend([
-            bind::<OpenFile>("ctrl-o", PDF_NO_SEARCH_CONTEXT),
+            bind::<OpenFile>("ctrl-o", WORKSPACE_CONTEXT),
             bind::<Search>("ctrl-f", PDF_CONTEXT),
             bind::<Search>("cmd-f", PDF_CONTEXT),
             bind::<Search>("/", PDF_CONTEXT),
@@ -710,13 +715,24 @@ fn action_specs() -> &'static [ActionSpec] {
         },
         ActionSpec {
             aliases: &["open-file", "open-pdf"],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
+            context: Some(WORKSPACE_CONTEXT),
             build: boxed::<OpenFile>,
         },
         ActionSpec {
-            aliases: &["open-start-board", "go-to-start-board", "start-board"],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
-            build: boxed::<OpenStartBoard>,
+            aliases: &[
+                "open-new-tab",
+                "new-tab",
+                "open-start-board",
+                "go-to-start-board",
+                "start-board",
+            ],
+            context: Some(WORKSPACE_CONTEXT),
+            build: boxed::<OpenNewTab>,
+        },
+        ActionSpec {
+            aliases: &["close-tab"],
+            context: Some(WORKSPACE_CONTEXT),
+            build: boxed::<CloseTab>,
         },
         ActionSpec {
             aliases: &["add-bookmark", "bookmark-page"],

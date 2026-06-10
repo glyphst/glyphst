@@ -1,6 +1,6 @@
 use crate::{
     settings::{
-        AiProvider, AiTitleModelSettings, KeymapPreset, Settings, SettingsStore,
+        AiProvider, AiTitleModelSettings, KeymapPreset, Settings, SettingsStore, TabBarVisibility,
         WindowBackgroundMode,
     },
     theme::{PartialTheme, Theme, ThemeMetadata, format_rgb_hex, format_rgba_hex},
@@ -1372,6 +1372,49 @@ impl SettingsPanel {
             .child(label)
     }
 
+    fn tab_bar_visibility_option(
+        &self,
+        label: &'static str,
+        visibility: TabBarVisibility,
+        selected_visibility: TabBarVisibility,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = visibility == selected_visibility;
+
+        div()
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(if selected {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.control_border)
+            })
+            .bg(if selected {
+                rgba(theme.selected_row)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.control_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.change_settings(
+                        move |settings| settings.tab_bar_visibility = visibility,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
     fn keymap_option(
         &self,
         preset: KeymapPreset,
@@ -1684,6 +1727,37 @@ impl SettingsPanel {
                                 "Opaque",
                                 WindowBackgroundMode::Opaque,
                                 settings.window.background,
+                                theme,
+                                cx,
+                            )),
+                    ),
+            )
+            .child(Self::section_title("Tabs", theme))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(44.0))
+                    .child(div().text_color(rgb(theme.text)).child("Tab bar"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(self.tab_bar_visibility_option(
+                                "Auto",
+                                TabBarVisibility::Auto,
+                                settings.tab_bar_visibility,
+                                theme,
+                                cx,
+                            ))
+                            .child(self.tab_bar_visibility_option(
+                                "Always",
+                                TabBarVisibility::Always,
+                                settings.tab_bar_visibility,
                                 theme,
                                 cx,
                             )),

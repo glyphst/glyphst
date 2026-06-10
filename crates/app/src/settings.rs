@@ -124,6 +124,30 @@ impl WindowSettings {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TabBarVisibility {
+    #[default]
+    Auto,
+    Always,
+}
+
+impl TabBarVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "auto" | "multiple" => Some(Self::Auto),
+            "always" => Some(Self::Always),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KeymapPreset {
     #[default]
     Modern,
@@ -283,6 +307,7 @@ impl From<AiTitleModelSettings> for AiSettings {
 pub struct Settings {
     pub behavior: BehaviorSettings,
     pub window: WindowSettings,
+    pub tab_bar_visibility: TabBarVisibility,
     pub ai: AiSettings,
     pub ai_title_model: Option<AiTitleModelSettings>,
     pub keymap_preset: KeymapPreset,
@@ -296,6 +321,7 @@ impl Default for Settings {
         Self {
             behavior: BehaviorSettings::default(),
             window: WindowSettings::default(),
+            tab_bar_visibility: TabBarVisibility::default(),
             ai: AiSettings::default(),
             ai_title_model: None,
             keymap_preset: KeymapPreset::default(),
@@ -366,6 +392,15 @@ impl Settings {
             {
                 settings.window.background = value;
             }
+        }
+
+        if let Some(tabs) = document.get("tabs").and_then(KdlNode::children)
+            && let Some(value) = tabs
+                .get_arg("visibility")
+                .and_then(KdlValue::as_string)
+                .and_then(TabBarVisibility::from_str)
+        {
+            settings.tab_bar_visibility = value;
         }
 
         if let Some(ai) = document.get("ai").and_then(KdlNode::children) {
@@ -458,6 +493,15 @@ impl Settings {
             self.window.background.as_str(),
         );
         document.nodes_mut().push(window);
+
+        let mut tabs = KdlNode::new("tabs");
+        let tabs_children = tabs.ensure_children();
+        push_value_node(
+            tabs_children,
+            "visibility",
+            self.tab_bar_visibility.as_str(),
+        );
+        document.nodes_mut().push(tabs);
 
         if self.ai != AiSettings::default() || self.ai_title_model.is_some() {
             let mut ai = KdlNode::new("ai");
@@ -735,6 +779,21 @@ keybindings {
             ]
         );
 
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn parses_and_exports_tab_settings() {
+        let settings = parse_settings(
+            r##"
+tabs {
+    visibility "always"
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.tab_bar_visibility, TabBarVisibility::Always);
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 

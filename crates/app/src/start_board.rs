@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
-    AnyElement, Context, Corners, FocusHandle, IntoElement, MouseButton, PathPromptOptions, Render,
+    AnyElement, Context, Corners, EventEmitter, FocusHandle, IntoElement, MouseButton, Render,
     RenderImage, SharedString, UniformListScrollHandle, Window, canvas, div, fill, prelude::*, px,
     rgb, rgba, uniform_list,
 };
@@ -53,6 +53,11 @@ struct StartBoardEntry {
     file_name: SharedString,
     directory: SharedString,
     page: usize,
+}
+
+pub(crate) enum StartBoardEvent {
+    OpenDocument(PathBuf),
+    OpenFile,
 }
 
 pub struct StartBoard {
@@ -186,8 +191,8 @@ impl StartBoard {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.open_file(window, cx);
+                cx.listener(|this, _, _, cx| {
+                    this.open_file(cx);
                     cx.stop_propagation();
                 }),
             )
@@ -219,11 +224,8 @@ impl StartBoard {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    match this.open_document(path.clone(), cx) {
-                        Ok(()) => window.remove_window(),
-                        Err(error) => eprintln!("failed to open PDF: {error:#}"),
-                    }
+                cx.listener(move |this, _, _, cx| {
+                    this.open_document(path.clone(), cx);
                     cx.stop_propagation();
                 }),
             )
@@ -317,58 +319,12 @@ impl StartBoard {
         }
     }
 
-    fn open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current_window = window.window_handle();
-        let dialog = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Open PDF".into()),
-        });
-
-        cx.spawn(async move |this, cx| match dialog.await {
-            Ok(Ok(Some(paths))) => {
-                let Some(path) = paths.into_iter().next() else {
-                    return;
-                };
-                if !Self::is_supported_document_path(&path) {
-                    eprintln!("unsupported file type: {}", path.display());
-                    return;
-                }
-
-                match this.update(cx, |this, cx| this.open_document(path, cx)) {
-                    Ok(Ok(())) => {
-                        if let Err(error) =
-                            cx.update_window(current_window, |_, window, _| window.remove_window())
-                        {
-                            eprintln!("failed to close start board: {error:#}");
-                        }
-                    }
-                    Ok(Err(error)) => eprintln!("failed to open selected PDF: {error:#}"),
-                    Err(error) => eprintln!("failed to update start board: {error:#}"),
-                }
-            }
-            Ok(Err(error)) => eprintln!("failed to open file dialog: {error:#}"),
-            Ok(Ok(None)) | Err(_) => {}
-        })
-        .detach();
+    fn open_file(&mut self, cx: &mut Context<Self>) {
+        cx.emit(StartBoardEvent::OpenFile);
     }
 
-    fn open_document(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Result<()> {
-        if !path.exists() {
-            bail!("PDF no longer exists: {}", path.display());
-        }
-        if !Self::is_supported_document_path(&path) {
-            bail!("unsupported file type: {}", path.display());
-        }
-
-        crate::open_pdf_window(path, cx)
-    }
-
-    fn is_supported_document_path(path: &Path) -> bool {
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+    fn open_document(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        cx.emit(StartBoardEvent::OpenDocument(path));
     }
 }
 
@@ -396,6 +352,8 @@ impl StartBoardEntry {
         }
     }
 }
+
+impl EventEmitter<StartBoardEvent> for StartBoard {}
 
 impl Render for StartBoard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

@@ -31,9 +31,9 @@ use crate::toc::{TocPalette, TocPaletteDelegate, TocPaletteEntry};
 use anyhow::{Context as _, Result, anyhow, bail};
 use arboard::{Clipboard, ImageData};
 use gpui::{
-    Anchor, Bounds, ClipboardItem, Context, Corners, DragMoveEvent, Entity, FocusHandle, Focusable,
-    IntoElement, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathPromptOptions, Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta,
+    Anchor, Bounds, ClipboardItem, Context, Corners, DragMoveEvent, Entity, EventEmitter,
+    FocusHandle, Focusable, IntoElement, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta,
     ScrollStrategy, ScrollWheelEvent, SharedString, Task, UniformListScrollHandle, Window,
     anchored, canvas, deferred, div, fill, point, prelude::*, px, rgb, rgba, size, uniform_list,
 };
@@ -76,7 +76,8 @@ gpui::actions!(
         OpenHistory,
         OpenBookmarks,
         OpenFile,
-        OpenStartBoard,
+        OpenNewTab,
+        CloseTab,
         AddBookmark,
         ToggleGridOverview,
         GridCursorUp,
@@ -249,6 +250,14 @@ enum NoteTarget {
 pub(crate) struct PdfAnnotations {
     pub(crate) highlights: Vec<Highlight>,
     pub(crate) notes: Vec<Note>,
+}
+
+pub(crate) enum PdfViewEvent {
+    OpenDocument {
+        path: PathBuf,
+        position: Option<DocumentPosition>,
+    },
+    SettingsChanged,
 }
 
 struct SearchMatch {
@@ -1196,6 +1205,10 @@ impl PdfView {
         &self.path
     }
 
+    pub(crate) fn file_name(&self) -> SharedString {
+        self.file_name.clone()
+    }
+
     fn restore_position(&mut self, position: DocumentPosition) {
         self.zoom = position.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         self.scroll_x_doc = position.scroll_x_doc;
@@ -1221,7 +1234,7 @@ impl PdfView {
             .record_history(&path, position);
     }
 
-    fn flush_current_history_position(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn flush_current_history_position(&mut self, cx: &mut Context<Self>) {
         self.position_save_task.take();
         self.record_current_history_position(cx);
         if let Err(error) = cx.global::<LibraryStore>().save() {
@@ -1800,49 +1813,6 @@ impl PdfView {
             Ok(Ok(None)) | Err(_) => {}
         })
         .detach();
-    }
-
-    fn open_file(&mut self, cx: &mut Context<Self>) {
-        let dialog = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Open PDF".into()),
-        });
-
-        cx.spawn(async move |this, cx| match dialog.await {
-            Ok(Ok(Some(paths))) => {
-                let Some(path) = paths.into_iter().next() else {
-                    return;
-                };
-                if !Self::is_supported_document_path(&path) {
-                    eprintln!("unsupported file type: {}", path.display());
-                    return;
-                }
-                if let Err(error) = this.update(cx, |this, cx| {
-                    this.open_library_document(path, None, cx);
-                }) {
-                    eprintln!("failed to open selected PDF: {error:#}");
-                }
-            }
-            Ok(Err(error)) => eprintln!("failed to open file dialog: {error:#}"),
-            Ok(Ok(None)) | Err(_) => {}
-        })
-        .detach();
-    }
-
-    fn open_start_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.flush_current_history_position(cx);
-        match crate::open_start_board_window(cx) {
-            Ok(()) => window.remove_window(),
-            Err(error) => eprintln!("failed to open start board: {error:#}"),
-        }
-    }
-
-    fn is_supported_document_path(path: &Path) -> bool {
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
     }
 
     fn save_image_to_path(
@@ -3151,6 +3121,7 @@ impl PdfView {
                     }
                     this.window_settings = window_settings;
                     this.apply_transparency(window, cx);
+                    cx.emit(PdfViewEvent::SettingsChanged);
                 }
             },
         )
@@ -3552,45 +3523,7 @@ impl PdfView {
         position: Option<DocumentPosition>,
         cx: &mut Context<Self>,
     ) {
-        self.flush_current_history_position(cx);
-
-        let path = normalize_path(&path);
-        let initial_position =
-            position.or_else(|| cx.global::<LibraryStore>().history_position(&path));
-        let focus_handle = self.focus_handle.clone();
-        let transparency_enabled = self.transparency_enabled;
-        let (behavior, window_settings, theme) = {
-            let store = cx.global::<SettingsStore>();
-            (
-                store.settings.behavior,
-                store.settings.window,
-                store.resolved_theme,
-            )
-        };
-        let annotations = PdfAnnotations {
-            highlights: cx.global::<LibraryStore>().highlights_for(&path),
-            notes: cx.global::<LibraryStore>().notes_for(&path),
-        };
-
-        match Self::open(
-            &path,
-            focus_handle,
-            behavior,
-            window_settings,
-            theme,
-            initial_position,
-            annotations,
-        ) {
-            Ok(mut pdf_view) => {
-                pdf_view.transparency_enabled = transparency_enabled;
-                *self = pdf_view;
-                self.flush_current_history_position(cx);
-                cx.notify();
-            }
-            Err(error) => {
-                eprintln!("failed to open {}: {error:#}", path.display());
-            }
-        }
+        cx.emit(PdfViewEvent::OpenDocument { path, position });
     }
 
     pub(crate) fn navigate_to_toc_entry(&mut self, entry_ix: usize, cx: &mut Context<Self>) {
@@ -5124,6 +5057,8 @@ impl PdfView {
     }
 }
 
+impl EventEmitter<PdfViewEvent> for PdfView {}
+
 impl Render for PdfView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
@@ -5287,12 +5222,6 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &OpenBookmarks, window, cx| {
                 this.toggle_bookmark_palette(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &OpenFile, _, cx| {
-                this.open_file(cx);
-            }))
-            .on_action(cx.listener(|this, _: &OpenStartBoard, window, cx| {
-                this.open_start_board(window, cx);
             }))
             .on_action(cx.listener(|this, _: &AddBookmark, window, cx| {
                 this.toggle_bookmark_prompt(window, cx);
