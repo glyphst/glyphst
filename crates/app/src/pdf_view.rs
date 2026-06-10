@@ -13,7 +13,6 @@ use crate::ai_panel::{AI_PANEL_WIDTH, AiPanel};
 use crate::bookmarks::{
     BookmarkPalette, BookmarkPaletteDelegate, BookmarkPrompt, BookmarkPromptDelegate,
 };
-use crate::command_palette::{CommandPalette, CommandPaletteDelegate};
 use crate::history::{HistoryPalette, HistoryPaletteDelegate};
 use crate::keybindings;
 use crate::library::{
@@ -368,7 +367,6 @@ pub struct PdfView {
     scroll_y_doc: f32,
     target_scroll_x_doc: f32,
     target_scroll_y_doc: f32,
-    command_palette: Option<Entity<CommandPalette>>,
     settings_panel: Option<Entity<SettingsPanel>>,
     ai_panel: Option<Entity<AiPanel>>,
     search_bar: Option<Entity<SearchBar>>,
@@ -542,7 +540,6 @@ impl PdfView {
             scroll_y_doc: 0.0,
             target_scroll_x_doc: 0.0,
             target_scroll_y_doc: 0.0,
-            command_palette: None,
             settings_panel: None,
             ai_panel: None,
             search_bar: None,
@@ -3044,41 +3041,7 @@ impl PdfView {
         }
     }
 
-    fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.command_palette.is_some() {
-            self.close_command_palette(window, cx);
-            return;
-        }
-        self.close_all_overlays(window, cx);
-
-        let actions = window
-            .available_actions(cx)
-            .into_iter()
-            .filter(|action| !action.partial_eq(&ToggleCommandPalette))
-            .collect::<Vec<_>>();
-        let previous_focus_handle = self.focus_handle.clone();
-        let delegate = CommandPaletteDelegate::new(actions);
-        let palette = cx.new(|cx| Picker::new(previous_focus_handle.clone(), delegate, cx));
-
-        cx.subscribe_in(&palette, window, |this, _, _: &PickerEvent, window, cx| {
-            this.close_command_palette(window, cx);
-        })
-        .detach();
-
-        palette.focus_handle(cx).focus(window, cx);
-        self.command_palette = Some(palette);
-        cx.notify();
-    }
-
-    fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.command_palette.take().is_some() {
-            self.focus_handle.focus(window, cx);
-            cx.notify();
-        }
-    }
-
     fn close_all_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_command_palette(window, cx);
         self.close_settings_panel(window, cx);
         self.close_search_bar(window, cx);
         self.close_toc_palette(window, cx);
@@ -5202,9 +5165,6 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &GridOverviewConfirm, _, cx| {
                 this.confirm_grid_overview_selection(cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
-                this.toggle_command_palette(window, cx);
-            }))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
                 window.toggle_fullscreen();
             }))
@@ -5315,8 +5275,7 @@ impl Render for PdfView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    if this.command_palette.is_some()
-                        || this.settings_panel.is_some()
+                    if this.settings_panel.is_some()
                         || this.search_bar.is_some()
                         || this.toc_palette.is_some()
                         || this.history_palette.is_some()
@@ -5657,14 +5616,6 @@ impl Render for PdfView {
             )
             .when(self.grid_overview_open, |this| {
                 this.child(self.render_grid_overview(theme, window, cx))
-            })
-            .when_some(self.command_palette.clone(), |this, palette| {
-                this.child(Self::render_top_aligned_overlay(
-                    palette,
-                    |this, window, cx| this.close_command_palette(window, cx),
-                    theme,
-                    cx,
-                ))
             })
             .when_some(self.settings_panel.clone(), |this, panel| {
                 this.child(Self::render_top_aligned_overlay(

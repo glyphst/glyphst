@@ -45,6 +45,7 @@ use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
 const PDF_CONTEXT: &str = "PdfView && !GridOverview && !CommandPalette && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
 const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !GridOverview && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
 const WORKSPACE_CONTEXT: &str = "Workspace && !GridOverview && !CommandPalette && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
+const COMMAND_PALETTE_CONTEXT: &str = "Workspace && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
 const GRID_OVERVIEW_CONTEXT: &str = "GridOverview && !SettingsPanel";
 const PALETTE_CONTEXT: &str = "CommandPalette";
 const SEARCH_CONTEXT: &str = "Search";
@@ -92,8 +93,8 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<GoToEnd>("ctrl-end", PDF_CONTEXT),
         bind::<GoToBeginning>("alt-<", PDF_CONTEXT),
         bind::<GoToEnd>("alt->", PDF_CONTEXT),
-        bind::<ToggleCommandPalette>("ctrl-shift-p", PDF_NO_SEARCH_CONTEXT),
-        bind::<ToggleCommandPalette>("cmd-shift-p", PDF_NO_SEARCH_CONTEXT),
+        bind::<ToggleCommandPalette>("ctrl-shift-p", COMMAND_PALETTE_CONTEXT),
+        bind::<ToggleCommandPalette>("cmd-shift-p", COMMAND_PALETTE_CONTEXT),
         bind::<ToggleFullScreen>("f11", PDF_NO_SEARCH_CONTEXT),
         bind::<ToggleTransparency>("ctrl-shift-t", PDF_CONTEXT),
         bind::<ToggleTransparency>("cmd-shift-t", PDF_CONTEXT),
@@ -680,7 +681,7 @@ fn action_specs() -> &'static [ActionSpec] {
         },
         ActionSpec {
             aliases: &["toggle-command-palette", "command-palette"],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
+            context: Some(COMMAND_PALETTE_CONTEXT),
             build: boxed::<ToggleCommandPalette>,
         },
         ActionSpec {

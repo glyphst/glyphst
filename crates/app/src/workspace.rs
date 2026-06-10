@@ -2,13 +2,17 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, IntoElement, MouseButton, PathPromptOptions, Render,
-    SharedString, Window, div, prelude::*, px, rgb, rgba,
+    AnyElement, Context, Entity, FocusHandle, Focusable, IntoElement, MouseButton,
+    PathPromptOptions, Render, SharedString, Window, div, prelude::*, px, rgb, rgba,
 };
 
 use crate::{
+    command_palette::{CommandPalette, CommandPaletteDelegate},
     library::{DocumentPosition, LibraryStore, normalize_path},
-    pdf_view::{CloseTab, OpenFile, OpenNewTab, PdfAnnotations, PdfView, PdfViewEvent},
+    pdf_view::{
+        CloseTab, OpenFile, OpenNewTab, PdfAnnotations, PdfView, PdfViewEvent, ToggleCommandPalette,
+    },
+    picker::{Picker, PickerEvent},
     settings::{SettingsStore, TabBarVisibility},
     start_board::{StartBoard, StartBoardEvent},
     theme::Theme,
@@ -24,6 +28,8 @@ pub(crate) struct Workspace {
     tabs: Vec<Tab>,
     active_tab: usize,
     focus_handle: FocusHandle,
+    command_palette: Option<Entity<CommandPalette>>,
+    command_palette_previous_focus_handle: Option<FocusHandle>,
 }
 
 impl Workspace {
@@ -36,6 +42,8 @@ impl Workspace {
             tabs: Vec::new(),
             active_tab: 0,
             focus_handle: cx.focus_handle(),
+            command_palette: None,
+            command_palette_previous_focus_handle: None,
         };
 
         let initial_tab = initial_path
@@ -162,6 +170,45 @@ impl Workspace {
             },
         )
         .detach();
+    }
+
+    fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette.is_some() {
+            self.close_command_palette(window, cx);
+            return;
+        }
+
+        let Some(previous_focus_handle) = window.focused(cx) else {
+            return;
+        };
+        let actions = window
+            .available_actions(cx)
+            .into_iter()
+            .filter(|action| !action.partial_eq(&ToggleCommandPalette))
+            .collect::<Vec<_>>();
+        let delegate = CommandPaletteDelegate::new(actions);
+        let picker_previous_focus_handle = previous_focus_handle.clone();
+        let palette = cx.new(|cx| Picker::new(picker_previous_focus_handle, delegate, cx));
+
+        cx.subscribe_in(&palette, window, |this, _, _: &PickerEvent, window, cx| {
+            this.close_command_palette(window, cx);
+        })
+        .detach();
+
+        palette.focus_handle(cx).focus(window, cx);
+        self.command_palette_previous_focus_handle = Some(previous_focus_handle);
+        self.command_palette = Some(palette);
+        cx.notify();
+    }
+
+    fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette.take().is_some() {
+            self.command_palette_previous_focus_handle
+                .take()
+                .unwrap_or_else(|| self.focus_handle.clone())
+                .focus(window, cx);
+            cx.notify();
+        }
     }
 
     fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -462,6 +509,32 @@ impl Workspace {
             )
             .into_any_element()
     }
+
+    fn render_top_aligned_overlay(
+        content: impl IntoElement + 'static,
+        close: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt(px(96.0))
+            .bg(rgba(theme.overlay))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| close(this, window, cx)),
+            )
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(content)
+    }
 }
 
 impl Render for Workspace {
@@ -475,6 +548,7 @@ impl Render for Workspace {
         div()
             .id("workspace")
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .key_context("Workspace")
@@ -488,6 +562,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 this.close_active_tab(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
+                this.toggle_command_palette(window, cx);
+            }))
             .when(show_tab_bar, |this| {
                 this.child(self.render_tab_bar(theme, cx))
             })
@@ -498,5 +575,13 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(self.active_tab_content()),
             )
+            .when_some(self.command_palette.clone(), |this, palette| {
+                this.child(Self::render_top_aligned_overlay(
+                    palette,
+                    |this, window, cx| this.close_command_palette(window, cx),
+                    theme,
+                    cx,
+                ))
+            })
     }
 }
