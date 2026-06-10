@@ -861,6 +861,10 @@ impl AiPanel {
         cx.stop_propagation();
     }
 
+    fn on_mouse_up_out(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.drag_origin = None;
+    }
+
     fn on_mouse_down_out(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.cancel_selection(cx);
     }
@@ -1677,7 +1681,10 @@ impl Render for AiPanel {
                                 .cursor(CursorStyle::IBeam)
                                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                                .on_mouse_up_out(
+                                    MouseButton::Left,
+                                    cx.listener(Self::on_mouse_up_out),
+                                )
                                 .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
                                 .on_mouse_move(cx.listener(Self::on_mouse_move))
                                 .child(AiInputElement { panel: entity })
