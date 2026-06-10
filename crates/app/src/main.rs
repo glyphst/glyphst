@@ -3,6 +3,11 @@ use std::path::PathBuf;
 use anyhow::Result;
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
+use tikv_jemalloc_sys as _;
+use tikv_jemallocator::Jemalloc;
+
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 mod ai_panel;
 mod bookmarks;
@@ -24,6 +29,7 @@ mod toc;
 mod workspace;
 
 use library::LibraryStore;
+use pdf_view::RenderCache;
 use settings::SettingsStore;
 use start_board::StartBoard;
 use workspace::Workspace;
@@ -34,6 +40,7 @@ fn main() {
     application().run(move |cx: &mut App| {
         cx.set_global(SettingsStore::load());
         cx.set_global(LibraryStore::load());
+        cx.set_global(RenderCache::new());
         cx.on_app_quit(|cx| {
             if let Err(error) = cx.global::<LibraryStore>().save() {
                 eprintln!("failed to save PDF library: {error:#}");

@@ -114,7 +114,10 @@ impl Workspace {
             Some(initial_position),
             annotations,
         )?;
-        let pdf_view = cx.new(|_| pdf_view);
+        let pdf_view = cx.new(|cx| {
+            PdfView::register_cache_eviction(cx);
+            pdf_view
+        });
         self.subscribe_to_pdf_view(&pdf_view, window, cx);
 
         cx.global_mut::<LibraryStore>()

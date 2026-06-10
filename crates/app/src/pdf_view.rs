@@ -5,7 +5,10 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -120,6 +123,12 @@ const SIDEBAR_PAGE_NUMBER_WIDTH: f32 = 38.0;
 const INFERRED_SPACE_WIDTH_RATIO: f32 = 0.75;
 const INFERRED_SPACE_HEIGHT_RATIO: f32 = 0.20;
 
+static NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_document_id() -> u64 {
+    NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 struct PdfPage {
     bounds: Rect,
     width: f32,
@@ -130,6 +139,7 @@ struct PdfPage {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct RenderKey {
+    doc_id: u64,
     page_idx: usize,
     physical_width: u32,
     physical_height: u32,
@@ -143,9 +153,194 @@ struct CachedRender {
 }
 
 struct CachedDisplayList {
+    doc_id: u64,
     page_idx: usize,
     display_list: Arc<DisplayList>,
     last_access: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct RenderCache {
+    renders: Vec<CachedRender>,
+    display_lists: Vec<CachedDisplayList>,
+    access_counter: u64,
+}
+
+impl gpui::Global for RenderCache {}
+
+impl RenderCache {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn contains_render(&self, key: RenderKey) -> bool {
+        self.exact_render_index(key).is_some()
+    }
+
+    fn render(&mut self, key: RenderKey) -> Option<Arc<RenderImage>> {
+        self.exact_render_index(key)
+            .map(|index| self.touch_render(index))
+    }
+
+    fn scaled_render(
+        &mut self,
+        doc_id: u64,
+        page_idx: usize,
+        render_scale: f32,
+    ) -> Option<Arc<RenderImage>> {
+        let index = self
+            .renders
+            .iter()
+            .enumerate()
+            .filter(|(_, cached)| cached.key.doc_id == doc_id && cached.key.page_idx == page_idx)
+            .min_by(|(_, a), (_, b)| {
+                (a.render_scale - render_scale)
+                    .abs()
+                    .total_cmp(&(b.render_scale - render_scale).abs())
+            })
+            .map(|(index, _)| index)?;
+
+        Some(self.touch_render(index))
+    }
+
+    fn insert_render(
+        &mut self,
+        key: RenderKey,
+        render_scale: f32,
+        image: Arc<RenderImage>,
+    ) -> Vec<Arc<RenderImage>> {
+        let last_access = self.next_access();
+        let mut removed = Vec::new();
+
+        if let Some(index) = self.exact_render_index(key) {
+            let replaced = std::mem::replace(
+                &mut self.renders[index],
+                CachedRender {
+                    key,
+                    render_scale,
+                    last_access,
+                    image,
+                },
+            );
+            removed.push(replaced.image);
+        } else {
+            self.renders.push(CachedRender {
+                key,
+                render_scale,
+                last_access,
+                image,
+            });
+        }
+
+        while self.renders.len() > MAX_CACHED_RENDERS
+            || (self.renders.len() > 1 && self.render_pixels() > MAX_CACHED_RENDER_PIXELS)
+        {
+            if let Some(index) = self
+                .renders
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, cached)| cached.last_access)
+                .map(|(index, _)| index)
+            {
+                removed.push(self.renders.remove(index).image);
+            } else {
+                break;
+            }
+        }
+
+        removed
+    }
+
+    fn display_list(&mut self, doc_id: u64, page_idx: usize) -> Option<Arc<DisplayList>> {
+        let index = self
+            .display_lists
+            .iter()
+            .position(|cached| cached.doc_id == doc_id && cached.page_idx == page_idx)?;
+        let last_access = self.next_access();
+        self.display_lists[index].last_access = last_access;
+        Some(self.display_lists[index].display_list.clone())
+    }
+
+    fn insert_display_list(
+        &mut self,
+        doc_id: u64,
+        page_idx: usize,
+        display_list: Arc<DisplayList>,
+    ) -> Arc<DisplayList> {
+        let last_access = self.next_access();
+
+        if let Some(index) = self
+            .display_lists
+            .iter()
+            .position(|cached| cached.doc_id == doc_id && cached.page_idx == page_idx)
+        {
+            self.display_lists[index] = CachedDisplayList {
+                doc_id,
+                page_idx,
+                display_list: display_list.clone(),
+                last_access,
+            };
+        } else {
+            self.display_lists.push(CachedDisplayList {
+                doc_id,
+                page_idx,
+                display_list: display_list.clone(),
+                last_access,
+            });
+        }
+
+        while self.display_lists.len() > MAX_CACHED_DISPLAY_LISTS {
+            if let Some(index) = self
+                .display_lists
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, cached)| cached.last_access)
+                .map(|(index, _)| index)
+            {
+                self.display_lists.remove(index);
+            } else {
+                break;
+            }
+        }
+
+        display_list
+    }
+
+    fn evict_document(&mut self, doc_id: u64) -> Vec<Arc<RenderImage>> {
+        let mut removed = Vec::new();
+        self.renders.retain(|cached| {
+            if cached.key.doc_id == doc_id {
+                removed.push(cached.image.clone());
+                false
+            } else {
+                true
+            }
+        });
+        self.display_lists.retain(|cached| cached.doc_id != doc_id);
+        removed
+    }
+
+    fn exact_render_index(&self, key: RenderKey) -> Option<usize> {
+        self.renders.iter().position(|cached| cached.key == key)
+    }
+
+    fn touch_render(&mut self, index: usize) -> Arc<RenderImage> {
+        let last_access = self.next_access();
+        self.renders[index].last_access = last_access;
+        self.renders[index].image.clone()
+    }
+
+    fn render_pixels(&self) -> u64 {
+        self.renders
+            .iter()
+            .map(|cached| cached.key.physical_width as u64 * cached.key.physical_height as u64)
+            .sum()
+    }
+
+    fn next_access(&mut self) -> u64 {
+        self.access_counter = self.access_counter.wrapping_add(1);
+        self.access_counter
+    }
 }
 
 struct PendingRender {
@@ -335,10 +530,10 @@ impl Render for DraggedSidebar {
 }
 
 pub struct PdfView {
+    doc_id: u64,
     path: PathBuf,
     file_name: SharedString,
     pages: Vec<PdfPage>,
-    display_lists: Vec<CachedDisplayList>,
     max_page_width: f32,
     content_height_doc: f32,
     glyphs: Vec<Glyph>,
@@ -355,8 +550,6 @@ pub struct PdfView {
     panning: Option<PanState>,
     page_image_bounds: Vec<Option<Bounds<Pixels>>>,
     focus_handle: FocusHandle,
-    cached: Vec<CachedRender>,
-    cache_access_counter: u64,
     pending_renders: Vec<PendingRender>,
     control_down: bool,
     zoom: f32,
@@ -409,7 +602,7 @@ pub struct PdfView {
     context_menu_highlight: Option<u64>,
     context_menu_note: Option<u64>,
     _image_clipboard: Option<Clipboard>,
-    // Must drop after display lists because Type3 fonts can reference the document.
+    // Must drop after pending render tasks because they can hold document-backed display lists.
     _document: mupdf::Document,
 }
 
@@ -508,10 +701,10 @@ impl PdfView {
         let page_image_bounds = (0..pages.len()).map(|_| None).collect();
 
         let mut view = Self {
+            doc_id: next_document_id(),
             path,
             file_name,
             pages,
-            display_lists: Vec::new(),
             max_page_width,
             content_height_doc,
             glyphs,
@@ -528,8 +721,6 @@ impl PdfView {
             panning: None,
             page_image_bounds,
             focus_handle,
-            cached: Vec::new(),
-            cache_access_counter: 0,
             pending_renders: Vec::new(),
             control_down: false,
             zoom: behavior.default_zoom,
@@ -590,6 +781,18 @@ impl PdfView {
         }
 
         Ok(view)
+    }
+
+    pub(crate) fn register_cache_eviction(cx: &mut Context<Self>) {
+        cx.on_release(|this, cx| {
+            if cx.has_global::<RenderCache>() {
+                let removed_images = cx.global_mut::<RenderCache>().evict_document(this.doc_id);
+                for image in removed_images {
+                    cx.drop_image(image, None);
+                }
+            }
+        })
+        .detach();
     }
 
     fn flatten_toc(outlines: Vec<mupdf::Outline>, page_count: usize) -> Vec<TocEntry> {
@@ -1049,16 +1252,22 @@ impl PdfView {
         scale_factor: f32,
     ) -> (Bounds<Pixels>, RenderKey) {
         let image_bounds = self.image_bounds_for_page(page_idx, bounds, scale);
-        let key = Self::render_key(page_idx, image_bounds, scale_factor);
+        let key = self.render_key(page_idx, image_bounds, scale_factor);
         (
             Self::pixel_aligned_image_bounds(image_bounds, key, scale_factor),
             key,
         )
     }
 
-    fn render_key(page_idx: usize, image_bounds: Bounds<Pixels>, scale_factor: f32) -> RenderKey {
+    fn render_key(
+        &self,
+        page_idx: usize,
+        image_bounds: Bounds<Pixels>,
+        scale_factor: f32,
+    ) -> RenderKey {
         let scale_factor = scale_factor.max(0.001);
         RenderKey {
+            doc_id: self.doc_id,
             page_idx,
             physical_width: (image_bounds.size.width.as_f32() * scale_factor)
                 .ceil()
@@ -1312,7 +1521,7 @@ impl PdfView {
     }
 
     fn request_render(&mut self, key: RenderKey, cx: &mut Context<Self>) {
-        if self.exact_cached_render_index(key).is_none() {
+        if !cx.global::<RenderCache>().contains_render(key) {
             self.start_background_render(key, cx);
         }
     }
@@ -1322,8 +1531,8 @@ impl PdfView {
         key: RenderKey,
         cx: &mut Context<Self>,
     ) -> Option<Arc<RenderImage>> {
-        if let Some(index) = self.exact_cached_render_index(key) {
-            return Some(self.touch_cached_render(index));
+        if let Some(image) = cx.global_mut::<RenderCache>().render(key) {
+            return Some(image);
         }
 
         if !self
@@ -1333,90 +1542,36 @@ impl PdfView {
         {
             self.start_background_render(key, cx);
         }
-        self.scaled_fallback_render_index(key)
-            .map(|index| self.touch_cached_render(index))
-    }
-
-    fn exact_cached_render_index(&self, key: RenderKey) -> Option<usize> {
-        self.cached.iter().position(|cached| cached.key == key)
-    }
-
-    fn scaled_fallback_render_index(&self, key: RenderKey) -> Option<usize> {
         let render_scale = key.physical_width as f32 / self.pages[key.page_idx].width;
-        self.cached
-            .iter()
-            .enumerate()
-            .filter(|(_, cached)| cached.key.page_idx == key.page_idx)
-            .min_by(|(_, a), (_, b)| {
-                (a.render_scale - render_scale)
-                    .abs()
-                    .total_cmp(&(b.render_scale - render_scale).abs())
-            })
-            .map(|(index, _)| index)
+        cx.global_mut::<RenderCache>()
+            .scaled_render(self.doc_id, key.page_idx, render_scale)
     }
 
-    fn touch_cached_render(&mut self, index: usize) -> Arc<RenderImage> {
-        let last_access = self.next_cache_access();
-        self.cached[index].last_access = last_access;
-        self.cached[index].image.clone()
-    }
-
-    fn insert_cached_render(&mut self, key: RenderKey, image: Arc<RenderImage>) {
-        let last_access = self.next_cache_access();
+    fn insert_cached_render(
+        &mut self,
+        key: RenderKey,
+        image: Arc<RenderImage>,
+        cx: &mut Context<Self>,
+    ) {
         let render_scale = key.physical_width as f32 / self.pages[key.page_idx].width;
-
-        if let Some(index) = self.exact_cached_render_index(key) {
-            self.cached[index] = CachedRender {
-                key,
-                render_scale,
-                last_access,
-                image,
-            };
-        } else {
-            self.cached.push(CachedRender {
-                key,
-                render_scale,
-                last_access,
-                image,
-            });
-        }
-
-        while self.cached.len() > MAX_CACHED_RENDERS
-            || (self.cached.len() > 1 && self.cached_render_pixels() > MAX_CACHED_RENDER_PIXELS)
-        {
-            if let Some(index) = self
-                .cached
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, cached)| cached.last_access)
-                .map(|(index, _)| index)
-            {
-                self.cached.remove(index);
-            }
+        let removed_images = cx
+            .global_mut::<RenderCache>()
+            .insert_render(key, render_scale, image);
+        for image in removed_images {
+            cx.drop_image(image, None);
         }
     }
 
-    fn cached_render_pixels(&self) -> u64 {
-        self.cached
-            .iter()
-            .map(|cached| cached.key.physical_width as u64 * cached.key.physical_height as u64)
-            .sum()
-    }
-
-    fn next_cache_access(&mut self) -> u64 {
-        self.cache_access_counter = self.cache_access_counter.wrapping_add(1);
-        self.cache_access_counter
-    }
-
-    fn get_or_create_display_list(&mut self, page_idx: usize) -> Result<Arc<DisplayList>> {
-        if let Some(index) = self
-            .display_lists
-            .iter()
-            .position(|cached| cached.page_idx == page_idx)
+    fn get_or_create_display_list(
+        &mut self,
+        page_idx: usize,
+        cx: &mut Context<Self>,
+    ) -> Result<Arc<DisplayList>> {
+        if let Some(display_list) = cx
+            .global_mut::<RenderCache>()
+            .display_list(self.doc_id, page_idx)
         {
-            let last_access = self.next_cache_access();
-            self.display_lists[index].last_access = last_access;
-            return Ok(self.display_lists[index].display_list.clone());
+            return Ok(display_list);
         }
 
         let page = self._document.load_page(page_idx as i32)?;
@@ -1425,28 +1580,9 @@ impl PdfView {
         let device = Device::from_display_list(&display_list)?;
         page.run(&device, &Matrix::IDENTITY)?;
 
-        let last_access = self.next_cache_access();
-        self.display_lists.push(CachedDisplayList {
-            page_idx,
-            display_list: display_list.clone(),
-            last_access,
-        });
-
-        while self.display_lists.len() > MAX_CACHED_DISPLAY_LISTS {
-            if let Some(index) = self
-                .display_lists
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, cached)| cached.last_access)
-                .map(|(index, _)| index)
-            {
-                self.display_lists.remove(index);
-            } else {
-                break;
-            }
-        }
-
-        Ok(display_list)
+        Ok(cx
+            .global_mut::<RenderCache>()
+            .insert_display_list(self.doc_id, page_idx, display_list))
     }
 
     fn start_background_render(&mut self, key: RenderKey, cx: &mut Context<Self>) {
@@ -1464,7 +1600,7 @@ impl PdfView {
         let page_bounds = page.bounds;
         let page_width = page.width;
         let page_height = page.height;
-        let display_list = match self.get_or_create_display_list(key.page_idx) {
+        let display_list = match self.get_or_create_display_list(key.page_idx, cx) {
             Ok(display_list) => display_list,
             Err(error) => {
                 eprintln!("failed to load PDF page for render: {error:#}");
@@ -1499,7 +1635,7 @@ impl PdfView {
 
                     match result {
                         Ok(image) => {
-                            this.insert_cached_render(key, image);
+                            this.insert_cached_render(key, image, cx);
                             cx.notify();
                         }
                         Err(error) => eprintln!("failed to render PDF page: {error:#}"),
@@ -1584,10 +1720,14 @@ impl PdfView {
         Ok(std::mem::take(&mut collector.borrow_mut().images))
     }
 
-    fn image_at_screen(&mut self, point: GpuiPoint<Pixels>) -> Option<(usize, usize)> {
+    fn image_at_screen(
+        &mut self,
+        point: GpuiPoint<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<(usize, usize)> {
         let page_idx = self.page_at_screen(point)?;
         let pdf_point = self.screen_to_pdf(page_idx, point)?;
-        let display_list = match self.get_or_create_display_list(page_idx) {
+        let display_list = match self.get_or_create_display_list(page_idx, cx) {
             Ok(display_list) => display_list,
             Err(error) => {
                 eprintln!("failed to load PDF page for image hit-test: {error:#}");
@@ -1727,7 +1867,7 @@ impl PdfView {
         if page_idx >= self.pages.len() {
             return;
         };
-        let display_list = match self.get_or_create_display_list(page_idx) {
+        let display_list = match self.get_or_create_display_list(page_idx, cx) {
             Ok(display_list) => display_list,
             Err(error) => {
                 eprintln!("failed to load PDF page for image copy: {error:#}");
@@ -1780,7 +1920,7 @@ impl PdfView {
         if page_idx >= self.pages.len() {
             return;
         };
-        let display_list = match self.get_or_create_display_list(page_idx) {
+        let display_list = match self.get_or_create_display_list(page_idx, cx) {
             Ok(display_list) => display_list,
             Err(error) => {
                 eprintln!("failed to load PDF page for image save: {error:#}");
@@ -3553,7 +3693,7 @@ impl PdfView {
             if self.context_menu_highlight.is_some() || self.context_menu_note.is_some() {
                 None
             } else {
-                self.image_at_screen(position)
+                self.image_at_screen(position, cx)
             };
         self.context_menu_position = Some(position);
         window.prevent_default();
@@ -4366,7 +4506,7 @@ impl PdfView {
                                                         let thumbnail_view = thumbnail_view.clone();
                                                         move |bounds, window, cx| {
                                                             thumbnail_view.update(cx, |this, cx| {
-                                                                let key = Self::render_key(
+                                                                let key = this.render_key(
                                                                     page_idx,
                                                                     bounds,
                                                                     window.scale_factor(),
