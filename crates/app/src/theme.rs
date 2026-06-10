@@ -8,15 +8,17 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 
 use crate::library::HighlightColor;
 
-pub const DEFAULT_THEME_ID: &str = "glyphst-light";
+pub const DEFAULT_THEME_ID: &str = "catppuccin-latte";
 pub const DEFAULT_PAGE_GAP: f32 = 4.0;
 
 const MIN_PAGE_GAP: f32 = 0.0;
 const MAX_PAGE_GAP: f32 = 240.0;
 
-const BUILTIN_THEMES: [(&str, &str); 4] = [
-    ("glyphst-dark", include_str!("../themes/glyphst-dark.kdl")),
-    ("glyphst-light", include_str!("../themes/glyphst-light.kdl")),
+const BUILTIN_THEMES: [(&str, &str); 3] = [
+    (
+        "catppuccin-latte",
+        include_str!("../themes/catppuccin-latte.kdl"),
+    ),
     ("one-dark", include_str!("../themes/one-dark.kdl")),
     (
         "catppuccin-mocha",
@@ -174,31 +176,31 @@ impl Default for Theme {
 }
 
 pub const DEFAULT_THEME: Theme = Theme {
-    background: 0xe8e8e8,
+    background: 0xeff1f5,
     page: 0xffffff,
-    selection_highlight: 0x0969da4d,
-    highlight_yellow: 0xfff8c54d,
-    highlight_green: 0xdafbe14d,
-    highlight_blue: 0xddf4ff4d,
-    highlight_pink: 0xffeff74d,
-    highlight_orange: 0xfff1e54d,
+    selection_highlight: 0x1e66f54d,
+    highlight_yellow: 0xdf8e1d4d,
+    highlight_green: 0x40a02b4d,
+    highlight_blue: 0x1e66f54d,
+    highlight_pink: 0xea76cb4d,
+    highlight_orange: 0xfe640b4d,
     overlay: 0x00000033,
-    footer_background: 0xf6f8fa,
-    footer_border: 0xd0d7de,
-    footer_text: 0x57606a,
-    panel_background: 0xf8f8f8,
-    panel_border: 0xd0d7de,
-    text: 0x24292f,
-    text_muted: 0x57606a,
-    placeholder_text: 0x6e7781aa,
-    accent: 0x0969da,
-    match_highlight: 0x9a6700,
-    selected_row: 0x0969da1f,
-    control_background: 0xffffff,
-    control_border: 0xd0d7de,
-    control_hover: 0xf3f4f6,
-    success: 0x1a7f37,
-    error: 0xcf222e,
+    footer_background: 0xe6e9ef,
+    footer_border: 0xdce0e8,
+    footer_text: 0x6c6f85,
+    panel_background: 0xe6e9ef,
+    panel_border: 0xdce0e8,
+    text: 0x4c4f69,
+    text_muted: 0x5c5f77,
+    placeholder_text: 0x7c7f93aa,
+    accent: 0x1e66f5,
+    match_highlight: 0xfe640b,
+    selected_row: 0x1e66f540,
+    control_background: 0xeff1f5,
+    control_border: 0xbcc0cc,
+    control_hover: 0xccd0da,
+    success: 0x40a02b,
+    error: 0xd20f39,
     page_gap: DEFAULT_PAGE_GAP,
 };
 
@@ -430,7 +432,7 @@ impl ThemeRegistry {
         if registry.theme(DEFAULT_THEME_ID).is_none() {
             registry.insert_theme(ThemeEntry {
                 id: DEFAULT_THEME_ID.to_string(),
-                name: "Glyphst Light".to_string(),
+                name: "Catppuccin Latte".to_string(),
                 appearance: ThemeAppearance::Light,
                 theme: DEFAULT_THEME,
             });

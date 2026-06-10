@@ -973,7 +973,7 @@ page-gap 36
                 zoom_step: 1.2,
                 smooth_scrolling: false,
             },
-            theme_name: "glyphst-light".to_string(),
+            theme_name: DEFAULT_THEME_ID.to_string(),
             overrides: PartialTheme {
                 background: Some(0x181818),
                 selection_highlight: Some(0x61afef66),

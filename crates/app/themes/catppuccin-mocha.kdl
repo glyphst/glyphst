@@ -20,7 +20,7 @@ colors {
     placeholder-text "#9399b2aa"
     accent "#89b4fa"
     match-highlight "#f9e2af"
-    selected-row "#45475a99"
+    selected-row "#89b4fa26"
     control-background "#1e1e2e"
     control-border "#45475a"
     control-hover "#313244"
