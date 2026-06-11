@@ -9,12 +9,12 @@ use crate::{
 use anyhow::{Context as _, Result, anyhow};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollHandle, SharedString, Style,
-    Task, TextRun, UTF16Selection, WeakEntity, Window, WrappedLine, div, fill, point, prelude::*,
-    px, relative, rgb, rgba, size,
+    Anchor, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollHandle,
+    SharedString, Style, Task, TextRun, UTF16Selection, WeakEntity, Window, WrappedLine, anchored,
+    deferred, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use serde_json::{Value, json};
 
@@ -1233,21 +1233,20 @@ impl AiPanel {
     fn render_mention_completion_menu(
         matches: Vec<MentionKind>,
         selected_ix: usize,
-        left: Pixels,
-        top: Pixels,
         theme: crate::theme::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut menu = div()
-            .absolute()
-            .top(top)
-            .left(left)
+            .occlude()
             .w(px(COMPLETION_MENU_WIDTH))
             .flex()
             .flex_col()
+            .py_1()
+            .rounded(px(6.0))
             .border_1()
             .border_color(rgb(theme.border))
             .bg(rgb(theme.surface_background))
+            .shadow_sm()
             .overflow_hidden()
             .text_size(px(12.0));
 
@@ -1256,11 +1255,12 @@ impl AiPanel {
             menu = menu.child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_1()
-                    .min_h(px(COMPLETION_MENU_ROW_HEIGHT))
-                    .px_3()
-                    .py_2()
+                    .items_center()
+                    .gap_2()
+                    .h(px(COMPLETION_MENU_ROW_HEIGHT))
+                    .mx_1()
+                    .px_2()
+                    .rounded(px(4.0))
                     .bg(if selected {
                         rgb(theme.element_selected)
                     } else {
@@ -1277,27 +1277,18 @@ impl AiPanel {
                     )
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_color(rgb(if selected {
-                                        theme.accent
-                                    } else {
-                                        theme.text
-                                    }))
-                                    .child("@"),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(if selected {
-                                        theme.accent
-                                    } else {
-                                        theme.text
-                                    }))
-                                    .child(mention.label()),
-                            ),
+                            .text_color(rgb(if selected {
+                                theme.accent
+                            } else {
+                                theme.text_muted
+                            }))
+                            .child("@"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(rgb(if selected { theme.accent } else { theme.text }))
+                            .child(mention.label()),
                     )
                     .child(
                         div()
@@ -1457,25 +1448,26 @@ impl Render for AiPanel {
         let showing_sessions = self.view == AiPanelView::Sessions;
         let loading = self.loading;
         let mention_completion_open = self.mention_completion.is_some();
-        let completion_menu_height = (completion_matches.len() as f32 * COMPLETION_MENU_ROW_HEIGHT)
-            .max(COMPLETION_MENU_ROW_HEIGHT);
-        let completion_left = self
-            .last_cursor_pos
-            .map(|position| {
-                let max_left = px((self.width - COMPLETION_MENU_WIDTH - 24.0).max(0.0));
-                if position.x < px(0.0) {
-                    px(0.0)
-                } else if position.x > max_left {
-                    max_left
-                } else {
-                    position.x
-                }
-            })
-            .unwrap_or(px(0.0));
-        let completion_top = self
-            .last_cursor_pos
-            .map(|position| position.y - px(completion_menu_height + 8.0))
-            .unwrap_or(px(-completion_menu_height - 8.0));
+        let completion_anchor = if showing_sessions || completion_matches.is_empty() {
+            None
+        } else {
+            self.last_bounds
+                .zip(self.last_cursor_pos)
+                .map(|(bounds, position)| {
+                    let max_left = px((self.width - COMPLETION_MENU_WIDTH - 24.0).max(0.0));
+                    let left = if position.x < px(0.0) {
+                        px(0.0)
+                    } else if position.x > max_left {
+                        max_left
+                    } else {
+                        position.x
+                    };
+                    point(
+                        bounds.origin.x + left,
+                        bounds.origin.y + position.y - px(8.0),
+                    )
+                })
+        };
 
         let mut messages = div().flex().flex_col().gap_3().p_3();
         if self.messages.is_empty() {
@@ -1677,17 +1669,7 @@ impl Render for AiPanel {
                                 )
                                 .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
                                 .on_mouse_move(cx.listener(Self::on_mouse_move))
-                                .child(AiInputElement { panel: entity })
-                                .when(!completion_matches.is_empty(), |this| {
-                                    this.child(Self::render_mention_completion_menu(
-                                        completion_matches,
-                                        completion_selected,
-                                        completion_left,
-                                        completion_top,
-                                        theme,
-                                        cx,
-                                    ))
-                                }),
+                                .child(AiInputElement { panel: entity }),
                         )
                         .child(
                             div()
@@ -1762,6 +1744,23 @@ impl Render for AiPanel {
                                         .child(if loading { "Sending…" } else { "Send" }),
                                 ),
                         ),
+                )
+            })
+            .when_some(completion_anchor, |this, anchor| {
+                this.child(
+                    deferred(
+                        anchored()
+                            .position(anchor)
+                            .anchor(Anchor::BottomLeft)
+                            .snap_to_window_with_margin(px(8.0))
+                            .child(Self::render_mention_completion_menu(
+                                completion_matches,
+                                completion_selected,
+                                theme,
+                                cx,
+                            )),
+                    )
+                    .with_priority(1),
                 )
             })
     }
