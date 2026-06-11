@@ -785,36 +785,14 @@ impl PdfView {
         let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
 
         self.loading_task = Some(cx.spawn(async move |this, cx| {
-            let thread_count = Self::thread_count(page_count);
-            let chunk_size = page_count.div_ceil(thread_count);
-            let mut tasks = Vec::with_capacity(thread_count);
-
-            for chunk_ix in 0..thread_count {
-                let start_page_idx = chunk_ix * chunk_size;
-                if start_page_idx >= page_count {
-                    break;
-                }
-
-                let end_page_idx = (start_page_idx + chunk_size).min(page_count);
-                let path = path.clone();
-                tasks.push(cx.background_spawn(async move {
-                    Self::load_page_chunk(&path, start_page_idx, end_page_idx)
+            let result = cx
+                .background_spawn(async move {
+                    Self::load_page_chunk(&path, 0, page_count)
                         .map_err(|error| format!("{error:#}"))
-                }));
-            }
+                })
+                .await;
 
-            let mut chunks = Vec::with_capacity(tasks.len());
-            for task in tasks {
-                match task.await {
-                    Ok(chunk) => chunks.push(chunk),
-                    Err(error) => {
-                        Self::finish_loading(this, cx, Err(error));
-                        return;
-                    }
-                }
-            }
-
-            let result = Self::merge_page_chunks(chunks, page_gap);
+            let result = result.and_then(|chunk| Self::merge_page_chunks(vec![chunk], page_gap));
             Self::finish_loading(this, cx, result);
         }));
     }
@@ -836,20 +814,6 @@ impl PdfView {
         {
             eprintln!("failed to update loaded PDF: {error:#}");
         }
-    }
-
-    fn thread_count(item_count: usize) -> usize {
-        std::thread::available_parallelism()
-            .map(|count| count.get())
-            .unwrap_or(1)
-            .min(item_count.max(1))
-    }
-
-    fn text_index_thread_count(item_count: usize) -> usize {
-        std::thread::available_parallelism()
-            .map(|count| count.get().saturating_sub(1).max(1))
-            .unwrap_or(1)
-            .min(item_count.max(1))
     }
 
     fn load_page_chunk(
@@ -970,43 +934,14 @@ impl PdfView {
                 .timer(Duration::from_millis(100))
                 .await;
 
-            let thread_count = Self::text_index_thread_count(page_count);
-            let chunk_size = page_count.div_ceil(thread_count);
-            let mut tasks = Vec::with_capacity(thread_count);
+            let result = cx
+                .background_spawn(async move {
+                    Self::load_page_text_chunk(&path, 0, page_count, page_count, page_bounds)
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .await;
 
-            for chunk_ix in 0..thread_count {
-                let start_page_idx = chunk_ix * chunk_size;
-                if start_page_idx >= page_count {
-                    break;
-                }
-
-                let end_page_idx = (start_page_idx + chunk_size).min(page_count);
-                let path = path.clone();
-                let page_bounds = page_bounds[start_page_idx..end_page_idx].to_vec();
-                tasks.push(cx.background_spawn(async move {
-                    Self::load_page_text_chunk(
-                        &path,
-                        start_page_idx,
-                        end_page_idx,
-                        page_count,
-                        page_bounds,
-                    )
-                    .map_err(|error| format!("{error:#}"))
-                }));
-            }
-
-            let mut chunks = Vec::with_capacity(tasks.len());
-            for task in tasks {
-                match task.await {
-                    Ok(chunk) => chunks.push(chunk),
-                    Err(error) => {
-                        Self::finish_text_indexing(this, cx, Err(error));
-                        return;
-                    }
-                }
-            }
-
-            let result = Self::merge_text_chunks(chunks, page_count);
+            let result = result.and_then(|chunk| Self::merge_text_chunks(vec![chunk], page_count));
             Self::finish_text_indexing(this, cx, result);
         }));
     }
