@@ -33,11 +33,12 @@ use crate::toc::{TocPalette, TocPaletteDelegate, TocPaletteEntry};
 use anyhow::{Context as _, Result, anyhow, bail};
 use arboard::{Clipboard, ImageData};
 use gpui::{
-    Anchor, Bounds, ClipboardItem, Context, Corners, DragMoveEvent, Entity, EventEmitter,
-    FocusHandle, Focusable, IntoElement, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta,
-    ScrollStrategy, ScrollWheelEvent, SharedString, Task, UniformListScrollHandle, Window,
-    anchored, canvas, deferred, div, fill, point, prelude::*, px, rgb, rgba, size, uniform_list,
+    Anchor, Animation, AnimationExt, AnyElement, AsyncApp, Bounds, ClipboardItem, Context, Corners,
+    DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollStrategy, ScrollWheelEvent,
+    SharedString, Task, UniformListScrollHandle, Window, anchored, canvas, deferred, div, fill,
+    point, prelude::*, px, rgb, rgba, size, uniform_list,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
@@ -136,6 +137,24 @@ struct PdfPage {
     height: f32,
     offset_y: f32,
     glyph_range: Range<usize>,
+}
+
+struct PageChunk {
+    start_page_idx: usize,
+    pages: Vec<PdfPage>,
+    glyphs: Vec<Glyph>,
+    links: Vec<PdfLink>,
+    max_page_width: f32,
+    line_count: u32,
+    block_count: u32,
+}
+
+struct LoadedPages {
+    pages: Vec<PdfPage>,
+    max_page_width: f32,
+    content_height_doc: f32,
+    glyphs: Vec<Glyph>,
+    links: Vec<PdfLink>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -535,6 +554,7 @@ pub struct PdfView {
     path: PathBuf,
     file_name: SharedString,
     pages: Vec<PdfPage>,
+    page_count: usize,
     max_page_width: f32,
     content_height_doc: f32,
     glyphs: Vec<Glyph>,
@@ -597,6 +617,10 @@ pub struct PdfView {
     transparency_enabled: bool,
     window_settings: WindowSettings,
     search: SearchState,
+    loading: bool,
+    loading_error: Option<String>,
+    pending_initial_position: Option<DocumentPosition>,
+    loading_task: Option<Task<()>>,
     position_save_task: Option<Task<()>>,
     context_menu_position: Option<GpuiPoint<Pixels>>,
     context_menu_image: Option<(usize, usize)>,
@@ -613,7 +637,7 @@ impl PdfView {
         focus_handle: FocusHandle,
         behavior: BehaviorSettings,
         window_settings: WindowSettings,
-        theme: Theme,
+        _theme: Theme,
         initial_position: Option<DocumentPosition>,
         annotations: PdfAnnotations,
     ) -> Result<Self> {
@@ -630,7 +654,7 @@ impl PdfView {
                 .ok_or_else(|| anyhow!("PDF path is not valid UTF-8"))?,
         )?;
         let page_count = document.page_count()?;
-        if page_count == 0 {
+        if page_count <= 0 {
             bail!("PDF has no pages");
         }
         let outlines = match document.outlines() {
@@ -642,74 +666,18 @@ impl PdfView {
         };
         let toc = Self::flatten_toc(outlines, page_count as usize);
 
-        let mut pages = Vec::with_capacity(page_count as usize);
-        let mut glyphs = Vec::new();
-        let mut links = Vec::new();
-        let mut offset_y = 0.0;
-        let mut max_page_width = 0.0_f32;
-        let mut next_line_idx = 0;
-        let mut next_block_idx = 0;
+        let page_count = page_count as usize;
 
-        for page_no in 0..page_count {
-            let page_idx = page_no as usize;
-            let page = document.load_page(page_no)?;
-            let page_bounds = page.bounds()?;
-            let page_width = page_bounds.x1 - page_bounds.x0;
-            let page_height = page_bounds.y1 - page_bounds.y0;
-
-            let display_list = Arc::new(DisplayList::new(page_bounds)?);
-            let device = Device::from_display_list(&display_list)?;
-            page.run(&device, &Matrix::IDENTITY)?;
-
-            let explicit_links_start = links.len();
-            match Self::extract_explicit_links(&page, page_idx, page_count as usize) {
-                Ok(page_links) => links.extend(page_links),
-                Err(error) => eprintln!(
-                    "failed to read PDF links on page {}: {error:#}",
-                    page_idx + 1
-                ),
-            }
-
-            let glyph_range = Self::extract_glyphs(
-                &display_list,
-                page_idx,
-                &mut glyphs,
-                &mut next_line_idx,
-                &mut next_block_idx,
-            )?;
-
-            let detected_links = Self::detect_text_url_links(
-                page_idx,
-                &glyphs,
-                glyph_range.clone(),
-                &links[explicit_links_start..],
-            );
-            links.extend(detected_links);
-
-            pages.push(PdfPage {
-                bounds: page_bounds,
-                width: page_width,
-                height: page_height,
-                offset_y,
-                glyph_range,
-            });
-
-            max_page_width = max_page_width.max(page_width);
-            offset_y += page_height + theme.page_gap;
-        }
-
-        let content_height_doc = offset_y - theme.page_gap;
-        let page_image_bounds = (0..pages.len()).map(|_| None).collect();
-
-        let mut view = Self {
+        Ok(Self {
             doc_id: next_document_id(),
             path,
             file_name,
-            pages,
-            max_page_width,
-            content_height_doc,
-            glyphs,
-            links,
+            pages: Vec::new(),
+            page_count,
+            max_page_width: 1.0,
+            content_height_doc: 0.0,
+            glyphs: Vec::new(),
+            links: Vec::new(),
             highlights: annotations.highlights,
             notes: annotations.notes,
             selected_highlight: None,
@@ -720,7 +688,7 @@ impl PdfView {
             hovered_note_position: None,
             pending_link: None,
             panning: None,
-            page_image_bounds,
+            page_image_bounds: Vec::new(),
             focus_handle,
             pending_renders: Vec::new(),
             control_down: false,
@@ -768,6 +736,10 @@ impl PdfView {
             transparency_enabled: window_settings.transparency_enabled_by_default(),
             window_settings,
             search: SearchState::default(),
+            loading: true,
+            loading_error: None,
+            pending_initial_position: initial_position,
+            loading_task: None,
             position_save_task: None,
             context_menu_position: None,
             context_menu_image: None,
@@ -775,13 +747,7 @@ impl PdfView {
             context_menu_note: None,
             _image_clipboard: None,
             _document: document,
-        };
-
-        if let Some(position) = initial_position {
-            view.restore_position(position);
-        }
-
-        Ok(view)
+        })
     }
 
     pub(crate) fn register_cache_eviction(cx: &mut Context<Self>) {
@@ -794,6 +760,237 @@ impl PdfView {
             }
         })
         .detach();
+    }
+
+    pub(crate) fn start_loading(&mut self, cx: &mut Context<Self>) {
+        if self.loading_task.is_some() || !self.loading {
+            return;
+        }
+
+        let path = self.path.clone();
+        let page_count = self.page_count;
+        let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
+
+        self.loading_task = Some(cx.spawn(async move |this, cx| {
+            let thread_count = std::thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(1)
+                .min(page_count.max(1));
+            let chunk_size = page_count.div_ceil(thread_count);
+            let mut tasks = Vec::with_capacity(thread_count);
+
+            for chunk_ix in 0..thread_count {
+                let start_page_idx = chunk_ix * chunk_size;
+                if start_page_idx >= page_count {
+                    break;
+                }
+
+                let end_page_idx = (start_page_idx + chunk_size).min(page_count);
+                let path = path.clone();
+                tasks.push(cx.background_spawn(async move {
+                    Self::load_page_chunk(&path, start_page_idx, end_page_idx, page_count)
+                        .map_err(|error| format!("{error:#}"))
+                }));
+            }
+
+            let mut chunks = Vec::with_capacity(tasks.len());
+            for task in tasks {
+                match task.await {
+                    Ok(chunk) => chunks.push(chunk),
+                    Err(error) => {
+                        Self::finish_loading(this, cx, Err(error));
+                        return;
+                    }
+                }
+            }
+
+            let result = Self::merge_page_chunks(chunks, page_gap);
+            Self::finish_loading(this, cx, result);
+        }));
+    }
+
+    fn finish_loading(
+        this: gpui::WeakEntity<Self>,
+        cx: &mut AsyncApp,
+        result: std::result::Result<LoadedPages, String>,
+    ) {
+        let update_result = this.update(cx, |this, cx| {
+            this.loading_task = None;
+            match result {
+                Ok(loaded) => this.apply_loaded_pages(loaded, cx),
+                Err(error) => this.apply_loading_error(error, cx),
+            }
+        });
+        if let Err(error) = update_result
+            && error.to_string() != "entity released"
+        {
+            eprintln!("failed to update loaded PDF: {error:#}");
+        }
+    }
+
+    fn load_page_chunk(
+        path: &Path,
+        start_page_idx: usize,
+        end_page_idx: usize,
+        page_count: usize,
+    ) -> Result<PageChunk> {
+        let document = mupdf::Document::open(path)?;
+        let mut pages = Vec::with_capacity(end_page_idx.saturating_sub(start_page_idx));
+        let mut glyphs = Vec::new();
+        let mut links = Vec::new();
+        let mut max_page_width = 0.0_f32;
+        let mut next_line_idx = 0;
+        let mut next_block_idx = 0;
+
+        for page_idx in start_page_idx..end_page_idx {
+            let page = document.load_page(page_idx as i32)?;
+            let page_bounds = page.bounds()?;
+            let page_width = page_bounds.x1 - page_bounds.x0;
+            let page_height = page_bounds.y1 - page_bounds.y0;
+
+            let display_list = Arc::new(DisplayList::new(page_bounds)?);
+            let device = Device::from_display_list(&display_list)?;
+            page.run(&device, &Matrix::IDENTITY)?;
+
+            let explicit_links_start = links.len();
+            match Self::extract_explicit_links(&page, page_idx, page_count) {
+                Ok(page_links) => links.extend(page_links),
+                Err(error) => {
+                    eprintln!(
+                        "failed to read PDF links on page {}: {error:#}",
+                        page_idx + 1
+                    );
+                }
+            }
+
+            let glyph_range = Self::extract_glyphs(
+                &display_list,
+                page_idx,
+                &mut glyphs,
+                &mut next_line_idx,
+                &mut next_block_idx,
+            )?;
+
+            let detected_links = Self::detect_text_url_links(
+                page_idx,
+                &glyphs,
+                glyph_range.clone(),
+                &links[explicit_links_start..],
+            );
+            links.extend(detected_links);
+
+            pages.push(PdfPage {
+                bounds: page_bounds,
+                width: page_width,
+                height: page_height,
+                offset_y: 0.0,
+                glyph_range,
+            });
+
+            max_page_width = max_page_width.max(page_width);
+        }
+
+        Ok(PageChunk {
+            start_page_idx,
+            pages,
+            glyphs,
+            links,
+            max_page_width,
+            line_count: next_line_idx,
+            block_count: next_block_idx,
+        })
+    }
+
+    fn merge_page_chunks(
+        mut chunks: Vec<PageChunk>,
+        page_gap: f32,
+    ) -> std::result::Result<LoadedPages, String> {
+        chunks.sort_by_key(|chunk| chunk.start_page_idx);
+
+        let page_count = chunks.iter().map(|chunk| chunk.pages.len()).sum();
+        let glyph_count = chunks.iter().map(|chunk| chunk.glyphs.len()).sum();
+        let link_count = chunks.iter().map(|chunk| chunk.links.len()).sum();
+        let mut pages = Vec::with_capacity(page_count);
+        let mut glyphs = Vec::with_capacity(glyph_count);
+        let mut links = Vec::with_capacity(link_count);
+        let mut offset_y = 0.0;
+        let mut max_page_width = 0.0_f32;
+        let mut line_offset = 0_u32;
+        let mut block_offset = 0_u32;
+
+        for mut chunk in chunks {
+            max_page_width = max_page_width.max(chunk.max_page_width);
+            let glyph_offset = glyphs.len();
+
+            for glyph in &mut chunk.glyphs {
+                glyph.line_idx = glyph
+                    .line_idx
+                    .checked_add(line_offset)
+                    .ok_or_else(|| "PDF contains too many text lines".to_string())?;
+                glyph.block_idx = glyph
+                    .block_idx
+                    .checked_add(block_offset)
+                    .ok_or_else(|| "PDF contains too many text blocks".to_string())?;
+            }
+
+            for page in &mut chunk.pages {
+                page.offset_y = offset_y;
+                page.glyph_range =
+                    (page.glyph_range.start + glyph_offset)..(page.glyph_range.end + glyph_offset);
+                offset_y += page.height + page_gap;
+            }
+
+            line_offset = line_offset
+                .checked_add(chunk.line_count)
+                .ok_or_else(|| "PDF contains too many text lines".to_string())?;
+            block_offset = block_offset
+                .checked_add(chunk.block_count)
+                .ok_or_else(|| "PDF contains too many text blocks".to_string())?;
+
+            pages.extend(chunk.pages);
+            glyphs.extend(chunk.glyphs);
+            links.extend(chunk.links);
+        }
+
+        let content_height_doc = if pages.is_empty() {
+            0.0
+        } else {
+            offset_y - page_gap
+        };
+
+        Ok(LoadedPages {
+            pages,
+            max_page_width,
+            content_height_doc,
+            glyphs,
+            links,
+        })
+    }
+
+    fn apply_loaded_pages(&mut self, loaded: LoadedPages, cx: &mut Context<Self>) {
+        self.pages = loaded.pages;
+        self.max_page_width = loaded.max_page_width.max(1.0);
+        self.content_height_doc = loaded.content_height_doc;
+        self.glyphs = loaded.glyphs;
+        self.links = loaded.links;
+        self.page_image_bounds = (0..self.pages.len()).map(|_| None).collect();
+        self.loading = false;
+        self.loading_error = None;
+
+        if let Some(position) = self.pending_initial_position.take() {
+            self.restore_position(position);
+        } else {
+            self.clamp_scroll();
+        }
+
+        cx.notify();
+    }
+
+    fn apply_loading_error(&mut self, error: String, cx: &mut Context<Self>) {
+        eprintln!("failed to load PDF pages: {error}");
+        self.loading = false;
+        self.loading_error = Some(error);
+        cx.notify();
     }
 
     fn flatten_toc(outlines: Vec<mupdf::Outline>, page_count: usize) -> Vec<TocEntry> {
@@ -1451,6 +1648,10 @@ impl PdfView {
 
     pub(crate) fn flush_current_history_position(&mut self, cx: &mut Context<Self>) {
         self.position_save_task.take();
+        if self.loading || self.loading_error.is_some() {
+            return;
+        }
+
         self.record_current_history_position(cx);
         if let Err(error) = cx.global::<LibraryStore>().save() {
             eprintln!("failed to save PDF history: {error:#}");
@@ -3621,6 +3822,11 @@ impl PdfView {
         position: DocumentPosition,
         cx: &mut Context<Self>,
     ) {
+        if self.loading {
+            self.pending_initial_position = Some(position);
+            return;
+        }
+
         let current_position = self.current_jump_position();
         Self::push_jump_position(&mut self.jump_back, current_position);
         self.jump_forward.clear();
@@ -4929,6 +5135,87 @@ impl PdfView {
         underlines
     }
 
+    fn render_loading_state(&self, theme: Theme, opacity: f32) -> AnyElement {
+        let content = if let Some(error) = &self.loading_error {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .text_align(gpui::TextAlign::Center)
+                .child(
+                    div()
+                        .text_size(px(15.0))
+                        .text_color(rgb(theme.error))
+                        .child("Failed to load PDF"),
+                )
+                .child(
+                    div()
+                        .max_w(px(520.0))
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(error.clone()),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .text_align(gpui::TextAlign::Center)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(14.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(format!("Loading {}", self.file_name))
+                        .child(div().w(px(24.0)).with_animation(
+                            "pdf-loading-dots",
+                            Animation::new(Duration::from_millis(900)).repeat(),
+                            |element, delta| {
+                                let dots = match (delta * 4.0) as u32 {
+                                    0 => "",
+                                    1 => ".",
+                                    2 => "..",
+                                    _ => "...",
+                                };
+                                element.child(dots)
+                            },
+                        )),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(format!("{} pages", self.page_count)),
+                )
+                .into_any_element()
+        };
+
+        div()
+            .size_full()
+            .key_context("PdfView")
+            .track_focus(&self.focus_handle)
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.tab_active_background))
+            .when(opacity < 1.0, |this| this.opacity(opacity))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_6()
+                    .child(content),
+            )
+            .into_any_element()
+    }
+
     fn highlight_rect_to_screen(&self, rect: &HighlightRect) -> Option<Bounds<Pixels>> {
         let image_bounds = *self.page_image_bounds.get(rect.page_idx)?.as_ref()?;
         Some(self.pdf_rect_to_screen(
@@ -5166,6 +5453,10 @@ impl Render for PdfView {
             (store.resolved_theme, store.settings.window)
         };
         let opacity = window_settings.effective_opacity(self.transparency_enabled);
+        if self.loading || self.loading_error.is_some() {
+            return self.render_loading_state(theme, opacity);
+        }
+
         self.step_scroll_animation(window, cx);
         let context_menu_highlight_color = self
             .context_menu_highlight
@@ -5812,6 +6103,7 @@ impl Render for PdfView {
             })
             .children(note_popup)
             .children(context_menu)
+            .into_any_element()
     }
 }
 

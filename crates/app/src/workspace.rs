@@ -117,7 +117,7 @@ impl Workspace {
             highlights: cx.global::<LibraryStore>().highlights_for(&path),
             notes: cx.global::<LibraryStore>().notes_for(&path),
         };
-        let pdf_view = PdfView::open(
+        let mut pdf_view = PdfView::open(
             &path,
             self.focus_handle.clone(),
             behavior,
@@ -128,6 +128,7 @@ impl Workspace {
         )?;
         let pdf_view = cx.new(|cx| {
             PdfView::register_cache_eviction(cx);
+            pdf_view.start_loading(cx);
             pdf_view
         });
         self.subscribe_to_pdf_view(&pdf_view, window, cx);
