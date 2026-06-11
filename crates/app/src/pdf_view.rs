@@ -5377,6 +5377,11 @@ impl PdfView {
                 )
                 .into_any_element()
         } else {
+            const GRID_SQUARE_SIZE: f32 = 18.0;
+            const GRID_GAP: f32 = 4.0;
+            const GRID_PHASES: [f32; 9] = [0.80, 0.05, 0.50, 0.30, 0.95, 0.15, 0.65, 0.40, 0.70];
+            const GRID_DURATION_MS: u64 = 1200;
+
             div()
                 .flex()
                 .flex_col()
@@ -5386,24 +5391,45 @@ impl PdfView {
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
+                        .gap(px(GRID_GAP))
+                        .w(px(GRID_SQUARE_SIZE * 3.0 + GRID_GAP * 3.0))
                         .items_center()
                         .justify_center()
+                        .children((0..9).map(|index| {
+                            let phase = GRID_PHASES[index];
+
+                            div()
+                                .w(px(GRID_SQUARE_SIZE))
+                                .h(px(GRID_SQUARE_SIZE))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .w(px(GRID_SQUARE_SIZE))
+                                        .h(px(GRID_SQUARE_SIZE))
+                                        .bg(rgb(theme.accent))
+                                        .with_animation(
+                                            ("pdf-grid-loader-square", index),
+                                            Animation::new(Duration::from_millis(GRID_DURATION_MS))
+                                                .repeat(),
+                                            move |element, delta| {
+                                                let t = (delta + phase) % 1.0;
+                                                let wave =
+                                                    (1.0 - (std::f32::consts::TAU * t).cos()) / 2.0;
+
+                                                element.opacity(0.2 + 0.8 * wave)
+                                            },
+                                        ),
+                                )
+                        })),
+                )
+                .child(
+                    div()
                         .text_size(px(14.0))
                         .text_color(rgb(theme.text_muted))
-                        .child(format!("Loading {}", self.file_name))
-                        .child(div().w(px(24.0)).with_animation(
-                            "pdf-loading-dots",
-                            Animation::new(Duration::from_millis(900)).repeat(),
-                            |element, delta| {
-                                let dots = match (delta * 4.0) as u32 {
-                                    0 => "",
-                                    1 => ".",
-                                    2 => "..",
-                                    _ => "...",
-                                };
-                                element.child(dots)
-                            },
-                        )),
+                        .child(format!("Loading {}", self.file_name)),
                 )
                 .child(
                     div()
