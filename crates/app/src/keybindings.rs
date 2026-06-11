@@ -18,7 +18,8 @@ use crate::{
         JumpForward, NextHalfPage, NextPage, OpenBookmarks, OpenFile, OpenHistory, OpenNewTab,
         OpenNotes, OpenSettings, PreviousHalfPage, PreviousPage, ResetZoom, Search, SearchNext,
         SearchPrev, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette, ToggleFullScreen,
-        ToggleGridOverview, ToggleNotes, ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
+        ToggleGridOverview, ToggleNotes, ToggleThumbnailSidebar, ToggleToc, ToggleTransparency,
+        ZoomIn, ZoomOut,
     },
     picker::{
         PickerBackspace, PickerCancel, PickerConfirm, PickerCopy, PickerCut, PickerDelete,
@@ -103,6 +104,8 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<ToggleAiPanel>("ctrl-shift-a", PDF_NO_SEARCH_CONTEXT),
         bind::<ToggleAiPanel>("cmd-shift-a", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenHistory>("ctrl-h", PDF_NO_SEARCH_CONTEXT),
+        bind::<ToggleThumbnailSidebar>("ctrl-shift-g", PDF_NO_SEARCH_CONTEXT),
+        bind::<ToggleThumbnailSidebar>("cmd-shift-g", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenFile>("cmd-o", WORKSPACE_CONTEXT),
         bind::<OpenNewTab>("cmd-t", WORKSPACE_CONTEXT),
         bind::<OpenNewTab>("ctrl-t", WORKSPACE_CONTEXT),
@@ -644,6 +647,16 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["toggle-notes", "toggle-notes-sidebar"],
             context: Some(PDF_NO_SEARCH_CONTEXT),
             build: boxed::<ToggleNotes>,
+        },
+        ActionSpec {
+            aliases: &[
+                "toggle-thumbnails",
+                "toggle-thumbnail-sidebar",
+                "thumbnail-sidebar",
+                "page-thumbnails",
+            ],
+            context: Some(PDF_NO_SEARCH_CONTEXT),
+            build: boxed::<ToggleThumbnailSidebar>,
         },
         ActionSpec {
             aliases: &["toggle-grid-overview", "grid-overview", "page-overview"],

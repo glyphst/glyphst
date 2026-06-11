@@ -72,6 +72,7 @@ gpui::actions!(
         ToggleToc,
         OpenNotes,
         ToggleNotes,
+        ToggleThumbnailSidebar,
         ToggleCommandPalette,
         ToggleFullScreen,
         ToggleTransparency,
@@ -88,7 +89,7 @@ gpui::actions!(
         GridCursorDown,
         GridCursorLeft,
         GridCursorRight,
-        GridOverviewConfirm
+        GridOverviewConfirm,
     ]
 );
 
@@ -107,6 +108,14 @@ const TOC_SIDEBAR_WIDTH: f32 = 280.0;
 const TOC_SIDEBAR_ROW_HEIGHT: f32 = 30.0;
 const NOTES_SIDEBAR_WIDTH: f32 = 300.0;
 const NOTES_SIDEBAR_ROW_HEIGHT: f32 = 52.0;
+const THUMBNAIL_SIDEBAR_WIDTH: f32 = 200.0;
+const THUMBNAIL_SIDEBAR_HORIZONTAL_PADDING: f32 = 12.0;
+const THUMBNAIL_SIDEBAR_THUMBNAIL_PADDING: f32 = 8.0;
+const THUMBNAIL_SIDEBAR_LABEL_HEIGHT: f32 = 18.0;
+const THUMBNAIL_SIDEBAR_ROW_PADDING_Y: f32 = 12.0;
+const THUMBNAIL_SIDEBAR_MIN_THUMBNAIL_WIDTH: f32 = 96.0;
+const THUMBNAIL_SIDEBAR_MAX_THUMBNAIL_WIDTH: f32 = 220.0;
+const THUMBNAIL_SIDEBAR_COMPACT_HEADER_WIDTH: f32 = 300.0;
 const SIDEBAR_RESIZE_HANDLE_SIZE: f32 = 6.0;
 const SIDEBAR_MIN_WIDTH: f32 = 150.0;
 const SIDEBAR_MAX_WIDTH_RATIO: f32 = 0.5;
@@ -567,9 +576,16 @@ struct JumpPosition {
 
 #[derive(Clone, Copy)]
 enum DraggedSidebar {
+    Thumbnails,
     Toc,
     Notes,
     AiPanel,
+}
+
+#[derive(Clone, Copy)]
+enum PageSelectionSource {
+    GridOverview,
+    ThumbnailSidebar,
 }
 
 impl Render for DraggedSidebar {
@@ -633,6 +649,13 @@ pub struct PdfView {
     notes_sidebar_scroll: UniformListScrollHandle,
     notes_sidebar_entries: Vec<NotePaletteEntry>,
     notes_sidebar_selected: Option<u64>,
+    thumbnail_sidebar_open: bool,
+    thumbnail_sidebar_width: f32,
+    thumbnail_sidebar_scroll: UniformListScrollHandle,
+    thumbnail_sidebar_current_page: usize,
+    thumbnail_sidebar_selecting: bool,
+    thumbnail_sidebar_selection: BTreeSet<usize>,
+    thumbnail_sidebar_actions_position: Option<GpuiPoint<Pixels>>,
     ai_panel_width: f32,
     grid_overview_open: bool,
     grid_overview_scroll: UniformListScrollHandle,
@@ -758,6 +781,13 @@ impl PdfView {
             notes_sidebar_scroll: UniformListScrollHandle::new(),
             notes_sidebar_entries: Vec::new(),
             notes_sidebar_selected: None,
+            thumbnail_sidebar_open: false,
+            thumbnail_sidebar_width: THUMBNAIL_SIDEBAR_WIDTH,
+            thumbnail_sidebar_scroll: UniformListScrollHandle::new(),
+            thumbnail_sidebar_current_page: 0,
+            thumbnail_sidebar_selecting: false,
+            thumbnail_sidebar_selection: BTreeSet::new(),
+            thumbnail_sidebar_actions_position: None,
             ai_panel_width: AI_PANEL_WIDTH,
             grid_overview_open: false,
             grid_overview_scroll: UniformListScrollHandle::new(),
@@ -2370,8 +2400,12 @@ impl PdfView {
         .detach();
     }
 
-    fn export_selected_pages_as_text(&mut self, cx: &mut Context<Self>) {
-        let page_indices = self.selected_grid_page_indices();
+    fn export_selected_pages_as_text(
+        &mut self,
+        source: PageSelectionSource,
+        cx: &mut Context<Self>,
+    ) {
+        let page_indices = self.selected_page_indices(source);
         if page_indices.is_empty() {
             return;
         }
@@ -2415,11 +2449,15 @@ impl PdfView {
         })
         .detach();
 
-        self.cancel_grid_overview_selection(cx);
+        self.cancel_page_selection(source, cx);
     }
 
-    fn export_selected_pages_as_image(&mut self, cx: &mut Context<Self>) {
-        let page_indices = self.selected_grid_page_indices();
+    fn export_selected_pages_as_image(
+        &mut self,
+        source: PageSelectionSource,
+        cx: &mut Context<Self>,
+    ) {
+        let page_indices = self.selected_page_indices(source);
         if page_indices.is_empty() {
             return;
         }
@@ -2480,7 +2518,7 @@ impl PdfView {
         })
         .detach();
 
-        self.cancel_grid_overview_selection(cx);
+        self.cancel_page_selection(source, cx);
     }
 
     fn save_selected_pages_text_to_path(
@@ -4104,6 +4142,10 @@ impl PdfView {
         cx.notify();
     }
 
+    fn toggle_thumbnail_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.set_thumbnail_sidebar_open(!self.thumbnail_sidebar_open, cx);
+    }
+
     fn toggle_grid_overview(&mut self, cx: &mut Context<Self>) {
         self.set_grid_overview_open(!self.grid_overview_open, cx);
     }
@@ -4401,6 +4443,7 @@ impl PdfView {
         self.dragging = false;
         self.panning = None;
         self.grid_overview_actions_position = None;
+        self.thumbnail_sidebar_actions_position = None;
         self.context_menu_image = if self.grid_overview_open
             || self.context_menu_highlight.is_some()
             || self.context_menu_note.is_some()
@@ -4518,7 +4561,14 @@ impl PdfView {
             .child(label)
     }
 
-    fn render_grid_overview_actions_menu(theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_page_selection_actions_menu(
+        source: PageSelectionSource,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let text_source = source;
+        let image_source = source;
+
         div()
             .occlude()
             .flex()
@@ -4531,15 +4581,26 @@ impl PdfView {
             .child(Self::grid_overview_action_entry(
                 "Export as Text",
                 theme,
-                |this, cx| this.export_selected_pages_as_text(cx),
+                move |this, cx| this.export_selected_pages_as_text(text_source, cx),
                 cx,
             ))
             .child(Self::grid_overview_action_entry(
                 "Export as Image",
                 theme,
-                |this, cx| this.export_selected_pages_as_image(cx),
+                move |this, cx| this.export_selected_pages_as_image(image_source, cx),
                 cx,
             ))
+    }
+
+    fn render_grid_overview_actions_menu(theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        Self::render_page_selection_actions_menu(PageSelectionSource::GridOverview, theme, cx)
+    }
+
+    fn render_thumbnail_sidebar_actions_menu(
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        Self::render_page_selection_actions_menu(PageSelectionSource::ThumbnailSidebar, theme, cx)
     }
 
     fn render_note_popup(body: SharedString, theme: Theme) -> impl IntoElement {
@@ -4649,8 +4710,8 @@ impl PdfView {
 
     fn render_sidebar_shell(
         title: &'static str,
-        count: usize,
         width: f32,
+        header_end: impl IntoElement + 'static,
         content: impl IntoElement + 'static,
         resize_handle: impl IntoElement + 'static,
         theme: Theme,
@@ -4678,19 +4739,29 @@ impl PdfView {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap_2()
                     .h(px(40.0))
                     .px_3()
                     .border_b(px(1.0))
                     .border_color(rgb(theme.border))
-                    .child(div().text_size(px(13.0)).child(title))
                     .child(
                         div()
-                            .text_color(rgb(theme.text_muted))
-                            .child(format!("{} items", count)),
-                    ),
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .child(title),
+                    )
+                    .child(div().flex_none().child(header_end)),
             )
             .child(content)
             .child(resize_handle)
+    }
+
+    fn render_sidebar_count(count: usize, theme: Theme) -> impl IntoElement {
+        div()
+            .text_color(rgb(theme.text_muted))
+            .child(format!("{} items", count))
     }
 
     fn render_sidebar_empty_message(message: &'static str, theme: Theme) -> impl IntoElement {
@@ -5017,6 +5088,43 @@ impl PdfView {
             .child("✎")
     }
 
+    fn render_thumbnail_sidebar_button(
+        &self,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let open = self.thumbnail_sidebar_open;
+
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .h(px(20.0))
+            .px_2()
+            .mr_2()
+            .text_color(rgb(if open {
+                theme.accent
+            } else {
+                theme.footer_text
+            }))
+            .bg(if open {
+                rgb(theme.element_selected)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_thumbnail_sidebar(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child("▤")
+    }
+
     fn render_grid_overview_button(
         &self,
         theme: Theme,
@@ -5087,12 +5195,24 @@ impl PdfView {
             .child("AI")
     }
 
-    fn selected_grid_page_indices(&self) -> Vec<usize> {
-        self.grid_overview_selection
+    fn selected_page_indices(&self, source: PageSelectionSource) -> Vec<usize> {
+        let selection = match source {
+            PageSelectionSource::GridOverview => &self.grid_overview_selection,
+            PageSelectionSource::ThumbnailSidebar => &self.thumbnail_sidebar_selection,
+        };
+
+        selection
             .iter()
             .copied()
             .filter(|page_idx| *page_idx < self.pages.len())
             .collect()
+    }
+
+    fn cancel_page_selection(&mut self, source: PageSelectionSource, cx: &mut Context<Self>) {
+        match source {
+            PageSelectionSource::GridOverview => self.cancel_grid_overview_selection(cx),
+            PageSelectionSource::ThumbnailSidebar => self.cancel_thumbnail_sidebar_selection(cx),
+        }
     }
 
     fn enter_grid_overview_selection(&mut self, cx: &mut Context<Self>) {
@@ -5143,6 +5263,93 @@ impl PdfView {
             cx.notify();
         }
         was_open
+    }
+
+    fn enter_thumbnail_sidebar_selection(&mut self, cx: &mut Context<Self>) {
+        self.thumbnail_sidebar_selecting = true;
+        self.thumbnail_sidebar_actions_position = None;
+        self.close_context_menu(cx);
+        cx.notify();
+    }
+
+    fn cancel_thumbnail_sidebar_selection(&mut self, cx: &mut Context<Self>) {
+        let changed = self.thumbnail_sidebar_selecting
+            || !self.thumbnail_sidebar_selection.is_empty()
+            || self.thumbnail_sidebar_actions_position.is_some();
+        self.thumbnail_sidebar_selecting = false;
+        self.thumbnail_sidebar_selection.clear();
+        self.thumbnail_sidebar_actions_position = None;
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn toggle_thumbnail_sidebar_page_selection(&mut self, page_idx: usize, cx: &mut Context<Self>) {
+        self.thumbnail_sidebar_current_page = page_idx.min(self.last_page_index());
+        if !self.thumbnail_sidebar_selection.insert(page_idx) {
+            self.thumbnail_sidebar_selection.remove(&page_idx);
+        }
+        self.thumbnail_sidebar_actions_position = None;
+        cx.notify();
+    }
+
+    fn toggle_thumbnail_sidebar_actions(
+        &mut self,
+        position: GpuiPoint<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_context_menu(cx);
+        self.thumbnail_sidebar_actions_position =
+            if self.thumbnail_sidebar_actions_position.is_some() {
+                None
+            } else {
+                Some(position)
+            };
+        cx.notify();
+    }
+
+    fn close_thumbnail_sidebar_actions(&mut self, cx: &mut Context<Self>) -> bool {
+        let was_open = self.thumbnail_sidebar_actions_position.take().is_some();
+        if was_open {
+            cx.notify();
+        }
+        was_open
+    }
+
+    fn set_thumbnail_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.thumbnail_sidebar_open == open {
+            return;
+        }
+
+        self.thumbnail_sidebar_open = open;
+        if open {
+            self.thumbnail_sidebar_current_page =
+                self.current_page_index().min(self.last_page_index());
+            if !self.pages.is_empty() {
+                self.thumbnail_sidebar_scroll
+                    .scroll_to_item(self.thumbnail_sidebar_current_page, ScrollStrategy::Center);
+            }
+        } else {
+            self.thumbnail_sidebar_selecting = false;
+            self.thumbnail_sidebar_selection.clear();
+            self.thumbnail_sidebar_actions_position = None;
+        }
+        cx.notify();
+    }
+
+    fn sync_thumbnail_sidebar_current_page(&mut self) {
+        if !self.thumbnail_sidebar_open || self.pages.is_empty() {
+            return;
+        }
+
+        let current_page = self.current_page_index().min(self.last_page_index());
+        if current_page == self.thumbnail_sidebar_current_page {
+            return;
+        }
+
+        self.thumbnail_sidebar_current_page = current_page;
+        self.thumbnail_sidebar_scroll
+            .scroll_to_item(current_page, ScrollStrategy::Center);
     }
 
     fn set_grid_overview_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -5223,6 +5430,27 @@ impl PdfView {
         true
     }
 
+    fn thumbnail_sidebar_zoom(width: f32) -> f32 {
+        let thumbnail_width = (width
+            - THUMBNAIL_SIDEBAR_HORIZONTAL_PADDING * 2.0
+            - THUMBNAIL_SIDEBAR_THUMBNAIL_PADDING)
+            .clamp(
+                THUMBNAIL_SIDEBAR_MIN_THUMBNAIL_WIDTH,
+                THUMBNAIL_SIDEBAR_MAX_THUMBNAIL_WIDTH,
+            );
+
+        thumbnail_width / GRID_OVERVIEW_BASE_THUMBNAIL_WIDTH
+    }
+
+    fn thumbnail_sidebar_row_height(width: f32) -> f32 {
+        let zoom = Self::thumbnail_sidebar_zoom(width);
+
+        Self::grid_overview_thumbnail_max_height(zoom)
+            + THUMBNAIL_SIDEBAR_THUMBNAIL_PADDING
+            + THUMBNAIL_SIDEBAR_LABEL_HEIGHT
+            + THUMBNAIL_SIDEBAR_ROW_PADDING_Y
+    }
+
     fn grid_overview_thumbnail_size(page: &PdfPage, zoom: f32) -> (f32, f32) {
         let page_width = page.width.max(1.0);
         let page_height = page.height.max(1.0);
@@ -5231,6 +5459,355 @@ impl PdfView {
             .max(0.001);
 
         (page_width * scale, page_height * scale)
+    }
+
+    fn render_thumbnail_sidebar(
+        &mut self,
+        theme: Theme,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.sync_thumbnail_sidebar_current_page();
+
+        let page_count = self.pages.len();
+        let selected_count = self
+            .thumbnail_sidebar_selection
+            .iter()
+            .filter(|page_idx| **page_idx < page_count)
+            .count();
+        let selecting = self.thumbnail_sidebar_selecting;
+        let zoom = Self::thumbnail_sidebar_zoom(self.thumbnail_sidebar_width);
+        let row_height = Self::thumbnail_sidebar_row_height(self.thumbnail_sidebar_width);
+        let thumbnail_max_width = Self::grid_overview_thumbnail_max_width(zoom);
+        let thumbnail_max_height = Self::grid_overview_thumbnail_max_height(zoom);
+        let thumbnail_box_width = thumbnail_max_width + THUMBNAIL_SIDEBAR_THUMBNAIL_PADDING;
+        let thumbnail_box_height = thumbnail_max_height + THUMBNAIL_SIDEBAR_THUMBNAIL_PADDING;
+        let scroll_handle = self.thumbnail_sidebar_scroll.clone();
+        let actions_position = self.thumbnail_sidebar_actions_position;
+        let compact_header =
+            selecting && self.thumbnail_sidebar_width < THUMBNAIL_SIDEBAR_COMPACT_HEADER_WIDTH;
+        let title = if compact_header { "" } else { "Thumbnails" };
+
+        let toolbar_label = if selecting && selected_count > 0 && !compact_header {
+            Some(match selected_count {
+                1 => "1 selected".to_string(),
+                count => format!("{count} selected"),
+            })
+        } else {
+            None
+        };
+
+        let mut toolbar_actions = div().flex().items_center().gap_2();
+        let actions_label = if compact_header { "⋯" } else { "Actions ▾" };
+        let cancel_label = if compact_header { "×" } else { "Cancel" };
+        if selecting && selected_count > 0 {
+            toolbar_actions = toolbar_actions
+                .child(Self::grid_overview_toolbar_button(
+                    actions_label,
+                    theme,
+                    |this, event, _, cx| {
+                        this.toggle_thumbnail_sidebar_actions(
+                            point(event.position.x, event.position.y),
+                            cx,
+                        );
+                    },
+                    cx,
+                ))
+                .child(Self::grid_overview_toolbar_button(
+                    cancel_label,
+                    theme,
+                    |this, _, _, cx| this.cancel_thumbnail_sidebar_selection(cx),
+                    cx,
+                ));
+        } else if selecting {
+            toolbar_actions = toolbar_actions.child(Self::grid_overview_toolbar_button(
+                cancel_label,
+                theme,
+                |this, _, _, cx| this.cancel_thumbnail_sidebar_selection(cx),
+                cx,
+            ));
+        } else {
+            toolbar_actions = toolbar_actions.child(Self::grid_overview_toolbar_button(
+                "Select",
+                theme,
+                |this, _, _, cx| this.enter_thumbnail_sidebar_selection(cx),
+                cx,
+            ));
+        }
+
+        let header_end = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .when_some(toolbar_label, |this, label| {
+                this.child(
+                    div()
+                        .text_color(rgb(theme.text_muted))
+                        .truncate()
+                        .child(label),
+                )
+            })
+            .child(toolbar_actions);
+
+        let content = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_context_menu(cx);
+                    this.close_thumbnail_sidebar_actions(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .when(page_count == 0, |this| {
+                        this.child(Self::render_sidebar_empty_message(
+                            "No pages available",
+                            theme,
+                        ))
+                    })
+                    .when(page_count > 0, |this| {
+                        this.child(
+                            uniform_list(
+                                "thumbnail-sidebar-list",
+                                page_count,
+                                cx.processor(
+                                    move |this, visible_range: Range<usize>, _window, cx| {
+                                        let theme =
+                                            cx.global::<SettingsStore>().resolved_theme;
+                                        let current_page =
+                                            this.current_page_index().min(this.last_page_index());
+                                        let selecting = this.thumbnail_sidebar_selecting;
+
+                                        visible_range
+                                            .filter_map(|page_idx| {
+                                                let page = this.pages.get(page_idx)?;
+                                                let (thumbnail_width, thumbnail_height) =
+                                                    Self::grid_overview_thumbnail_size(page, zoom);
+                                                let current = page_idx == current_page;
+                                                let selected = this
+                                                    .thumbnail_sidebar_selection
+                                                    .contains(&page_idx);
+                                                let border_color = if selected || current {
+                                                    theme.accent
+                                                } else {
+                                                    theme.border
+                                                };
+                                                let label_color = if selected || current {
+                                                    theme.accent
+                                                } else {
+                                                    theme.text_muted
+                                                };
+                                                let thumbnail_view = cx.entity();
+                                                let thumbnail = canvas(
+                                                    {
+                                                        let thumbnail_view =
+                                                            thumbnail_view.clone();
+                                                        move |bounds, window, cx| {
+                                                            thumbnail_view.update(cx, |this, cx| {
+                                                                let key = this.render_key(
+                                                                    page_idx,
+                                                                    bounds,
+                                                                    window.scale_factor(),
+                                                                );
+                                                                this.cached_or_request_render(
+                                                                    key, cx,
+                                                                )
+                                                            })
+                                                        }
+                                                    },
+                                                    move |bounds, image, window, _| {
+                                                        window.paint_quad(fill(
+                                                            bounds,
+                                                            rgb(theme.page),
+                                                        ));
+                                                        if let Some(image) = image {
+                                                            let _ = window.paint_image(
+                                                                bounds,
+                                                                Corners::default(),
+                                                                image,
+                                                                0,
+                                                                false,
+                                                            );
+                                                        }
+                                                    },
+                                                )
+                                                .w(px(thumbnail_width))
+                                                .h(px(thumbnail_height));
+
+                                                Some(
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .w_full()
+                                                        .h(px(row_height))
+                                                        .px(px(THUMBNAIL_SIDEBAR_HORIZONTAL_PADDING))
+                                                        .cursor_pointer()
+                                                        .hover(move |style| {
+                                                            style.bg(rgb(theme.element_hover))
+                                                        })
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(move |this, _, _, cx| {
+                                                                this.close_context_menu(cx);
+                                                                this.close_thumbnail_sidebar_actions(cx);
+                                                                if this.thumbnail_sidebar_selecting {
+                                                                    this.toggle_thumbnail_sidebar_page_selection(
+                                                                        page_idx, cx,
+                                                                    );
+                                                                } else {
+                                                                    this.navigate_to_pdf_destination(
+                                                                        page_idx, None, None, cx,
+                                                                    );
+                                                                }
+                                                                cx.stop_propagation();
+                                                            }),
+                                                        )
+                                                        .on_mouse_down(
+                                                            MouseButton::Right,
+                                                            cx.listener(
+                                                                move |this,
+                                                                      event: &MouseDownEvent,
+                                                                      window,
+                                                                      cx| {
+                                                                    this.close_thumbnail_sidebar_actions(cx);
+                                                                    this.context_menu_page =
+                                                                        Some(page_idx);
+                                                                    this.context_menu_highlight =
+                                                                        None;
+                                                                    this.context_menu_note = None;
+                                                                    this.selected_highlight = None;
+                                                                    this.selection = None;
+                                                                    this.open_context_menu(
+                                                                        event.position,
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .relative()
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .w(px(thumbnail_box_width))
+                                                                .h(px(thumbnail_box_height))
+                                                                .border_1()
+                                                                .border_color(rgb(border_color))
+                                                                .bg(if selected {
+                                                                    rgba(Self::with_alpha(
+                                                                        theme.accent,
+                                                                        0x22,
+                                                                    ))
+                                                                } else if current {
+                                                                    rgba(Self::with_alpha(
+                                                                        theme.accent,
+                                                                        0x18,
+                                                                    ))
+                                                                } else {
+                                                                    rgba(0x00000000)
+                                                                })
+                                                                .child(thumbnail)
+                                                                .when(selecting, |this| {
+                                                                    this.child(
+                                                                        div()
+                                                                            .absolute()
+                                                                            .top(px(6.0))
+                                                                            .right(px(6.0))
+                                                                            .flex()
+                                                                            .items_center()
+                                                                            .justify_center()
+                                                                            .w(px(22.0))
+                                                                            .h(px(22.0))
+                                                                            .border_1()
+                                                                            .border_color(rgb(
+                                                                                if selected {
+                                                                                    theme.accent
+                                                                                } else {
+                                                                                    theme.border
+                                                                                },
+                                                                            ))
+                                                                            .bg(rgba(
+                                                                                Self::with_alpha(
+                                                                                    theme
+                                                                                        .surface_background,
+                                                                                    0xe8,
+                                                                                ),
+                                                                            ))
+                                                                            .text_size(px(13.0))
+                                                                            .text_color(rgb(
+                                                                                if selected {
+                                                                                    theme.accent
+                                                                                } else {
+                                                                                    theme.text_muted
+                                                                                },
+                                                                            ))
+                                                                            .child(if selected {
+                                                                                "☑"
+                                                                            } else {
+                                                                                "☐"
+                                                                            }),
+                                                                    )
+                                                                }),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .mt_1()
+                                                                .h(px(THUMBNAIL_SIDEBAR_LABEL_HEIGHT))
+                                                                .text_size(px(11.0))
+                                                                .text_color(rgb(label_color))
+                                                                .child(format!("{}", page_idx + 1)),
+                                                        ),
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                    },
+                                ),
+                            )
+                            .track_scroll(&scroll_handle)
+                            .size_full(),
+                        )
+                    }),
+            )
+            .when_some(actions_position, |this, position| {
+                this.child(
+                    deferred(
+                        anchored()
+                            .snap_to_window_with_margin(px(8.0))
+                            .position(position)
+                            .anchor(Anchor::TopLeft)
+                            .child(Self::render_thumbnail_sidebar_actions_menu(theme, cx)),
+                    )
+                    .with_priority(2),
+                )
+            });
+
+        Self::render_sidebar_shell(
+            title,
+            self.thumbnail_sidebar_width,
+            header_end,
+            content,
+            Self::render_sidebar_resize_handle(
+                "thumbnail-sidebar-resize-handle",
+                DraggedSidebar::Thumbnails,
+                false,
+                cx,
+            ),
+            theme,
+        )
     }
 
     fn render_grid_overview(
@@ -5762,8 +6339,8 @@ impl PdfView {
 
         Self::render_sidebar_shell(
             "Table of Contents",
-            self.toc.len(),
             self.toc_sidebar_width,
+            Self::render_sidebar_count(self.toc.len(), theme),
             content,
             Self::render_sidebar_resize_handle(
                 "toc-sidebar-resize-handle",
@@ -5885,8 +6462,8 @@ impl PdfView {
 
         Self::render_sidebar_shell(
             "Notes",
-            visible_len,
             self.notes_sidebar_width,
+            Self::render_sidebar_count(visible_len, theme),
             content,
             Self::render_sidebar_resize_handle(
                 "notes-sidebar-resize-handle",
@@ -6418,6 +6995,9 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &ToggleNotes, _, cx| {
                 this.toggle_notes_sidebar(cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleThumbnailSidebar, _, cx| {
+                this.toggle_thumbnail_sidebar(cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleGridOverview, _, cx| {
                 this.toggle_grid_overview(cx);
             }))
@@ -6455,6 +7035,7 @@ impl Render for PdfView {
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     this.close_context_menu(cx);
+                    this.close_thumbnail_sidebar_actions(cx);
                     this.focus_handle.focus(window, cx);
                     this.dragging = false;
                     this.pending_link = None;
@@ -6518,6 +7099,7 @@ impl Render for PdfView {
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     this.close_context_menu(cx);
+                    this.close_thumbnail_sidebar_actions(cx);
                     this.focus_handle.focus(window, cx);
                     this.dragging = false;
                     this.pending_link = None;
@@ -6632,16 +7214,31 @@ impl Render for PdfView {
                                         * SIDEBAR_MAX_WIDTH_RATIO)
                                         .max(SIDEBAR_MIN_WIDTH);
                                     let new_width = match dragged_sidebar {
-                                        DraggedSidebar::Toc => {
+                                        DraggedSidebar::Thumbnails => {
                                             (e.event.position.x - e.bounds.left()).as_f32()
                                         }
+                                        DraggedSidebar::Toc => {
+                                            let thumbnail_offset = if this.thumbnail_sidebar_open {
+                                                this.thumbnail_sidebar_width
+                                            } else {
+                                                0.0
+                                            };
+                                            (e.event.position.x - e.bounds.left()).as_f32()
+                                                - thumbnail_offset
+                                        }
                                         DraggedSidebar::Notes => {
+                                            let thumbnail_offset = if this.thumbnail_sidebar_open {
+                                                this.thumbnail_sidebar_width
+                                            } else {
+                                                0.0
+                                            };
                                             let toc_offset = if this.toc_sidebar_open {
                                                 this.toc_sidebar_width
                                             } else {
                                                 0.0
                                             };
                                             (e.event.position.x - e.bounds.left()).as_f32()
+                                                - thumbnail_offset
                                                 - toc_offset
                                         }
                                         DraggedSidebar::AiPanel => {
@@ -6651,6 +7248,9 @@ impl Render for PdfView {
                                     .clamp(SIDEBAR_MIN_WIDTH, max_width);
 
                                     match dragged_sidebar {
+                                        DraggedSidebar::Thumbnails => {
+                                            this.thumbnail_sidebar_width = new_width;
+                                        }
                                         DraggedSidebar::Toc => {
                                             this.toc_sidebar_width = new_width;
                                         }
@@ -6670,6 +7270,9 @@ impl Render for PdfView {
                                     cx.notify();
                                 },
                             ))
+                            .when(self.thumbnail_sidebar_open, |this| {
+                                this.child(self.render_thumbnail_sidebar(theme, window, cx))
+                            })
                             .when(self.toc_sidebar_open, |this| {
                                 this.child(self.render_toc_sidebar(theme, window, cx))
                             })
@@ -6857,6 +7460,7 @@ impl Render for PdfView {
                                     .items_center()
                                     .child(self.render_toc_button(theme, cx))
                                     .child(self.render_notes_button(theme, cx))
+                                    .child(self.render_thumbnail_sidebar_button(theme, cx))
                                     .child(self.render_grid_overview_button(theme, cx))
                                     .child(self.render_ai_button(theme, cx)),
                             )
