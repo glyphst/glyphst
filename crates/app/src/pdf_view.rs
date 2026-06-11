@@ -1,7 +1,8 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
+    fs,
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
@@ -121,7 +122,7 @@ const GRID_OVERVIEW_ROW_PADDING_Y: f32 = 16.0;
 const GRID_OVERVIEW_LABEL_HEIGHT: f32 = 18.0;
 const GRID_OVERVIEW_HEADER_HEIGHT: f32 = 40.0;
 const GRID_OVERVIEW_VIEWPORT_WIDTH_EPSILON: f32 = 0.5;
-const PAGE_EXPORT_SCALE: f32 = 2.0;
+const PAGE_EXPORT_SCALE: f32 = 300.0 / 72.0;
 const SIDEBAR_PAGE_NUMBER_WIDTH: f32 = 38.0;
 const INFERRED_SPACE_WIDTH_RATIO: f32 = 0.75;
 const INFERRED_SPACE_HEIGHT_RATIO: f32 = 0.20;
@@ -138,6 +139,14 @@ struct PdfPage {
     height: f32,
     offset_y: f32,
     glyph_range: Range<usize>,
+}
+
+struct PageImageExport {
+    page_idx: usize,
+    display_list: Arc<DisplayList>,
+    bounds: Rect,
+    width: f32,
+    height: f32,
 }
 
 struct PageChunk {
@@ -631,6 +640,9 @@ pub struct PdfView {
     grid_overview_cols: usize,
     grid_overview_cursor: usize,
     grid_overview_viewport_width: f32,
+    grid_overview_selecting: bool,
+    grid_overview_selection: BTreeSet<usize>,
+    grid_overview_actions_position: Option<GpuiPoint<Pixels>>,
     jump_back: Vec<JumpPosition>,
     jump_forward: Vec<JumpPosition>,
     position_from_search: bool,
@@ -753,6 +765,9 @@ impl PdfView {
             grid_overview_cols: GRID_OVERVIEW_DEFAULT_COLS,
             grid_overview_cursor: 0,
             grid_overview_viewport_width: 0.0,
+            grid_overview_selecting: false,
+            grid_overview_selection: BTreeSet::new(),
+            grid_overview_actions_position: None,
             jump_back: Vec::new(),
             jump_forward: Vec::new(),
             position_from_search: false,
@@ -2353,6 +2368,202 @@ impl PdfView {
             Ok(Ok(None)) | Err(_) => {}
         })
         .detach();
+    }
+
+    fn export_selected_pages_as_text(&mut self, cx: &mut Context<Self>) {
+        let page_indices = self.selected_grid_page_indices();
+        if page_indices.is_empty() {
+            return;
+        }
+
+        let mut export_pages = Vec::with_capacity(page_indices.len());
+        for page_idx in page_indices.iter().copied() {
+            let display_list = match self.get_or_create_display_list(page_idx, cx) {
+                Ok(display_list) => display_list,
+                Err(error) => {
+                    eprintln!("failed to load PDF page for text export: {error:#}");
+                    return;
+                }
+            };
+            export_pages.push((page_idx, display_list));
+        }
+
+        let suggested_name = if export_pages.len() == 1 {
+            format!("page-{}.txt", export_pages[0].0 + 1)
+        } else {
+            "selected-pages.txt".to_string()
+        };
+        let directory = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+
+        cx.spawn(async move |_, cx| match dialog.await {
+            Ok(Ok(Some(path))) => {
+                let result = cx
+                    .background_spawn(async move {
+                        Self::save_selected_pages_text_to_path(export_pages, path)
+                    })
+                    .await;
+
+                if let Err(error) = result {
+                    eprintln!("failed to export selected PDF pages as text: {error:#}");
+                }
+            }
+            Ok(Err(error)) => eprintln!("failed to open text export dialog: {error:#}"),
+            Ok(Ok(None)) | Err(_) => {}
+        })
+        .detach();
+
+        self.cancel_grid_overview_selection(cx);
+    }
+
+    fn export_selected_pages_as_image(&mut self, cx: &mut Context<Self>) {
+        let page_indices = self.selected_grid_page_indices();
+        if page_indices.is_empty() {
+            return;
+        }
+
+        let mut export_pages = Vec::with_capacity(page_indices.len());
+        for page_idx in page_indices {
+            let Some(page) = self.pages.get(page_idx) else {
+                continue;
+            };
+            let bounds = page.bounds;
+            let width = page.width;
+            let height = page.height;
+            let display_list = match self.get_or_create_display_list(page_idx, cx) {
+                Ok(display_list) => display_list,
+                Err(error) => {
+                    eprintln!("failed to load PDF page for image export: {error:#}");
+                    return;
+                }
+            };
+            export_pages.push(PageImageExport {
+                page_idx,
+                display_list,
+                bounds,
+                width,
+                height,
+            });
+        }
+
+        if export_pages.is_empty() {
+            return;
+        }
+
+        let suggested_name = if export_pages.len() == 1 {
+            format!("page-{}.png", export_pages[0].page_idx + 1)
+        } else {
+            "selected-pages.png".to_string()
+        };
+        let directory = dirs::picture_dir()
+            .or_else(dirs::download_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+
+        cx.spawn(async move |_, cx| match dialog.await {
+            Ok(Ok(Some(path))) => {
+                let result = cx
+                    .background_spawn(async move {
+                        Self::save_selected_pages_image_to_path(export_pages, path)
+                    })
+                    .await;
+
+                if let Err(error) = result {
+                    eprintln!("failed to export selected PDF pages as image: {error:#}");
+                }
+            }
+            Ok(Err(error)) => eprintln!("failed to open image export dialog: {error:#}"),
+            Ok(Ok(None)) | Err(_) => {}
+        })
+        .detach();
+
+        self.cancel_grid_overview_selection(cx);
+    }
+
+    fn save_selected_pages_text_to_path(
+        pages: Vec<(usize, Arc<DisplayList>)>,
+        path: PathBuf,
+    ) -> Result<()> {
+        let mut text = String::new();
+        for (page_ix, (_, display_list)) in pages.into_iter().enumerate() {
+            if page_ix > 0 {
+                text.push_str("\n\n");
+            }
+            text.push_str(&Self::text_from_display_list(display_list.as_ref())?);
+        }
+
+        fs::write(&path, text).with_context(|| format!("failed to save text to {}", path.display()))
+    }
+
+    fn text_from_display_list(display_list: &DisplayList) -> Result<String> {
+        let mut glyphs = Vec::new();
+        let mut next_line_idx = 0;
+        let mut next_block_idx = 0;
+        let range = Self::extract_glyphs(
+            display_list,
+            0,
+            &mut glyphs,
+            &mut next_line_idx,
+            &mut next_block_idx,
+        )?;
+        Ok(Self::text_for_glyph_range(&glyphs, range).unwrap_or_default())
+    }
+
+    fn save_selected_pages_image_to_path(pages: Vec<PageImageExport>, path: PathBuf) -> Result<()> {
+        if pages.is_empty() {
+            bail!("no pages selected for image export");
+        }
+
+        let mut rendered_pages = Vec::with_capacity(pages.len());
+        let mut max_width = 1u32;
+        let mut total_height = 0u32;
+
+        for page in pages {
+            let (width, height, rgba) = Self::rasterize_page_to_rgba(
+                page.display_list.as_ref(),
+                page.bounds,
+                page.width,
+                page.height,
+            )?;
+            max_width = max_width.max(width);
+            total_height = total_height
+                .checked_add(height)
+                .context("combined page image is too tall")?;
+            rendered_pages.push((width, height, rgba));
+        }
+
+        let total_bytes = (max_width as u64)
+            .checked_mul(total_height as u64)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .context("combined page image is too large")?;
+        if total_bytes > usize::MAX as u64 {
+            bail!("combined page image is too large");
+        }
+
+        let mut image =
+            RgbaImage::from_pixel(max_width, total_height, image::Rgba([255, 255, 255, 255]));
+        let mut y_offset = 0u32;
+        for (width, height, rgba) in rendered_pages {
+            let page_image = RgbaImage::from_raw(width, height, rgba)
+                .context("failed to create page image data")?;
+            let x_offset = (max_width - width) / 2;
+            for y in 0..height {
+                for x in 0..width {
+                    let pixel = *page_image.get_pixel(x, y);
+                    image.put_pixel(x_offset + x, y_offset + y, pixel);
+                }
+            }
+            y_offset = y_offset
+                .checked_add(height)
+                .context("combined page image is too tall")?;
+        }
+
+        image
+            .save_with_format(&path, image::ImageFormat::Png)
+            .with_context(|| format!("failed to save image to {}", path.display()))
     }
 
     fn save_page_to_path(
@@ -4189,6 +4400,7 @@ impl PdfView {
         self.focus_handle.focus(window, cx);
         self.dragging = false;
         self.panning = None;
+        self.grid_overview_actions_position = None;
         self.context_menu_image = if self.grid_overview_open
             || self.context_menu_highlight.is_some()
             || self.context_menu_note.is_some()
@@ -4250,6 +4462,84 @@ impl PdfView {
             .text_size(px(12.0))
             .text_color(rgb(theme.text_muted))
             .child(label)
+    }
+
+    fn grid_overview_toolbar_button(
+        label: &'static str,
+        theme: Theme,
+        handler: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(px(24.0))
+            .px_2()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgba(0x00000000))
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    handler(this, event, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
+    fn grid_overview_action_entry(
+        label: &'static str,
+        theme: Theme,
+        handler: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .h(px(30.0))
+            .px_3()
+            .text_size(px(13.0))
+            .text_color(rgb(theme.text))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    handler(this, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
+    fn render_grid_overview_actions_menu(theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .occlude()
+            .flex()
+            .flex_col()
+            .min_w(px(160.0))
+            .py_1()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
+            .child(Self::grid_overview_action_entry(
+                "Export as Text",
+                theme,
+                |this, cx| this.export_selected_pages_as_text(cx),
+                cx,
+            ))
+            .child(Self::grid_overview_action_entry(
+                "Export as Image",
+                theme,
+                |this, cx| this.export_selected_pages_as_image(cx),
+                cx,
+            ))
     }
 
     fn render_note_popup(body: SharedString, theme: Theme) -> impl IntoElement {
@@ -4797,6 +5087,64 @@ impl PdfView {
             .child("AI")
     }
 
+    fn selected_grid_page_indices(&self) -> Vec<usize> {
+        self.grid_overview_selection
+            .iter()
+            .copied()
+            .filter(|page_idx| *page_idx < self.pages.len())
+            .collect()
+    }
+
+    fn enter_grid_overview_selection(&mut self, cx: &mut Context<Self>) {
+        self.grid_overview_selecting = true;
+        self.grid_overview_actions_position = None;
+        self.close_context_menu(cx);
+        cx.notify();
+    }
+
+    fn cancel_grid_overview_selection(&mut self, cx: &mut Context<Self>) {
+        let changed = self.grid_overview_selecting
+            || !self.grid_overview_selection.is_empty()
+            || self.grid_overview_actions_position.is_some();
+        self.grid_overview_selecting = false;
+        self.grid_overview_selection.clear();
+        self.grid_overview_actions_position = None;
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn toggle_grid_overview_page_selection(&mut self, page_idx: usize, cx: &mut Context<Self>) {
+        self.grid_overview_cursor = page_idx.min(self.last_page_index());
+        if !self.grid_overview_selection.insert(page_idx) {
+            self.grid_overview_selection.remove(&page_idx);
+        }
+        self.grid_overview_actions_position = None;
+        cx.notify();
+    }
+
+    fn toggle_grid_overview_actions(
+        &mut self,
+        position: GpuiPoint<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_context_menu(cx);
+        self.grid_overview_actions_position = if self.grid_overview_actions_position.is_some() {
+            None
+        } else {
+            Some(position)
+        };
+        cx.notify();
+    }
+
+    fn close_grid_overview_actions(&mut self, cx: &mut Context<Self>) -> bool {
+        let was_open = self.grid_overview_actions_position.take().is_some();
+        if was_open {
+            cx.notify();
+        }
+        was_open
+    }
+
     fn set_grid_overview_open(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.grid_overview_open == open {
             return;
@@ -4806,6 +5154,10 @@ impl PdfView {
         if open {
             self.grid_overview_cursor = self.current_page_index().min(self.last_page_index());
             self.scroll_grid_overview_cursor(ScrollStrategy::Center);
+        } else {
+            self.grid_overview_selecting = false;
+            self.grid_overview_selection.clear();
+            self.grid_overview_actions_position = None;
         }
         cx.notify();
     }
@@ -4897,7 +5249,7 @@ impl PdfView {
         let thumbnail_box_height = thumbnail_max_height + GRID_OVERVIEW_CELL_PADDING;
         let horizontal_gap =
             Self::grid_overview_horizontal_gap(self.grid_overview_viewport_width, cols, zoom);
-        let page_count = self.pages.len();
+        let actions_position = self.grid_overview_actions_position;
         let scroll_handle = self.grid_overview_scroll.clone();
         let measure_view = cx.entity();
 
@@ -4934,12 +5286,14 @@ impl PdfView {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.close_context_menu(cx);
+                    this.close_grid_overview_actions(cx);
                     cx.stop_propagation();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.close_grid_overview_actions(cx);
                     let page_idx = this.grid_overview_cursor.min(this.last_page_index());
                     this.context_menu_page = Some(page_idx);
                     this.context_menu_highlight = None;
@@ -4967,14 +5321,46 @@ impl PdfView {
                     .border_color(rgb(theme.border))
                     .child(div().text_size(px(13.0)).child("Page Overview"))
                     .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(if page_count == 1 {
-                                "1 page".to_string()
+                        {
+                            let mut toolbar = div().flex().items_center().gap_2();
+                            if self.grid_overview_selecting
+                                && !self.grid_overview_selection.is_empty()
+                            {
+                                toolbar = toolbar
+                                    .child(Self::grid_overview_toolbar_button(
+                                        "Actions ▾",
+                                        theme,
+                                        |this, event, _, cx| {
+                                            this.toggle_grid_overview_actions(
+                                                point(event.position.x, event.position.y),
+                                                cx,
+                                            );
+                                        },
+                                        cx,
+                                    ))
+                                    .child(Self::grid_overview_toolbar_button(
+                                        "Cancel Selection",
+                                        theme,
+                                        |this, _, _, cx| this.cancel_grid_overview_selection(cx),
+                                        cx,
+                                    ));
+                            } else if self.grid_overview_selecting {
+                                toolbar = toolbar.child(Self::grid_overview_toolbar_button(
+                                    "Cancel",
+                                    theme,
+                                    |this, _, _, cx| this.cancel_grid_overview_selection(cx),
+                                    cx,
+                                ));
                             } else {
-                                format!("{page_count} pages")
-                            }),
+                                toolbar = toolbar.child(Self::grid_overview_toolbar_button(
+                                    "Select",
+                                    theme,
+                                    |this, _, _, cx| this.enter_grid_overview_selection(cx),
+                                    cx,
+                                ));
+                            }
+                            toolbar
+                        },
                     ),
             )
             .child(
@@ -5011,12 +5397,16 @@ impl PdfView {
                                                 let (thumbnail_width, thumbnail_height) =
                                                     Self::grid_overview_thumbnail_size(page, zoom);
                                                 let current = page_idx == current_page;
-                                                let border_color = if current {
+                                                let selecting = this.grid_overview_selecting;
+                                                let selected = this
+                                                    .grid_overview_selection
+                                                    .contains(&page_idx);
+                                                let border_color = if selected || current {
                                                     theme.accent
                                                 } else {
                                                     theme.border
                                                 };
-                                                let label_color = if current {
+                                                let label_color = if selected || current {
                                                     theme.accent
                                                 } else {
                                                     theme.text_muted
@@ -5063,6 +5453,7 @@ impl PdfView {
                                                         .flex_none()
                                                         .flex_col()
                                                         .items_center()
+                                                        .relative()
                                                         .w(px(thumbnail_box_width))
                                                         .cursor_pointer()
                                                         .hover(move |style| {
@@ -5072,12 +5463,19 @@ impl PdfView {
                                                             MouseButton::Left,
                                                             cx.listener(move |this, _, _, cx| {
                                                                 this.close_context_menu(cx);
-                                                                this.navigate_to_pdf_destination(
-                                                                    page_idx, None, None, cx,
-                                                                );
-                                                                this.set_grid_overview_open(
-                                                                    false, cx,
-                                                                );
+                                                                this.close_grid_overview_actions(cx);
+                                                                if this.grid_overview_selecting {
+                                                                    this.toggle_grid_overview_page_selection(
+                                                                        page_idx, cx,
+                                                                    );
+                                                                } else {
+                                                                    this.navigate_to_pdf_destination(
+                                                                        page_idx, None, None, cx,
+                                                                    );
+                                                                    this.set_grid_overview_open(
+                                                                        false, cx,
+                                                                    );
+                                                                }
                                                                 cx.stop_propagation();
                                                             }),
                                                         )
@@ -5088,6 +5486,7 @@ impl PdfView {
                                                                       event: &MouseDownEvent,
                                                                       window,
                                                                       cx| {
+                                                                    this.close_grid_overview_actions(cx);
                                                                     this.grid_overview_cursor =
                                                                         page_idx;
                                                                     this.context_menu_page =
@@ -5106,6 +5505,7 @@ impl PdfView {
                                                         )
                                                         .child(
                                                             div()
+                                                                .relative()
                                                                 .flex()
                                                                 .items_center()
                                                                 .justify_center()
@@ -5113,7 +5513,12 @@ impl PdfView {
                                                                 .h(px(thumbnail_box_height))
                                                                 .border_1()
                                                                 .border_color(rgb(border_color))
-                                                                .bg(if current {
+                                                                .bg(if selected {
+                                                                    rgba(Self::with_alpha(
+                                                                        theme.accent,
+                                                                        0x22,
+                                                                    ))
+                                                                } else if current {
                                                                     rgba(Self::with_alpha(
                                                                         theme.accent,
                                                                         0x18,
@@ -5121,7 +5526,48 @@ impl PdfView {
                                                                 } else {
                                                                     rgba(0x00000000)
                                                                 })
-                                                                .child(thumbnail),
+                                                                .child(thumbnail)
+                                                                .when(selecting, |this| {
+                                                                    this.child(
+                                                                        div()
+                                                                            .absolute()
+                                                                            .top(px(6.0))
+                                                                            .right(px(6.0))
+                                                                            .flex()
+                                                                            .items_center()
+                                                                            .justify_center()
+                                                                            .w(px(22.0))
+                                                                            .h(px(22.0))
+                                                                            .border_1()
+                                                                            .border_color(rgb(
+                                                                                if selected {
+                                                                                    theme.accent
+                                                                                } else {
+                                                                                    theme.border
+                                                                                },
+                                                                            ))
+                                                                            .bg(rgba(
+                                                                                Self::with_alpha(
+                                                                                    theme
+                                                                                        .surface_background,
+                                                                                    0xe8,
+                                                                                ),
+                                                                            ))
+                                                                            .text_size(px(13.0))
+                                                                            .text_color(rgb(
+                                                                                if selected {
+                                                                                    theme.accent
+                                                                                } else {
+                                                                                    theme.text_muted
+                                                                                },
+                                                                            ))
+                                                                            .child(if selected {
+                                                                                "☑"
+                                                                            } else {
+                                                                                "☐"
+                                                                            }),
+                                                                    )
+                                                                }),
                                                         )
                                                         .child(
                                                             div()
@@ -5147,6 +5593,18 @@ impl PdfView {
                         .size_full(),
                     ),
             )
+            .when_some(actions_position, |this, position| {
+                this.child(
+                    deferred(
+                        anchored()
+                            .snap_to_window_with_margin(px(8.0))
+                            .position(position)
+                            .anchor(Anchor::TopLeft)
+                            .child(Self::render_grid_overview_actions_menu(theme, cx)),
+                    )
+                    .with_priority(2),
+                )
+            })
     }
 
     fn render_toc_sidebar(
