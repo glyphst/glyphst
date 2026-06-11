@@ -5285,7 +5285,6 @@ impl PdfView {
     }
 
     fn toggle_thumbnail_sidebar_page_selection(&mut self, page_idx: usize, cx: &mut Context<Self>) {
-        self.thumbnail_sidebar_current_page = page_idx.min(self.last_page_index());
         if !self.thumbnail_sidebar_selection.insert(page_idx) {
             self.thumbnail_sidebar_selection.remove(&page_idx);
         }
@@ -5338,11 +5337,19 @@ impl PdfView {
     }
 
     fn sync_thumbnail_sidebar_current_page(&mut self) {
-        if !self.thumbnail_sidebar_open || self.pages.is_empty() {
+        if !self.thumbnail_sidebar_open || self.thumbnail_sidebar_selecting || self.pages.is_empty()
+        {
             return;
         }
 
-        let current_page = self.current_page_index().min(self.last_page_index());
+        let sync_scroll_y = if (self.target_scroll_y_doc - self.scroll_y_doc).abs() > f32::EPSILON {
+            self.target_scroll_y_doc
+        } else {
+            self.scroll_y_doc
+        };
+        let current_page = self
+            .page_index_for_scroll_y(sync_scroll_y)
+            .min(self.last_page_index());
         if current_page == self.thumbnail_sidebar_current_page {
             return;
         }
