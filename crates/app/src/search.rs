@@ -64,6 +64,7 @@ pub struct SearchBar {
     active_match: Option<usize>,
     match_count: usize,
     ignore_case: bool,
+    indexing: bool,
     search_debounce: Option<Task<()>>,
 }
 
@@ -74,6 +75,7 @@ impl SearchBar {
         active_match: Option<usize>,
         match_count: usize,
         ignore_case: bool,
+        indexing: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let content_len = content.len();
@@ -94,6 +96,7 @@ impl SearchBar {
             active_match,
             match_count,
             ignore_case,
+            indexing,
             search_debounce: None,
         }
     }
@@ -104,12 +107,14 @@ impl SearchBar {
         active_match: Option<usize>,
         match_count: usize,
         ignore_case: bool,
+        indexing: bool,
         cx: &mut Context<Self>,
     ) {
         if self.applied_query.as_ref() == applied_query.as_ref()
             && self.active_match == active_match
             && self.match_count == match_count
             && self.ignore_case == ignore_case
+            && self.indexing == indexing
         {
             return;
         }
@@ -118,6 +123,7 @@ impl SearchBar {
         self.active_match = active_match;
         self.match_count = match_count;
         self.ignore_case = ignore_case;
+        self.indexing = indexing;
         cx.notify();
     }
 
@@ -413,6 +419,8 @@ impl SearchBar {
     fn counter_text(&self) -> String {
         if self.applied_query.is_empty() || self.content.as_ref() != self.applied_query.as_ref() {
             String::new()
+        } else if self.indexing {
+            "indexing…".to_string()
         } else {
             let active_match = self.active_match.map_or(0, |active| active + 1);
             format!("{active_match}/{}", self.match_count)
@@ -559,7 +567,9 @@ impl Render for SearchBar {
         let entity = cx.entity();
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let counter = self.counter_text();
-        let counter_color = if !counter.is_empty() && self.match_count == 0 {
+        let counter_color = if self.indexing {
+            theme.text_muted
+        } else if !counter.is_empty() && self.match_count == 0 {
             theme.error
         } else {
             theme.text_muted

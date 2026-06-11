@@ -142,19 +142,28 @@ struct PdfPage {
 struct PageChunk {
     start_page_idx: usize,
     pages: Vec<PdfPage>,
-    glyphs: Vec<Glyph>,
-    links: Vec<PdfLink>,
     max_page_width: f32,
-    line_count: u32,
-    block_count: u32,
 }
 
 struct LoadedPages {
     pages: Vec<PdfPage>,
     max_page_width: f32,
     content_height_doc: f32,
+}
+
+struct TextChunk {
+    start_page_idx: usize,
     glyphs: Vec<Glyph>,
     links: Vec<PdfLink>,
+    page_glyph_ranges: Vec<Range<usize>>,
+    line_count: u32,
+    block_count: u32,
+}
+
+struct LoadedText {
+    glyphs: Vec<Glyph>,
+    links: Vec<PdfLink>,
+    page_glyph_ranges: Vec<Range<usize>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -621,6 +630,8 @@ pub struct PdfView {
     loading_error: Option<String>,
     pending_initial_position: Option<DocumentPosition>,
     loading_task: Option<Task<()>>,
+    text_indexing: bool,
+    text_indexing_task: Option<Task<()>>,
     position_save_task: Option<Task<()>>,
     context_menu_position: Option<GpuiPoint<Pixels>>,
     context_menu_image: Option<(usize, usize)>,
@@ -740,6 +751,8 @@ impl PdfView {
             loading_error: None,
             pending_initial_position: initial_position,
             loading_task: None,
+            text_indexing: false,
+            text_indexing_task: None,
             position_save_task: None,
             context_menu_position: None,
             context_menu_image: None,
@@ -772,10 +785,7 @@ impl PdfView {
         let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
 
         self.loading_task = Some(cx.spawn(async move |this, cx| {
-            let thread_count = std::thread::available_parallelism()
-                .map(|count| count.get())
-                .unwrap_or(1)
-                .min(page_count.max(1));
+            let thread_count = Self::thread_count(page_count);
             let chunk_size = page_count.div_ceil(thread_count);
             let mut tasks = Vec::with_capacity(thread_count);
 
@@ -788,7 +798,7 @@ impl PdfView {
                 let end_page_idx = (start_page_idx + chunk_size).min(page_count);
                 let path = path.clone();
                 tasks.push(cx.background_spawn(async move {
-                    Self::load_page_chunk(&path, start_page_idx, end_page_idx, page_count)
+                    Self::load_page_chunk(&path, start_page_idx, end_page_idx)
                         .map_err(|error| format!("{error:#}"))
                 }));
             }
@@ -828,19 +838,28 @@ impl PdfView {
         }
     }
 
+    fn thread_count(item_count: usize) -> usize {
+        std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+            .min(item_count.max(1))
+    }
+
+    fn text_index_thread_count(item_count: usize) -> usize {
+        std::thread::available_parallelism()
+            .map(|count| count.get().saturating_sub(1).max(1))
+            .unwrap_or(1)
+            .min(item_count.max(1))
+    }
+
     fn load_page_chunk(
         path: &Path,
         start_page_idx: usize,
         end_page_idx: usize,
-        page_count: usize,
     ) -> Result<PageChunk> {
         let document = mupdf::Document::open(path)?;
         let mut pages = Vec::with_capacity(end_page_idx.saturating_sub(start_page_idx));
-        let mut glyphs = Vec::new();
-        let mut links = Vec::new();
         let mut max_page_width = 0.0_f32;
-        let mut next_line_idx = 0;
-        let mut next_block_idx = 0;
 
         for page_idx in start_page_idx..end_page_idx {
             let page = document.load_page(page_idx as i32)?;
@@ -848,7 +867,168 @@ impl PdfView {
             let page_width = page_bounds.x1 - page_bounds.x0;
             let page_height = page_bounds.y1 - page_bounds.y0;
 
-            let display_list = Arc::new(DisplayList::new(page_bounds)?);
+            pages.push(PdfPage {
+                bounds: page_bounds,
+                width: page_width,
+                height: page_height,
+                offset_y: 0.0,
+                glyph_range: 0..0,
+            });
+
+            max_page_width = max_page_width.max(page_width);
+        }
+
+        Ok(PageChunk {
+            start_page_idx,
+            pages,
+            max_page_width,
+        })
+    }
+
+    fn merge_page_chunks(
+        mut chunks: Vec<PageChunk>,
+        page_gap: f32,
+    ) -> std::result::Result<LoadedPages, String> {
+        chunks.sort_by_key(|chunk| chunk.start_page_idx);
+
+        let page_count = chunks.iter().map(|chunk| chunk.pages.len()).sum();
+        let mut pages = Vec::with_capacity(page_count);
+        let mut offset_y = 0.0;
+        let mut max_page_width = 0.0_f32;
+
+        for mut chunk in chunks {
+            max_page_width = max_page_width.max(chunk.max_page_width);
+
+            for page in &mut chunk.pages {
+                page.offset_y = offset_y;
+                offset_y += page.height + page_gap;
+            }
+
+            pages.extend(chunk.pages);
+        }
+
+        let content_height_doc = if pages.is_empty() {
+            0.0
+        } else {
+            offset_y - page_gap
+        };
+
+        Ok(LoadedPages {
+            pages,
+            max_page_width,
+            content_height_doc,
+        })
+    }
+
+    fn apply_loaded_pages(&mut self, loaded: LoadedPages, cx: &mut Context<Self>) {
+        self.pages = loaded.pages;
+        self.max_page_width = loaded.max_page_width.max(1.0);
+        self.content_height_doc = loaded.content_height_doc;
+        self.glyphs.clear();
+        self.links.clear();
+        self.search.matches.clear();
+        self.search.active = None;
+        self.selection = None;
+        self.hovered_link = None;
+        self.pending_link = None;
+        self.page_image_bounds = (0..self.pages.len()).map(|_| None).collect();
+        self.loading = false;
+        self.loading_error = None;
+
+        if let Some(position) = self.pending_initial_position.take() {
+            self.restore_position(position);
+        } else {
+            self.clamp_scroll();
+        }
+
+        self.start_text_indexing(cx);
+        cx.notify();
+    }
+
+    fn apply_loading_error(&mut self, error: String, cx: &mut Context<Self>) {
+        eprintln!("failed to load PDF pages: {error}");
+        self.loading = false;
+        self.text_indexing = false;
+        self.loading_error = Some(error);
+        cx.notify();
+    }
+
+    fn start_text_indexing(&mut self, cx: &mut Context<Self>) {
+        if self.text_indexing_task.is_some() || self.pages.is_empty() {
+            return;
+        }
+
+        self.text_indexing = true;
+        self.sync_search_bar(cx);
+
+        let path = self.path.clone();
+        let page_count = self.pages.len();
+        let page_bounds: Vec<Rect> = self.pages.iter().map(|page| page.bounds).collect();
+
+        self.text_indexing_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+
+            let thread_count = Self::text_index_thread_count(page_count);
+            let chunk_size = page_count.div_ceil(thread_count);
+            let mut tasks = Vec::with_capacity(thread_count);
+
+            for chunk_ix in 0..thread_count {
+                let start_page_idx = chunk_ix * chunk_size;
+                if start_page_idx >= page_count {
+                    break;
+                }
+
+                let end_page_idx = (start_page_idx + chunk_size).min(page_count);
+                let path = path.clone();
+                let page_bounds = page_bounds[start_page_idx..end_page_idx].to_vec();
+                tasks.push(cx.background_spawn(async move {
+                    Self::load_page_text_chunk(
+                        &path,
+                        start_page_idx,
+                        end_page_idx,
+                        page_count,
+                        page_bounds,
+                    )
+                    .map_err(|error| format!("{error:#}"))
+                }));
+            }
+
+            let mut chunks = Vec::with_capacity(tasks.len());
+            for task in tasks {
+                match task.await {
+                    Ok(chunk) => chunks.push(chunk),
+                    Err(error) => {
+                        Self::finish_text_indexing(this, cx, Err(error));
+                        return;
+                    }
+                }
+            }
+
+            let result = Self::merge_text_chunks(chunks, page_count);
+            Self::finish_text_indexing(this, cx, result);
+        }));
+    }
+
+    fn load_page_text_chunk(
+        path: &Path,
+        start_page_idx: usize,
+        end_page_idx: usize,
+        page_count: usize,
+        page_bounds: Vec<Rect>,
+    ) -> Result<TextChunk> {
+        let document = mupdf::Document::open(path)?;
+        let mut glyphs = Vec::new();
+        let mut links = Vec::new();
+        let mut page_glyph_ranges = Vec::with_capacity(end_page_idx.saturating_sub(start_page_idx));
+        let mut next_line_idx = 0;
+        let mut next_block_idx = 0;
+
+        for page_idx in start_page_idx..end_page_idx {
+            let page = document.load_page(page_idx as i32)?;
+            let page_bounds = page_bounds[page_idx - start_page_idx];
+            let display_list = DisplayList::new(page_bounds)?;
             let device = Device::from_display_list(&display_list)?;
             page.run(&device, &Matrix::IDENTITY)?;
 
@@ -878,48 +1058,34 @@ impl PdfView {
                 &links[explicit_links_start..],
             );
             links.extend(detected_links);
-
-            pages.push(PdfPage {
-                bounds: page_bounds,
-                width: page_width,
-                height: page_height,
-                offset_y: 0.0,
-                glyph_range,
-            });
-
-            max_page_width = max_page_width.max(page_width);
+            page_glyph_ranges.push(glyph_range);
         }
 
-        Ok(PageChunk {
+        Ok(TextChunk {
             start_page_idx,
-            pages,
             glyphs,
             links,
-            max_page_width,
+            page_glyph_ranges,
             line_count: next_line_idx,
             block_count: next_block_idx,
         })
     }
 
-    fn merge_page_chunks(
-        mut chunks: Vec<PageChunk>,
-        page_gap: f32,
-    ) -> std::result::Result<LoadedPages, String> {
+    fn merge_text_chunks(
+        mut chunks: Vec<TextChunk>,
+        page_count: usize,
+    ) -> std::result::Result<LoadedText, String> {
         chunks.sort_by_key(|chunk| chunk.start_page_idx);
 
-        let page_count = chunks.iter().map(|chunk| chunk.pages.len()).sum();
         let glyph_count = chunks.iter().map(|chunk| chunk.glyphs.len()).sum();
         let link_count = chunks.iter().map(|chunk| chunk.links.len()).sum();
-        let mut pages = Vec::with_capacity(page_count);
         let mut glyphs = Vec::with_capacity(glyph_count);
         let mut links = Vec::with_capacity(link_count);
-        let mut offset_y = 0.0;
-        let mut max_page_width = 0.0_f32;
+        let mut page_glyph_ranges = vec![0..0; page_count];
         let mut line_offset = 0_u32;
         let mut block_offset = 0_u32;
 
         for mut chunk in chunks {
-            max_page_width = max_page_width.max(chunk.max_page_width);
             let glyph_offset = glyphs.len();
 
             for glyph in &mut chunk.glyphs {
@@ -933,11 +1099,14 @@ impl PdfView {
                     .ok_or_else(|| "PDF contains too many text blocks".to_string())?;
             }
 
-            for page in &mut chunk.pages {
-                page.offset_y = offset_y;
-                page.glyph_range =
-                    (page.glyph_range.start + glyph_offset)..(page.glyph_range.end + glyph_offset);
-                offset_y += page.height + page_gap;
+            for (offset, range) in chunk.page_glyph_ranges.into_iter().enumerate() {
+                let page_idx = chunk.start_page_idx + offset;
+                if page_idx >= page_count {
+                    return Err("PDF text chunk exceeded page count".to_string());
+                }
+
+                page_glyph_ranges[page_idx] =
+                    (range.start + glyph_offset)..(range.end + glyph_offset);
             }
 
             line_offset = line_offset
@@ -947,49 +1116,63 @@ impl PdfView {
                 .checked_add(chunk.block_count)
                 .ok_or_else(|| "PDF contains too many text blocks".to_string())?;
 
-            pages.extend(chunk.pages);
             glyphs.extend(chunk.glyphs);
             links.extend(chunk.links);
         }
 
-        let content_height_doc = if pages.is_empty() {
-            0.0
-        } else {
-            offset_y - page_gap
-        };
-
-        Ok(LoadedPages {
-            pages,
-            max_page_width,
-            content_height_doc,
+        Ok(LoadedText {
             glyphs,
             links,
+            page_glyph_ranges,
         })
     }
 
-    fn apply_loaded_pages(&mut self, loaded: LoadedPages, cx: &mut Context<Self>) {
-        self.pages = loaded.pages;
-        self.max_page_width = loaded.max_page_width.max(1.0);
-        self.content_height_doc = loaded.content_height_doc;
+    fn finish_text_indexing(
+        this: gpui::WeakEntity<Self>,
+        cx: &mut AsyncApp,
+        result: std::result::Result<LoadedText, String>,
+    ) {
+        let update_result = this.update(cx, |this, cx| {
+            this.text_indexing_task = None;
+            match result {
+                Ok(loaded) => this.apply_text_data(loaded, cx),
+                Err(error) => this.apply_text_indexing_error(error, cx),
+            }
+        });
+        if let Err(error) = update_result
+            && error.to_string() != "entity released"
+        {
+            eprintln!("failed to update indexed PDF text: {error:#}");
+        }
+    }
+
+    fn apply_text_data(&mut self, loaded: LoadedText, cx: &mut Context<Self>) {
         self.glyphs = loaded.glyphs;
         self.links = loaded.links;
-        self.page_image_bounds = (0..self.pages.len()).map(|_| None).collect();
-        self.loading = false;
-        self.loading_error = None;
+        self.text_indexing = false;
+        self.hovered_link = None;
+        self.pending_link = None;
 
-        if let Some(position) = self.pending_initial_position.take() {
-            self.restore_position(position);
-        } else {
-            self.clamp_scroll();
+        for (page, glyph_range) in self.pages.iter_mut().zip(loaded.page_glyph_ranges) {
+            page.glyph_range = glyph_range;
+        }
+
+        self.recompute_search();
+        self.search.active = self.nearest_search_match_index();
+        self.sync_search_bar(cx);
+
+        if self.search.active.is_some() {
+            self.record_search_jump_origin();
+            self.scroll_to_active_search_match(cx);
         }
 
         cx.notify();
     }
 
-    fn apply_loading_error(&mut self, error: String, cx: &mut Context<Self>) {
-        eprintln!("failed to load PDF pages: {error}");
-        self.loading = false;
-        self.loading_error = Some(error);
+    fn apply_text_indexing_error(&mut self, error: String, cx: &mut Context<Self>) {
+        eprintln!("failed to index PDF text: {error}");
+        self.text_indexing = false;
+        self.sync_search_bar(cx);
         cx.notify();
     }
 
@@ -2412,7 +2595,11 @@ impl PdfView {
     }
 
     fn exact_glyph_at_pdf(&self, page_idx: usize, point: mupdf::Point) -> Option<usize> {
-        let range = self.pages[page_idx].glyph_range.clone();
+        let range = self.pages.get(page_idx)?.glyph_range.clone();
+        if range.start >= range.end || range.end > self.glyphs.len() {
+            return None;
+        }
+
         self.glyphs[range.clone()]
             .iter()
             .enumerate()
@@ -2433,7 +2620,11 @@ impl PdfView {
             return Some(ix);
         }
 
-        let range = self.pages[page_idx].glyph_range.clone();
+        let range = self.pages.get(page_idx)?.glyph_range.clone();
+        if range.start >= range.end || range.end > self.glyphs.len() {
+            return None;
+        }
+
         self.glyphs[range.clone()]
             .iter()
             .enumerate()
@@ -2446,7 +2637,7 @@ impl PdfView {
     }
 
     fn glyph_at_pdf(&self, page_idx: usize, point: mupdf::Point) -> Option<usize> {
-        if self.pages[page_idx].glyph_range.is_empty() {
+        if self.pages.get(page_idx)?.glyph_range.is_empty() {
             return None;
         }
 
@@ -2482,7 +2673,11 @@ impl PdfView {
         page_idx: usize,
         point: mupdf::Point,
     ) -> Option<(f32, usize, usize, Rect)> {
-        let range = self.pages[page_idx].glyph_range.clone();
+        let range = self.pages.get(page_idx)?.glyph_range.clone();
+        if range.start >= range.end || range.end > self.glyphs.len() {
+            return None;
+        }
+
         let mut best = None;
         let mut start = range.start;
 
@@ -2893,7 +3088,7 @@ impl PdfView {
         } else {
             self.search.query.as_ref().to_string()
         };
-        if needle.is_empty() {
+        if needle.is_empty() || self.text_indexing {
             return;
         }
 
@@ -2926,8 +3121,15 @@ impl PdfView {
         let mut text = String::new();
         let mut glyph_map = Vec::new();
         let mut previous: Option<&Glyph> = None;
+        let Some(page) = self.pages.get(page_idx) else {
+            return (text, glyph_map);
+        };
+        let range = page.glyph_range.clone();
+        if range.start >= range.end || range.end > self.glyphs.len() {
+            return (text, glyph_map);
+        }
 
-        for glyph_ix in self.pages[page_idx].glyph_range.clone() {
+        for glyph_ix in range {
             let glyph = &self.glyphs[glyph_ix];
             if let Some(previous) = previous {
                 if glyph.block_idx != previous.block_idx {
@@ -3048,6 +3250,13 @@ impl PdfView {
     }
 
     fn search_match_doc_rect(&self, search_match: &SearchMatch) -> Option<Rect> {
+        if search_match.range.start >= search_match.range.end
+            || search_match.range.end > self.glyphs.len()
+            || search_match.page_idx >= self.pages.len()
+        {
+            return None;
+        }
+
         let mut rect = None;
 
         for glyph in &self.glyphs[search_match.range.clone()] {
@@ -3078,8 +3287,16 @@ impl PdfView {
             let active = self.search.active;
             let match_count = self.search.matches.len();
             let ignore_case = self.search.ignore_case;
+            let indexing = self.text_indexing && !query.is_empty();
             search_bar.update(cx, |search_bar, cx| {
-                search_bar.set_match_status(query.clone(), active, match_count, ignore_case, cx);
+                search_bar.set_match_status(
+                    query.clone(),
+                    active,
+                    match_count,
+                    ignore_case,
+                    indexing,
+                    cx,
+                );
             });
         }
     }
@@ -3522,6 +3739,7 @@ impl PdfView {
         let active = self.search.active;
         let match_count = self.search.matches.len();
         let ignore_case = self.search.ignore_case;
+        let indexing = self.text_indexing && !query.is_empty();
         let search_bar = cx.new(|cx| {
             SearchBar::new(
                 previous_focus_handle.clone(),
@@ -3529,6 +3747,7 @@ impl PdfView {
                 active,
                 match_count,
                 ignore_case,
+                indexing,
                 cx,
             )
         });
