@@ -121,6 +121,7 @@ const GRID_OVERVIEW_ROW_PADDING_Y: f32 = 16.0;
 const GRID_OVERVIEW_LABEL_HEIGHT: f32 = 18.0;
 const GRID_OVERVIEW_HEADER_HEIGHT: f32 = 40.0;
 const GRID_OVERVIEW_VIEWPORT_WIDTH_EPSILON: f32 = 0.5;
+const PAGE_EXPORT_SCALE: f32 = 2.0;
 const SIDEBAR_PAGE_NUMBER_WIDTH: f32 = 38.0;
 const INFERRED_SPACE_WIDTH_RATIO: f32 = 0.75;
 const INFERRED_SPACE_HEIGHT_RATIO: f32 = 0.20;
@@ -460,6 +461,16 @@ enum HighlightColorAction {
     Change,
 }
 
+#[derive(Clone, Copy)]
+struct ContextMenuState {
+    has_page: bool,
+    has_image: bool,
+    has_selection: bool,
+    highlight_color: Option<HighlightColor>,
+    has_note: bool,
+    grid_overview: bool,
+}
+
 enum NoteTarget {
     New {
         rects: Vec<HighlightRect>,
@@ -634,6 +645,7 @@ pub struct PdfView {
     text_indexing_task: Option<Task<()>>,
     position_save_task: Option<Task<()>>,
     context_menu_position: Option<GpuiPoint<Pixels>>,
+    context_menu_page: Option<usize>,
     context_menu_image: Option<(usize, usize)>,
     context_menu_highlight: Option<u64>,
     context_menu_note: Option<u64>,
@@ -755,6 +767,7 @@ impl PdfView {
             text_indexing_task: None,
             position_save_task: None,
             context_menu_position: None,
+            context_menu_page: None,
             context_menu_image: None,
             context_menu_highlight: None,
             context_menu_note: None,
@@ -2292,6 +2305,124 @@ impl PdfView {
         image
             .save_with_format(&path, image::ImageFormat::Png)
             .with_context(|| format!("failed to save image to {}", path.display()))
+    }
+
+    fn save_page_as_image(&mut self, cx: &mut Context<Self>) {
+        let Some(page_idx) = self.context_menu_page else {
+            return;
+        };
+        let Some(page) = self.pages.get(page_idx) else {
+            return;
+        };
+        let page_bounds = page.bounds;
+        let page_width = page.width;
+        let page_height = page.height;
+        let display_list = match self.get_or_create_display_list(page_idx, cx) {
+            Ok(display_list) => display_list,
+            Err(error) => {
+                eprintln!("failed to load PDF page for image export: {error:#}");
+                return;
+            }
+        };
+        let suggested_name = format!("page-{}.png", page_idx + 1);
+        let directory = dirs::picture_dir()
+            .or_else(dirs::download_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+
+        cx.spawn(async move |_, cx| match dialog.await {
+            Ok(Ok(Some(path))) => {
+                let result = cx
+                    .background_spawn(async move {
+                        Self::save_page_to_path(
+                            display_list,
+                            page_bounds,
+                            page_width,
+                            page_height,
+                            path,
+                        )
+                    })
+                    .await;
+
+                if let Err(error) = result {
+                    eprintln!("failed to save PDF page as image: {error:#}");
+                }
+            }
+            Ok(Err(error)) => eprintln!("failed to open save page image dialog: {error:#}"),
+            Ok(Ok(None)) | Err(_) => {}
+        })
+        .detach();
+    }
+
+    fn save_page_to_path(
+        display_list: Arc<DisplayList>,
+        page_bounds: Rect,
+        page_width: f32,
+        page_height: f32,
+        path: PathBuf,
+    ) -> Result<()> {
+        let (width, height, rgba) =
+            Self::rasterize_page_to_rgba(&display_list, page_bounds, page_width, page_height)?;
+        let image =
+            RgbaImage::from_raw(width, height, rgba).context("failed to create page image data")?;
+        image
+            .save_with_format(&path, image::ImageFormat::Png)
+            .with_context(|| format!("failed to save image to {}", path.display()))
+    }
+
+    fn rasterize_page_to_rgba(
+        display_list: &DisplayList,
+        page_bounds: Rect,
+        page_width: f32,
+        page_height: f32,
+    ) -> Result<(u32, u32, Vec<u8>)> {
+        let physical_width = (page_width * PAGE_EXPORT_SCALE).ceil().max(1.0);
+        let physical_height = (page_height * PAGE_EXPORT_SCALE).ceil().max(1.0);
+        if physical_width > i32::MAX as f32 || physical_height > i32::MAX as f32 {
+            bail!("PDF page is too large to export as an image");
+        }
+
+        let physical_width_i32 = physical_width as i32;
+        let physical_height_i32 = physical_height as i32;
+        let mut pixmap = Pixmap::new_with_w_h(
+            &Colorspace::device_rgb(),
+            physical_width_i32,
+            physical_height_i32,
+            true,
+        )?;
+        pixmap.samples_mut().fill(255);
+
+        let zoom_x = physical_width / page_width.max(1.0);
+        let zoom_y = physical_height / page_height.max(1.0);
+        let matrix = Matrix::new(
+            zoom_x,
+            0.0,
+            0.0,
+            zoom_y,
+            -page_bounds.x0 * zoom_x,
+            -page_bounds.y0 * zoom_y,
+        );
+        {
+            let device = Device::from_pixmap(&pixmap)?;
+            display_list
+                .run(&device, &matrix, Rect::INF)
+                .context("failed to render PDF page image")?;
+        }
+
+        let width = pixmap.width();
+        let height = pixmap.height();
+        let samples = pixmap.samples();
+        let expected_len = width as usize * height as usize * 4;
+        if samples.len() != expected_len || pixmap.n() != 4 {
+            bail!(
+                "unexpected page image pixmap layout: {} samples, {} components",
+                samples.len(),
+                pixmap.n()
+            );
+        }
+
+        Ok((width, height, samples.to_vec()))
     }
 
     fn rasterize_image_from_display_list(
@@ -4058,12 +4189,14 @@ impl PdfView {
         self.focus_handle.focus(window, cx);
         self.dragging = false;
         self.panning = None;
-        self.context_menu_image =
-            if self.context_menu_highlight.is_some() || self.context_menu_note.is_some() {
-                None
-            } else {
-                self.image_at_screen(position, cx)
-            };
+        self.context_menu_image = if self.grid_overview_open
+            || self.context_menu_highlight.is_some()
+            || self.context_menu_note.is_some()
+        {
+            None
+        } else {
+            self.image_at_screen(position, cx)
+        };
         self.context_menu_position = Some(position);
         window.prevent_default();
         cx.stop_propagation();
@@ -4072,6 +4205,7 @@ impl PdfView {
 
     fn close_context_menu(&mut self, cx: &mut Context<Self>) -> bool {
         let was_open = self.context_menu_position.take().is_some();
+        self.context_menu_page = None;
         self.context_menu_image = None;
         self.context_menu_highlight = None;
         if was_open {
@@ -4339,10 +4473,7 @@ impl PdfView {
     }
 
     fn render_context_menu(
-        has_image: bool,
-        has_selection: bool,
-        highlight_color: Option<HighlightColor>,
-        has_note: bool,
+        state: ContextMenuState,
         is_fullscreen: bool,
         theme: Theme,
         cx: &mut Context<Self>,
@@ -4373,7 +4504,7 @@ impl PdfView {
                 window.prevent_default();
                 cx.stop_propagation();
             })
-            .when(has_note, |menu| {
+            .when(state.has_note, |menu| {
                 menu.child(Self::context_menu_entry(
                     "Edit Note",
                     theme,
@@ -4388,7 +4519,7 @@ impl PdfView {
                 ))
                 .child(Self::context_menu_separator(theme))
             })
-            .when(!has_note && has_selection, |menu| {
+            .when(!state.has_note && state.has_selection, |menu| {
                 menu.child(Self::context_menu_entry(
                     "Add Note",
                     theme,
@@ -4397,7 +4528,7 @@ impl PdfView {
                 ))
                 .child(Self::context_menu_separator(theme))
             })
-            .when_some(highlight_color, |menu, color| {
+            .when_some(state.highlight_color, |menu, color| {
                 menu.child(Self::context_menu_label("Change Highlight Color", theme))
                     .child(Self::context_menu_highlight_color_row(
                         HighlightColorAction::Change,
@@ -4413,17 +4544,20 @@ impl PdfView {
                     ))
                     .child(Self::context_menu_separator(theme))
             })
-            .when(highlight_color.is_none() && has_selection, |menu| {
-                menu.child(Self::context_menu_label("Highlight", theme))
-                    .child(Self::context_menu_highlight_color_row(
-                        HighlightColorAction::Create,
-                        None,
-                        theme,
-                        cx,
-                    ))
-                    .child(Self::context_menu_separator(theme))
-            })
-            .when(has_image, |menu| {
+            .when(
+                state.highlight_color.is_none() && state.has_selection,
+                |menu| {
+                    menu.child(Self::context_menu_label("Highlight", theme))
+                        .child(Self::context_menu_highlight_color_row(
+                            HighlightColorAction::Create,
+                            None,
+                            theme,
+                            cx,
+                        ))
+                        .child(Self::context_menu_separator(theme))
+                },
+            )
+            .when(state.has_image, |menu| {
                 menu.child(Self::context_menu_entry(
                     "Copy Image",
                     theme,
@@ -4438,25 +4572,39 @@ impl PdfView {
                 ))
                 .child(Self::context_menu_separator(theme))
             })
-            .when(highlight_color.is_none() && has_selection, |menu| {
+            .when(state.has_page, |menu| {
                 menu.child(Self::context_menu_entry(
-                    "Copy",
+                    "Save Page as Image",
                     theme,
-                    |this, _, cx| this.copy_selection(cx),
+                    |this, _, cx| this.save_page_as_image(cx),
                     cx,
                 ))
                 .child(Self::context_menu_separator(theme))
             })
-            .child(Self::context_menu_entry(
-                "Select All",
-                theme,
-                |this, _, cx| {
-                    this.select_all();
-                    cx.notify();
+            .when(
+                state.highlight_color.is_none() && state.has_selection,
+                |menu| {
+                    menu.child(Self::context_menu_entry(
+                        "Copy",
+                        theme,
+                        |this, _, cx| this.copy_selection(cx),
+                        cx,
+                    ))
+                    .child(Self::context_menu_separator(theme))
                 },
-                cx,
-            ))
-            .child(Self::context_menu_separator(theme))
+            )
+            .when(!state.grid_overview, |menu| {
+                menu.child(Self::context_menu_entry(
+                    "Select All",
+                    theme,
+                    |this, _, cx| {
+                        this.select_all();
+                        cx.notify();
+                    },
+                    cx,
+                ))
+                .child(Self::context_menu_separator(theme))
+            })
             .child(Self::context_menu_entry(
                 "Zoom In",
                 theme,
@@ -4686,21 +4834,19 @@ impl PdfView {
             return GRID_OVERVIEW_DEFAULT_COLS;
         }
 
-        let available_width = (viewport_width - GRID_OVERVIEW_CELL_GAP * 2.0).max(1.0);
         let cell_width = Self::grid_overview_cell_width(zoom).max(1.0);
-        (((available_width + GRID_OVERVIEW_CELL_GAP) / (cell_width + GRID_OVERVIEW_CELL_GAP))
-            .floor() as usize)
+        (((viewport_width - GRID_OVERVIEW_CELL_GAP) / (cell_width + GRID_OVERVIEW_CELL_GAP)).floor()
+            as usize)
             .max(1)
     }
 
     fn grid_overview_horizontal_gap(viewport_width: f32, cols: usize, zoom: f32) -> f32 {
-        if cols <= 1 || !viewport_width.is_finite() || viewport_width <= 0.0 {
+        if !viewport_width.is_finite() || viewport_width <= 0.0 {
             return GRID_OVERVIEW_CELL_GAP;
         }
 
-        let available_width = (viewport_width - GRID_OVERVIEW_CELL_GAP * 2.0).max(1.0);
         let cells_width = Self::grid_overview_cell_width(zoom) * cols as f32;
-        ((available_width - cells_width) / (cols - 1) as f32).max(GRID_OVERVIEW_CELL_GAP)
+        ((viewport_width - cells_width) / (cols + 1) as f32).max(GRID_OVERVIEW_CELL_GAP)
     }
 
     fn update_grid_overview_cols(&mut self, viewport_width: f32, cx: &mut Context<Self>) -> bool {
@@ -4784,9 +4930,24 @@ impl PdfView {
             .bg(rgb(theme.surface_background))
             .text_size(px(12.0))
             .text_color(rgb(theme.text))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_context_menu(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    let page_idx = this.grid_overview_cursor.min(this.last_page_index());
+                    this.context_menu_page = Some(page_idx);
+                    this.context_menu_highlight = None;
+                    this.context_menu_note = None;
+                    this.selected_highlight = None;
+                    this.open_context_menu(event.position, window, cx);
+                }),
+            )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 if this.control_down {
                     this.handle_scroll_wheel(event, cx);
@@ -4841,7 +5002,7 @@ impl PdfView {
                                             .gap(px(horizontal_gap))
                                             .w_full()
                                             .h(px(row_height))
-                                            .px(px(GRID_OVERVIEW_CELL_GAP))
+                                            .px(px(horizontal_gap))
                                             .py_2();
 
                                         for col_ix in 0..cols {
@@ -4910,6 +5071,7 @@ impl PdfView {
                                                         .on_mouse_down(
                                                             MouseButton::Left,
                                                             cx.listener(move |this, _, _, cx| {
+                                                                this.close_context_menu(cx);
                                                                 this.navigate_to_pdf_destination(
                                                                     page_idx, None, None, cx,
                                                                 );
@@ -4918,6 +5080,29 @@ impl PdfView {
                                                                 );
                                                                 cx.stop_propagation();
                                                             }),
+                                                        )
+                                                        .on_mouse_down(
+                                                            MouseButton::Right,
+                                                            cx.listener(
+                                                                move |this,
+                                                                      event: &MouseDownEvent,
+                                                                      window,
+                                                                      cx| {
+                                                                    this.grid_overview_cursor =
+                                                                        page_idx;
+                                                                    this.context_menu_page =
+                                                                        Some(page_idx);
+                                                                    this.context_menu_highlight =
+                                                                        None;
+                                                                    this.context_menu_note = None;
+                                                                    this.selected_highlight = None;
+                                                                    this.open_context_menu(
+                                                                        event.position,
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            ),
                                                         )
                                                         .child(
                                                             div()
@@ -5638,9 +5823,14 @@ impl Render for PdfView {
         }
 
         self.step_scroll_animation(window, cx);
-        let context_menu_highlight_color = self
-            .context_menu_highlight
-            .and_then(|id| self.highlight_color_for_id(id));
+        let context_menu_highlight_color = if self.grid_overview_open {
+            None
+        } else {
+            self.context_menu_highlight
+                .and_then(|id| self.highlight_color_for_id(id))
+        };
+        let context_menu_has_selection = !self.grid_overview_open && self.selected_text().is_some();
+        let context_menu_has_note = !self.grid_overview_open && self.context_menu_note.is_some();
         let context_menu = self.context_menu_position.map(|position| {
             deferred(
                 anchored()
@@ -5648,10 +5838,15 @@ impl Render for PdfView {
                     .position(position)
                     .anchor(Anchor::TopLeft)
                     .child(Self::render_context_menu(
-                        self.context_menu_image.is_some(),
-                        self.selected_text().is_some(),
-                        context_menu_highlight_color,
-                        self.context_menu_note.is_some(),
+                        ContextMenuState {
+                            has_page: self.context_menu_page.is_some(),
+                            has_image: !self.grid_overview_open
+                                && self.context_menu_image.is_some(),
+                            has_selection: context_menu_has_selection,
+                            highlight_color: context_menu_highlight_color,
+                            has_note: context_menu_has_note,
+                            grid_overview: self.grid_overview_open,
+                        },
                         window.is_fullscreen(),
                         theme,
                         cx,
@@ -5896,6 +6091,7 @@ impl Render for PdfView {
 
                     this.context_menu_highlight = this.highlight_at_screen(event.position);
                     this.context_menu_note = this.note_at_screen(event.position);
+                    this.context_menu_page = this.page_at_screen(event.position);
                     if let Some(highlight_id) = this.context_menu_highlight {
                         this.selected_highlight = Some(highlight_id);
                         this.selection = None;
