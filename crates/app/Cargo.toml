@@ -1,5 +1,5 @@
 [package]
-name = "gpui-template"
+name = "glyphst"
 version.workspace = true
 edition.workspace = true
 

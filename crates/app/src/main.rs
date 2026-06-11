@@ -80,7 +80,10 @@ pub(crate) fn open_workspace_window(path: Option<PathBuf>, cx: &mut App) -> Resu
             window_background: window_settings.background_appearance(transparency_enabled),
             ..Default::default()
         },
-        move |window, cx| cx.new(|cx| Workspace::new(path.clone(), window, cx)),
+        move |window, cx| {
+            window.set_app_id("glyphst");
+            cx.new(|cx| Workspace::new(path.clone(), window, cx))
+        },
     )?;
 
     Ok(())

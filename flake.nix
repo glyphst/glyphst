@@ -1,5 +1,5 @@
 {
-  description = "A hello-world GPUI starter application";
+  description = "A GPUI-based PDF viewer";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -18,23 +18,46 @@
         "aarch64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+      mkPkgs =
+        system:
+        import nixpkgs {
+          inherit system;
+          overlays = [ (import rust-overlay) ];
+        };
+      mkRustToolchain =
+        pkgs:
+        pkgs.rust-bin.stable.latest.default.override {
+          extensions = [
+            "clippy"
+            "rust-src"
+            "rustfmt"
+          ];
+        };
     in
     {
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = mkPkgs system;
+          rustToolchain = mkRustToolchain pkgs;
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
+          };
+          glyphst = pkgs.callPackage ./nix/package.nix { inherit rustPlatform; };
+        in
+        {
+          inherit glyphst;
+          default = glyphst;
+        }
+      );
+
       devShells = forAllSystems (
         system:
         let
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ (import rust-overlay) ];
-          };
+          pkgs = mkPkgs system;
           lib = pkgs.lib;
-          rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-            extensions = [
-              "clippy"
-              "rust-src"
-              "rustfmt"
-            ];
-          };
+          rustToolchain = mkRustToolchain pkgs;
           linuxLibraries = with pkgs; [
             alsa-lib
             fontconfig

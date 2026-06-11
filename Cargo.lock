@@ -2251,6 +2251,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "glyphst"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "bincode",
+ "dirs",
+ "futures",
+ "gpui",
+ "gpui_platform",
+ "image",
+ "kdl",
+ "mupdf",
+ "redb",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
+]
+
+[[package]]
 name = "gpu-allocator"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2363,29 +2386,6 @@ dependencies = [
  "web-time",
  "windows 0.61.3",
  "zed-scap",
-]
-
-[[package]]
-name = "gpui-template"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "bincode",
- "dirs",
- "futures",
- "gpui",
- "gpui_platform",
- "image",
- "kdl",
- "mupdf",
- "redb",
- "reqwest",
- "serde",
- "serde_json",
- "smallvec",
- "tikv-jemalloc-sys",
- "tikv-jemallocator",
 ]
 
 [[package]]
