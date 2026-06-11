@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, Focusable, IntoElement, MouseButton,
+    AnyElement, Context, Entity, EntityId, FocusHandle, Focusable, IntoElement, MouseButton,
     PathPromptOptions, Render, SharedString, Window, div, prelude::*, px, rgb, rgba,
 };
 
@@ -23,6 +23,37 @@ use crate::{
 pub(crate) enum Tab {
     NewTab(Entity<NewTab>),
     Document(Entity<PdfView>),
+}
+
+#[derive(Clone)]
+struct DraggedTab {
+    ix: usize,
+    label: SharedString,
+    theme: Theme,
+}
+
+impl Render for DraggedTab {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .h(px(32.0))
+            .max_w(px(220.0))
+            .min_w(px(120.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(rgb(self.theme.border))
+            .bg(rgb(self.theme.tab_active_background))
+            .text_size(px(12.0))
+            .text_color(rgb(self.theme.text))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(self.label.clone()),
+            )
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -371,6 +402,27 @@ impl Workspace {
         cx.notify();
     }
 
+    fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+
+        let active_tab_id = self.tabs.get(self.active_tab).map(Self::tab_entity_id);
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+
+        if let Some(active_tab_id) = active_tab_id
+            && let Some(active_tab) = self
+                .tabs
+                .iter()
+                .position(|tab| Self::tab_entity_id(tab) == active_tab_id)
+        {
+            self.active_tab = active_tab;
+        }
+
+        cx.notify();
+    }
+
     fn flush_active_tab(&mut self, cx: &mut Context<Self>) {
         self.flush_tab(self.active_tab, cx);
     }
@@ -405,6 +457,13 @@ impl Workspace {
         match self.tabs.get(tab_ix) {
             Some(Tab::Document(pdf_view)) => pdf_view.read(cx).file_name(),
             Some(Tab::NewTab(_)) | None => "New Tab".into(),
+        }
+    }
+
+    fn tab_entity_id(tab: &Tab) -> EntityId {
+        match tab {
+            Tab::NewTab(new_tab) => new_tab.entity_id(),
+            Tab::Document(pdf_view) => pdf_view.entity_id(),
         }
     }
 
@@ -684,6 +743,7 @@ impl Workspace {
         let label = self.tab_label(tab_ix, cx);
 
         div()
+            .id(("tab", tab_ix))
             .h(px(32.0))
             .max_w(px(220.0))
             .min_w(px(120.0))
@@ -707,6 +767,27 @@ impl Workspace {
             }))
             .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
+            .on_drag(
+                DraggedTab {
+                    ix: tab_ix,
+                    label: label.clone(),
+                    theme,
+                },
+                |tab, _, _, cx| cx.new(|_| tab.clone()),
+            )
+            .drag_over::<DraggedTab>(move |style, dragged_tab, _, _| {
+                let style = style.bg(rgb(theme.element_hover));
+                if tab_ix < dragged_tab.ix {
+                    style.border_l(px(2.0)).border_color(rgb(theme.accent))
+                } else if tab_ix > dragged_tab.ix {
+                    style.border_r(px(2.0)).border_color(rgb(theme.accent))
+                } else {
+                    style
+                }
+            })
+            .on_drop(cx.listener(move |this, dragged_tab: &DraggedTab, _, cx| {
+                this.move_tab(dragged_tab.ix, tab_ix, cx);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
