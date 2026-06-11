@@ -47,19 +47,19 @@ enum ThumbnailState {
 }
 
 #[derive(Clone)]
-struct StartBoardEntry {
+struct NewTabEntry {
     path: PathBuf,
     file_name: SharedString,
     directory: SharedString,
     page: usize,
 }
 
-pub(crate) enum StartBoardEvent {
+pub(crate) enum NewTabEvent {
     OpenDocument(PathBuf),
 }
 
-pub struct StartBoard {
-    entries: Vec<StartBoardEntry>,
+pub struct NewTab {
+    entries: Vec<NewTabEntry>,
     thumbnails: HashMap<PathBuf, ThumbnailState>,
     focus_handle: FocusHandle,
     scroll: UniformListScrollHandle,
@@ -67,7 +67,7 @@ pub struct StartBoard {
     viewport_width: f32,
 }
 
-impl StartBoard {
+impl NewTab {
     pub(crate) const WINDOW_WIDTH: f32 = BOARD_WIDTH;
     pub(crate) const WINDOW_HEIGHT: f32 = BOARD_HEIGHT;
 
@@ -83,7 +83,7 @@ impl StartBoard {
             store
                 .history_entries()
                 .iter()
-                .map(StartBoardEntry::from_history)
+                .map(NewTabEntry::from_history)
                 .collect::<Vec<_>>()
         };
 
@@ -122,19 +122,17 @@ impl StartBoard {
                 Ok(image) => ThumbnailState::Ready(image),
                 Err(error) => {
                     eprintln!(
-                        "failed to render start board preview for {}: {error:#}",
+                        "failed to render new tab preview for {}: {error:#}",
                         path.display()
                     );
                     ThumbnailState::Failed
                 }
             };
 
-            if let Err(error) = this.update(cx, |this, cx| {
+            let _ = this.update(cx, |this, cx| {
                 this.thumbnails.insert(path, state);
                 cx.notify();
-            }) {
-                eprintln!("failed to update start board preview: {error:#}");
-            }
+            });
         })
         .detach();
     }
@@ -251,7 +249,7 @@ impl StartBoard {
                         if let Err(error) =
                             window.paint_image(bounds, Corners::default(), image, 0, false)
                         {
-                            eprintln!("failed to paint start board preview: {error:#}");
+                            eprintln!("failed to paint new tab preview: {error:#}");
                         }
                     },
                 )
@@ -291,11 +289,11 @@ impl StartBoard {
     }
 
     fn open_document(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        cx.emit(StartBoardEvent::OpenDocument(path));
+        cx.emit(NewTabEvent::OpenDocument(path));
     }
 }
 
-impl StartBoardEntry {
+impl NewTabEntry {
     fn from_history(entry: &HistoryEntry) -> Self {
         let file_name = entry
             .path
@@ -320,9 +318,9 @@ impl StartBoardEntry {
     }
 }
 
-impl EventEmitter<StartBoardEvent> for StartBoard {}
+impl EventEmitter<NewTabEvent> for NewTab {}
 
-impl Render for StartBoard {
+impl Render for NewTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let cols = self.cols.max(1);
@@ -364,13 +362,13 @@ impl Render for StartBoard {
                 .into_any_element()
         } else {
             div()
-                .id("start-board-content")
+                .id("new-tab-content")
                 .flex_1()
                 .min_h_0()
                 .overflow_hidden()
                 .child(
                     uniform_list(
-                        "start-board-list",
+                        "new-tab-list",
                         rows,
                         cx.processor(move |this, visible_range: Range<usize>, _window, cx| {
                             let theme = cx.global::<SettingsStore>().resolved_theme;
@@ -427,10 +425,10 @@ impl Render for StartBoard {
         };
 
         div()
-            .id("start-board")
+            .id("new-tab")
             .relative()
             .size_full()
-            .key_context("StartBoard")
+            .key_context("NewTab")
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()

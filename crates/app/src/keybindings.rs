@@ -720,13 +720,7 @@ fn action_specs() -> &'static [ActionSpec] {
             build: boxed::<OpenFile>,
         },
         ActionSpec {
-            aliases: &[
-                "open-new-tab",
-                "new-tab",
-                "open-start-board",
-                "go-to-start-board",
-                "start-board",
-            ],
+            aliases: &["open-new-tab", "new-tab"],
             context: Some(WORKSPACE_CONTEXT),
             build: boxed::<OpenNewTab>,
         },

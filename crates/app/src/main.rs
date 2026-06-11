@@ -15,6 +15,7 @@ mod command_palette;
 mod history;
 mod keybindings;
 mod library;
+mod new_tab;
 mod note_editor;
 mod notes;
 mod pdf_view;
@@ -23,15 +24,14 @@ mod search;
 mod settings;
 mod settings_panel;
 mod smooth_scroll;
-mod start_board;
 mod theme;
 mod toc;
 mod workspace;
 
 use library::LibraryStore;
+use new_tab::NewTab;
 use pdf_view::RenderCache;
 use settings::SettingsStore;
-use start_board::StartBoard;
 use workspace::Workspace;
 
 fn main() {
@@ -68,7 +68,7 @@ pub(crate) fn open_workspace_window(path: Option<PathBuf>, cx: &mut App) -> Resu
     let window_size = if path.is_some() {
         size(px(800.0), px(1000.0))
     } else {
-        size(px(StartBoard::WINDOW_WIDTH), px(StartBoard::WINDOW_HEIGHT))
+        size(px(NewTab::WINDOW_WIDTH), px(NewTab::WINDOW_HEIGHT))
     };
     let bounds = Bounds::centered(None, window_size, cx);
     let window_settings = cx.global::<SettingsStore>().settings.window;

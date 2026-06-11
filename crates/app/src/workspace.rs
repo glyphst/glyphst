@@ -9,19 +9,19 @@ use gpui::{
 use crate::{
     command_palette::{CommandPalette, CommandPaletteDelegate},
     library::{DocumentPosition, LibraryStore, normalize_path},
+    new_tab::{NewTab, NewTabEvent},
     pdf_view::{
         CloseTab, OpenFile, OpenNewTab, OpenSettings, PdfAnnotations, PdfView, PdfViewEvent,
         ToggleCommandPalette,
     },
     picker::{Picker, PickerEvent},
     settings::{SettingsStore, TabBarVisibility},
-    start_board::{StartBoard, StartBoardEvent},
     theme::Theme,
 };
 
 #[derive(Clone)]
 pub(crate) enum Tab {
-    StartBoard(Entity<StartBoard>),
+    NewTab(Entity<NewTab>),
     Document(Entity<PdfView>),
 }
 
@@ -68,18 +68,18 @@ impl Workspace {
                     }
                 },
             )
-            .unwrap_or_else(|| workspace.create_start_board_tab(window, cx));
+            .unwrap_or_else(|| workspace.create_new_tab(window, cx));
 
         workspace.tabs.push(initial_tab);
         workspace.focus_handle.focus(window, cx);
         workspace
     }
 
-    fn create_start_board_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Tab {
+    fn create_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Tab {
         let focus_handle = self.focus_handle.clone();
-        let start_board = cx.new(|cx| StartBoard::new(focus_handle, cx));
-        self.subscribe_to_start_board(&start_board, window, cx);
-        Tab::StartBoard(start_board)
+        let new_tab = cx.new(|cx| NewTab::new(focus_handle, cx));
+        self.subscribe_to_new_tab(&new_tab, window, cx);
+        Tab::NewTab(new_tab)
     }
 
     fn create_document_tab(
@@ -141,17 +141,17 @@ impl Workspace {
         Ok(Tab::Document(pdf_view))
     }
 
-    fn subscribe_to_start_board(
+    fn subscribe_to_new_tab(
         &self,
-        start_board: &Entity<StartBoard>,
+        new_tab: &Entity<NewTab>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         cx.subscribe_in(
-            start_board,
+            new_tab,
             window,
-            |this, _, event: &StartBoardEvent, window, cx| {
-                let StartBoardEvent::OpenDocument(path) = event;
+            |this, _, event: &NewTabEvent, window, cx| {
+                let NewTabEvent::OpenDocument(path) = event;
                 if let Err(error) =
                     this.focus_or_open_document(path.clone(), None, true, window, cx)
                 {
@@ -234,7 +234,7 @@ impl Workspace {
 
     fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.flush_active_tab(cx);
-        let tab = self.create_start_board_tab(window, cx);
+        let tab = self.create_new_tab(window, cx);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.focus_handle.focus(window, cx);
@@ -242,7 +242,7 @@ impl Workspace {
     }
 
     fn open_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let replace_active_start_board = self.active_tab_is_start_board();
+        let replace_active_new_tab = self.active_tab_is_new_tab();
         let dialog = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -256,7 +256,7 @@ impl Workspace {
                     return;
                 };
                 match this.update_in(cx, |this, window, cx| {
-                    this.focus_or_open_document(path, None, replace_active_start_board, window, cx)
+                    this.focus_or_open_document(path, None, replace_active_new_tab, window, cx)
                 }) {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => eprintln!("failed to open selected PDF: {error:#}"),
@@ -273,24 +273,18 @@ impl Workspace {
         &mut self,
         path: PathBuf,
         position: Option<DocumentPosition>,
-        replace_active_start_board: bool,
+        replace_active_new_tab: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let path = normalize_path(&path);
         if let Some(tab_ix) = self.document_tab_ix(&path, cx) {
-            self.activate_existing_document(
-                tab_ix,
-                position,
-                replace_active_start_board,
-                window,
-                cx,
-            );
+            self.activate_existing_document(tab_ix, position, replace_active_new_tab, window, cx);
             return Ok(());
         }
 
         let tab = self.create_document_tab(path, position, window, cx)?;
-        if replace_active_start_board && self.active_tab_is_start_board() {
+        if replace_active_new_tab && self.active_tab_is_new_tab() {
             self.tabs[self.active_tab] = tab;
         } else {
             self.flush_active_tab(cx);
@@ -306,12 +300,12 @@ impl Workspace {
         &mut self,
         tab_ix: usize,
         position: Option<DocumentPosition>,
-        replace_active_start_board: bool,
+        replace_active_new_tab: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let remove_tab_ix =
-            (replace_active_start_board && self.active_tab_is_start_board() && self.tabs.len() > 1)
+            (replace_active_new_tab && self.active_tab_is_new_tab() && self.tabs.len() > 1)
                 .then_some(self.active_tab);
 
         if self.active_tab != tab_ix {
@@ -363,7 +357,7 @@ impl Workspace {
         self.tabs.remove(tab_ix);
 
         if self.tabs.is_empty() {
-            let tab = self.create_start_board_tab(window, cx);
+            let tab = self.create_new_tab(window, cx);
             self.tabs.push(tab);
             self.active_tab = 0;
         } else if self.active_tab > tab_ix {
@@ -392,12 +386,12 @@ impl Workspace {
         let path = normalize_path(path);
         self.tabs.iter().position(|tab| match tab {
             Tab::Document(pdf_view) => pdf_view.read(cx).path() == path.as_path(),
-            Tab::StartBoard(_) => false,
+            Tab::NewTab(_) => false,
         })
     }
 
-    fn active_tab_is_start_board(&self) -> bool {
-        matches!(self.tabs.get(self.active_tab), Some(Tab::StartBoard(_)))
+    fn active_tab_is_new_tab(&self) -> bool {
+        matches!(self.tabs.get(self.active_tab), Some(Tab::NewTab(_)))
     }
 
     fn is_supported_document_path(path: &Path) -> bool {
@@ -409,14 +403,14 @@ impl Workspace {
     fn tab_label(&self, tab_ix: usize, cx: &Context<Self>) -> SharedString {
         match self.tabs.get(tab_ix) {
             Some(Tab::Document(pdf_view)) => pdf_view.read(cx).file_name(),
-            Some(Tab::StartBoard(_)) | None => "New Tab".into(),
+            Some(Tab::NewTab(_)) | None => "New Tab".into(),
         }
     }
 
     fn active_tab_content(&self) -> AnyElement {
         match self.tabs.get(self.active_tab) {
             Some(Tab::Document(pdf_view)) => pdf_view.clone().into_any_element(),
-            Some(Tab::StartBoard(start_board)) => start_board.clone().into_any_element(),
+            Some(Tab::NewTab(new_tab)) => new_tab.clone().into_any_element(),
             None => div().into_any_element(),
         }
     }
@@ -424,7 +418,7 @@ impl Workspace {
     fn active_document_label(&self, cx: &Context<Self>) -> Option<SharedString> {
         match self.tabs.get(self.active_tab) {
             Some(Tab::Document(pdf_view)) => Some(pdf_view.read(cx).file_name()),
-            Some(Tab::StartBoard(_)) | None => None,
+            Some(Tab::NewTab(_)) | None => None,
         }
     }
 
@@ -499,7 +493,7 @@ impl Workspace {
     }
 
     fn render_toolbar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
-        let expanded = self.toolbar_menu_open || self.active_tab_is_start_board();
+        let expanded = self.toolbar_menu_open || self.active_tab_is_new_tab();
         let mut toolbar = div()
             .flex_none()
             .h(px(32.0))
