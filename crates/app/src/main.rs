@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext, Bounds, Pixels, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
 use tikv_jemalloc_sys as _;
 use tikv_jemallocator::Jemalloc;
@@ -65,12 +65,20 @@ fn main() {
 }
 
 pub(crate) fn open_workspace_window(path: Option<PathBuf>, cx: &mut App) -> Result<()> {
+    open_workspace_window_at(path, None, cx)
+}
+
+pub(crate) fn open_workspace_window_at(
+    path: Option<PathBuf>,
+    bounds: Option<Bounds<Pixels>>,
+    cx: &mut App,
+) -> Result<()> {
     let window_size = if path.is_some() {
         size(px(800.0), px(1000.0))
     } else {
         size(px(NewTab::WINDOW_WIDTH), px(NewTab::WINDOW_HEIGHT))
     };
-    let bounds = Bounds::centered(None, window_size, cx);
+    let bounds = bounds.unwrap_or_else(|| Bounds::centered(None, window_size, cx));
     let window_settings = cx.global::<SettingsStore>().settings.window;
     let transparency_enabled = window_settings.transparency_enabled_by_default();
 

@@ -2,14 +2,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use gpui::{
-    AnyElement, Context, Entity, EntityId, FocusHandle, Focusable, IntoElement, MouseButton,
-    PathPromptOptions, Render, SharedString, Window, div, prelude::*, px, rgb, rgba,
+    AnyElement, Context, DragMoveEvent, Entity, EntityId, FocusHandle, Focusable, IntoElement,
+    MouseButton, MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString, Window,
+    WindowHandle, div, point, prelude::*, px, rgb, rgba,
 };
 
 use crate::{
     command_palette::{CommandPalette, CommandPaletteDelegate},
     library::{DocumentPosition, LibraryStore, normalize_path},
     new_tab::{NewTab, NewTabEvent},
+    open_workspace_window_at,
     pdf_view::{
         CloseTab, OpenFile, OpenNewTab, OpenSettings, PdfAnnotations, PdfView, PdfViewEvent,
         ToggleCommandPalette,
@@ -27,8 +29,17 @@ pub(crate) enum Tab {
 }
 
 #[derive(Clone)]
+enum DraggedTabPayload {
+    NewTab,
+    Document(PathBuf),
+}
+
+#[derive(Clone)]
 struct DraggedTab {
+    source_window: WindowHandle<Workspace>,
     ix: usize,
+    tab_id: EntityId,
+    payload: DraggedTabPayload,
     label: SharedString,
     theme: Theme,
 }
@@ -72,6 +83,7 @@ pub(crate) struct Workspace {
     command_palette_previous_focus_handle: Option<FocusHandle>,
     toolbar_menu_open: bool,
     toolbar_open_menu: Option<ToolbarMenu>,
+    dragged_tab_outside_window: Option<DraggedTab>,
 }
 
 impl Workspace {
@@ -88,6 +100,7 @@ impl Workspace {
             command_palette_previous_focus_handle: None,
             toolbar_menu_open: false,
             toolbar_open_menu: None,
+            dragged_tab_outside_window: None,
         };
 
         let initial_tab = initial_path
@@ -405,12 +418,13 @@ impl Workspace {
     }
 
     fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
-        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+        if from == to || from >= self.tabs.len() || to > self.tabs.len() {
             return;
         }
 
         let active_tab_id = self.tabs.get(self.active_tab).map(Self::tab_entity_id);
         let tab = self.tabs.remove(from);
+        let to = to.min(self.tabs.len());
         self.tabs.insert(to, tab);
 
         if let Some(active_tab_id) = active_tab_id
@@ -422,6 +436,222 @@ impl Workspace {
             self.active_tab = active_tab;
         }
 
+        cx.notify();
+    }
+
+    fn handle_dragged_tab_drop(
+        &mut self,
+        dragged_tab: &DraggedTab,
+        to: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_dragged_tab_outside_window();
+
+        if dragged_tab.source_window.window_id() == window.window_handle().window_id() {
+            self.move_dragged_tab(dragged_tab, to, cx);
+            return;
+        }
+
+        if let Err(error) = self.import_dragged_tab(dragged_tab, to, window, cx) {
+            eprintln!("failed to move tab to window: {error:#}");
+        }
+    }
+
+    fn move_dragged_tab(&mut self, dragged_tab: &DraggedTab, to: usize, cx: &mut Context<Self>) {
+        let Some(from) = self.tab_ix_for_entity_id(dragged_tab.tab_id) else {
+            return;
+        };
+        self.move_tab(from, to, cx);
+    }
+
+    fn import_dragged_tab(
+        &mut self,
+        dragged_tab: &DraggedTab,
+        to: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let source_has_tab = dragged_tab.source_window.update(cx, |source, _, cx| {
+            if let Some(tab_ix) = source.tab_ix_for_entity_id(dragged_tab.tab_id) {
+                source.flush_tab(tab_ix, cx);
+                true
+            } else {
+                false
+            }
+        })?;
+
+        if !source_has_tab {
+            return Ok(());
+        }
+
+        self.import_dragged_tab_payload(&dragged_tab.payload, to, window, cx)?;
+
+        dragged_tab
+            .source_window
+            .update(cx, |source, source_window, cx| {
+                source.clear_dragged_tab_outside_window();
+                if let Some(tab_ix) = source.tab_ix_for_entity_id(dragged_tab.tab_id) {
+                    source.remove_detached_tab(tab_ix, source_window, cx);
+                }
+            })?;
+
+        Ok(())
+    }
+
+    fn import_dragged_tab_payload(
+        &mut self,
+        payload: &DraggedTabPayload,
+        to: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        match payload {
+            DraggedTabPayload::NewTab => {
+                let tab = self.create_new_tab(window, cx);
+                self.insert_imported_tab(tab, to, window, cx);
+            }
+            DraggedTabPayload::Document(path) => {
+                let path = normalize_path(path);
+                if let Some(existing_ix) = self.document_tab_ix(&path, cx) {
+                    self.activate_existing_tab_at(existing_ix, to, window, cx);
+                } else {
+                    let tab = self.create_document_tab(path, None, window, cx)?;
+                    self.insert_imported_tab(tab, to, window, cx);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn insert_imported_tab(
+        &mut self,
+        tab: Tab,
+        to: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.flush_active_tab(cx);
+        let tab_ix = to.min(self.tabs.len());
+        self.tabs.insert(tab_ix, tab);
+        self.active_tab = tab_ix;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn activate_existing_tab_at(
+        &mut self,
+        existing_ix: usize,
+        to: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_id) = self.tabs.get(existing_ix).map(Self::tab_entity_id) else {
+            return;
+        };
+
+        self.move_tab(existing_ix, to, cx);
+        if let Some(active_ix) = self.tab_ix_for_entity_id(tab_id) {
+            self.active_tab = active_ix;
+        }
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn tab_ix_for_entity_id(&self, tab_id: EntityId) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| Self::tab_entity_id(tab) == tab_id)
+    }
+
+    fn track_dragged_tab_outside_window(
+        &mut self,
+        event: &DragMoveEvent<DraggedTab>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dragged_tab = event.drag(cx).clone();
+        if dragged_tab.source_window.window_id() != window.window_handle().window_id() {
+            self.dragged_tab_outside_window = None;
+            return;
+        }
+
+        if self.tab_ix_for_entity_id(dragged_tab.tab_id).is_none() {
+            self.dragged_tab_outside_window = None;
+            return;
+        }
+
+        self.dragged_tab_outside_window =
+            (!event.bounds.contains(&event.event.position)).then_some(dragged_tab);
+    }
+
+    fn clear_dragged_tab_outside_window(&mut self) {
+        self.dragged_tab_outside_window = None;
+    }
+
+    fn detach_dragged_tab(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dragged_tab) = self.dragged_tab_outside_window.take() else {
+            return;
+        };
+        if dragged_tab.source_window.window_id() != window.window_handle().window_id() {
+            return;
+        }
+
+        let Some(tab_ix) = self.tab_ix_for_entity_id(dragged_tab.tab_id) else {
+            return;
+        };
+
+        let path = match &self.tabs[tab_ix] {
+            Tab::Document(pdf_view) => Some(pdf_view.read(cx).path().to_path_buf()),
+            Tab::NewTab(_) => None,
+        };
+        self.flush_tab(tab_ix, cx);
+
+        let bounds = Self::detached_window_bounds(event, window);
+        if let Err(error) = open_workspace_window_at(path, Some(bounds), cx) {
+            eprintln!("failed to tear tab into new window: {error:#}");
+            return;
+        }
+
+        self.remove_detached_tab(tab_ix, window, cx);
+        cx.stop_propagation();
+    }
+
+    fn detached_window_bounds(event: &MouseUpEvent, window: &Window) -> gpui::Bounds<Pixels> {
+        let source_bounds = window.bounds();
+        let origin = point(
+            source_bounds.origin.x + event.position.x - px(160.0),
+            source_bounds.origin.y + event.position.y - px(16.0),
+        );
+
+        gpui::Bounds::new(origin, source_bounds.size)
+    }
+
+    fn remove_detached_tab(&mut self, tab_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if tab_ix >= self.tabs.len() {
+            return;
+        }
+
+        self.clear_dragged_tab_outside_window();
+        self.tabs.remove(tab_ix);
+        if self.tabs.is_empty() {
+            window.remove_window();
+            return;
+        }
+
+        if self.active_tab > tab_ix {
+            self.active_tab -= 1;
+        } else if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+
+        self.focus_handle.focus(window, cx);
         cx.notify();
     }
 
@@ -459,6 +689,16 @@ impl Workspace {
         match self.tabs.get(tab_ix) {
             Some(Tab::Document(pdf_view)) => pdf_view.read(cx).file_name(),
             Some(Tab::NewTab(_)) | None => "New Tab".into(),
+        }
+    }
+
+    fn dragged_tab_payload(&self, tab_ix: usize, cx: &Context<Self>) -> Option<DraggedTabPayload> {
+        match self.tabs.get(tab_ix) {
+            Some(Tab::Document(pdf_view)) => Some(DraggedTabPayload::Document(
+                pdf_view.read(cx).path().to_path_buf(),
+            )),
+            Some(Tab::NewTab(_)) => Some(DraggedTabPayload::NewTab),
+            None => None,
         }
     }
 
@@ -732,9 +972,23 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_tab(&self, tab_ix: usize, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tab(
+        &self,
+        tab_ix: usize,
+        source_window: WindowHandle<Workspace>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let selected = tab_ix == self.active_tab;
         let label = self.tab_label(tab_ix, cx);
+        let Some(payload) = self.dragged_tab_payload(tab_ix, cx) else {
+            return div().into_any_element();
+        };
+        let tab_id = self
+            .tabs
+            .get(tab_ix)
+            .map(Self::tab_entity_id)
+            .unwrap_or_else(|| cx.entity_id());
 
         div()
             .id(("tab", tab_ix))
@@ -763,7 +1017,10 @@ impl Workspace {
             .cursor_pointer()
             .on_drag(
                 DraggedTab {
+                    source_window,
                     ix: tab_ix,
+                    tab_id,
+                    payload,
                     label: label.clone(),
                     theme,
                 },
@@ -771,7 +1028,7 @@ impl Workspace {
             )
             .drag_over::<DraggedTab>(move |style, dragged_tab, _, _| {
                 let style = style.bg(rgb(theme.element_hover));
-                if tab_ix < dragged_tab.ix {
+                if dragged_tab.source_window != source_window || tab_ix < dragged_tab.ix {
                     style.border_l(px(2.0)).border_color(rgb(theme.accent))
                 } else if tab_ix > dragged_tab.ix {
                     style.border_r(px(2.0)).border_color(rgb(theme.accent))
@@ -779,9 +1036,11 @@ impl Workspace {
                     style
                 }
             })
-            .on_drop(cx.listener(move |this, dragged_tab: &DraggedTab, _, cx| {
-                this.move_tab(dragged_tab.ix, tab_ix, cx);
-            }))
+            .on_drop(
+                cx.listener(move |this, dragged_tab: &DraggedTab, window, cx| {
+                    this.handle_dragged_tab_drop(dragged_tab, tab_ix, window, cx);
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -816,9 +1075,14 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_tab_bar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tab_bar(&self, theme: Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let source_window = window
+            .window_handle()
+            .downcast::<Workspace>()
+            .expect("workspace window should have Workspace root view");
+        let append_ix = self.tabs.len();
         let tabs = (0..self.tabs.len())
-            .map(|tab_ix| self.render_tab(tab_ix, theme, cx))
+            .map(|tab_ix| self.render_tab(tab_ix, source_window, theme, cx))
             .collect::<Vec<_>>();
 
         div()
@@ -860,7 +1124,18 @@ impl Workspace {
                     .flex_1()
                     .h_full()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.border)),
+                    .border_color(rgb(theme.border))
+                    .drag_over::<DraggedTab>(move |style, _, _, _| {
+                        style
+                            .bg(rgb(theme.element_hover))
+                            .border_l(px(2.0))
+                            .border_color(rgb(theme.accent))
+                    })
+                    .on_drop(
+                        cx.listener(move |this, dragged_tab: &DraggedTab, window, cx| {
+                            this.handle_dragged_tab_drop(dragged_tab, append_ix, window, cx);
+                        }),
+                    ),
             )
             .into_any_element()
     }
@@ -893,7 +1168,7 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (theme, tab_bar_visibility) = {
             let store = cx.global::<SettingsStore>();
             (store.resolved_theme, store.settings.tab_bar_visibility)
@@ -908,6 +1183,26 @@ impl Render for Workspace {
             .flex_col()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            .on_drag_move::<DraggedTab>(cx.listener(
+                |this, event: &DragMoveEvent<DraggedTab>, window, cx| {
+                    this.track_dragged_tab_outside_window(event, window, cx);
+                },
+            ))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    this.detach_dragged_tab(event, window, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.clear_dragged_tab_outside_window();
+                }),
+            )
+            .on_drop(cx.listener(|this, dragged_tab: &DraggedTab, window, cx| {
+                this.handle_dragged_tab_drop(dragged_tab, this.tabs.len(), window, cx);
+            }))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
                 this.open_file(window, cx);
             }))
@@ -923,7 +1218,7 @@ impl Render for Workspace {
             .on_action(|_: &OpenSettings, _, cx| open_settings_window(cx))
             .child(self.render_toolbar(theme, cx))
             .when(show_tab_bar, |this| {
-                this.child(self.render_tab_bar(theme, cx))
+                this.child(self.render_tab_bar(theme, window, cx))
             })
             .child(
                 div()
