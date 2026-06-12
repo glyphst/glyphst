@@ -3,7 +3,7 @@ use std::{collections::HashSet, io::Read as _, ops::Range, path::PathBuf, thread
 use crate::{
     library::{AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp},
     pdf_view::PdfView,
-    settings::{AiApiStyle, ResolvedAiConfig, SettingsStore},
+    settings::{AiApiStyle, AiProvider, AiThinkingLevel, ResolvedAiConfig, SettingsStore},
     settings_window::PanelEvent,
 };
 use anyhow::{Context as _, Result, anyhow};
@@ -73,15 +73,17 @@ struct ChatMessage {
 enum MentionKind {
     CurrentPageText,
     Selection,
+    DocumentText,
 }
 
 impl MentionKind {
-    const ALL: [Self; 2] = [Self::CurrentPageText, Self::Selection];
+    const ALL: [Self; 3] = [Self::CurrentPageText, Self::Selection, Self::DocumentText];
 
     fn token(self) -> &'static str {
         match self {
             Self::CurrentPageText => "@current page text",
             Self::Selection => "@selection",
+            Self::DocumentText => "@document text",
         }
     }
 
@@ -89,6 +91,7 @@ impl MentionKind {
         match self {
             Self::CurrentPageText => "Current page text",
             Self::Selection => "Selection",
+            Self::DocumentText => "Whole PDF text",
         }
     }
 
@@ -96,6 +99,7 @@ impl MentionKind {
         match self {
             Self::CurrentPageText => "Attach text from the visible page",
             Self::Selection => "Attach the selected PDF text",
+            Self::DocumentText => "Attach extracted text from the PDF",
         }
     }
 
@@ -103,6 +107,7 @@ impl MentionKind {
         match self {
             Self::CurrentPageText => "Current page text",
             Self::Selection => "Selection",
+            Self::DocumentText => "Whole PDF text",
         }
     }
 }
@@ -152,6 +157,9 @@ pub struct AiPanel {
     view: AiPanelView,
     mention_completion: Option<MentionCompletion>,
     last_cursor_pos: Option<GpuiPoint<Pixels>>,
+    attachment_menu_open: bool,
+    model_menu_open: bool,
+    thinking_menu_open: bool,
 }
 
 struct LaidOutLine {
@@ -208,6 +216,9 @@ impl AiPanel {
             view: AiPanelView::Chat,
             mention_completion: None,
             last_cursor_pos: None,
+            attachment_menu_open: false,
+            model_menu_open: false,
+            thinking_menu_open: false,
         }
     }
 
@@ -357,6 +368,7 @@ impl AiPanel {
         self.marked_range = None;
         self.mention_completion = None;
         self.last_cursor_pos = None;
+        self.close_composer_menus();
         self.messages.push(ChatMessage {
             role: Role::User,
             content: prompt,
@@ -534,6 +546,11 @@ impl AiPanel {
                     truncate_context(text)
                         .unwrap_or_else(|| "No selected text is currently available.".to_string())
                 }),
+                MentionKind::DocumentText => pdf_view.document_text().map(|text| {
+                    truncate_context(text).unwrap_or_else(|| {
+                        "No extracted text is available for this PDF.".to_string()
+                    })
+                }),
             })
             .ok()
             .flatten();
@@ -541,6 +558,7 @@ impl AiPanel {
         resolved.unwrap_or_else(|| match mention {
             MentionKind::CurrentPageText => "No current page text is available.".to_string(),
             MentionKind::Selection => "No selected text is currently available.".to_string(),
+            MentionKind::DocumentText => "No extracted text is available for this PDF.".to_string(),
         })
     }
 
@@ -609,11 +627,74 @@ impl AiPanel {
         self.save_current_session(cx);
         self.refresh_sessions(cx);
         self.view = AiPanelView::Sessions;
+        self.close_composer_menus();
         cx.notify();
     }
 
     fn show_chat(&mut self, cx: &mut Context<Self>) {
         self.view = AiPanelView::Chat;
+        cx.notify();
+    }
+
+    fn close_composer_menus(&mut self) {
+        self.attachment_menu_open = false;
+        self.model_menu_open = false;
+        self.thinking_menu_open = false;
+    }
+
+    fn toggle_attachment_menu(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.attachment_menu_open = !self.attachment_menu_open;
+        self.model_menu_open = false;
+        self.thinking_menu_open = false;
+        cx.notify();
+    }
+
+    fn toggle_model_menu(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.model_menu_open = !self.model_menu_open;
+        self.attachment_menu_open = false;
+        self.thinking_menu_open = false;
+        cx.notify();
+    }
+
+    fn toggle_thinking_menu(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.thinking_menu_open = !self.thinking_menu_open;
+        self.attachment_menu_open = false;
+        self.model_menu_open = false;
+        cx.notify();
+    }
+
+    fn select_provider(&mut self, provider: AiProvider, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        settings.ai.provider = provider;
+        if let Err(error) = cx.global_mut::<SettingsStore>().set_settings(settings) {
+            eprintln!("failed to update AI provider: {error:#}");
+        }
+        self.close_composer_menus();
+        cx.notify();
+    }
+
+    fn select_thinking_level(&mut self, level: AiThinkingLevel, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        settings.ai.thinking_level = level;
+        if let Err(error) = cx.global_mut::<SettingsStore>().set_settings(settings) {
+            eprintln!("failed to update AI thinking level: {error:#}");
+        }
+        self.close_composer_menus();
         cx.notify();
     }
 
@@ -635,6 +716,7 @@ impl AiPanel {
         self.mention_completion = None;
         self.last_cursor_pos = None;
         self.pending_title_task = None;
+        self.close_composer_menus();
         self.view = AiPanelView::Chat;
         self.focus_handle.focus(window, cx);
         self.refresh_sessions(cx);
@@ -680,6 +762,7 @@ impl AiPanel {
         self.mention_completion = None;
         self.last_cursor_pos = None;
         self.pending_title_task = None;
+        self.close_composer_menus();
         self.view = AiPanelView::Chat;
         self.focus_handle.focus(window, cx);
         cx.notify();
@@ -801,6 +884,7 @@ impl AiPanel {
 
     fn open_context_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
+        self.close_composer_menus();
         if self.mention_completion.is_some() {
             return;
         }
@@ -813,6 +897,72 @@ impl AiPanel {
                 .is_some_and(|ch| !ch.is_whitespace());
         let trigger = if needs_space { " @" } else { "@" };
         self.replace_text_in_range(None, trigger, window, cx);
+    }
+
+    fn add_attachment(
+        &mut self,
+        mention: MentionKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.loading {
+            return;
+        }
+        self.focus_handle.focus(window, cx);
+        self.close_composer_menus();
+        if mentioned_kinds(&self.content).contains(&mention) {
+            cx.notify();
+            return;
+        }
+
+        let cursor = self.cursor_offset().min(self.content.len());
+        let needs_leading_space = cursor > 0
+            && self.content[..cursor]
+                .chars()
+                .last()
+                .is_some_and(|ch| !ch.is_whitespace());
+        let needs_trailing_space = self.content[cursor..]
+            .chars()
+            .next()
+            .is_some_and(|ch| !ch.is_whitespace());
+        let mut text = String::new();
+        if needs_leading_space {
+            text.push(' ');
+        }
+        text.push_str(mention.token());
+        if needs_trailing_space || cursor == self.content.len() {
+            text.push(' ');
+        }
+        self.replace_text_in_range(None, &text, window, cx);
+    }
+
+    fn remove_attachment(&mut self, mention: MentionKind, cx: &mut Context<Self>) {
+        let mut content = self.content.to_string();
+        for (range, kind) in find_mention_ranges(&content).into_iter().rev() {
+            if kind != mention {
+                continue;
+            }
+
+            let mut end = range.end;
+            while end < content.len() {
+                let Some(ch) = content[end..].chars().next() else {
+                    break;
+                };
+                if ch == '\n' || !ch.is_whitespace() {
+                    break;
+                }
+                end += ch.len_utf8();
+            }
+            content.replace_range(range.start..end, "");
+        }
+
+        self.content = content.into();
+        let cursor = self.cursor_offset().min(self.content.len());
+        self.selected_range = cursor..cursor;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.update_mention_completion();
+        cx.notify();
     }
 
     fn insert_mention_at_range(
@@ -1296,6 +1446,227 @@ impl AiPanel {
 
         menu
     }
+
+    fn render_attachment_chips(
+        mentions: Vec<MentionKind>,
+        theme: crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut row = div()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .px_2()
+            .pt_2()
+            .text_size(px(11.0));
+
+        for mention in mentions {
+            row = row.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(rgb(theme.border_variant))
+                    .bg(rgba(with_alpha(theme.accent, 0x14)))
+                    .text_color(rgb(theme.text))
+                    .child(div().text_color(rgb(theme.accent)).child(mention.label()))
+                    .child(
+                        div()
+                            .text_color(rgb(theme.text_muted))
+                            .cursor_pointer()
+                            .hover(move |style| style.text_color(rgb(theme.text)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.remove_attachment(mention, cx);
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child("×"),
+                    ),
+            );
+        }
+
+        row
+    }
+
+    fn render_attachment_menu(
+        theme: crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut menu = div()
+            .mx_2()
+            .mb_1()
+            .flex()
+            .flex_col()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
+            .shadow_sm()
+            .overflow_hidden()
+            .text_size(px(12.0));
+
+        for mention in MentionKind::ALL {
+            menu = menu.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_2()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.element_hover)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.add_attachment(mention, window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_color(rgb(theme.text)).child(mention.label()))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(mention.description()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(mention.token()),
+                    ),
+            );
+        }
+
+        menu
+    }
+
+    fn render_model_menu(
+        selected_provider: AiProvider,
+        provider_models: Vec<(AiProvider, String)>,
+        theme: crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut menu = div()
+            .mx_2()
+            .mb_1()
+            .flex()
+            .flex_col()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
+            .shadow_sm()
+            .overflow_hidden()
+            .text_size(px(12.0));
+
+        for (provider, model) in provider_models {
+            let selected = provider == selected_provider;
+            menu = menu.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_2()
+                    .bg(if selected {
+                        rgb(theme.element_selected)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .text_color(rgb(if selected { theme.accent } else { theme.text }))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.element_hover)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.select_provider(provider, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(provider.label())
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(model),
+                    ),
+            );
+        }
+
+        menu
+    }
+
+    fn render_thinking_menu(
+        selected_level: AiThinkingLevel,
+        theme: crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut menu = div()
+            .mx_2()
+            .mb_1()
+            .flex()
+            .flex_col()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
+            .shadow_sm()
+            .overflow_hidden()
+            .text_size(px(12.0));
+
+        for level in AiThinkingLevel::ALL {
+            let selected = level == selected_level;
+            menu = menu.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_2()
+                    .bg(if selected {
+                        rgb(theme.element_selected)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .text_color(rgb(if selected { theme.accent } else { theme.text }))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.element_hover)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.select_thinking_level(level, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(level.label())
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(thinking_level_description(level)),
+                    ),
+            );
+        }
+
+        menu
+    }
 }
 
 impl EntityInputHandler for AiPanel {
@@ -1429,8 +1800,23 @@ impl Focusable for AiPanel {
 impl Render for AiPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
-        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let (theme, ai_settings) = {
+            let store = cx.global::<SettingsStore>();
+            (store.resolved_theme, store.settings.ai.clone())
+        };
         let can_send = !self.loading && !self.content.trim().is_empty();
+        let selected_provider = ai_settings.provider;
+        let selected_model = ai_settings.provider_config(selected_provider).model;
+        let selected_thinking_level = ai_settings.thinking_level;
+        let provider_models = AiProvider::ALL
+            .into_iter()
+            .map(|provider| (provider, ai_settings.provider_config(provider).model))
+            .collect::<Vec<_>>();
+        let model_label = format!("{} · {}", selected_provider.label(), selected_model);
+        let attached_mentions = mentioned_kinds(&self.content);
+        let attachment_menu_open = self.attachment_menu_open;
+        let model_menu_open = self.model_menu_open;
+        let thinking_menu_open = self.thinking_menu_open;
         let completion_matches = self.mention_completion_matches();
         let completion_selected = self
             .mention_completion
@@ -1470,7 +1856,7 @@ impl Render for AiPanel {
                 div()
                     .text_size(px(13.0))
                     .text_color(rgb(theme.text_muted))
-                    .child("Ask questions about the PDF. Type @ to add selection or current page text."),
+                    .child("Ask questions about the PDF. Type @ or use Attach to add document context."),
             );
         }
         for message in self.messages.clone() {
@@ -1644,17 +2030,36 @@ impl Render for AiPanel {
                     div()
                         .flex()
                         .flex_col()
-                        .gap_2()
-                        .p_2()
                         .border_t(px(1.0))
                         .border_color(rgb(theme.border))
+                        .bg(rgb(theme.surface_background))
+                        .when(!attached_mentions.is_empty(), |this| {
+                            this.child(Self::render_attachment_chips(attached_mentions, theme, cx))
+                        })
+                        .when(attachment_menu_open, |this| {
+                            this.child(Self::render_attachment_menu(theme, cx))
+                        })
+                        .when(model_menu_open, |this| {
+                            this.child(Self::render_model_menu(
+                                selected_provider,
+                                provider_models,
+                                theme,
+                                cx,
+                            ))
+                        })
+                        .when(thinking_menu_open, |this| {
+                            this.child(Self::render_thinking_menu(
+                                selected_thinking_level,
+                                theme,
+                                cx,
+                            ))
+                        })
                         .child(
                             div()
                                 .relative()
-                                .border_1()
-                                .border_color(rgb(theme.border_variant))
-                                .bg(rgb(theme.surface_background))
-                                .p_2()
+                                .px_2()
+                                .pt_2()
+                                .pb_1()
                                 .cursor(CursorStyle::IBeam)
                                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1672,18 +2077,52 @@ impl Render for AiPanel {
                                 .items_center()
                                 .justify_between()
                                 .gap_2()
+                                .px_2()
+                                .pb_2()
+                                .pt_1()
                                 .text_size(px(11.0))
                                 .text_color(rgb(theme.text_muted))
                                 .child(
                                     div()
                                         .flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex_wrap()
                                         .items_center()
                                         .gap_1()
                                         .child(
                                             div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
                                                 .px_2()
                                                 .py_1()
+                                                .rounded(px(4.0))
                                                 .text_size(px(11.0))
+                                                .text_color(rgb(if attachment_menu_open {
+                                                    theme.accent
+                                                } else {
+                                                    theme.text_muted
+                                                }))
+                                                .cursor_pointer()
+                                                .hover(move |style| {
+                                                    style.bg(rgb(theme.element_hover))
+                                                })
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.toggle_attachment_menu(cx);
+                                                        cx.stop_propagation();
+                                                    }),
+                                                )
+                                                .child("+")
+                                                .child("Attach"),
+                                        )
+                                        .child(
+                                            div()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded(px(4.0))
                                                 .text_color(rgb(if mention_completion_open {
                                                     theme.accent
                                                 } else {
@@ -1700,16 +2139,84 @@ impl Render for AiPanel {
                                                         cx.stop_propagation();
                                                     }),
                                                 )
-                                                .child("@ Add context"),
+                                                .child("@"),
                                         )
-                                        .child(if mention_completion_open {
-                                            "Enter inserts context"
-                                        } else {
-                                            "Ctrl+Enter sends"
-                                        }),
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded(px(4.0))
+                                                .text_color(rgb(if model_menu_open {
+                                                    theme.accent
+                                                } else {
+                                                    theme.text_muted
+                                                }))
+                                                .cursor_pointer()
+                                                .hover(move |style| {
+                                                    style.bg(rgb(theme.element_hover))
+                                                })
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.toggle_model_menu(cx);
+                                                        cx.stop_propagation();
+                                                    }),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .max_w(px(96.0))
+                                                        .truncate()
+                                                        .child(model_label),
+                                                )
+                                                .child(if model_menu_open { "⌃" } else { "⌄" }),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded(px(4.0))
+                                                .text_color(rgb(
+                                                    if thinking_menu_open
+                                                        || selected_thinking_level
+                                                            != AiThinkingLevel::Off
+                                                    {
+                                                        theme.accent
+                                                    } else {
+                                                        theme.text_muted
+                                                    },
+                                                ))
+                                                .cursor_pointer()
+                                                .hover(move |style| {
+                                                    style.bg(rgb(theme.element_hover))
+                                                })
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.toggle_thinking_menu(cx);
+                                                        cx.stop_propagation();
+                                                    }),
+                                                )
+                                                .child(format!(
+                                                    "Think {}",
+                                                    selected_thinking_level.label()
+                                                ))
+                                                .child(if thinking_menu_open {
+                                                    "⌃"
+                                                } else {
+                                                    "⌄"
+                                                }),
+                                        ),
                                 )
                                 .child(
                                     div()
+                                        .flex_none()
+                                        .rounded(px(4.0))
                                         .px_3()
                                         .py_1()
                                         .border_1()
@@ -1998,10 +2505,12 @@ fn stream_openai(
     send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
 ) -> Result<()> {
     let url = openai_chat_url(&settings.base_url);
+    let native_thinking =
+        supports_openai_reasoning(settings.provider, &settings.model, settings.thinking_level);
     let mut request_messages = Vec::new();
     request_messages.push(json!({
         "role": "system",
-        "content": system_prompt(),
+        "content": system_prompt(settings.thinking_level, native_thinking),
     }));
     for message in messages {
         request_messages.push(json!({
@@ -2013,11 +2522,19 @@ fn stream_openai(
         }));
     }
 
-    let mut request = client.post(url).json(&json!({
-        "model": settings.model,
+    let mut body = json!({
+        "model": settings.model.clone(),
         "messages": request_messages,
         "stream": true,
-    }));
+    });
+    apply_openai_thinking(
+        &mut body,
+        settings.provider,
+        &settings.model,
+        settings.thinking_level,
+    );
+
+    let mut request = client.post(url).json(&body);
     if !settings.api_key.is_empty() {
         request = request.bearer_auth(settings.api_key);
     }
@@ -2056,13 +2573,21 @@ fn stream_anthropic(
         })
         .collect::<Vec<_>>();
 
+    let native_thinking =
+        supports_anthropic_thinking(settings.provider, &settings.model, settings.thinking_level);
     let mut body = json!({
-        "model": settings.model,
+        "model": settings.model.clone(),
         "messages": request_messages,
         "max_tokens": 4096,
         "stream": true,
     });
-    body["system"] = json!(system_prompt());
+    body["system"] = json!(system_prompt(settings.thinking_level, native_thinking));
+    apply_anthropic_thinking(
+        &mut body,
+        settings.provider,
+        &settings.model,
+        settings.thinking_level,
+    );
 
     let response = client
         .post(url)
@@ -2171,8 +2696,85 @@ fn openai_chat_url(base_url: &str) -> String {
     }
 }
 
-fn system_prompt() -> &'static str {
-    "You are an AI assistant embedded in a PDF viewer. Help the user understand and work with the document. Be conversational but professional. Refer to the user in the second person and yourself in the first person. Format responses in Markdown. Never invent document details; if the needed PDF context is missing, say what context you need. When the user includes @selection or @current page text context, ground your answer in that attached context."
+fn system_prompt(thinking_level: AiThinkingLevel, native_thinking: bool) -> String {
+    let mut prompt = "You are an AI assistant embedded in a PDF viewer. Help the user understand and work with the document. Be conversational but professional. Refer to the user in the second person and yourself in the first person. Format responses in Markdown. Never invent document details; if the needed PDF context is missing, say what context you need. When the user includes @selection, @current page text, or @document text context, ground your answer in that attached context. Do not reveal hidden chain-of-thought; provide concise reasoning summaries only when useful.".to_string();
+
+    if thinking_level != AiThinkingLevel::Off && !native_thinking {
+        prompt.push_str(" Use ");
+        prompt.push_str(thinking_level.as_str());
+        prompt.push_str(" internal reasoning effort before answering.");
+    }
+
+    prompt
+}
+
+fn thinking_level_description(level: AiThinkingLevel) -> &'static str {
+    match level {
+        AiThinkingLevel::Off => "No extra reasoning",
+        AiThinkingLevel::Low => "Fast light reasoning",
+        AiThinkingLevel::Medium => "Balanced reasoning",
+        AiThinkingLevel::High => "Deeper reasoning",
+    }
+}
+
+fn supports_openai_reasoning(provider: AiProvider, model: &str, level: AiThinkingLevel) -> bool {
+    if level == AiThinkingLevel::Off || provider != AiProvider::OpenAi {
+        return false;
+    }
+
+    let model = model.to_ascii_lowercase();
+    model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+        || model.starts_with("gpt-5")
+}
+
+fn supports_anthropic_thinking(provider: AiProvider, model: &str, level: AiThinkingLevel) -> bool {
+    if level == AiThinkingLevel::Off || provider != AiProvider::Anthropic {
+        return false;
+    }
+
+    let model = model.to_ascii_lowercase();
+    model.contains("claude-3-7") || model.contains("claude-4")
+}
+
+fn apply_openai_thinking(
+    body: &mut Value,
+    provider: AiProvider,
+    model: &str,
+    level: AiThinkingLevel,
+) {
+    if !supports_openai_reasoning(provider, model, level) {
+        return;
+    }
+
+    body["reasoning_effort"] = json!(match level {
+        AiThinkingLevel::Off => return,
+        AiThinkingLevel::Low => "low",
+        AiThinkingLevel::Medium => "medium",
+        AiThinkingLevel::High => "high",
+    });
+}
+
+fn apply_anthropic_thinking(
+    body: &mut Value,
+    provider: AiProvider,
+    model: &str,
+    level: AiThinkingLevel,
+) {
+    if !supports_anthropic_thinking(provider, model, level) {
+        return;
+    }
+
+    body["thinking"] = json!({
+        "type": "enabled",
+        "budget_tokens": match level {
+            AiThinkingLevel::Off => return,
+            AiThinkingLevel::Low => 1024,
+            AiThinkingLevel::Medium => 2048,
+            AiThinkingLevel::High => 3072,
+        },
+    });
 }
 
 fn mentioned_kinds(text: &str) -> Vec<MentionKind> {
@@ -2490,12 +3092,19 @@ fn with_alpha(rgb: u32, alpha: u8) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parses_pdf_context_mentions_in_order_without_duplicates() {
         assert_eq!(
-            mentioned_kinds("Summarize @selection and compare with @current page text"),
-            vec![MentionKind::Selection, MentionKind::CurrentPageText]
+            mentioned_kinds(
+                "Summarize @selection and compare with @current page text plus @document text"
+            ),
+            vec![
+                MentionKind::Selection,
+                MentionKind::CurrentPageText,
+                MentionKind::DocumentText,
+            ]
         );
         assert_eq!(
             mentioned_kinds("@selection then @selection again"),
@@ -2532,5 +3141,45 @@ mod tests {
             Some("Fourier Transform Basics".to_string())
         );
         assert_eq!(title_from_response("   \n"), None);
+    }
+
+    #[test]
+    fn configures_native_thinking_for_supported_models() {
+        let mut openai_body = json!({});
+        apply_openai_thinking(
+            &mut openai_body,
+            AiProvider::OpenAi,
+            "gpt-5",
+            AiThinkingLevel::High,
+        );
+        assert_eq!(openai_body["reasoning_effort"], "high");
+
+        let mut anthropic_body = json!({});
+        apply_anthropic_thinking(
+            &mut anthropic_body,
+            AiProvider::Anthropic,
+            "claude-3-7-sonnet-latest",
+            AiThinkingLevel::Medium,
+        );
+        assert_eq!(anthropic_body["thinking"]["budget_tokens"], 2048);
+
+        let mut unsupported_body = json!({});
+        apply_openai_thinking(
+            &mut unsupported_body,
+            AiProvider::OpenRouter,
+            "openai/gpt-5",
+            AiThinkingLevel::High,
+        );
+        assert!(unsupported_body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn unsupported_thinking_uses_system_prompt_instruction() {
+        let prompt = system_prompt(AiThinkingLevel::Low, false);
+        assert!(prompt.contains("Use low internal reasoning effort"));
+        assert!(prompt.contains("Do not reveal hidden chain-of-thought"));
+
+        let native_prompt = system_prompt(AiThinkingLevel::Low, true);
+        assert!(!native_prompt.contains("Use low internal reasoning effort"));
     }
 }

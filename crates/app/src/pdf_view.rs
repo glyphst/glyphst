@@ -3063,6 +3063,10 @@ impl PdfView {
         Self::text_for_glyph_range(&self.glyphs, page.glyph_range.clone())
     }
 
+    pub(crate) fn document_text(&self) -> Option<String> {
+        Self::text_for_glyph_range(&self.glyphs, 0..self.glyphs.len())
+    }
+
     fn text_for_glyph_range(glyphs: &[Glyph], range: Range<usize>) -> Option<String> {
         if range.start >= range.end || range.end > glyphs.len() {
             return None;

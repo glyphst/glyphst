@@ -191,6 +191,47 @@ pub enum AiApiStyle {
     Anthropic,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AiThinkingLevel {
+    #[default]
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl AiThinkingLevel {
+    pub const ALL: [Self; 4] = [Self::Off, Self::Low, Self::Medium, Self::High];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "off" | "none" | "disabled" => Some(Self::Off),
+            "low" => Some(Self::Low),
+            "medium" | "med" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AiProvider {
     #[default]
@@ -349,6 +390,7 @@ pub struct ResolvedAiConfig {
     pub api_key: String,
     pub base_url: String,
     pub base_url_overridden: bool,
+    pub thinking_level: AiThinkingLevel,
 }
 
 impl ResolvedAiConfig {
@@ -400,6 +442,7 @@ pub struct AiSettings {
     pub provider: AiProvider,
     pub providers: BTreeMap<AiProvider, AiProviderConfig>,
     pub title_model: Option<AiTitleModelSettings>,
+    pub thinking_level: AiThinkingLevel,
 }
 
 impl Default for AiSettings {
@@ -409,6 +452,7 @@ impl Default for AiSettings {
             provider,
             providers: BTreeMap::from([(provider, provider.default_config())]),
             title_model: None,
+            thinking_level: AiThinkingLevel::Off,
         }
     }
 }
@@ -444,16 +488,25 @@ impl AiSettings {
 
     pub fn resolved_main(&self) -> ResolvedAiConfig {
         let config = self.provider_config(self.provider);
-        self.resolved_for(self.provider, config.model)
+        self.resolved_for(self.provider, config.model, self.thinking_level)
     }
 
     pub fn resolved_title(&self) -> Option<ResolvedAiConfig> {
         let title_model = self.title_model.as_ref()?;
-        let resolved = self.resolved_for(title_model.provider, title_model.model.clone());
+        let resolved = self.resolved_for(
+            title_model.provider,
+            title_model.model.clone(),
+            AiThinkingLevel::Off,
+        );
         resolved.can_request().then_some(resolved)
     }
 
-    fn resolved_for(&self, provider: AiProvider, model: String) -> ResolvedAiConfig {
+    fn resolved_for(
+        &self,
+        provider: AiProvider,
+        model: String,
+        thinking_level: AiThinkingLevel,
+    ) -> ResolvedAiConfig {
         let config = self.provider_config(provider);
         let base_url_overridden = config.base_url.is_some();
         ResolvedAiConfig {
@@ -464,6 +517,7 @@ impl AiSettings {
                 .base_url
                 .unwrap_or_else(|| provider.default_base_url().to_string()),
             base_url_overridden,
+            thinking_level,
         }
     }
 }
@@ -570,6 +624,14 @@ impl Settings {
                 .and_then(AiProvider::from_str)
             {
                 settings.ai.provider = value;
+            }
+
+            if let Some(value) = ai
+                .get_arg("thinking")
+                .and_then(KdlValue::as_string)
+                .and_then(AiThinkingLevel::from_str)
+            {
+                settings.ai.thinking_level = value;
             }
 
             if let Some(providers) = ai.get("providers").and_then(KdlNode::children) {
@@ -702,6 +764,9 @@ impl Settings {
             let mut ai = KdlNode::new("ai");
             let ai_children = ai.ensure_children();
             push_value_node(ai_children, "provider", self.ai.provider.as_str());
+            if self.ai.thinking_level != AiThinkingLevel::Off {
+                push_value_node(ai_children, "thinking", self.ai.thinking_level.as_str());
+            }
 
             let mut providers = KdlNode::new("providers");
             let providers_children = providers.ensure_children();
@@ -1046,6 +1111,7 @@ ai {
         .unwrap();
 
         assert_eq!(settings.ai.provider, AiProvider::DeepSeek);
+        assert_eq!(settings.ai.thinking_level, AiThinkingLevel::Off);
         let deepseek = settings.ai.provider_config(AiProvider::DeepSeek);
         assert_eq!(deepseek.model, "deepseek-chat");
         assert_eq!(deepseek.api_key, "deepseek-key");
@@ -1056,6 +1122,22 @@ ai {
         let openrouter = settings.ai.provider_config(AiProvider::OpenRouter);
         assert_eq!(openrouter.model, "openai/gpt-4o-mini");
         assert_eq!(openrouter.api_key, "openrouter-key");
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn parses_and_exports_ai_thinking_level() {
+        let settings = parse_settings(
+            r##"
+ai {
+    provider "openai"
+    thinking "high"
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.ai.thinking_level, AiThinkingLevel::High);
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 
