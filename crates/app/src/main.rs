@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use gpui::{App, AppContext, Bounds, Pixels, WindowBounds, WindowOptions, px, size};
+use futures::{StreamExt, channel::mpsc};
+use gpui::{App, AppContext, Bounds, Pixels, WindowBounds, WindowHandle, WindowOptions, px, size};
 use gpui_platform::application;
 use tikv_jemalloc_sys as _;
 use tikv_jemallocator::Jemalloc;
@@ -13,6 +14,7 @@ mod ai_panel;
 mod bookmarks;
 mod command_palette;
 mod history;
+mod instance;
 mod keybindings;
 mod library;
 mod new_tab;
@@ -35,7 +37,18 @@ use settings::SettingsStore;
 use workspace::Workspace;
 
 fn main() {
-    let path = std::env::args_os().nth(1).map(PathBuf::from);
+    let request = instance::parse_args();
+    match instance::try_forward(&request) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => eprintln!("failed to forward open request: {error:#}"),
+    }
+
+    let (open_tx, mut open_rx) = mpsc::unbounded();
+    if let Err(error) = instance::listen(open_tx) {
+        eprintln!("failed to start IPC listener: {error:#}");
+        return;
+    }
 
     application().run(move |cx: &mut App| {
         cx.set_global(SettingsStore::load());
@@ -44,6 +57,9 @@ fn main() {
         cx.on_app_quit(|cx| {
             if let Err(error) = cx.global::<LibraryStore>().save() {
                 eprintln!("failed to save PDF library: {error:#}");
+            }
+            if let Err(error) = instance::remove_socket_file() {
+                eprintln!("failed to remove IPC socket: {error:#}");
             }
             async {}
         })
@@ -58,10 +74,72 @@ fn main() {
         };
         keybindings::apply(cx, keymap_preset, &keybinding_overrides);
 
-        open_workspace_window(path.clone(), cx).expect("failed to open workspace window");
+        open_workspace_window(request.path.clone(), cx).expect("failed to open workspace window");
 
         cx.activate(true);
+
+        cx.spawn(async move |cx| {
+            while let Some(request) = open_rx.next().await {
+                cx.update(|cx| handle_open_request(request, cx));
+            }
+        })
+        .detach();
     });
+}
+
+fn handle_open_request(request: instance::OpenRequest, cx: &mut App) {
+    if request.new {
+        if let Err(error) = open_workspace_window(request.path, cx) {
+            eprintln!("failed to open workspace window: {error:#}");
+        }
+        cx.activate(true);
+        return;
+    }
+
+    let path = request.path;
+    let Some(workspace) = active_workspace_window(cx) else {
+        if let Err(error) = open_workspace_window(path, cx) {
+            eprintln!("failed to open workspace window: {error:#}");
+        }
+        cx.activate(true);
+        return;
+    };
+
+    let update_path = path.clone();
+    match workspace.update(cx, |workspace, window, cx| {
+        if let Some(path) = update_path
+            && let Err(error) = workspace.open_document_external(path, window, cx)
+        {
+            eprintln!("failed to open PDF: {error:#}");
+        }
+        window.activate_window();
+    }) {
+        Ok(()) => cx.activate(true),
+        Err(error) => {
+            eprintln!("failed to update workspace window: {error:#}");
+            if let Err(error) = open_workspace_window(path, cx) {
+                eprintln!("failed to open workspace window: {error:#}");
+            }
+            cx.activate(true);
+        }
+    }
+}
+
+fn active_workspace_window(cx: &App) -> Option<WindowHandle<Workspace>> {
+    cx.active_window()
+        .and_then(|window| window.downcast::<Workspace>())
+        .or_else(|| {
+            cx.window_stack().and_then(|windows| {
+                windows
+                    .into_iter()
+                    .find_map(|window| window.downcast::<Workspace>())
+            })
+        })
+        .or_else(|| {
+            cx.windows()
+                .into_iter()
+                .find_map(|window| window.downcast::<Workspace>())
+        })
 }
 
 pub(crate) fn open_workspace_window(path: Option<PathBuf>, cx: &mut App) -> Result<()> {

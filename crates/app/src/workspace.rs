@@ -316,6 +316,16 @@ impl Workspace {
         .detach();
     }
 
+    pub(crate) fn open_document_external(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let replace_active_new_tab = self.active_tab_is_new_tab();
+        self.focus_or_open_document(path, None, replace_active_new_tab, window, cx)
+    }
+
     fn focus_or_open_document(
         &mut self,
         path: PathBuf,
