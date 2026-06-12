@@ -461,6 +461,7 @@ struct PaintData {
 struct Glyph {
     c: char,
     quad: Quad,
+    line_rect: Rect,
     page_idx: usize,
     line_idx: u32,
     block_idx: u32,
@@ -1519,11 +1520,13 @@ impl PdfView {
 
             for line in block.lines() {
                 let line_idx = *next_line_idx;
+                let line_rect = line.bounds();
                 for ch in line.chars() {
                     if let Some(c) = ch.char() {
                         glyphs.push(Glyph {
                             c,
                             quad: ch.quad(),
+                            line_rect,
                             page_idx,
                             line_idx,
                             block_idx,
@@ -6620,7 +6623,7 @@ impl PdfView {
         let mut current_rect = None;
 
         for glyph in &self.glyphs[range] {
-            let rect = Self::quad_rect(&glyph.quad);
+            let rect = Self::glyph_line_rect(glyph);
 
             match (current_page, current_line, current_rect) {
                 (Some(page), Some(line), Some(existing))
@@ -6660,7 +6663,7 @@ impl PdfView {
         let mut current_rect = None;
 
         for glyph in &self.glyphs[range] {
-            let rect = Self::quad_rect(&glyph.quad);
+            let rect = Self::glyph_line_rect(glyph);
 
             match (current_page, current_line, current_rect) {
                 (Some(page), Some(line), Some(existing))
@@ -6738,6 +6741,11 @@ impl PdfView {
             quad.ul.x.max(quad.ur.x).max(quad.ll.x).max(quad.lr.x),
             quad.ul.y.max(quad.ur.y).max(quad.ll.y).max(quad.lr.y),
         )
+    }
+
+    fn glyph_line_rect(glyph: &Glyph) -> Rect {
+        let rect = Self::quad_rect(&glyph.quad);
+        Rect::new(rect.x0, glyph.line_rect.y0, rect.x1, glyph.line_rect.y1)
     }
 
     fn union_rect(a: Rect, b: Rect) -> Rect {
@@ -7499,7 +7507,7 @@ impl Render for PdfView {
 #[cfg(test)]
 mod tests {
     use super::{Glyph, PdfView};
-    use mupdf::{Point, Quad};
+    use mupdf::{Point, Quad, Rect};
 
     fn test_glyph(c: char, x0: f32, x1: f32) -> Glyph {
         Glyph {
@@ -7510,6 +7518,7 @@ mod tests {
                 Point::new(x0, 6.0),
                 Point::new(x1, 6.0),
             ),
+            line_rect: Rect::new(x0, 0.0, x1, 6.0),
             page_idx: 0,
             line_idx: 0,
             block_idx: 0,
@@ -7534,6 +7543,23 @@ mod tests {
         .into_iter()
         .map(|(c, x0, x1)| test_glyph(c, x0, x1))
         .collect()
+    }
+
+    #[test]
+    fn glyph_line_rect_uses_line_bounds_for_height() {
+        let mut glyph = test_glyph('x', 2.0, 7.0);
+        glyph.quad = Quad::new(
+            Point::new(2.0, 2.0),
+            Point::new(7.0, 2.0),
+            Point::new(2.0, 4.0),
+            Point::new(7.0, 4.0),
+        );
+        glyph.line_rect = Rect::new(0.0, 0.0, 10.0, 8.0);
+
+        assert_eq!(
+            PdfView::glyph_line_rect(&glyph),
+            Rect::new(2.0, 0.0, 7.0, 8.0)
+        );
     }
 
     #[test]
