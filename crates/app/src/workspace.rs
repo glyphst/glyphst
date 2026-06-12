@@ -16,6 +16,7 @@ use crate::{
     },
     picker::{Picker, PickerEvent},
     settings::{SettingsStore, TabBarVisibility},
+    settings_window::open_settings_window,
     theme::Theme,
 };
 
@@ -103,6 +104,8 @@ impl Workspace {
 
         workspace.tabs.push(initial_tab);
         workspace.focus_handle.focus(window, cx);
+        cx.observe_global::<SettingsStore>(|_, cx| cx.notify())
+            .detach();
         workspace
     }
 
@@ -211,7 +214,6 @@ impl Workspace {
                         eprintln!("failed to open PDF: {error:#}");
                     }
                 }
-                PdfViewEvent::SettingsChanged => cx.notify(),
             },
         )
         .detach();
@@ -679,15 +681,7 @@ impl Workspace {
                     .child(Self::render_toolbar_menu_item(
                         "Open Settings",
                         theme,
-                        |this, window, cx| {
-                            if matches!(this.tabs.get(this.active_tab), Some(Tab::Document(_))) {
-                                let focus_handle = this.focus_handle.clone();
-                                window.defer(cx, move |window, cx| {
-                                    focus_handle.focus(window, cx);
-                                    focus_handle.dispatch_action(&OpenSettings, window, cx);
-                                });
-                            }
-                        },
+                        |_, _, cx| open_settings_window(cx),
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
@@ -926,6 +920,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
+            .on_action(|_: &OpenSettings, _, cx| open_settings_window(cx))
             .child(self.render_toolbar(theme, cx))
             .when(show_tab_bar, |this| {
                 this.child(self.render_tab_bar(theme, cx))

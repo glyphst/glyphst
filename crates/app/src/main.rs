@@ -22,7 +22,7 @@ mod pdf_view;
 mod picker;
 mod search;
 mod settings;
-mod settings_panel;
+mod settings_window;
 mod smooth_scroll;
 mod theme;
 mod toc;

@@ -18,7 +18,6 @@ use crate::bookmarks::{
     BookmarkPalette, BookmarkPaletteDelegate, BookmarkPrompt, BookmarkPromptDelegate,
 };
 use crate::history::{HistoryPalette, HistoryPaletteDelegate};
-use crate::keybindings;
 use crate::library::{
     DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore, Note, normalize_path,
 };
@@ -27,7 +26,7 @@ use crate::notes::{NotePaletteEntry, NotesPalette, NotesPaletteDelegate};
 use crate::picker::{Picker, PickerEvent};
 use crate::search::{SearchBar, SearchEvent};
 use crate::settings::{BehaviorSettings, SettingsStore, WindowSettings};
-use crate::settings_panel::{PanelEvent, SettingsPanel};
+use crate::settings_window::{PanelEvent, open_settings_window};
 use crate::smooth_scroll::advance_toward;
 use crate::theme::Theme;
 use crate::toc::{TocPalette, TocPaletteDelegate, TocPaletteEntry};
@@ -509,7 +508,6 @@ pub(crate) enum PdfViewEvent {
         path: PathBuf,
         position: Option<DocumentPosition>,
     },
-    SettingsChanged,
 }
 
 struct SearchMatch {
@@ -626,7 +624,6 @@ pub struct PdfView {
     scroll_y_doc: f32,
     target_scroll_x_doc: f32,
     target_scroll_y_doc: f32,
-    settings_panel: Option<Entity<SettingsPanel>>,
     ai_panel: Option<Entity<AiPanel>>,
     search_bar: Option<Entity<SearchBar>>,
     toc_palette: Option<Entity<TocPalette>>,
@@ -758,7 +755,6 @@ impl PdfView {
             scroll_y_doc: 0.0,
             target_scroll_x_doc: 0.0,
             target_scroll_y_doc: 0.0,
-            settings_panel: None,
             ai_panel: None,
             search_bar: None,
             toc_palette: None,
@@ -829,6 +825,20 @@ impl PdfView {
                     cx.drop_image(image, None);
                 }
             }
+        })
+        .detach();
+
+        cx.observe_global::<SettingsStore>(|this, cx| {
+            let (page_gap, window_settings) = {
+                let store = cx.global::<SettingsStore>();
+                (store.resolved_theme.page_gap, store.settings.window)
+            };
+            this.recompute_layout(page_gap);
+            if this.window_settings != window_settings {
+                this.transparency_enabled = window_settings.transparency_enabled_by_default();
+                this.window_settings = window_settings;
+            }
+            cx.notify();
         })
         .detach();
     }
@@ -3924,57 +3934,12 @@ impl PdfView {
     }
 
     fn close_all_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_settings_panel(window, cx);
         self.close_search_bar(window, cx);
         self.close_toc_palette(window, cx);
         self.close_notes_palette(window, cx);
         self.close_history_palette(window, cx);
         self.close_bookmark_palette(window, cx);
         self.close_bookmark_prompt(window, cx);
-    }
-
-    fn toggle_settings_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_panel.is_some() {
-            self.close_settings_panel(window, cx);
-            return;
-        }
-        self.close_all_overlays(window, cx);
-
-        let previous_focus_handle = self.focus_handle.clone();
-        let panel = cx.new(|cx| SettingsPanel::new(previous_focus_handle.clone(), cx));
-
-        cx.subscribe_in(
-            &panel,
-            window,
-            |this, _, event: &PanelEvent, window, cx| match event {
-                PanelEvent::Dismissed => this.close_settings_panel(window, cx),
-                PanelEvent::Changed => {
-                    let (page_gap, window_settings, keymap_preset, keybinding_overrides) = {
-                        let store = cx.global::<SettingsStore>();
-                        (
-                            store.resolved_theme.page_gap,
-                            store.settings.window,
-                            store.settings.keymap_preset,
-                            store.settings.keybinding_overrides.clone(),
-                        )
-                    };
-                    keybindings::apply(cx, keymap_preset, &keybinding_overrides);
-                    this.recompute_layout(page_gap);
-                    if this.window_settings != window_settings {
-                        this.transparency_enabled =
-                            window_settings.transparency_enabled_by_default();
-                    }
-                    this.window_settings = window_settings;
-                    this.apply_transparency(window, cx);
-                    cx.emit(PdfViewEvent::SettingsChanged);
-                }
-            },
-        )
-        .detach();
-
-        panel.focus_handle(cx).focus(window, cx);
-        self.settings_panel = Some(panel);
-        cx.notify();
     }
 
     fn apply_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3986,13 +3951,6 @@ impl PdfView {
     fn toggle_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.transparency_enabled = !self.transparency_enabled;
         self.apply_transparency(window, cx);
-    }
-
-    fn close_settings_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_panel.take().is_some() {
-            self.focus_handle.focus(window, cx);
-            cx.notify();
-        }
     }
 
     fn toggle_ai_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4649,32 +4607,6 @@ impl PdfView {
             .child(content)
     }
 
-    fn render_top_aligned_overlay(
-        content: impl IntoElement + 'static,
-        close: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .flex()
-            .items_start()
-            .justify_center()
-            .pt(px(96.0))
-            .bg(rgba(theme.overlay))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| close(this, window, cx)),
-            )
-            .on_scroll_wheel(|_, _, cx| {
-                cx.stop_propagation();
-            })
-            .child(content)
-    }
-
     fn render_sidebar_resize_handle(
         id: &'static str,
         sidebar: DraggedSidebar,
@@ -4994,7 +4926,7 @@ impl PdfView {
             .child(Self::context_menu_entry(
                 "Settings",
                 theme,
-                |this, window, cx| this.toggle_settings_panel(window, cx),
+                |_, _, cx| open_settings_window(cx),
                 cx,
             ))
     }
@@ -6859,6 +6791,13 @@ impl Render for PdfView {
             let store = cx.global::<SettingsStore>();
             (store.resolved_theme, store.settings.window)
         };
+        if self.window_settings != window_settings {
+            self.transparency_enabled = window_settings.transparency_enabled_by_default();
+            self.window_settings = window_settings;
+            window.set_background_appearance(
+                window_settings.background_appearance(self.transparency_enabled),
+            );
+        }
         let opacity = window_settings.effective_opacity(self.transparency_enabled);
         if self.loading || self.loading_error.is_some() {
             return self.render_loading_state(theme, opacity);
@@ -7017,9 +6956,7 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &ToggleTransparency, window, cx| {
                 this.toggle_transparency(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                this.toggle_settings_panel(window, cx);
-            }))
+            .on_action(|_: &OpenSettings, _, cx| open_settings_window(cx))
             .on_action(cx.listener(|this, _: &ToggleAiPanel, window, cx| {
                 this.toggle_ai_panel(window, cx);
             }))
@@ -7123,8 +7060,7 @@ impl Render for PdfView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    if this.settings_panel.is_some()
-                        || this.search_bar.is_some()
+                    if this.search_bar.is_some()
                         || this.toc_palette.is_some()
                         || this.history_palette.is_some()
                         || this.bookmark_palette.is_some()
@@ -7480,14 +7416,6 @@ impl Render for PdfView {
             )
             .when(self.grid_overview_open, |this| {
                 this.child(self.render_grid_overview(theme, window, cx))
-            })
-            .when_some(self.settings_panel.clone(), |this, panel| {
-                this.child(Self::render_top_aligned_overlay(
-                    panel,
-                    |this, window, cx| this.close_settings_panel(window, cx),
-                    theme,
-                    cx,
-                ))
             })
             .when_some(self.search_bar.clone(), |this, search_bar| {
                 this.child(

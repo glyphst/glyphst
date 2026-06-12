@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -184,18 +185,48 @@ pub struct KeyBindingOverride {
     pub keystrokes: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum AiProvider {
-    #[default]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiApiStyle {
     OpenAi,
     Anthropic,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AiProvider {
+    #[default]
+    OpenAi,
+    Anthropic,
+    DeepSeek,
+    OpenRouter,
+    Fireworks,
+}
+
 impl AiProvider {
+    pub const ALL: [Self; 5] = [
+        Self::OpenAi,
+        Self::Anthropic,
+        Self::DeepSeek,
+        Self::OpenRouter,
+        Self::Fireworks,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+            Self::DeepSeek => "deepseek",
+            Self::OpenRouter => "openrouter",
+            Self::Fireworks => "fireworks",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI",
+            Self::Anthropic => "Anthropic",
+            Self::DeepSeek => "DeepSeek",
+            Self::OpenRouter => "OpenRouter",
+            Self::Fireworks => "Fireworks",
         }
     }
 
@@ -203,6 +234,9 @@ impl AiProvider {
         match value {
             "openai" | "open-ai" | "open_ai" => Some(Self::OpenAi),
             "anthropic" | "claude" => Some(Self::Anthropic),
+            "deepseek" | "deep-seek" | "deep_seek" => Some(Self::DeepSeek),
+            "openrouter" | "open-router" | "open_router" => Some(Self::OpenRouter),
+            "fireworks" | "fireworks-ai" | "fireworks_ai" => Some(Self::Fireworks),
             _ => None,
         }
     }
@@ -211,41 +245,127 @@ impl AiProvider {
         match self {
             Self::OpenAi => "gpt-4o",
             Self::Anthropic => "claude-3-5-sonnet-latest",
+            Self::DeepSeek => "deepseek-chat",
+            Self::OpenRouter => "openai/gpt-4o",
+            Self::Fireworks => "accounts/fireworks/models/llama-v3p1-70b-instruct",
         }
     }
-}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AiSettings {
-    pub provider: AiProvider,
-    pub model: String,
-    pub api_key: String,
-    pub base_url: Option<String>,
-}
+    pub fn default_title_model(self) -> &'static str {
+        match self {
+            Self::OpenAi => "gpt-4o-mini",
+            Self::Anthropic => "claude-3-5-haiku-latest",
+            Self::DeepSeek => "deepseek-chat",
+            Self::OpenRouter => "openai/gpt-4o-mini",
+            Self::Fireworks => "accounts/fireworks/models/llama-v3p1-8b-instruct",
+        }
+    }
 
-impl Default for AiSettings {
-    fn default() -> Self {
-        let provider = AiProvider::OpenAi;
-        Self {
-            provider,
-            model: provider.default_model().to_string(),
+    pub fn default_base_url(self) -> &'static str {
+        match self {
+            Self::OpenAi => "https://api.openai.com",
+            Self::Anthropic => "https://api.anthropic.com",
+            Self::DeepSeek => "https://api.deepseek.com",
+            Self::OpenRouter => "https://openrouter.ai/api",
+            Self::Fireworks => "https://api.fireworks.ai/inference",
+        }
+    }
+
+    pub fn api_style(self) -> AiApiStyle {
+        match self {
+            Self::Anthropic => AiApiStyle::Anthropic,
+            Self::OpenAi | Self::DeepSeek | Self::OpenRouter | Self::Fireworks => {
+                AiApiStyle::OpenAi
+            }
+        }
+    }
+
+    pub fn default_config(self) -> AiProviderConfig {
+        AiProviderConfig {
+            model: self.default_model().to_string(),
             api_key: String::new(),
             base_url: None,
         }
     }
 }
 
-impl AiSettings {
-    fn sanitize(&mut self) {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiProviderConfig {
+    pub model: String,
+    pub api_key: String,
+    pub base_url: Option<String>,
+}
+
+impl AiProviderConfig {
+    fn sanitize(&mut self, provider: AiProvider) {
         self.model = self.model.trim().to_string();
         self.api_key = self.api_key.trim().to_string();
         self.base_url = self
             .base_url
             .take()
             .map(|value| value.trim().trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty());
+            .filter(|value| !value.is_empty())
+            .filter(|value| value != provider.default_base_url());
         if self.model.is_empty() {
-            self.model = self.provider.default_model().to_string();
+            self.model = provider.default_model().to_string();
+        }
+    }
+
+    fn from_document(provider: AiProvider, document: &KdlDocument) -> Self {
+        let mut config = provider.default_config();
+        if let Some(value) = document.get_arg("model").and_then(KdlValue::as_string) {
+            config.model = value.to_string();
+        }
+        if let Some(value) = document.get_arg("api_key").and_then(KdlValue::as_string) {
+            config.api_key = value.to_string();
+        }
+        config.base_url = document
+            .get_arg("base_url")
+            .and_then(KdlValue::as_string)
+            .map(str::to_string);
+        config.sanitize(provider);
+        config
+    }
+
+    fn write_to_document(&self, document: &mut KdlDocument) {
+        push_value_node(document, "model", self.model.clone());
+        if !self.api_key.is_empty() {
+            push_value_node(document, "api_key", self.api_key.clone());
+        }
+        if let Some(base_url) = &self.base_url {
+            push_value_node(document, "base_url", base_url.clone());
+        }
+    }
+
+    fn is_default_for(&self, provider: AiProvider) -> bool {
+        self == &provider.default_config()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedAiConfig {
+    pub provider: AiProvider,
+    pub model: String,
+    pub api_key: String,
+    pub base_url: String,
+    pub base_url_overridden: bool,
+}
+
+impl ResolvedAiConfig {
+    pub fn can_request(&self) -> bool {
+        match self.provider.api_style() {
+            AiApiStyle::OpenAi => !self.api_key.is_empty() || self.base_url_overridden,
+            AiApiStyle::Anthropic => !self.api_key.is_empty(),
+        }
+    }
+
+    pub fn missing_credentials_message(&self) -> String {
+        match self.provider.api_style() {
+            AiApiStyle::OpenAi => format!(
+                "missing {} API key, or set a custom base URL for an OpenAI-compatible server",
+                self.provider.label()
+            ),
+            AiApiStyle::Anthropic => format!("missing {} API key", self.provider.label()),
         }
     }
 }
@@ -254,8 +374,6 @@ impl AiSettings {
 pub struct AiTitleModelSettings {
     pub provider: AiProvider,
     pub model: String,
-    pub api_key: String,
-    pub base_url: Option<String>,
 }
 
 impl Default for AiTitleModelSettings {
@@ -263,9 +381,7 @@ impl Default for AiTitleModelSettings {
         let provider = AiProvider::OpenAi;
         Self {
             provider,
-            model: provider.default_model().to_string(),
-            api_key: String::new(),
-            base_url: None,
+            model: provider.default_title_model().to_string(),
         }
     }
 }
@@ -273,32 +389,81 @@ impl Default for AiTitleModelSettings {
 impl AiTitleModelSettings {
     fn sanitize(&mut self) {
         self.model = self.model.trim().to_string();
-        self.api_key = self.api_key.trim().to_string();
-        self.base_url = self
-            .base_url
-            .take()
-            .map(|value| value.trim().trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty());
         if self.model.is_empty() {
-            self.model = self.provider.default_model().to_string();
-        }
-    }
-
-    pub fn can_request(&self) -> bool {
-        match self.provider {
-            AiProvider::OpenAi => !self.api_key.is_empty() || self.base_url.is_some(),
-            AiProvider::Anthropic => !self.api_key.is_empty(),
+            self.model = self.provider.default_title_model().to_string();
         }
     }
 }
 
-impl From<AiTitleModelSettings> for AiSettings {
-    fn from(settings: AiTitleModelSettings) -> Self {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiSettings {
+    pub provider: AiProvider,
+    pub providers: BTreeMap<AiProvider, AiProviderConfig>,
+    pub title_model: Option<AiTitleModelSettings>,
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        let provider = AiProvider::OpenAi;
         Self {
-            provider: settings.provider,
-            model: settings.model,
-            api_key: settings.api_key,
-            base_url: settings.base_url,
+            provider,
+            providers: BTreeMap::from([(provider, provider.default_config())]),
+            title_model: None,
+        }
+    }
+}
+
+impl AiSettings {
+    fn sanitize(&mut self) {
+        for (provider, config) in self.providers.iter_mut() {
+            config.sanitize(*provider);
+        }
+        self.providers
+            .entry(self.provider)
+            .or_insert_with(|| self.provider.default_config());
+        if let Some(title_model) = self.title_model.as_mut() {
+            title_model.sanitize();
+            self.providers
+                .entry(title_model.provider)
+                .or_insert_with(|| title_model.provider.default_config());
+        }
+    }
+
+    pub fn provider_config(&self, provider: AiProvider) -> AiProviderConfig {
+        self.providers
+            .get(&provider)
+            .cloned()
+            .unwrap_or_else(|| provider.default_config())
+    }
+
+    pub fn provider_config_mut(&mut self, provider: AiProvider) -> &mut AiProviderConfig {
+        self.providers
+            .entry(provider)
+            .or_insert_with(|| provider.default_config())
+    }
+
+    pub fn resolved_main(&self) -> ResolvedAiConfig {
+        let config = self.provider_config(self.provider);
+        self.resolved_for(self.provider, config.model)
+    }
+
+    pub fn resolved_title(&self) -> Option<ResolvedAiConfig> {
+        let title_model = self.title_model.as_ref()?;
+        let resolved = self.resolved_for(title_model.provider, title_model.model.clone());
+        resolved.can_request().then_some(resolved)
+    }
+
+    fn resolved_for(&self, provider: AiProvider, model: String) -> ResolvedAiConfig {
+        let config = self.provider_config(provider);
+        let base_url_overridden = config.base_url.is_some();
+        ResolvedAiConfig {
+            provider,
+            model,
+            api_key: config.api_key,
+            base_url: config
+                .base_url
+                .unwrap_or_else(|| provider.default_base_url().to_string()),
+            base_url_overridden,
         }
     }
 }
@@ -309,7 +474,6 @@ pub struct Settings {
     pub window: WindowSettings,
     pub tab_bar_visibility: TabBarVisibility,
     pub ai: AiSettings,
-    pub ai_title_model: Option<AiTitleModelSettings>,
     pub keymap_preset: KeymapPreset,
     pub keybinding_overrides: Vec<KeyBindingOverride>,
     pub theme_name: String,
@@ -323,7 +487,6 @@ impl Default for Settings {
             window: WindowSettings::default(),
             tab_bar_visibility: TabBarVisibility::default(),
             ai: AiSettings::default(),
-            ai_title_model: None,
             keymap_preset: KeymapPreset::default(),
             keybinding_overrides: Vec::new(),
             theme_name: DEFAULT_THEME_ID.to_string(),
@@ -337,9 +500,6 @@ impl Settings {
         self.behavior.sanitize();
         self.window.sanitize();
         self.ai.sanitize();
-        if let Some(title_model) = self.ai_title_model.as_mut() {
-            title_model.sanitize();
-        }
         self.overrides.sanitize();
         if self.theme_name.trim().is_empty() {
             self.theme_name = DEFAULT_THEME_ID.to_string();
@@ -411,16 +571,41 @@ impl Settings {
             {
                 settings.ai.provider = value;
             }
-            if let Some(value) = ai.get_arg("model").and_then(KdlValue::as_string) {
-                settings.ai.model = value.to_string();
+
+            if let Some(providers) = ai.get("providers").and_then(KdlNode::children) {
+                for node in providers.nodes() {
+                    let Some(provider) = AiProvider::from_str(node.name().value()) else {
+                        continue;
+                    };
+                    let Some(children) = node.children() else {
+                        continue;
+                    };
+                    settings.ai.providers.insert(
+                        provider,
+                        AiProviderConfig::from_document(provider, children),
+                    );
+                }
             }
-            if let Some(value) = ai.get_arg("api_key").and_then(KdlValue::as_string) {
-                settings.ai.api_key = value.to_string();
+
+            let legacy_provider = settings.ai.provider;
+            if ai.get("model").is_some()
+                || ai.get("api_key").is_some()
+                || ai.get("base_url").is_some()
+            {
+                let mut config = settings.ai.provider_config(legacy_provider);
+                if let Some(value) = ai.get_arg("model").and_then(KdlValue::as_string) {
+                    config.model = value.to_string();
+                }
+                if let Some(value) = ai.get_arg("api_key").and_then(KdlValue::as_string) {
+                    config.api_key = value.to_string();
+                }
+                config.base_url = ai
+                    .get_arg("base_url")
+                    .and_then(KdlValue::as_string)
+                    .map(str::to_string);
+                config.sanitize(legacy_provider);
+                settings.ai.providers.insert(legacy_provider, config);
             }
-            settings.ai.base_url = ai
-                .get_arg("base_url")
-                .and_then(KdlValue::as_string)
-                .map(str::to_string);
 
             if let Some(title_model) = ai.get("title_model").and_then(KdlNode::children) {
                 let mut settings_title_model = AiTitleModelSettings::default();
@@ -434,14 +619,24 @@ impl Settings {
                 if let Some(value) = title_model.get_arg("model").and_then(KdlValue::as_string) {
                     settings_title_model.model = value.to_string();
                 }
-                if let Some(value) = title_model.get_arg("api_key").and_then(KdlValue::as_string) {
-                    settings_title_model.api_key = value.to_string();
+
+                if title_model.get("api_key").is_some() || title_model.get("base_url").is_some() {
+                    let title_provider = settings_title_model.provider;
+                    let mut config = settings.ai.provider_config(title_provider);
+                    if let Some(value) =
+                        title_model.get_arg("api_key").and_then(KdlValue::as_string)
+                    {
+                        config.api_key = value.to_string();
+                    }
+                    config.base_url = title_model
+                        .get_arg("base_url")
+                        .and_then(KdlValue::as_string)
+                        .map(str::to_string);
+                    config.sanitize(title_provider);
+                    settings.ai.providers.insert(title_provider, config);
                 }
-                settings_title_model.base_url = title_model
-                    .get_arg("base_url")
-                    .and_then(KdlValue::as_string)
-                    .map(str::to_string);
-                settings.ai_title_model = Some(settings_title_model);
+
+                settings.ai.title_model = Some(settings_title_model);
             }
         }
 
@@ -503,18 +698,30 @@ impl Settings {
         );
         document.nodes_mut().push(tabs);
 
-        if self.ai != AiSettings::default() || self.ai_title_model.is_some() {
+        if self.ai != AiSettings::default() {
             let mut ai = KdlNode::new("ai");
             let ai_children = ai.ensure_children();
             push_value_node(ai_children, "provider", self.ai.provider.as_str());
-            push_value_node(ai_children, "model", self.ai.model.clone());
-            if !self.ai.api_key.is_empty() {
-                push_value_node(ai_children, "api_key", self.ai.api_key.clone());
+
+            let mut providers = KdlNode::new("providers");
+            let providers_children = providers.ensure_children();
+            for provider in AiProvider::ALL {
+                let Some(config) = self.ai.providers.get(&provider) else {
+                    continue;
+                };
+                if config.is_default_for(provider) {
+                    continue;
+                }
+
+                let mut provider_node = KdlNode::new(provider.as_str());
+                config.write_to_document(provider_node.ensure_children());
+                providers_children.nodes_mut().push(provider_node);
             }
-            if let Some(base_url) = &self.ai.base_url {
-                push_value_node(ai_children, "base_url", base_url.clone());
+            if !providers_children.nodes().is_empty() {
+                ai_children.nodes_mut().push(providers);
             }
-            if let Some(title_model) = &self.ai_title_model {
+
+            if let Some(title_model) = &self.ai.title_model {
                 let mut title_model_node = KdlNode::new("title_model");
                 let title_model_children = title_model_node.ensure_children();
                 push_value_node(
@@ -523,12 +730,6 @@ impl Settings {
                     title_model.provider.as_str(),
                 );
                 push_value_node(title_model_children, "model", title_model.model.clone());
-                if !title_model.api_key.is_empty() {
-                    push_value_node(title_model_children, "api_key", title_model.api_key.clone());
-                }
-                if let Some(base_url) = &title_model.base_url {
-                    push_value_node(title_model_children, "base_url", base_url.clone());
-                }
                 ai_children.nodes_mut().push(title_model_node);
             }
             document.nodes_mut().push(ai);
@@ -801,7 +1002,7 @@ tabs {
     }
 
     #[test]
-    fn parses_and_exports_ai_settings() {
+    fn migrates_legacy_ai_settings() {
         let settings = parse_settings(
             r##"
 ai {
@@ -815,17 +1016,51 @@ ai {
         .unwrap();
 
         assert_eq!(settings.ai.provider, AiProvider::Anthropic);
-        assert_eq!(settings.ai.model, "claude-3-5-sonnet-latest");
-        assert_eq!(settings.ai.api_key, "test-key");
-        assert_eq!(
-            settings.ai.base_url,
-            Some("https://api.example.com".to_string())
-        );
+        let config = settings.ai.provider_config(AiProvider::Anthropic);
+        assert_eq!(config.model, "claude-3-5-sonnet-latest");
+        assert_eq!(config.api_key, "test-key");
+        assert_eq!(config.base_url, Some("https://api.example.com".to_string()));
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 
     #[test]
-    fn parses_and_exports_ai_title_model_settings() {
+    fn parses_and_exports_per_provider_ai_settings() {
+        let settings = parse_settings(
+            r##"
+ai {
+    provider "deepseek"
+    providers {
+        deepseek {
+            model "deepseek-chat"
+            api_key "deepseek-key"
+            base_url "https://api.deepseek.com/v1/"
+        }
+        openrouter {
+            model "openai/gpt-4o-mini"
+            api_key "openrouter-key"
+        }
+    }
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.ai.provider, AiProvider::DeepSeek);
+        let deepseek = settings.ai.provider_config(AiProvider::DeepSeek);
+        assert_eq!(deepseek.model, "deepseek-chat");
+        assert_eq!(deepseek.api_key, "deepseek-key");
+        assert_eq!(
+            deepseek.base_url,
+            Some("https://api.deepseek.com/v1".to_string())
+        );
+        let openrouter = settings.ai.provider_config(AiProvider::OpenRouter);
+        assert_eq!(openrouter.model, "openai/gpt-4o-mini");
+        assert_eq!(openrouter.api_key, "openrouter-key");
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn migrates_legacy_ai_title_model_settings() {
         let settings = parse_settings(
             r##"
 ai {
@@ -840,12 +1075,13 @@ ai {
         )
         .unwrap();
 
-        let title_model = settings.ai_title_model.as_ref().unwrap();
+        let title_model = settings.ai.title_model.as_ref().unwrap();
         assert_eq!(title_model.provider, AiProvider::OpenAi);
         assert_eq!(title_model.model, "gpt-4o-mini");
-        assert_eq!(title_model.api_key, "title-key");
+        let config = settings.ai.provider_config(AiProvider::OpenAi);
+        assert_eq!(config.api_key, "title-key");
         assert_eq!(
-            title_model.base_url,
+            config.base_url,
             Some("https://api.example.com/v1".to_string())
         );
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);

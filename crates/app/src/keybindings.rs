@@ -34,7 +34,7 @@ use crate::{
         SearchInputSelectEnd, SearchInputSelectHome, SearchInputSelectLeft, SearchInputSelectRight,
     },
     settings::{KeyBindingOverride, KeymapPreset},
-    settings_panel::{
+    settings_window::{
         PanelClose, SettingsInputBackspace, SettingsInputCopy, SettingsInputCut,
         SettingsInputDelete, SettingsInputEnd, SettingsInputHome, SettingsInputLeft,
         SettingsInputPaste, SettingsInputRight, SettingsInputSelectAll, SettingsInputSelectEnd,

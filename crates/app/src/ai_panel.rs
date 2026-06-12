@@ -3,8 +3,8 @@ use std::{collections::HashSet, io::Read as _, ops::Range, path::PathBuf, thread
 use crate::{
     library::{AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp},
     pdf_view::PdfView,
-    settings::{AiProvider, AiSettings, SettingsStore},
-    settings_panel::PanelEvent,
+    settings::{AiApiStyle, ResolvedAiConfig, SettingsStore},
+    settings_window::PanelEvent,
 };
 use anyhow::{Context as _, Result, anyhow};
 use futures::{StreamExt, channel::mpsc};
@@ -345,7 +345,7 @@ impl AiPanel {
             return;
         }
 
-        let settings = cx.global::<SettingsStore>().settings.ai.clone();
+        let settings = cx.global::<SettingsStore>().settings.ai.resolved_main();
         self.update_current_page(cx);
         let request_content = self.request_content_for_prompt(&prompt, cx);
         if self.messages.is_empty() {
@@ -436,13 +436,9 @@ impl AiPanel {
             return;
         }
 
-        let Some(title_settings) = cx.global::<SettingsStore>().settings.ai_title_model.clone()
-        else {
+        let Some(settings) = cx.global::<SettingsStore>().settings.ai.resolved_title() else {
             return;
         };
-        if !title_settings.can_request() {
-            return;
-        }
 
         let session_id = self.session_id;
         let mut title_messages = self.messages.clone();
@@ -452,7 +448,6 @@ impl AiPanel {
             request_content: None,
         });
 
-        let settings: AiSettings = title_settings.into();
         let (tx, mut rx) = mpsc::unbounded::<AiStreamEvent>();
 
         thread::spawn(move || {
@@ -1978,39 +1973,31 @@ impl Element for AiInputElement {
 }
 
 fn stream_completion(
-    settings: AiSettings,
+    settings: ResolvedAiConfig,
     messages: Vec<ChatMessage>,
     send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
 ) -> Result<()> {
-    if settings.provider == AiProvider::Anthropic && settings.api_key.is_empty() {
-        return Err(anyhow!("missing Anthropic API key in ai.api_key"));
-    }
-    if settings.provider == AiProvider::OpenAi
-        && settings.api_key.is_empty()
-        && settings.base_url.is_none()
-    {
-        return Err(anyhow!(
-            "missing OpenAI API key in ai.api_key, or set ai.base_url for a local/OpenAI-compatible server"
-        ));
+    if !settings.can_request() {
+        return Err(anyhow!(settings.missing_credentials_message()));
     }
 
     let client = reqwest::blocking::Client::builder()
         .build()
         .context("failed to create HTTP client")?;
 
-    match settings.provider {
-        AiProvider::OpenAi => stream_openai(&client, settings, messages, send_event),
-        AiProvider::Anthropic => stream_anthropic(&client, settings, messages, send_event),
+    match settings.provider.api_style() {
+        AiApiStyle::OpenAi => stream_openai(&client, settings, messages, send_event),
+        AiApiStyle::Anthropic => stream_anthropic(&client, settings, messages, send_event),
     }
 }
 
 fn stream_openai(
     client: &reqwest::blocking::Client,
-    settings: AiSettings,
+    settings: ResolvedAiConfig,
     messages: Vec<ChatMessage>,
     send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
 ) -> Result<()> {
-    let url = openai_chat_url(settings.base_url.as_deref());
+    let url = openai_chat_url(&settings.base_url);
     let mut request_messages = Vec::new();
     request_messages.push(json!({
         "role": "system",
@@ -2035,21 +2022,19 @@ fn stream_openai(
         request = request.bearer_auth(settings.api_key);
     }
 
-    let response = request.send().context("failed to send OpenAI request")?;
-    read_sse_response(response, AiProvider::OpenAi, send_event)
+    let response = request
+        .send()
+        .with_context(|| format!("failed to send {} request", settings.provider.label()))?;
+    read_sse_response(response, AiApiStyle::OpenAi, send_event)
 }
 
 fn stream_anthropic(
     client: &reqwest::blocking::Client,
-    settings: AiSettings,
+    settings: ResolvedAiConfig,
     messages: Vec<ChatMessage>,
     send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
 ) -> Result<()> {
-    let base_url = settings
-        .base_url
-        .as_deref()
-        .unwrap_or("https://api.anthropic.com")
-        .trim_end_matches('/');
+    let base_url = settings.base_url.trim_end_matches('/');
     let url = if base_url.ends_with("/v1/messages") {
         base_url.to_string()
     } else if base_url.ends_with("/v1") {
@@ -2086,18 +2071,20 @@ fn stream_anthropic(
         .json(&body)
         .send()
         .context("failed to send Anthropic request")?;
-    read_sse_response(response, AiProvider::Anthropic, send_event)
+    read_sse_response(response, AiApiStyle::Anthropic, send_event)
 }
 
 fn read_sse_response(
     mut response: reqwest::blocking::Response,
-    provider: AiProvider,
+    api_style: AiApiStyle,
     send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
 ) -> Result<()> {
     if !response.status().is_success() {
         let status = response.status();
         let mut body = String::new();
-        let _ = response.read_to_string(&mut body);
+        if let Err(error) = response.read_to_string(&mut body) {
+            body = format!("failed to read error body: {error:#}");
+        }
         return Err(anyhow!("AI request failed with status {status}: {body}"));
     }
 
@@ -2117,7 +2104,7 @@ fn read_sse_response(
             let line = std::str::from_utf8(&line)
                 .context("AI stream emitted invalid UTF-8")?
                 .trim();
-            if process_sse_line(provider, line, send_event)? {
+            if process_sse_line(api_style, line, send_event)? {
                 return Ok(());
             }
         }
@@ -2127,14 +2114,14 @@ fn read_sse_response(
         let line = std::str::from_utf8(&pending)
             .context("AI stream emitted invalid UTF-8")?
             .trim();
-        process_sse_line(provider, line, send_event)?;
+        process_sse_line(api_style, line, send_event)?;
     }
 
     Ok(())
 }
 
 fn process_sse_line(
-    provider: AiProvider,
+    api_style: AiApiStyle,
     line: &str,
     send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
 ) -> Result<bool> {
@@ -2147,8 +2134,8 @@ fn process_sse_line(
     }
 
     let value = serde_json::from_str::<Value>(data).context("failed to parse AI stream event")?;
-    match provider {
-        AiProvider::OpenAi => {
+    match api_style {
+        AiApiStyle::OpenAi => {
             if let Some(delta) = value["choices"][0]["delta"]["content"].as_str()
                 && !delta.is_empty()
             {
@@ -2156,7 +2143,7 @@ fn process_sse_line(
             }
             Ok(false)
         }
-        AiProvider::Anthropic => {
+        AiApiStyle::Anthropic => {
             match value["type"].as_str() {
                 Some("content_block_delta") => {
                     if let Some(delta) = value["delta"]["text"].as_str()
@@ -2173,10 +2160,8 @@ fn process_sse_line(
     }
 }
 
-fn openai_chat_url(base_url: Option<&str>) -> String {
-    let base_url = base_url
-        .unwrap_or("https://api.openai.com")
-        .trim_end_matches('/');
+fn openai_chat_url(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
     if base_url.ends_with("/v1/chat/completions") {
         base_url.to_string()
     } else if base_url.ends_with("/v1") {

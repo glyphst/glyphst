@@ -105,6 +105,8 @@ impl NewTab {
             board.start_thumbnail_render(path, cx);
         }
 
+        cx.observe_global::<SettingsStore>(|_, cx| cx.notify())
+            .detach();
         board
     }
 
