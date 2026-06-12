@@ -13,8 +13,8 @@ use crate::{
     new_tab::{NewTab, NewTabEvent},
     open_workspace_window_at,
     pdf_view::{
-        CloseTab, OpenFile, OpenNewTab, OpenSettings, PdfAnnotations, PdfView, PdfViewEvent,
-        ToggleCommandPalette,
+        CloseTab, OpenFile, OpenNewTab, OpenSettings, PdfAnnotations, PdfOpenOptions, PdfView,
+        PdfViewEvent, ToggleCommandPalette,
     },
     picker::{Picker, PickerEvent},
     settings::{SettingsStore, TabBarVisibility},
@@ -164,14 +164,18 @@ impl Workspace {
             highlights: cx.global::<LibraryStore>().highlights_for(&path),
             notes: cx.global::<LibraryStore>().notes_for(&path),
         };
+        let sidebar_widths = cx.global::<LibraryStore>().sidebar_widths();
         let mut pdf_view = PdfView::open(
             &path,
             self.focus_handle.clone(),
             behavior,
             window_settings,
             theme,
-            Some(initial_position),
-            annotations,
+            PdfOpenOptions {
+                initial_position: Some(initial_position),
+                sidebar_widths,
+                annotations,
+            },
         )?;
         let pdf_view = cx.new(|cx| {
             PdfView::register_cache_eviction(cx);

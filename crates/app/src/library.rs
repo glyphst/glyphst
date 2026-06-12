@@ -16,6 +16,8 @@ const BOOKMARKS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("bookm
 const HIGHLIGHTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("highlights");
 const NOTES_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("notes");
 const AI_SESSIONS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions");
+const UI_STATE_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("ui_state");
+const SIDEBAR_WIDTHS_KEY: &str = "sidebar_widths";
 const MAX_AI_SESSIONS: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -122,6 +124,14 @@ pub struct AiSession {
     pub updated: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SidebarWidths {
+    pub thumbnails: f32,
+    pub toc: f32,
+    pub notes: f32,
+    pub ai: f32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Library {
     pub history: Vec<HistoryEntry>,
@@ -129,6 +139,7 @@ pub struct Library {
     pub highlights: Vec<Highlight>,
     pub notes: Vec<Note>,
     pub ai_sessions: Vec<AiSession>,
+    pub sidebar_widths: Option<SidebarWidths>,
     next_bookmark_id: u64,
     next_highlight_id: u64,
     next_note_id: u64,
@@ -170,6 +181,16 @@ impl LibraryStore {
 
     pub fn history_entries(&self) -> &[HistoryEntry] {
         &self.library.history
+    }
+
+    pub fn sidebar_widths(&self) -> Option<SidebarWidths> {
+        self.library.sidebar_widths
+    }
+
+    pub fn set_sidebar_widths(&mut self, widths: SidebarWidths) -> Result<()> {
+        self.write_sidebar_widths(widths)?;
+        self.library.sidebar_widths = Some(widths);
+        Ok(())
     }
 
     pub fn remove_missing_history_entries(&mut self) -> bool {
@@ -472,6 +493,17 @@ impl LibraryStore {
         write_txn.commit()?;
         Ok(())
     }
+
+    fn write_sidebar_widths(&self, widths: SidebarWidths) -> Result<()> {
+        let write_txn = self.database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(UI_STATE_TABLE)?;
+            let encoded = encode(&widths)?;
+            table.insert(SIDEBAR_WIDTHS_KEY, encoded.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
 }
 
 impl Library {
@@ -710,6 +742,9 @@ fn ensure_tables(database: &Database) -> Result<()> {
     {
         write_txn.open_table(AI_SESSIONS_TABLE)?;
     }
+    {
+        write_txn.open_table(UI_STATE_TABLE)?;
+    }
     write_txn.commit()?;
     Ok(())
 }
@@ -784,6 +819,16 @@ fn load_library(database: &Database) -> Result<Library> {
                     library.ai_sessions.push(session);
                 }
                 Err(error) => eprintln!("failed to decode AI session: {error:#}"),
+            }
+        }
+    }
+
+    {
+        let table = read_txn.open_table(UI_STATE_TABLE)?;
+        if let Some(value) = table.get(SIDEBAR_WIDTHS_KEY)? {
+            match decode::<SidebarWidths>(value.value()) {
+                Ok(widths) => library.sidebar_widths = Some(widths),
+                Err(error) => eprintln!("failed to decode sidebar widths: {error:#}"),
             }
         }
     }
@@ -1005,6 +1050,29 @@ mod tests {
             assert!(store.bookmarks().is_empty());
             assert!(store.highlights_for(document_path).is_empty());
             assert!(store.notes_for(document_path).is_empty());
+        }
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn persists_sidebar_widths() {
+        let path = temp_library_path("sidebar-widths");
+        let widths = SidebarWidths {
+            thumbnails: 222.0,
+            toc: 333.0,
+            notes: 444.0,
+            ai: 555.0,
+        };
+
+        {
+            let mut store = LibraryStore::open(path.clone()).unwrap();
+            store.set_sidebar_widths(widths).unwrap();
+        }
+
+        {
+            let store = LibraryStore::open(path.clone()).unwrap();
+            assert_eq!(store.sidebar_widths(), Some(widths));
         }
 
         let _ = fs::remove_file(path);

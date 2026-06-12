@@ -19,7 +19,8 @@ use crate::bookmarks::{
 };
 use crate::history::{HistoryPalette, HistoryPaletteDelegate};
 use crate::library::{
-    DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore, Note, normalize_path,
+    DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore, Note, SidebarWidths,
+    normalize_path,
 };
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
 use crate::notes::{NotePaletteEntry, NotesPalette, NotesPaletteDelegate};
@@ -504,6 +505,12 @@ pub(crate) struct PdfAnnotations {
     pub(crate) notes: Vec<Note>,
 }
 
+pub(crate) struct PdfOpenOptions {
+    pub(crate) initial_position: Option<DocumentPosition>,
+    pub(crate) sidebar_widths: Option<SidebarWidths>,
+    pub(crate) annotations: PdfAnnotations,
+}
+
 pub(crate) enum PdfViewEvent {
     OpenDocument {
         path: PathBuf,
@@ -581,6 +588,13 @@ enum DraggedSidebar {
     AiPanel,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeftSidebar {
+    Thumbnails,
+    Toc,
+    Notes,
+}
+
 #[derive(Clone, Copy)]
 enum PageSelectionSource {
     GridOverview,
@@ -656,6 +670,7 @@ pub struct PdfView {
     thumbnail_sidebar_selection: BTreeSet<usize>,
     thumbnail_sidebar_actions_position: Option<GpuiPoint<Pixels>>,
     ai_panel_width: f32,
+    sidebar_width_save_task: Option<Task<()>>,
     grid_overview_open: bool,
     grid_overview_scroll: UniformListScrollHandle,
     grid_overview_zoom: f32,
@@ -689,14 +704,83 @@ pub struct PdfView {
 }
 
 impl PdfView {
+    fn default_sidebar_widths() -> SidebarWidths {
+        SidebarWidths {
+            thumbnails: THUMBNAIL_SIDEBAR_WIDTH,
+            toc: TOC_SIDEBAR_WIDTH,
+            notes: NOTES_SIDEBAR_WIDTH,
+            ai: AI_PANEL_WIDTH,
+        }
+    }
+
+    fn sanitize_sidebar_widths(widths: SidebarWidths) -> SidebarWidths {
+        let sanitize = |width: f32, fallback: f32| {
+            if width.is_finite() {
+                width.max(SIDEBAR_MIN_WIDTH)
+            } else {
+                fallback
+            }
+        };
+
+        SidebarWidths {
+            thumbnails: sanitize(widths.thumbnails, THUMBNAIL_SIDEBAR_WIDTH),
+            toc: sanitize(widths.toc, TOC_SIDEBAR_WIDTH),
+            notes: sanitize(widths.notes, NOTES_SIDEBAR_WIDTH),
+            ai: sanitize(widths.ai, AI_PANEL_WIDTH),
+        }
+    }
+
+    fn max_sidebar_width_for_window(window: &Window) -> f32 {
+        (window.bounds().size.width.as_f32() * SIDEBAR_MAX_WIDTH_RATIO).max(SIDEBAR_MIN_WIDTH)
+    }
+
+    fn clamp_sidebar_width_for_window(width: f32, fallback: f32, window: &Window) -> f32 {
+        let width = if width.is_finite() { width } else { fallback };
+        width.clamp(
+            SIDEBAR_MIN_WIDTH,
+            Self::max_sidebar_width_for_window(window),
+        )
+    }
+
+    fn clamp_ai_panel_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let width =
+            Self::clamp_sidebar_width_for_window(self.ai_panel_width, AI_PANEL_WIDTH, window);
+        if (self.ai_panel_width - width).abs() <= f32::EPSILON {
+            return;
+        }
+
+        self.ai_panel_width = width;
+        if let Some(panel) = &self.ai_panel {
+            panel.update(cx, |panel, cx| {
+                panel.set_width(width);
+                cx.notify();
+            });
+        }
+        self.schedule_sidebar_width_save(cx);
+    }
+
+    fn close_left_sidebars_except(&mut self, keep_open: LeftSidebar) {
+        if keep_open != LeftSidebar::Thumbnails {
+            self.thumbnail_sidebar_open = false;
+            self.thumbnail_sidebar_selecting = false;
+            self.thumbnail_sidebar_selection.clear();
+            self.thumbnail_sidebar_actions_position = None;
+        }
+        if keep_open != LeftSidebar::Toc {
+            self.toc_sidebar_open = false;
+        }
+        if keep_open != LeftSidebar::Notes {
+            self.notes_sidebar_open = false;
+        }
+    }
+
     pub fn open(
         path: impl AsRef<Path>,
         focus_handle: FocusHandle,
         behavior: BehaviorSettings,
         window_settings: WindowSettings,
         _theme: Theme,
-        initial_position: Option<DocumentPosition>,
-        annotations: PdfAnnotations,
+        options: PdfOpenOptions,
     ) -> Result<Self> {
         let path = normalize_path(path.as_ref());
         let file_name = path
@@ -724,6 +808,10 @@ impl PdfView {
         let toc = Self::flatten_toc(outlines, page_count as usize);
 
         let page_count = page_count as usize;
+        let sidebar_widths = options
+            .sidebar_widths
+            .map(Self::sanitize_sidebar_widths)
+            .unwrap_or_else(Self::default_sidebar_widths);
 
         Ok(Self {
             doc_id: next_document_id(),
@@ -735,8 +823,8 @@ impl PdfView {
             content_height_doc: 0.0,
             glyphs: Vec::new(),
             links: Vec::new(),
-            highlights: annotations.highlights,
-            notes: annotations.notes,
+            highlights: options.annotations.highlights,
+            notes: options.annotations.notes,
             selected_highlight: None,
             selection: None,
             pending_selection_anchor: None,
@@ -770,24 +858,25 @@ impl PdfView {
             toc,
             toc_collapsed: HashSet::new(),
             toc_sidebar_open: false,
-            toc_sidebar_width: TOC_SIDEBAR_WIDTH,
+            toc_sidebar_width: sidebar_widths.toc,
             toc_sidebar_scroll: UniformListScrollHandle::new(),
             toc_sidebar_visible_entry_ixs: Vec::new(),
             toc_sidebar_entries_dirty: true,
             toc_sidebar_selected: None,
             notes_sidebar_open: false,
-            notes_sidebar_width: NOTES_SIDEBAR_WIDTH,
+            notes_sidebar_width: sidebar_widths.notes,
             notes_sidebar_scroll: UniformListScrollHandle::new(),
             notes_sidebar_entries: Vec::new(),
             notes_sidebar_selected: None,
             thumbnail_sidebar_open: false,
-            thumbnail_sidebar_width: THUMBNAIL_SIDEBAR_WIDTH,
+            thumbnail_sidebar_width: sidebar_widths.thumbnails,
             thumbnail_sidebar_scroll: UniformListScrollHandle::new(),
             thumbnail_sidebar_current_page: 0,
             thumbnail_sidebar_selecting: false,
             thumbnail_sidebar_selection: BTreeSet::new(),
             thumbnail_sidebar_actions_position: None,
-            ai_panel_width: AI_PANEL_WIDTH,
+            ai_panel_width: sidebar_widths.ai,
+            sidebar_width_save_task: None,
             grid_overview_open: false,
             grid_overview_scroll: UniformListScrollHandle::new(),
             grid_overview_zoom: GRID_OVERVIEW_DEFAULT_ZOOM,
@@ -805,7 +894,7 @@ impl PdfView {
             search: SearchState::default(),
             loading: true,
             loading_error: None,
-            pending_initial_position: initial_position,
+            pending_initial_position: options.initial_position,
             loading_task: None,
             text_indexing: false,
             text_indexing_task: None,
@@ -1860,6 +1949,29 @@ impl PdfView {
             _ = this.update(cx, |_, cx| {
                 if let Err(error) = cx.global::<LibraryStore>().save() {
                     eprintln!("failed to save PDF history: {error:#}");
+                }
+            });
+        }));
+    }
+
+    fn current_sidebar_widths(&self) -> SidebarWidths {
+        SidebarWidths {
+            thumbnails: self.thumbnail_sidebar_width,
+            toc: self.toc_sidebar_width,
+            notes: self.notes_sidebar_width,
+            ai: self.ai_panel_width,
+        }
+    }
+
+    fn schedule_sidebar_width_save(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_width_save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+            _ = this.update(cx, |this, cx| {
+                let widths = Self::sanitize_sidebar_widths(this.current_sidebar_widths());
+                if let Err(error) = cx.global_mut::<LibraryStore>().set_sidebar_widths(widths) {
+                    eprintln!("failed to save sidebar widths: {error:#}");
                 }
             });
         }));
@@ -3971,6 +4083,7 @@ impl PdfView {
         }
 
         self.close_all_overlays(window, cx);
+        self.clamp_ai_panel_width(window, cx);
 
         let previous_focus_handle = self.focus_handle.clone();
         let document_path = self.path.clone();
@@ -4064,8 +4177,21 @@ impl PdfView {
         }
     }
 
-    fn toggle_toc_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.toc_sidebar_open = !self.toc_sidebar_open;
+    fn toggle_toc_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.toc_sidebar_open {
+            self.toc_sidebar_open = false;
+            cx.notify();
+            return;
+        }
+
+        self.close_left_sidebars_except(LeftSidebar::Toc);
+        let width =
+            Self::clamp_sidebar_width_for_window(self.toc_sidebar_width, TOC_SIDEBAR_WIDTH, window);
+        if (self.toc_sidebar_width - width).abs() > f32::EPSILON {
+            self.toc_sidebar_width = width;
+            self.schedule_sidebar_width_save(cx);
+        }
+        self.toc_sidebar_open = true;
         cx.notify();
     }
 
@@ -4102,17 +4228,30 @@ impl PdfView {
         }
     }
 
-    fn toggle_notes_sidebar(&mut self, cx: &mut Context<Self>) {
-        if !self.notes_sidebar_open {
-            self.refresh_notes_sidebar_entries();
+    fn toggle_notes_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.notes_sidebar_open {
+            self.notes_sidebar_open = false;
+            cx.notify();
+            return;
         }
 
-        self.notes_sidebar_open = !self.notes_sidebar_open;
+        self.close_left_sidebars_except(LeftSidebar::Notes);
+        self.refresh_notes_sidebar_entries();
+        let width = Self::clamp_sidebar_width_for_window(
+            self.notes_sidebar_width,
+            NOTES_SIDEBAR_WIDTH,
+            window,
+        );
+        if (self.notes_sidebar_width - width).abs() > f32::EPSILON {
+            self.notes_sidebar_width = width;
+            self.schedule_sidebar_width_save(cx);
+        }
+        self.notes_sidebar_open = true;
         cx.notify();
     }
 
-    fn toggle_thumbnail_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.set_thumbnail_sidebar_open(!self.thumbnail_sidebar_open, cx);
+    fn toggle_thumbnail_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_thumbnail_sidebar_open(!self.thumbnail_sidebar_open, window, cx);
     }
 
     fn toggle_grid_overview(&mut self, cx: &mut Context<Self>) {
@@ -4976,7 +5115,6 @@ impl PdfView {
             .justify_center()
             .h(px(20.0))
             .px_2()
-            .mr_2()
             .text_color(rgb(if open {
                 theme.accent
             } else {
@@ -4991,8 +5129,8 @@ impl PdfView {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.toggle_toc_sidebar(cx);
+                cx.listener(|this, _, window, cx| {
+                    this.toggle_toc_sidebar(window, cx);
                     cx.stop_propagation();
                 }),
             )
@@ -5024,8 +5162,8 @@ impl PdfView {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.toggle_notes_sidebar(cx);
+                cx.listener(|this, _, window, cx| {
+                    this.toggle_notes_sidebar(window, cx);
                     cx.stop_propagation();
                 }),
             )
@@ -5061,8 +5199,8 @@ impl PdfView {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.toggle_thumbnail_sidebar(cx);
+                cx.listener(|this, _, window, cx| {
+                    this.toggle_thumbnail_sidebar(window, cx);
                     cx.stop_propagation();
                 }),
             )
@@ -5259,13 +5397,28 @@ impl PdfView {
         was_open
     }
 
-    fn set_thumbnail_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
+    fn set_thumbnail_sidebar_open(
+        &mut self,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.thumbnail_sidebar_open == open {
             return;
         }
 
         self.thumbnail_sidebar_open = open;
         if open {
+            self.close_left_sidebars_except(LeftSidebar::Thumbnails);
+            let width = Self::clamp_sidebar_width_for_window(
+                self.thumbnail_sidebar_width,
+                THUMBNAIL_SIDEBAR_WIDTH,
+                window,
+            );
+            if (self.thumbnail_sidebar_width - width).abs() > f32::EPSILON {
+                self.thumbnail_sidebar_width = width;
+                self.schedule_sidebar_width_save(cx);
+            }
             self.thumbnail_sidebar_current_page =
                 self.current_page_index().min(self.last_page_index());
             if !self.pages.is_empty() {
@@ -6949,17 +7102,17 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &Toc, window, cx| {
                 this.toggle_toc_palette(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleToc, _, cx| {
-                this.toggle_toc_sidebar(cx);
+            .on_action(cx.listener(|this, _: &ToggleToc, window, cx| {
+                this.toggle_toc_sidebar(window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenNotes, window, cx| {
                 this.toggle_notes_palette(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleNotes, _, cx| {
-                this.toggle_notes_sidebar(cx);
+            .on_action(cx.listener(|this, _: &ToggleNotes, window, cx| {
+                this.toggle_notes_sidebar(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleThumbnailSidebar, _, cx| {
-                this.toggle_thumbnail_sidebar(cx);
+            .on_action(cx.listener(|this, _: &ToggleThumbnailSidebar, window, cx| {
+                this.toggle_thumbnail_sidebar(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleGridOverview, _, cx| {
                 this.toggle_grid_overview(cx);
@@ -7238,6 +7391,7 @@ impl Render for PdfView {
                                             }
                                         }
                                     }
+                                    this.schedule_sidebar_width_save(cx);
                                     cx.notify();
                                 },
                             ))
@@ -7432,14 +7586,21 @@ impl Render for PdfView {
                                     .child(self.render_toc_button(theme, cx))
                                     .child(self.render_notes_button(theme, cx))
                                     .child(self.render_thumbnail_sidebar_button(theme, cx))
-                                    .child(self.render_grid_overview_button(theme, cx))
-                                    .child(self.render_ai_button(theme, cx)),
+                                    .child(self.render_grid_overview_button(theme, cx)),
                             )
-                            .child(div().flex_none().child(format!(
-                                "{} / {}",
-                                self.current_page(),
-                                self.pages.len()
-                            ))),
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(format!(
+                                        "{} / {}",
+                                        self.current_page(),
+                                        self.pages.len()
+                                    ))
+                                    .child(self.render_ai_button(theme, cx)),
+                            ),
                     ),
             )
             .when(self.grid_overview_open, |this| {

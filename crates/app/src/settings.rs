@@ -193,40 +193,122 @@ pub enum AiApiStyle {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AiThinkingLevel {
-    #[default]
     Off,
+    Minimal,
     Low,
+    #[default]
     Medium,
     High,
+    XHigh,
+    Max,
 }
 
 impl AiThinkingLevel {
-    pub const ALL: [Self; 4] = [Self::Off, Self::Low, Self::Medium, Self::High];
+    const FALLBACK: [Self; 4] = [Self::Off, Self::Low, Self::Medium, Self::High];
+    const OPENAI_REASONING: [Self; 6] = [
+        Self::Off,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+    ];
+    const ANTHROPIC_THINKING: [Self; 5] =
+        [Self::Off, Self::Low, Self::Medium, Self::High, Self::Max];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "Off",
+            Self::Minimal => "Minimal",
             Self::Low => "Low",
             Self::Medium => "Medium",
             Self::High => "High",
+            Self::XHigh => "X High",
+            Self::Max => "Max",
         }
+    }
+
+    pub fn supported_for(provider: AiProvider, model: &str) -> &'static [Self] {
+        if provider == AiProvider::OpenAi && Self::openai_supports_native_thinking(model) {
+            &Self::OPENAI_REASONING
+        } else if provider == AiProvider::Anthropic
+            && Self::anthropic_supports_native_thinking(model)
+        {
+            &Self::ANTHROPIC_THINKING
+        } else {
+            &Self::FALLBACK
+        }
+    }
+
+    pub fn clamp_for(self, provider: AiProvider, model: &str) -> Self {
+        let supported = Self::supported_for(provider, model);
+        if supported.contains(&self) {
+            return self;
+        }
+
+        match self {
+            Self::Minimal => {
+                if supported.contains(&Self::Low) {
+                    Self::Low
+                } else {
+                    Self::Off
+                }
+            }
+            Self::XHigh | Self::Max => supported
+                .iter()
+                .rev()
+                .copied()
+                .find(|level| *level != Self::Off)
+                .unwrap_or(Self::Off),
+            other => other,
+        }
+    }
+
+    pub fn supports_native_for(self, provider: AiProvider, model: &str) -> bool {
+        self != Self::Off
+            && ((provider == AiProvider::OpenAi && Self::openai_supports_native_thinking(model))
+                || (provider == AiProvider::Anthropic
+                    && Self::anthropic_supports_native_thinking(model)))
+    }
+
+    fn openai_supports_native_thinking(model: &str) -> bool {
+        let model = model.to_ascii_lowercase();
+        model.starts_with("o1")
+            || model.starts_with("o3")
+            || model.starts_with("o4")
+            || model.starts_with("gpt-5")
+    }
+
+    fn anthropic_supports_native_thinking(model: &str) -> bool {
+        let model = model.to_ascii_lowercase();
+        model.contains("claude-3-7")
+            || model.contains("claude-4")
+            || model.contains("opus-4")
+            || model.contains("sonnet-4")
+            || model.contains("haiku-4")
     }
 
     fn from_str(value: &str) -> Option<Self> {
         match value {
             "off" | "none" | "disabled" => Some(Self::Off),
+            "minimal" | "min" => Some(Self::Minimal),
             "low" => Some(Self::Low),
             "medium" | "med" => Some(Self::Medium),
             "high" => Some(Self::High),
+            "xhigh" | "x-high" | "x_high" => Some(Self::XHigh),
+            "max" | "maximum" => Some(Self::Max),
             _ => None,
         }
     }
@@ -416,6 +498,8 @@ impl ResolvedAiConfig {
 pub struct AiTitleModelSettings {
     pub provider: AiProvider,
     pub model: String,
+    pub api_key: String,
+    pub base_url: Option<String>,
 }
 
 impl Default for AiTitleModelSettings {
@@ -424,6 +508,8 @@ impl Default for AiTitleModelSettings {
         Self {
             provider,
             model: provider.default_title_model().to_string(),
+            api_key: String::new(),
+            base_url: None,
         }
     }
 }
@@ -431,6 +517,13 @@ impl Default for AiTitleModelSettings {
 impl AiTitleModelSettings {
     fn sanitize(&mut self) {
         self.model = self.model.trim().to_string();
+        self.api_key = self.api_key.trim().to_string();
+        self.base_url = self
+            .base_url
+            .take()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .filter(|value| value != self.provider.default_base_url());
         if self.model.is_empty() {
             self.model = self.provider.default_title_model().to_string();
         }
@@ -452,7 +545,7 @@ impl Default for AiSettings {
             provider,
             providers: BTreeMap::from([(provider, provider.default_config())]),
             title_model: None,
-            thinking_level: AiThinkingLevel::Off,
+            thinking_level: AiThinkingLevel::Medium,
         }
     }
 }
@@ -467,10 +560,9 @@ impl AiSettings {
             .or_insert_with(|| self.provider.default_config());
         if let Some(title_model) = self.title_model.as_mut() {
             title_model.sanitize();
-            self.providers
-                .entry(title_model.provider)
-                .or_insert_with(|| title_model.provider.default_config());
         }
+        let config = self.provider_config(self.provider);
+        self.thinking_level = self.thinking_level.clamp_for(self.provider, &config.model);
     }
 
     pub fn provider_config(&self, provider: AiProvider) -> AiProviderConfig {
@@ -488,16 +580,24 @@ impl AiSettings {
 
     pub fn resolved_main(&self) -> ResolvedAiConfig {
         let config = self.provider_config(self.provider);
-        self.resolved_for(self.provider, config.model, self.thinking_level)
+        let thinking_level = self.thinking_level.clamp_for(self.provider, &config.model);
+        self.resolved_for(self.provider, config.model, thinking_level)
     }
 
     pub fn resolved_title(&self) -> Option<ResolvedAiConfig> {
         let title_model = self.title_model.as_ref()?;
-        let resolved = self.resolved_for(
-            title_model.provider,
-            title_model.model.clone(),
-            AiThinkingLevel::Off,
-        );
+        let base_url_overridden = title_model.base_url.is_some();
+        let resolved = ResolvedAiConfig {
+            provider: title_model.provider,
+            model: title_model.model.clone(),
+            api_key: title_model.api_key.clone(),
+            base_url: title_model
+                .base_url
+                .clone()
+                .unwrap_or_else(|| title_model.provider.default_base_url().to_string()),
+            base_url_overridden,
+            thinking_level: AiThinkingLevel::Off,
+        };
         resolved.can_request().then_some(resolved)
     }
 
@@ -508,6 +608,7 @@ impl AiSettings {
         thinking_level: AiThinkingLevel,
     ) -> ResolvedAiConfig {
         let config = self.provider_config(provider);
+        let thinking_level = thinking_level.clamp_for(provider, &model);
         let base_url_overridden = config.base_url.is_some();
         ResolvedAiConfig {
             provider,
@@ -681,22 +782,13 @@ impl Settings {
                 if let Some(value) = title_model.get_arg("model").and_then(KdlValue::as_string) {
                     settings_title_model.model = value.to_string();
                 }
-
-                if title_model.get("api_key").is_some() || title_model.get("base_url").is_some() {
-                    let title_provider = settings_title_model.provider;
-                    let mut config = settings.ai.provider_config(title_provider);
-                    if let Some(value) =
-                        title_model.get_arg("api_key").and_then(KdlValue::as_string)
-                    {
-                        config.api_key = value.to_string();
-                    }
-                    config.base_url = title_model
-                        .get_arg("base_url")
-                        .and_then(KdlValue::as_string)
-                        .map(str::to_string);
-                    config.sanitize(title_provider);
-                    settings.ai.providers.insert(title_provider, config);
+                if let Some(value) = title_model.get_arg("api_key").and_then(KdlValue::as_string) {
+                    settings_title_model.api_key = value.to_string();
                 }
+                settings_title_model.base_url = title_model
+                    .get_arg("base_url")
+                    .and_then(KdlValue::as_string)
+                    .map(str::to_string);
 
                 settings.ai.title_model = Some(settings_title_model);
             }
@@ -764,7 +856,7 @@ impl Settings {
             let mut ai = KdlNode::new("ai");
             let ai_children = ai.ensure_children();
             push_value_node(ai_children, "provider", self.ai.provider.as_str());
-            if self.ai.thinking_level != AiThinkingLevel::Off {
+            if self.ai.thinking_level != AiThinkingLevel::default() {
                 push_value_node(ai_children, "thinking", self.ai.thinking_level.as_str());
             }
 
@@ -795,6 +887,12 @@ impl Settings {
                     title_model.provider.as_str(),
                 );
                 push_value_node(title_model_children, "model", title_model.model.clone());
+                if !title_model.api_key.is_empty() {
+                    push_value_node(title_model_children, "api_key", title_model.api_key.clone());
+                }
+                if let Some(base_url) = &title_model.base_url {
+                    push_value_node(title_model_children, "base_url", base_url.clone());
+                }
                 ai_children.nodes_mut().push(title_model_node);
             }
             document.nodes_mut().push(ai);
@@ -1111,7 +1209,7 @@ ai {
         .unwrap();
 
         assert_eq!(settings.ai.provider, AiProvider::DeepSeek);
-        assert_eq!(settings.ai.thinking_level, AiThinkingLevel::Off);
+        assert_eq!(settings.ai.thinking_level, AiThinkingLevel::Medium);
         let deepseek = settings.ai.provider_config(AiProvider::DeepSeek);
         assert_eq!(deepseek.model, "deepseek-chat");
         assert_eq!(deepseek.api_key, "deepseek-key");
@@ -1160,13 +1258,68 @@ ai {
         let title_model = settings.ai.title_model.as_ref().unwrap();
         assert_eq!(title_model.provider, AiProvider::OpenAi);
         assert_eq!(title_model.model, "gpt-4o-mini");
-        let config = settings.ai.provider_config(AiProvider::OpenAi);
-        assert_eq!(config.api_key, "title-key");
+        assert_eq!(title_model.api_key, "title-key");
         assert_eq!(
-            config.base_url,
+            title_model.base_url,
             Some("https://api.example.com/v1".to_string())
         );
+        let config = settings.ai.provider_config(AiProvider::OpenAi);
+        assert!(config.api_key.is_empty());
+        assert_eq!(config.base_url, None);
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn title_model_credentials_are_independent_from_main_provider() {
+        let settings = parse_settings(
+            r##"
+ai {
+    provider "openai"
+    providers {
+        openai {
+            model "gpt-5"
+            api_key "main-key"
+            base_url "https://main.example.com"
+        }
+    }
+    title_model {
+        provider "openai"
+        model "gpt-4o-mini"
+        api_key "title-key"
+        base_url "https://title.example.com"
+    }
+}
+"##,
+        )
+        .unwrap();
+
+        let main = settings.ai.resolved_main();
+        let title = settings.ai.resolved_title().unwrap();
+        assert_eq!(main.api_key, "main-key");
+        assert_eq!(main.base_url, "https://main.example.com");
+        assert_eq!(title.api_key, "title-key");
+        assert_eq!(title.base_url, "https://title.example.com");
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn thinking_levels_are_provider_specific() {
+        assert!(
+            AiThinkingLevel::supported_for(AiProvider::OpenAi, "gpt-5")
+                .contains(&AiThinkingLevel::XHigh)
+        );
+        assert!(
+            !AiThinkingLevel::supported_for(AiProvider::OpenAi, "gpt-5")
+                .contains(&AiThinkingLevel::Max)
+        );
+        assert!(
+            AiThinkingLevel::supported_for(AiProvider::Anthropic, "claude-sonnet-4-5-latest")
+                .contains(&AiThinkingLevel::Max)
+        );
+        assert_eq!(
+            AiThinkingLevel::Max.clamp_for(AiProvider::OpenAi, "gpt-5"),
+            AiThinkingLevel::XHigh
+        );
     }
 
     #[test]
