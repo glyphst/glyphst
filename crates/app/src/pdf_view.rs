@@ -606,6 +606,7 @@ pub struct PdfView {
     notes: Vec<Note>,
     selected_highlight: Option<u64>,
     selection: Option<Selection>,
+    pending_selection_anchor: Option<usize>,
     dragging: bool,
     hovered_link: Option<usize>,
     hovered_note: Option<u64>,
@@ -737,6 +738,7 @@ impl PdfView {
             notes: annotations.notes,
             selected_highlight: None,
             selection: None,
+            pending_selection_anchor: None,
             dragging: false,
             hovered_link: None,
             hovered_note: None,
@@ -961,6 +963,7 @@ impl PdfView {
         self.search.matches.clear();
         self.search.active = None;
         self.selection = None;
+        self.pending_selection_anchor = None;
         self.hovered_link = None;
         self.pending_link = None;
         self.page_image_bounds = (0..self.pages.len()).map(|_| None).collect();
@@ -1155,6 +1158,7 @@ impl PdfView {
         self.text_indexing = false;
         self.hovered_link = None;
         self.pending_link = None;
+        self.pending_selection_anchor = None;
 
         for (page, glyph_range) in self.pages.iter_mut().zip(loaded.page_glyph_ranges) {
             page.glyph_range = glyph_range;
@@ -4399,6 +4403,7 @@ impl PdfView {
     ) {
         self.focus_handle.focus(window, cx);
         self.dragging = false;
+        self.pending_selection_anchor = None;
         self.panning = None;
         self.grid_overview_actions_position = None;
         self.thumbnail_sidebar_actions_position = None;
@@ -6983,6 +6988,7 @@ impl Render for PdfView {
                     this.focus_handle.focus(window, cx);
                     this.dragging = false;
                     this.pending_link = None;
+                    this.pending_selection_anchor = None;
 
                     if let Some(link_ix) = this.link_at_screen(event.position) {
                         this.selection = None;
@@ -7025,10 +7031,8 @@ impl Render for PdfView {
                                 this.dragging = true;
                             }
                         } else {
-                            this.selection = Some(Selection {
-                                anchor: ix,
-                                head: ix,
-                            });
+                            this.selection = None;
+                            this.pending_selection_anchor = Some(ix);
                             this.dragging = true;
                         }
                     } else {
@@ -7047,6 +7051,7 @@ impl Render for PdfView {
                     this.focus_handle.focus(window, cx);
                     this.dragging = false;
                     this.pending_link = None;
+                    this.pending_selection_anchor = None;
                     this.set_hovered_link(None, cx);
                     this.set_hovered_note(None, None, cx);
                     this.panning = Some(PanState {
@@ -7106,11 +7111,21 @@ impl Render for PdfView {
                     return;
                 }
 
+                if !event.dragging() {
+                    this.dragging = false;
+                    this.pending_selection_anchor = None;
+                    this.update_hovered_link(event.position, cx);
+                    this.update_hovered_note(event.position, cx);
+                    return;
+                }
+
                 this.set_hovered_link(None, cx);
                 this.set_hovered_note(None, None, cx);
                 if let Some(ix) = this.glyph_at_screen(event.position) {
                     if let Some(selection) = this.selection.as_mut() {
                         selection.head = ix;
+                    } else if let Some(anchor) = this.pending_selection_anchor {
+                        this.selection = Some(Selection { anchor, head: ix });
                     }
                     cx.notify();
                 }
@@ -7120,6 +7135,7 @@ impl Render for PdfView {
                 cx.listener(|this, event: &MouseUpEvent, _, cx| {
                     let pending_link = this.pending_link.take();
                     this.dragging = false;
+                    this.pending_selection_anchor = None;
                     if let Some(link_ix) = pending_link {
                         if this.link_at_screen(event.position) == Some(link_ix) {
                             this.activate_link(link_ix, cx);
