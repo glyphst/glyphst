@@ -103,7 +103,9 @@ const SMOOTH_SCROLL_LARGE_JUMP_VIEWPORTS: f32 = 3.0;
 const CTRL_SCROLL_ZOOM_STEP_MULTIPLIER: f32 = 0.25;
 const MAX_CACHED_RENDERS: usize = 2048;
 const MAX_CACHED_RENDER_PIXELS: u64 = 30_000_000;
+const MAX_PREFETCH_RENDER_PIXELS: u64 = MAX_CACHED_RENDER_PIXELS / 3;
 const MAX_CACHED_DISPLAY_LISTS: usize = 50;
+const MAX_RENDER_TEXTURE_DIMENSION: u32 = 8192;
 const MAX_JUMP_HISTORY: usize = 128;
 const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
 const TOC_SIDEBAR_WIDTH: f32 = 280.0;
@@ -205,12 +207,18 @@ struct FileSignature {
     len: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct RenderKey {
     doc_id: u64,
     page_idx: usize,
     physical_width: u32,
     physical_height: u32,
+}
+
+impl RenderKey {
+    fn pixel_count(self) -> u64 {
+        self.physical_width as u64 * self.physical_height as u64
+    }
 }
 
 struct CachedRender {
@@ -231,6 +239,7 @@ struct CachedDisplayList {
 pub(crate) struct RenderCache {
     renders: Vec<CachedRender>,
     display_lists: Vec<CachedDisplayList>,
+    protected_pages: HashSet<(u64, usize)>,
     access_counter: u64,
 }
 
@@ -243,6 +252,11 @@ impl RenderCache {
 
     fn contains_render(&self, key: RenderKey) -> bool {
         self.exact_render_index(key).is_some()
+    }
+
+    fn set_protected_pages(&mut self, pages: impl IntoIterator<Item = (u64, usize)>) {
+        self.protected_pages.clear();
+        self.protected_pages.extend(pages);
     }
 
     fn render(&mut self, key: RenderKey) -> Option<Arc<RenderImage>> {
@@ -307,6 +321,11 @@ impl RenderCache {
                 .renders
                 .iter()
                 .enumerate()
+                .filter(|(_, cached)| {
+                    !self
+                        .protected_pages
+                        .contains(&(cached.key.doc_id, cached.key.page_idx))
+                })
                 .min_by_key(|(_, cached)| cached.last_access)
                 .map(|(index, _)| index)
             {
@@ -401,7 +420,7 @@ impl RenderCache {
     fn render_pixels(&self) -> u64 {
         self.renders
             .iter()
-            .map(|cached| cached.key.physical_width as u64 * cached.key.physical_height as u64)
+            .map(|cached| cached.key.pixel_count())
             .sum()
     }
 
@@ -2031,7 +2050,22 @@ impl PdfView {
             }
         }
 
-        if let (Some(first), Some(last)) = (visible_pages.first(), visible_pages.last()) {
+        let mut visible_page_renders = Vec::with_capacity(visible_pages.len());
+        for page_idx in visible_pages {
+            let (image_bounds, key) =
+                self.image_bounds_and_render_key(page_idx, bounds, scale, scale_factor);
+            visible_page_renders.push((page_idx, image_bounds, key));
+        }
+        let doc_id = self.doc_id;
+        cx.global_mut::<RenderCache>().set_protected_pages(
+            visible_page_renders
+                .iter()
+                .map(|(page_idx, _, _)| (doc_id, *page_idx)),
+        );
+
+        if let (Some((first, _, _)), Some((last, _, _))) =
+            (visible_page_renders.first(), visible_page_renders.last())
+        {
             let start = first.saturating_sub(1);
             let end = (*last + 1).min(self.pages.len().saturating_sub(1));
             for page_idx in start..=end {
@@ -2041,14 +2075,14 @@ impl PdfView {
 
                 let (_, key) =
                     self.image_bounds_and_render_key(page_idx, bounds, scale, scale_factor);
-                self.request_render(key, cx);
+                if key.pixel_count() <= MAX_PREFETCH_RENDER_PIXELS {
+                    self.request_render(key, cx);
+                }
             }
         }
 
-        let mut pages = Vec::with_capacity(visible_pages.len());
-        for page_idx in visible_pages {
-            let (image_bounds, key) =
-                self.image_bounds_and_render_key(page_idx, bounds, scale, scale_factor);
+        let mut pages = Vec::with_capacity(visible_page_renders.len());
+        for (_, image_bounds, key) in visible_page_renders {
             let image = self.cached_or_request_render(key, cx);
             pages.push(PaintPage {
                 bounds: image_bounds,
@@ -2105,11 +2139,9 @@ impl PdfView {
         scale_factor: f32,
     ) -> (Bounds<Pixels>, RenderKey) {
         let image_bounds = self.image_bounds_for_page(page_idx, bounds, scale);
+        let image_bounds = Self::pixel_aligned_image_bounds(image_bounds, scale_factor);
         let key = self.render_key(page_idx, image_bounds, scale_factor);
-        (
-            Self::pixel_aligned_image_bounds(image_bounds, key, scale_factor),
-            key,
-        )
+        (image_bounds, key)
     }
 
     fn render_key(
@@ -2119,29 +2151,46 @@ impl PdfView {
         scale_factor: f32,
     ) -> RenderKey {
         let scale_factor = scale_factor.max(0.001);
+        let requested_width = (image_bounds.size.width.as_f32() * scale_factor)
+            .ceil()
+            .max(1.0);
+        let requested_height = (image_bounds.size.height.as_f32() * scale_factor)
+            .ceil()
+            .max(1.0);
+        let max_dimension = MAX_RENDER_TEXTURE_DIMENSION as f32;
+        let texture_scale = (max_dimension / requested_width)
+            .min(max_dimension / requested_height)
+            .min(1.0);
+
         RenderKey {
             doc_id: self.doc_id,
             page_idx,
-            physical_width: (image_bounds.size.width.as_f32() * scale_factor)
-                .ceil()
-                .max(1.0) as u32,
-            physical_height: (image_bounds.size.height.as_f32() * scale_factor)
-                .ceil()
-                .max(1.0) as u32,
+            physical_width: (requested_width * texture_scale)
+                .round()
+                .clamp(1.0, max_dimension) as u32,
+            physical_height: (requested_height * texture_scale)
+                .round()
+                .clamp(1.0, max_dimension) as u32,
         }
     }
 
     fn pixel_aligned_image_bounds(
         image_bounds: Bounds<Pixels>,
-        key: RenderKey,
         scale_factor: f32,
     ) -> Bounds<Pixels> {
         let scale_factor = scale_factor.max(0.001);
+        let physical_width = (image_bounds.size.width.as_f32() * scale_factor)
+            .ceil()
+            .max(1.0);
+        let physical_height = (image_bounds.size.height.as_f32() * scale_factor)
+            .ceil()
+            .max(1.0);
+
         Bounds::new(
             image_bounds.origin,
             size(
-                px(key.physical_width as f32 / scale_factor),
-                px(key.physical_height as f32 / scale_factor),
+                px(physical_width / scale_factor),
+                px(physical_height / scale_factor),
             ),
         )
     }
