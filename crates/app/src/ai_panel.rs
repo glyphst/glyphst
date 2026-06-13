@@ -1,11 +1,12 @@
 use std::{collections::HashSet, io::Read as _, ops::Range, path::PathBuf, thread};
 
 use crate::{
-    ai_client::{AiModelInfo, list_ai_models},
     library::{AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp},
     pdf_view::PdfView,
-    scrollbar::{WithScrollbar as _, uniform_list_scrollbar_for},
-    settings::{AiApiStyle, AiProvider, AiThinkingLevel, ResolvedAiConfig, SettingsStore},
+    scrollbar::WithScrollbar as _,
+    settings::{
+        AiApiStyle, AiModel, AiProvider, AiThinkingLevel, ModelRef, ResolvedAiConfig, SettingsStore,
+    },
     settings_window::PanelEvent,
 };
 use anyhow::{Context as _, Result, anyhow};
@@ -15,9 +16,8 @@ use gpui::{
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollHandle,
-    SharedString, Style, Task, TextRun, UTF16Selection, UniformListScrollHandle, WeakEntity,
-    Window, WrappedLine, anchored, deferred, div, fill, point, prelude::*, px, relative, rgb, rgba,
-    size, uniform_list,
+    SharedString, Style, Task, TextRun, UTF16Selection, WeakEntity, Window, WrappedLine, anchored,
+    deferred, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use serde_json::{Value, json};
 
@@ -75,14 +75,16 @@ struct ChatMessage {
 struct ModelMenuRenderState {
     selected_provider: AiProvider,
     selected_model: String,
-    provider_models: Vec<(AiProvider, String)>,
-    fetched_provider: Option<AiProvider>,
-    fetched_models: Vec<AiModelInfo>,
+    provider_models: Vec<(AiProvider, Vec<AiModel>)>,
     search_query: SharedString,
-    scroll_handle: UniformListScrollHandle,
-    loading: bool,
-    status: Option<SharedString>,
+    scroll_handle: ScrollHandle,
     focused: bool,
+}
+
+#[derive(Clone)]
+enum ModelMenuEntry {
+    Header(AiProvider),
+    Model(AiProvider, AiModel),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -179,12 +181,7 @@ pub struct AiPanel {
     model_menu_open: bool,
     model_menu_anchor: Option<GpuiPoint<Pixels>>,
     model_search_query: SharedString,
-    model_menu_scroll: UniformListScrollHandle,
-    model_options_provider: Option<AiProvider>,
-    model_options: Vec<AiModelInfo>,
-    model_options_loading: bool,
-    model_options_status: Option<SharedString>,
-    model_options_task: Option<Task<()>>,
+    model_menu_scroll: ScrollHandle,
     thinking_menu_open: bool,
     thinking_menu_anchor: Option<GpuiPoint<Pixels>>,
 }
@@ -249,12 +246,7 @@ impl AiPanel {
             model_menu_open: false,
             model_menu_anchor: None,
             model_search_query: SharedString::default(),
-            model_menu_scroll: UniformListScrollHandle::new(),
-            model_options_provider: None,
-            model_options: Vec::new(),
-            model_options_loading: false,
-            model_options_status: None,
-            model_options_task: None,
+            model_menu_scroll: ScrollHandle::new(),
             thinking_menu_open: false,
             thinking_menu_anchor: None,
         }
@@ -739,12 +731,6 @@ impl AiPanel {
         self.thinking_menu_open = false;
         self.thinking_menu_anchor = None;
         self.model_search_query = SharedString::default();
-        if self.model_menu_open {
-            let provider = cx.global::<SettingsStore>().settings.ai.provider;
-            if self.model_options_provider != Some(provider) && !self.model_options_loading {
-                self.fetch_model_options(cx);
-            }
-        }
         cx.notify();
     }
 
@@ -769,8 +755,7 @@ impl AiPanel {
         }
 
         let mut settings = cx.global::<SettingsStore>().settings.clone();
-        settings.ai.provider = provider;
-        settings.ai.provider_config_mut(provider).model = model.clone();
+        settings.ai.main_model = Some(ModelRef::new(provider, model.clone()));
         settings.ai.thinking_level = settings.ai.thinking_level.clamp_for(provider, &model);
         if let Err(error) = cx.global_mut::<SettingsStore>().set_settings(settings) {
             eprintln!("failed to update AI model: {error:#}");
@@ -779,48 +764,14 @@ impl AiPanel {
         cx.notify();
     }
 
-    fn fetch_model_options(&mut self, cx: &mut Context<Self>) {
-        let config = cx.global::<SettingsStore>().settings.ai.resolved_main();
-        let provider = config.provider;
-        self.model_options_loading = true;
-        self.model_options_status = Some("Fetching models…".into());
-        self.model_options_provider = Some(provider);
-
-        self.model_options_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    list_ai_models(config).map_err(|error| format!("{error:#}"))
-                })
-                .await;
-            _ = this.update(cx, |this, cx| {
-                if cx.global::<SettingsStore>().settings.ai.provider != provider {
-                    return;
-                }
-                this.model_options_loading = false;
-                match result {
-                    Ok(models) => {
-                        let count = models.len();
-                        this.model_options = models;
-                        this.model_options_status = Some(format!("Fetched {count} models.").into());
-                    }
-                    Err(error) => {
-                        this.model_options.clear();
-                        this.model_options_status =
-                            Some(format!("Failed to fetch models: {error}").into());
-                    }
-                }
-                cx.notify();
-            });
-        }));
-    }
-
     fn select_thinking_level(&mut self, level: AiThinkingLevel, cx: &mut Context<Self>) {
         if self.loading {
             return;
         }
         let mut settings = cx.global::<SettingsStore>().settings.clone();
-        let provider = settings.ai.provider;
-        let model = settings.ai.provider_config(provider).model;
+        let main = settings.ai.resolved_main();
+        let provider = main.provider;
+        let model = main.model;
         settings.ai.thinking_level = level.clamp_for(provider, &model);
         if let Err(error) = cx.global_mut::<SettingsStore>().set_settings(settings) {
             eprintln!("failed to update AI thinking level: {error:#}");
@@ -1701,34 +1652,23 @@ impl AiPanel {
         let query_empty = query.is_empty();
         let query_lower = query.to_ascii_lowercase();
         let mut entries = Vec::new();
-        for (provider, model) in state.provider_models {
-            entries.push((
-                provider,
-                model.clone(),
-                model,
-                format!("Configured {}", provider.label()),
-            ));
-        }
-        if state.fetched_provider == Some(state.selected_provider) {
-            for model in state.fetched_models {
-                if entries.iter().any(|(provider, id, _, _)| {
-                    *provider == state.selected_provider && id == &model.id
-                }) {
-                    continue;
-                }
-                let meta = model
-                    .owned_by
-                    .unwrap_or_else(|| state.selected_provider.label().to_string());
-                entries.push((state.selected_provider, model.id, model.label, meta));
+        for (provider, models) in state.provider_models {
+            let mut provider_entries = models
+                .into_iter()
+                .filter(|model| {
+                    query_lower.is_empty()
+                        || model.id.to_ascii_lowercase().contains(&query_lower)
+                        || model.name.to_ascii_lowercase().contains(&query_lower)
+                        || model.group.to_ascii_lowercase().contains(&query_lower)
+                        || provider.label().to_ascii_lowercase().contains(&query_lower)
+                })
+                .map(move |model| ModelMenuEntry::Model(provider, model))
+                .collect::<Vec<_>>();
+            if !provider_entries.is_empty() {
+                entries.push(ModelMenuEntry::Header(provider));
+                entries.append(&mut provider_entries);
             }
         }
-        entries.retain(|(_, id, label, meta)| {
-            query_lower.is_empty()
-                || id.to_ascii_lowercase().contains(&query_lower)
-                || label.to_ascii_lowercase().contains(&query_lower)
-                || meta.to_ascii_lowercase().contains(&query_lower)
-        });
-        entries.sort_by(|left, right| left.1.cmp(&right.1));
         let entry_count = entries.len();
         let scroll_handle = state.scroll_handle.clone();
         let search_focused = state.focused;
@@ -1803,34 +1743,7 @@ impl AiPanel {
                         div()
                             .text_size(px(11.0))
                             .text_color(rgb(theme.text_muted))
-                            .child(
-                                state
-                                    .status
-                                    .unwrap_or_else(|| "Select provider/model".into()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(rgb(theme.border_variant))
-                            .text_color(rgb(theme.text))
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(rgb(theme.element_hover)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.fetch_model_options(cx);
-                                    cx.stop_propagation();
-                                }),
-                            )
-                            .child(if state.loading {
-                                "Fetching…"
-                            } else {
-                                "Fetch"
-                            }),
+                            .child("Select provider/model"),
                     ),
             );
 
@@ -1847,88 +1760,71 @@ impl AiPanel {
         if entry_count > 0 {
             let selected_provider = state.selected_provider;
             let selected_model = state.selected_model;
-            let row_height = 42.0;
-            let list_height = row_height * entry_count.min(8) as f32;
+            let rows = entries
+                .into_iter()
+                .map(|entry| match entry {
+                    ModelMenuEntry::Header(provider) => div()
+                        .h(px(26.0))
+                        .flex()
+                        .items_center()
+                        .px_2()
+                        .text_size(px(11.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(provider.label())
+                        .into_any_element(),
+                    ModelMenuEntry::Model(provider, model) => {
+                        let selected = provider == selected_provider && model.id == selected_model;
+                        let model_for_click = model.id.clone();
+                        div()
+                            .h(px(30.0))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .pl(px(20.0))
+                            .pr_2()
+                            .rounded(px(4.0))
+                            .bg(if selected {
+                                rgb(theme.element_selected)
+                            } else {
+                                rgba(0x00000000)
+                            })
+                            .text_color(rgb(if selected { theme.accent } else { theme.text }))
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(rgb(theme.element_hover)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.select_model(provider, model_for_click.clone(), cx);
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child(div().truncate().min_w_0().child(model.name))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .max_w(px(96.0))
+                                    .truncate()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(model.group),
+                            )
+                            .into_any_element()
+                    }
+                })
+                .collect::<Vec<_>>();
             menu = menu.child(
                 div()
-                    .h(px(list_height))
+                    .id("ai-model-menu-list")
+                    .track_scroll(&scroll_handle)
+                    .max_h(px(300.0))
+                    .pb_1()
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
                     .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                    .child(
-                        uniform_list(
-                            "ai-model-menu-list",
-                            entry_count,
-                            cx.processor(move |_, visible_range: Range<usize>, _, cx| {
-                                visible_range
-                                    .map(|ix| {
-                                        let (provider, model, label, meta) = entries[ix].clone();
-                                        let selected = provider == selected_provider
-                                            && model == selected_model;
-                                        let model_for_click = model.clone();
-                                        div()
-                                            .h(px(row_height))
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap_2()
-                                            .px_2()
-                                            .bg(if selected {
-                                                rgb(theme.element_selected)
-                                            } else {
-                                                rgba(0x00000000)
-                                            })
-                                            .text_color(rgb(if selected {
-                                                theme.accent
-                                            } else {
-                                                theme.text
-                                            }))
-                                            .cursor_pointer()
-                                            .hover(move |style| style.bg(rgb(theme.element_hover)))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |this, _, _, cx| {
-                                                    this.select_model(
-                                                        provider,
-                                                        model_for_click.clone(),
-                                                        cx,
-                                                    );
-                                                    cx.stop_propagation();
-                                                }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .min_w_0()
-                                                    .child(div().truncate().child(label))
-                                                    .child(
-                                                        div()
-                                                            .truncate()
-                                                            .text_size(px(11.0))
-                                                            .text_color(rgb(theme.text_muted))
-                                                            .child(model),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .max_w(px(96.0))
-                                                    .truncate()
-                                                    .text_size(px(11.0))
-                                                    .text_color(rgb(theme.text_muted))
-                                                    .child(meta),
-                                            )
-                                    })
-                                    .collect::<Vec<_>>()
-                            }),
-                        )
-                        .track_scroll(&scroll_handle)
-                        .with_decoration(uniform_list_scrollbar_for(
-                            &scroll_handle,
-                            "ai-model-menu-scrollbar",
-                            window,
-                            cx,
-                        ))
-                        .size_full(),
-                    ),
+                    .children(rows)
+                    .vertical_scrollbar_for(&scroll_handle, window, cx),
             );
         }
 
@@ -2154,8 +2050,9 @@ impl Render for AiPanel {
             (store.resolved_theme, store.settings.ai.clone())
         };
         let can_send = !self.loading && !self.content.trim().is_empty();
-        let selected_provider = ai_settings.provider;
-        let selected_model = ai_settings.provider_config(selected_provider).model;
+        let resolved_main = ai_settings.resolved_main();
+        let selected_provider = resolved_main.provider;
+        let selected_model = resolved_main.model;
         let selected_thinking_level = ai_settings
             .thinking_level
             .clamp_for(selected_provider, &selected_model);
@@ -2163,9 +2060,16 @@ impl Render for AiPanel {
         let thinking_menu_selected_model = selected_model.clone();
         let provider_models = AiProvider::ALL
             .into_iter()
-            .map(|provider| (provider, ai_settings.provider_config(provider).model))
+            .filter_map(|provider| {
+                let config = ai_settings.provider_config(provider);
+                (config.enabled && !config.models.is_empty()).then_some((provider, config.models))
+            })
             .collect::<Vec<_>>();
-        let model_label = selected_model.clone();
+        let model_label = ai_settings
+            .main_model
+            .as_ref()
+            .map(|model_ref| ai_settings.model_label(model_ref))
+            .unwrap_or_else(|| selected_model.clone());
         let attached_mentions = mentioned_kinds(&self.content);
         let attachment_menu_open = self.attachment_menu_open;
         let attachment_menu_anchor = self.attachment_menu_anchor;
@@ -2177,10 +2081,6 @@ impl Render for AiPanel {
         let model_menu_position = model_menu_open.then_some(()).and(model_menu_anchor);
         let model_search_query = self.model_search_query.clone();
         let model_menu_scroll = self.model_menu_scroll.clone();
-        let model_options_provider = self.model_options_provider;
-        let model_options = self.model_options.clone();
-        let model_options_loading = self.model_options_loading;
-        let model_options_status = self.model_options_status.clone();
         let thinking_menu_open = self.thinking_menu_open;
         let thinking_menu_anchor = self.thinking_menu_anchor;
         let thinking_menu_position = thinking_menu_open.then_some(()).and(thinking_menu_anchor);
@@ -2653,12 +2553,8 @@ impl Render for AiPanel {
                                     selected_provider,
                                     selected_model: model_menu_selected_model,
                                     provider_models,
-                                    fetched_provider: model_options_provider,
-                                    fetched_models: model_options,
                                     search_query: model_search_query,
                                     scroll_handle: model_menu_scroll,
-                                    loading: model_options_loading,
-                                    status: model_options_status,
                                     focused: model_search_focused,
                                 },
                                 theme,
@@ -3118,11 +3014,19 @@ fn openai_chat_url(base_url: &str) -> String {
     let base_url = base_url.trim_end_matches('/');
     if base_url.ends_with("/v1/chat/completions") {
         base_url.to_string()
-    } else if base_url.ends_with("/v1") {
+    } else if openai_base_url_has_version(base_url) {
         format!("{base_url}/chat/completions")
     } else {
         format!("{base_url}/v1/chat/completions")
     }
+}
+
+fn openai_base_url_has_version(base_url: &str) -> bool {
+    base_url.rsplit('/').next().is_some_and(|segment| {
+        segment.len() > 1
+            && segment.starts_with('v')
+            && segment[1..].chars().all(|ch| ch.is_ascii_digit())
+    })
 }
 
 fn system_prompt(thinking_level: AiThinkingLevel, native_thinking: bool) -> String {

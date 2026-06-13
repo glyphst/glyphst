@@ -77,11 +77,19 @@ fn openai_models_url(base_url: &str) -> String {
     let base_url = base_url.trim_end_matches('/');
     if base_url.ends_with("/models") {
         base_url.to_string()
-    } else if base_url.ends_with("/v1") {
+    } else if openai_base_url_has_version(base_url) {
         format!("{base_url}/models")
     } else {
         format!("{base_url}/v1/models")
     }
+}
+
+fn openai_base_url_has_version(base_url: &str) -> bool {
+    base_url.rsplit('/').next().is_some_and(|segment| {
+        segment.len() > 1
+            && segment.starts_with('v')
+            && segment[1..].chars().all(|ch| ch.is_ascii_digit())
+    })
 }
 
 fn anthropic_models_url(base_url: &str) -> String {
@@ -150,6 +158,10 @@ mod tests {
         assert_eq!(
             openai_models_url("https://api.openai.com/v1"),
             "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            openai_models_url("https://ark.cn-beijing.volces.com/api/v3"),
+            "https://ark.cn-beijing.volces.com/api/v3/models"
         );
         assert_eq!(
             anthropic_models_url("https://api.anthropic.com"),

@@ -3,7 +3,7 @@ use crate::{
     keybindings,
     scrollbar::{WithScrollbar as _, uniform_list_scrollbar_for},
     settings::{
-        AiProvider, AiProviderConfig, AiThinkingLevel, AiTitleModelSettings, KeymapPreset,
+        AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, KeymapPreset, ModelRef,
         ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility, WindowBackgroundMode,
     },
     theme::{PartialTheme, Theme, ThemeMetadata, format_rgb_hex, format_rgba_hex},
@@ -832,25 +832,17 @@ pub fn open_settings_window(cx: &mut App) {
 enum SettingsTab {
     General,
     Appearance,
-    Ai,
+    AiGeneral,
+    AiProviders,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 3] = [Self::General, Self::Appearance, Self::Ai];
-
     fn label(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Appearance => "Appearance",
-            Self::Ai => "AI",
-        }
-    }
-
-    fn index(self) -> usize {
-        match self {
-            Self::General => 0,
-            Self::Appearance => 1,
-            Self::Ai => 2,
+            Self::AiGeneral => "General",
+            Self::AiProviders => "Model Providers",
         }
     }
 
@@ -868,8 +860,8 @@ enum SettingsSection {
     GeneralTabs,
     AppearanceTheme,
     AppearanceOverrides,
-    AiMainModel,
-    AiTitleModel,
+    AiGeneral,
+    AiProviders,
 }
 
 const GENERAL_SECTIONS: [SettingsSection; 5] = [
@@ -883,8 +875,8 @@ const APPEARANCE_SECTIONS: [SettingsSection; 2] = [
     SettingsSection::AppearanceTheme,
     SettingsSection::AppearanceOverrides,
 ];
-const AI_SECTIONS: [SettingsSection; 2] =
-    [SettingsSection::AiMainModel, SettingsSection::AiTitleModel];
+const AI_GENERAL_SECTIONS: [SettingsSection; 1] = [SettingsSection::AiGeneral];
+const AI_PROVIDER_SECTIONS: [SettingsSection; 1] = [SettingsSection::AiProviders];
 
 impl SettingsSection {
     fn tab(self) -> SettingsTab {
@@ -895,7 +887,8 @@ impl SettingsSection {
             | Self::GeneralWindow
             | Self::GeneralTabs => SettingsTab::General,
             Self::AppearanceTheme | Self::AppearanceOverrides => SettingsTab::Appearance,
-            Self::AiMainModel | Self::AiTitleModel => SettingsTab::Ai,
+            Self::AiGeneral => SettingsTab::AiGeneral,
+            Self::AiProviders => SettingsTab::AiProviders,
         }
     }
 
@@ -908,8 +901,8 @@ impl SettingsSection {
             Self::GeneralTabs => "Tabs",
             Self::AppearanceTheme => "Theme",
             Self::AppearanceOverrides => "Overrides",
-            Self::AiMainModel => "Main model",
-            Self::AiTitleModel => "Title model",
+            Self::AiGeneral => "General",
+            Self::AiProviders => "Model Providers",
         }
     }
 
@@ -917,7 +910,8 @@ impl SettingsSection {
         match tab {
             SettingsTab::General => &GENERAL_SECTIONS,
             SettingsTab::Appearance => &APPEARANCE_SECTIONS,
-            SettingsTab::Ai => &AI_SECTIONS,
+            SettingsTab::AiGeneral => &AI_GENERAL_SECTIONS,
+            SettingsTab::AiProviders => &AI_PROVIDER_SECTIONS,
         }
     }
 
@@ -944,80 +938,75 @@ struct ModelRequestSignature {
 
 struct ModelPickerState {
     open: bool,
+    query: SharedString,
     models: Vec<AiModelInfo>,
     loading: bool,
     status: Option<SharedString>,
     request: Option<ModelRequestSignature>,
     task: Option<Task<()>>,
     anchor: Option<GpuiPoint<Pixels>>,
-    scroll_handle: UniformListScrollHandle,
+    scroll_handle: ScrollHandle,
+    fetch_scroll_handle: UniformListScrollHandle,
 }
 
 impl Default for ModelPickerState {
     fn default() -> Self {
         Self {
             open: false,
+            query: SharedString::default(),
             models: Vec::new(),
             loading: false,
             status: None,
             request: None,
             task: None,
             anchor: None,
-            scroll_handle: UniformListScrollHandle::new(),
+            scroll_handle: ScrollHandle::new(),
+            fetch_scroll_handle: UniformListScrollHandle::new(),
         }
     }
+}
+
+#[derive(Clone)]
+enum SettingsModelMenuEntry {
+    Header(AiProvider),
+    Model(AiProvider, AiModel),
 }
 
 pub struct SettingsWindow {
     focus_handle: FocusHandle,
     active_tab: SettingsTab,
     active_section: SettingsSection,
-    expanded_tabs: [bool; 3],
+    ai_expanded: bool,
     content_scroll: ScrollHandle,
     status: Option<SharedString>,
     save_error: Option<SharedString>,
-    main_provider_dropdown_open: bool,
-    title_provider_dropdown_open: bool,
+    selected_ai_provider: AiProvider,
     main_model_picker: ModelPickerState,
     title_model_picker: ModelPickerState,
+    provider_model_picker: ModelPickerState,
+    provider_model_selection: Vec<String>,
     ai_model_input: Entity<SettingsTextInput>,
     ai_key_input: Entity<SettingsTextInput>,
     ai_base_url_input: Entity<SettingsTextInput>,
-    ai_title_model_input: Entity<SettingsTextInput>,
-    ai_title_key_input: Entity<SettingsTextInput>,
-    ai_title_base_url_input: Entity<SettingsTextInput>,
+    main_model_search: Entity<SettingsTextInput>,
+    title_model_search: Entity<SettingsTextInput>,
+    fetch_model_search: Entity<SettingsTextInput>,
 }
 
 impl SettingsWindow {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let (provider, config, title_provider, title_model, title_api_key, title_base_url) = {
+        let (provider, config) = {
             let ai = &cx.global::<SettingsStore>().settings.ai;
-            let title_model = ai.title_model.as_ref();
-            let title_provider = title_model
-                .map(|settings| settings.provider)
-                .unwrap_or(ai.provider);
-            (
-                ai.provider,
-                ai.provider_config(ai.provider),
-                title_provider,
-                title_model
-                    .map(|settings| settings.model.clone())
-                    .unwrap_or_default(),
-                title_model
-                    .map(|settings| settings.api_key.clone())
-                    .unwrap_or_default(),
-                title_model.and_then(|settings| settings.base_url.clone()),
-            )
+            let provider = ai
+                .main_model
+                .as_ref()
+                .map(|model_ref| model_ref.provider)
+                .unwrap_or(AiProvider::OpenAi);
+            (provider, ai.provider_config(provider))
         };
 
-        let ai_model_input = cx.new(|cx| {
-            SettingsTextInput::new(
-                config.model.clone().into(),
-                provider.default_model().into(),
-                false,
-                cx,
-            )
-        });
+        let ai_model_input =
+            cx.new(|cx| SettingsTextInput::new("".into(), "model id…".into(), false, cx));
         let ai_key_input = cx.new(|cx| {
             SettingsTextInput::new(
                 config.api_key.clone().into(),
@@ -1038,82 +1027,50 @@ impl SettingsWindow {
                 cx,
             )
         });
-        let ai_title_model_input = cx.new(|cx| {
-            SettingsTextInput::new(
-                title_model.into(),
-                title_provider.default_title_model().into(),
-                false,
-                cx,
-            )
-        });
-        let ai_title_key_input = cx.new(|cx| {
-            SettingsTextInput::new(title_api_key.into(), "paste API key…".into(), true, cx)
-        });
-        let ai_title_base_url_input = cx.new(|cx| {
-            SettingsTextInput::new(
-                title_base_url
-                    .unwrap_or_else(|| title_provider.default_base_url().to_string())
-                    .into(),
-                title_provider.default_base_url().into(),
-                false,
-                cx,
-            )
-        });
-
-        cx.subscribe(&ai_model_input, |this, _, event, cx| {
-            let SettingsInputEvent::Changed(value) = event;
-            let value = value.to_string();
-            this.update_active_provider_config(move |_, config| config.model = value, cx);
-        })
-        .detach();
-
         cx.subscribe(&ai_key_input, |this, _, event, cx| {
             let SettingsInputEvent::Changed(value) = event;
             let value = value.to_string();
-            this.update_active_provider_config(move |_, config| config.api_key = value, cx);
+            let provider = this.selected_ai_provider;
+            this.update_provider_config(provider, move |_, config| config.api_key = value, cx);
+        })
+        .detach();
+
+        let main_model_search =
+            cx.new(|cx| SettingsTextInput::new("".into(), "Search model…".into(), false, cx));
+        let title_model_search =
+            cx.new(|cx| SettingsTextInput::new("".into(), "Search model…".into(), false, cx));
+        cx.subscribe(&main_model_search, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            this.main_model_picker.query = value.clone();
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&title_model_search, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            this.title_model_picker.query = value.clone();
+            cx.notify();
+        })
+        .detach();
+
+        let fetch_model_search =
+            cx.new(|cx| SettingsTextInput::new("".into(), "Search model…".into(), false, cx));
+        cx.subscribe(&fetch_model_search, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            this.provider_model_picker.query = value.clone();
+            cx.notify();
         })
         .detach();
 
         cx.subscribe(&ai_base_url_input, |this, _, event, cx| {
             let SettingsInputEvent::Changed(value) = event;
             let value = value.to_string();
-            this.update_active_provider_config(
+            let provider = this.selected_ai_provider;
+            this.update_provider_config(
+                provider,
                 move |provider, config| {
                     let trimmed = value.trim().trim_end_matches('/').to_string();
                     config.base_url =
                         if trimmed.is_empty() || trimmed == provider.default_base_url() {
-                            None
-                        } else {
-                            Some(trimmed)
-                        };
-                },
-                cx,
-            );
-        })
-        .detach();
-
-        cx.subscribe(&ai_title_model_input, |this, _, event, cx| {
-            let SettingsInputEvent::Changed(value) = event;
-            let value = value.to_string();
-            this.update_title_model_settings(move |title| title.model = value, cx);
-        })
-        .detach();
-
-        cx.subscribe(&ai_title_key_input, |this, _, event, cx| {
-            let SettingsInputEvent::Changed(value) = event;
-            let value = value.to_string();
-            this.update_title_model_settings(move |title| title.api_key = value, cx);
-        })
-        .detach();
-
-        cx.subscribe(&ai_title_base_url_input, |this, _, event, cx| {
-            let SettingsInputEvent::Changed(value) = event;
-            let value = value.to_string();
-            this.update_title_model_settings(
-                move |title| {
-                    let trimmed = value.trim().trim_end_matches('/').to_string();
-                    title.base_url =
-                        if trimmed.is_empty() || trimmed == title.provider.default_base_url() {
                             None
                         } else {
                             Some(trimmed)
@@ -1131,20 +1088,21 @@ impl SettingsWindow {
             focus_handle: cx.focus_handle(),
             active_tab: SettingsTab::General,
             active_section: SettingsSection::GeneralZoom,
-            expanded_tabs: [true, true, true],
+            ai_expanded: true,
             content_scroll: ScrollHandle::new(),
             status: None,
             save_error: None,
-            main_provider_dropdown_open: false,
-            title_provider_dropdown_open: false,
+            selected_ai_provider: provider,
             main_model_picker: ModelPickerState::default(),
             title_model_picker: ModelPickerState::default(),
+            provider_model_picker: ModelPickerState::default(),
+            provider_model_selection: Vec::new(),
             ai_model_input,
             ai_key_input,
             ai_base_url_input,
-            ai_title_model_input,
-            ai_title_key_input,
-            ai_title_base_url_input,
+            main_model_search,
+            title_model_search,
+            fetch_model_search,
         }
     }
 
@@ -1164,53 +1122,23 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    fn update_active_provider_config(
-        &mut self,
-        update: impl FnOnce(AiProvider, &mut AiProviderConfig),
-        cx: &mut Context<Self>,
-    ) {
-        let mut settings = cx.global::<SettingsStore>().settings.clone();
-        let provider = settings.ai.provider;
-        update(provider, settings.ai.provider_config_mut(provider));
-        self.persist_settings(settings, cx);
-    }
-
-    fn update_title_model_settings(
-        &mut self,
-        update: impl FnOnce(&mut AiTitleModelSettings),
-        cx: &mut Context<Self>,
-    ) {
-        let mut settings = cx.global::<SettingsStore>().settings.clone();
-        let provider = Self::effective_title_provider(&settings);
-        update(
-            settings
-                .ai
-                .title_model
-                .get_or_insert_with(|| AiTitleModelSettings {
-                    provider,
-                    model: provider.default_title_model().to_string(),
-                    api_key: String::new(),
-                    base_url: None,
-                }),
-        );
-        self.persist_settings(settings, cx);
-    }
-
-    fn effective_title_provider(settings: &Settings) -> AiProvider {
-        settings
-            .ai
-            .title_model
-            .as_ref()
-            .map(|settings| settings.provider)
-            .unwrap_or(settings.ai.provider)
-    }
-
     fn base_url_input_content(provider: AiProvider, config: &AiProviderConfig) -> SharedString {
         config
             .base_url
             .clone()
             .unwrap_or_else(|| provider.default_base_url().to_string())
             .into()
+    }
+
+    fn update_provider_config(
+        &mut self,
+        provider: AiProvider,
+        update: impl FnOnce(AiProvider, &mut AiProviderConfig),
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        update(provider, settings.ai.provider_config_mut(provider));
+        self.persist_settings(settings, cx);
     }
 
     fn model_picker(&self, target: ProviderDropdownTarget) -> &ModelPickerState {
@@ -1227,33 +1155,33 @@ impl SettingsWindow {
         }
     }
 
-    fn resolved_ai_config_for_target(
-        settings: &Settings,
-        target: ProviderDropdownTarget,
-    ) -> ResolvedAiConfig {
+    fn model_search_input(&self, target: ProviderDropdownTarget) -> &Entity<SettingsTextInput> {
         match target {
-            ProviderDropdownTarget::Main => settings.ai.resolved_main(),
-            ProviderDropdownTarget::Title => {
-                let provider = Self::effective_title_provider(settings);
-                let title_model = settings.ai.title_model.as_ref();
-                let base_url = title_model
-                    .and_then(|settings| settings.base_url.clone())
-                    .unwrap_or_else(|| provider.default_base_url().to_string());
-                let base_url_overridden =
-                    title_model.is_some_and(|settings| settings.base_url.is_some());
-                ResolvedAiConfig {
-                    provider,
-                    model: title_model
-                        .map(|settings| settings.model.clone())
-                        .unwrap_or_else(|| provider.default_title_model().to_string()),
-                    api_key: title_model
-                        .map(|settings| settings.api_key.clone())
-                        .unwrap_or_default(),
-                    base_url,
-                    base_url_overridden,
-                    thinking_level: AiThinkingLevel::Off,
-                }
-            }
+            ProviderDropdownTarget::Main => &self.main_model_search,
+            ProviderDropdownTarget::Title => &self.title_model_search,
+        }
+    }
+
+    fn resolved_ai_config_for_provider(
+        settings: &Settings,
+        provider: AiProvider,
+    ) -> ResolvedAiConfig {
+        let config = settings.ai.provider_config(provider);
+        let model = config
+            .models
+            .first()
+            .map(|model| model.id.clone())
+            .unwrap_or_else(|| provider.default_model().to_string());
+        let base_url_overridden = config.base_url.is_some();
+        ResolvedAiConfig {
+            provider,
+            model,
+            api_key: config.api_key,
+            base_url: config
+                .base_url
+                .unwrap_or_else(|| provider.default_base_url().to_string()),
+            base_url_overridden,
+            thinking_level: AiThinkingLevel::Off,
         }
     }
 
@@ -1265,69 +1193,86 @@ impl SettingsWindow {
         }
     }
 
-    fn current_model_request_signature(
+    fn current_provider_request_signature(
         &self,
-        target: ProviderDropdownTarget,
+        provider: AiProvider,
         cx: &mut Context<Self>,
     ) -> ModelRequestSignature {
         let settings = cx.global::<SettingsStore>().settings.clone();
-        let config = Self::resolved_ai_config_for_target(&settings, target);
+        let config = Self::resolved_ai_config_for_provider(&settings, provider);
         Self::model_request_signature(&config)
     }
 
     fn select_model(
         &mut self,
         target: ProviderDropdownTarget,
+        provider: AiProvider,
         model: String,
         cx: &mut Context<Self>,
     ) {
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        let model_ref = Some(ModelRef::new(provider, model));
         match target {
             ProviderDropdownTarget::Main => {
-                self.ai_model_input
-                    .update(cx, |input, cx| input.set_content(model.clone().into(), cx));
-                self.update_active_provider_config(move |_, config| config.model = model, cx);
+                settings.ai.main_model = model_ref;
                 self.main_model_picker.open = false;
                 self.main_model_picker.anchor = None;
+                self.main_model_picker.query = SharedString::default();
             }
             ProviderDropdownTarget::Title => {
-                self.ai_title_model_input
-                    .update(cx, |input, cx| input.set_content(model.clone().into(), cx));
-                self.update_title_model_settings(move |title| title.model = model, cx);
+                settings.ai.title_model = model_ref;
                 self.title_model_picker.open = false;
                 self.title_model_picker.anchor = None;
+                self.title_model_picker.query = SharedString::default();
             }
         }
+        self.model_search_input(target).update(cx, |input, cx| {
+            input.set_content(SharedString::default(), cx);
+        });
+        self.persist_settings(settings, cx);
     }
 
-    fn fetch_models(&mut self, target: ProviderDropdownTarget, cx: &mut Context<Self>) {
+    fn fetch_provider_models(
+        &mut self,
+        provider: AiProvider,
+        anchor: Option<GpuiPoint<Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
         let settings = cx.global::<SettingsStore>().settings.clone();
-        let config = Self::resolved_ai_config_for_target(&settings, target);
+        let config = Self::resolved_ai_config_for_provider(&settings, provider);
         let signature = Self::model_request_signature(&config);
         {
-            let picker = self.model_picker_mut(target);
+            let picker = &mut self.provider_model_picker;
             picker.loading = true;
             picker.status = Some("Fetching models…".into());
             picker.request = Some(signature.clone());
+            picker.open = false;
+            picker.anchor = anchor;
+            picker.query = SharedString::default();
         }
+        self.provider_model_selection.clear();
+        self.fetch_model_search.update(cx, |input, cx| {
+            input.set_content(SharedString::default(), cx);
+        });
 
-        self.model_picker_mut(target).task = Some(cx.spawn(async move |this, cx| {
+        self.provider_model_picker.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     list_ai_models(config).map_err(|error| format!("{error:#}"))
                 })
                 .await;
             _ = this.update(cx, |this, cx| {
-                if this.current_model_request_signature(target, cx) != signature {
+                if this.current_provider_request_signature(provider, cx) != signature {
                     return;
                 }
-                let picker = this.model_picker_mut(target);
+                let picker = &mut this.provider_model_picker;
                 picker.loading = false;
                 match result {
                     Ok(models) => {
                         let count = models.len();
                         picker.models = models;
                         picker.status = Some(format!("Fetched {count} models.").into());
-                        picker.open = picker.anchor.is_some();
+                        picker.open = true;
                     }
                     Err(error) => {
                         picker.status = Some(format!("Failed to fetch models: {error}").into());
@@ -1339,28 +1284,28 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    fn test_connection(&mut self, target: ProviderDropdownTarget, cx: &mut Context<Self>) {
+    fn test_connection(&mut self, provider: AiProvider, cx: &mut Context<Self>) {
         let settings = cx.global::<SettingsStore>().settings.clone();
-        let config = Self::resolved_ai_config_for_target(&settings, target);
+        let config = Self::resolved_ai_config_for_provider(&settings, provider);
         let signature = Self::model_request_signature(&config);
         {
-            let picker = self.model_picker_mut(target);
+            let picker = &mut self.provider_model_picker;
             picker.loading = true;
             picker.status = Some("Testing connection…".into());
             picker.request = Some(signature.clone());
         }
 
-        self.model_picker_mut(target).task = Some(cx.spawn(async move |this, cx| {
+        self.provider_model_picker.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     test_ai_connection(config).map_err(|error| format!("{error:#}"))
                 })
                 .await;
             _ = this.update(cx, |this, cx| {
-                if this.current_model_request_signature(target, cx) != signature {
+                if this.current_provider_request_signature(provider, cx) != signature {
                     return;
                 }
-                let picker = this.model_picker_mut(target);
+                let picker = &mut this.provider_model_picker;
                 picker.loading = false;
                 picker.status = Some(match result {
                     Ok(()) => "Connection succeeded.".into(),
@@ -1372,35 +1317,16 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    fn sync_all_ai_inputs(&mut self, settings: &Settings, cx: &mut Context<Self>) {
-        let provider = settings.ai.provider;
-        let config = settings.ai.provider_config(provider);
-        self.sync_main_provider_inputs(provider, config, cx);
-
-        let title_provider = Self::effective_title_provider(settings);
-        let title_model = settings.ai.title_model.as_ref().cloned();
-        self.sync_title_provider_inputs(title_provider, title_model, cx);
-    }
-
-    fn sync_main_provider_inputs(
+    fn sync_provider_inputs(
         &mut self,
         provider: AiProvider,
         config: AiProviderConfig,
         cx: &mut Context<Self>,
     ) {
         self.ai_model_input.update(cx, |input, cx| {
-            input.placeholder = provider.default_model().into();
-            input.set_content(config.model.clone().into(), cx);
+            input.placeholder = "model id…".into();
+            input.set_content("".into(), cx);
         });
-        self.sync_main_provider_config_inputs(provider, config, cx);
-    }
-
-    fn sync_main_provider_config_inputs(
-        &mut self,
-        provider: AiProvider,
-        config: AiProviderConfig,
-        cx: &mut Context<Self>,
-    ) {
         self.ai_key_input.update(cx, |input, cx| {
             input.placeholder = "paste API key…".into();
             input.set_content(config.api_key.clone().into(), cx);
@@ -1411,83 +1337,13 @@ impl SettingsWindow {
         });
     }
 
-    fn sync_title_provider_inputs(
-        &mut self,
-        provider: AiProvider,
-        title_model: Option<AiTitleModelSettings>,
-        cx: &mut Context<Self>,
-    ) {
-        self.ai_title_model_input.update(cx, |input, cx| {
-            input.placeholder = provider.default_title_model().into();
-            input.set_content(
-                title_model
-                    .as_ref()
-                    .map(|settings| settings.model.clone())
-                    .unwrap_or_default()
-                    .into(),
-                cx,
-            );
-        });
-        self.ai_title_key_input.update(cx, |input, cx| {
-            input.placeholder = "paste API key…".into();
-            input.set_content(
-                title_model
-                    .as_ref()
-                    .map(|settings| settings.api_key.clone())
-                    .unwrap_or_default()
-                    .into(),
-                cx,
-            );
-        });
-        self.ai_title_base_url_input.update(cx, |input, cx| {
-            input.placeholder = provider.default_base_url().into();
-            input.set_content(
-                title_model
-                    .as_ref()
-                    .and_then(|settings| settings.base_url.clone())
-                    .unwrap_or_else(|| provider.default_base_url().to_string())
-                    .into(),
-                cx,
-            );
-        });
-    }
-
-    fn select_main_provider(&mut self, provider: AiProvider, cx: &mut Context<Self>) {
-        let mut settings = cx.global::<SettingsStore>().settings.clone();
-        settings.ai.provider = provider;
-        self.persist_settings(settings, cx);
+    fn select_ai_provider(&mut self, provider: AiProvider, cx: &mut Context<Self>) {
+        self.selected_ai_provider = provider;
         let settings = cx.global::<SettingsStore>().settings.clone();
-        self.sync_all_ai_inputs(&settings, cx);
-        self.main_provider_dropdown_open = false;
-        self.main_model_picker = ModelPickerState::default();
-        cx.notify();
-    }
-
-    fn select_title_provider(&mut self, provider: AiProvider, cx: &mut Context<Self>) {
-        let mut settings = cx.global::<SettingsStore>().settings.clone();
-        let model = provider.default_title_model().to_string();
-        settings.ai.title_model = Some(AiTitleModelSettings {
-            provider,
-            model: model.clone(),
-            api_key: String::new(),
-            base_url: None,
-        });
-        self.persist_settings(settings, cx);
-        let settings = cx.global::<SettingsStore>().settings.clone();
-        self.sync_all_ai_inputs(&settings, cx);
-        self.title_provider_dropdown_open = false;
-        self.title_model_picker = ModelPickerState::default();
-        cx.notify();
-    }
-
-    fn clear_title_model_settings(&mut self, cx: &mut Context<Self>) {
-        let mut settings = cx.global::<SettingsStore>().settings.clone();
-        settings.ai.title_model = None;
-        self.persist_settings(settings, cx);
-        let settings = cx.global::<SettingsStore>().settings.clone();
-        self.sync_all_ai_inputs(&settings, cx);
-        self.title_provider_dropdown_open = false;
-        self.title_model_picker = ModelPickerState::default();
+        self.sync_provider_inputs(provider, settings.ai.provider_config(provider), cx);
+        self.provider_model_picker.open = false;
+        self.provider_model_picker.anchor = None;
+        self.provider_model_selection.clear();
         cx.notify();
     }
 
@@ -1550,11 +1406,11 @@ impl SettingsWindow {
 
     fn settings_nav(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let mut entries = Vec::new();
-        for tab in SettingsTab::ALL {
-            entries.push(self.nav_root_entry(tab, theme, cx));
-            if self.expanded_tabs[tab.index()] {
-                entries.push(self.nav_sub_entries(tab, theme, cx));
-            }
+        entries.push(self.nav_root_entry(SettingsTab::General, theme, cx));
+        entries.push(self.nav_root_entry(SettingsTab::Appearance, theme, cx));
+        entries.push(self.nav_ai_parent_entry(theme, cx));
+        if self.ai_expanded {
+            entries.push(self.nav_ai_children(theme, cx));
         }
 
         div()
@@ -1570,15 +1426,9 @@ impl SettingsWindow {
             .children(entries)
     }
 
-    fn nav_sub_entries(
-        &self,
-        tab: SettingsTab,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let entries = SettingsSection::for_tab(tab)
-            .iter()
-            .copied()
+    fn nav_ai_children(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let entries = [SettingsSection::AiGeneral, SettingsSection::AiProviders]
+            .into_iter()
             .map(|section| self.nav_sub_entry(section, theme, cx))
             .collect::<Vec<_>>();
 
@@ -1600,7 +1450,53 @@ impl SettingsWindow {
 
     fn nav_root_entry(&self, tab: SettingsTab, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.active_tab == tab;
-        let expanded = self.expanded_tabs[tab.index()];
+
+        div()
+            .w_full()
+            .h(px(28.0))
+            .px_2()
+            .flex()
+            .flex_row()
+            .items_center()
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(if selected {
+                rgb(theme.border_variant)
+            } else {
+                rgba(0x00000000)
+            })
+            .bg(if selected {
+                rgb(theme.element_selected)
+            } else {
+                rgba(0x00000000)
+            })
+            .text_color(rgb(if selected {
+                theme.text
+            } else {
+                theme.text_muted
+            }))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.active_tab = tab;
+                    this.active_section = tab.first_section();
+                    this.content_scroll.scroll_to_top_of_item(0);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(tab.label())
+            .into_any_element()
+    }
+
+    fn nav_ai_parent_entry(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let selected = matches!(
+            self.active_tab,
+            SettingsTab::AiGeneral | SettingsTab::AiProviders
+        );
+        let expanded = self.ai_expanded;
 
         div()
             .w_full()
@@ -1632,14 +1528,7 @@ impl SettingsWindow {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
-                    if this.active_tab == tab {
-                        this.expanded_tabs[tab.index()] = !this.expanded_tabs[tab.index()];
-                    } else {
-                        this.expanded_tabs[tab.index()] = true;
-                    }
-                    this.active_tab = tab;
-                    this.active_section = tab.first_section();
-                    this.content_scroll.scroll_to_top_of_item(0);
+                    this.ai_expanded = !this.ai_expanded;
                     cx.stop_propagation();
                     cx.notify();
                 }),
@@ -1651,7 +1540,7 @@ impl SettingsWindow {
                     .text_color(rgb(theme.text_muted))
                     .child(if expanded { "▾" } else { "▸" }),
             )
-            .child(tab.label())
+            .child("AI")
             .into_any_element()
     }
 
@@ -1695,7 +1584,7 @@ impl SettingsWindow {
                 cx.listener(move |this, _, _, cx| {
                     this.active_tab = tab;
                     this.active_section = section;
-                    this.expanded_tabs[tab.index()] = true;
+                    this.ai_expanded = true;
                     this.content_scroll.scroll_to_top_of_item(section_index);
                     cx.stop_propagation();
                     cx.notify();
@@ -2071,283 +1960,198 @@ impl SettingsWindow {
             .child(preset.label())
     }
 
-    fn provider_dropdown(
+    fn model_selector_control(
         &self,
         target: ProviderDropdownTarget,
-        selected_provider: AiProvider,
+        settings: &Settings,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let open = match target {
-            ProviderDropdownTarget::Main => self.main_provider_dropdown_open,
-            ProviderDropdownTarget::Title => self.title_provider_dropdown_open,
+        let picker = self.model_picker(target);
+        let selected = match target {
+            ProviderDropdownTarget::Main => settings.ai.main_model.as_ref(),
+            ProviderDropdownTarget::Title => settings.ai.title_model.as_ref(),
         };
-
-        let options = AiProvider::ALL
-            .into_iter()
-            .map(|provider| {
-                self.provider_dropdown_option(target, provider, selected_provider, theme, cx)
-            })
-            .collect::<Vec<_>>();
+        let open = picker.open;
+        let model_label = selected
+            .map(|model_ref| settings.ai.model_label(model_ref))
+            .unwrap_or_else(|| "Select model".to_string());
+        let search_input = self.model_search_input(target).clone();
 
         div()
+            .w(px(280.0))
+            .h(px(32.0))
             .flex()
-            .flex_col()
-            .min_w(px(180.0))
+            .items_center()
+            .gap_2()
+            .px_3()
+            .border_1()
+            .border_color(rgb(if open {
+                theme.accent
+            } else {
+                theme.border_variant
+            }))
+            .bg(rgb(theme.surface_background))
+            .cursor_text()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.main_model_picker.open = false;
+                    this.main_model_picker.anchor = None;
+                    this.title_model_picker.open = false;
+                    this.title_model_picker.anchor = None;
+                    let picker = this.model_picker_mut(target);
+                    picker.open = true;
+                    picker.anchor = Some(point(
+                        event.position.x - px(8.0),
+                        event.position.y + px(20.0),
+                    ));
+                    this.model_search_input(target)
+                        .read(cx)
+                        .focus_handle
+                        .clone()
+                        .focus(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
+                    .when(!open, |this| {
+                        this.child(div().truncate().child(model_label))
+                    })
+                    .when(open, |this| this.child(search_input)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted))
+                    .child(if open { "⌃" } else { "⌄" }),
+            )
+    }
+
+    fn settings_model_entries(settings: &Settings, query: &str) -> Vec<SettingsModelMenuEntry> {
+        let query = query.trim().to_ascii_lowercase();
+        let mut entries = Vec::new();
+        for provider in AiProvider::ALL {
+            let config = settings.ai.provider_config(provider);
+            if !config.enabled || config.models.is_empty() {
+                continue;
+            }
+            let provider_matches = provider.label().to_ascii_lowercase().contains(&query);
+            let mut model_entries = config
+                .models
+                .into_iter()
+                .filter(|model| {
+                    query.is_empty()
+                        || provider_matches
+                        || model.id.to_ascii_lowercase().contains(&query)
+                        || model.name.to_ascii_lowercase().contains(&query)
+                        || model.group.to_ascii_lowercase().contains(&query)
+                })
+                .map(move |model| SettingsModelMenuEntry::Model(provider, model))
+                .collect::<Vec<_>>();
+            if !model_entries.is_empty() {
+                entries.push(SettingsModelMenuEntry::Header(provider));
+                entries.append(&mut model_entries);
+            }
+        }
+        entries
+    }
+
+    fn model_picker_option(
+        target: ProviderDropdownTarget,
+        entry: SettingsModelMenuEntry,
+        selected: Option<ModelRef>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match entry {
+            SettingsModelMenuEntry::Header(provider) => div()
+                .h(px(26.0))
+                .px_3()
+                .flex()
+                .items_center()
+                .text_size(px(11.0))
+                .text_color(rgb(theme.text_muted))
+                .child(provider.label())
+                .into_any_element(),
+            SettingsModelMenuEntry::Model(provider, model) => {
+                let model_id = model.id.clone();
+                let is_selected = selected.as_ref().is_some_and(|model_ref| {
+                    model_ref.provider == provider && model_ref.id == model.id
+                });
+                div()
                     .h(px(30.0))
-                    .px_3()
+                    .pl(px(24.0))
+                    .pr_3()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .border_1()
-                    .border_color(rgb(theme.border_variant))
-                    .bg(rgb(theme.surface_background))
+                    .gap_2()
+                    .rounded(px(4.0))
+                    .bg(if is_selected {
+                        rgb(theme.element_selected)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .text_color(rgb(if is_selected {
+                        theme.accent
+                    } else {
+                        theme.text
+                    }))
                     .hover(move |style| style.bg(rgb(theme.element_hover)))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
-                            match target {
-                                ProviderDropdownTarget::Main => {
-                                    this.main_provider_dropdown_open =
-                                        !this.main_provider_dropdown_open;
-                                    this.title_provider_dropdown_open = false;
-                                }
-                                ProviderDropdownTarget::Title => {
-                                    this.title_provider_dropdown_open =
-                                        !this.title_provider_dropdown_open;
-                                    this.main_provider_dropdown_open = false;
-                                }
-                            }
+                            this.select_model(target, provider, model_id.clone(), cx);
                             cx.stop_propagation();
-                            cx.notify();
                         }),
                     )
-                    .child(selected_provider.label())
-                    .child(div().text_color(rgb(theme.text_muted)).child(if open {
-                        "⌃"
-                    } else {
-                        "⌄"
-                    })),
-            )
-            .when(open, |this| {
-                this.child(
-                    div()
-                        .mt_1()
-                        .flex()
-                        .flex_col()
-                        .border_1()
-                        .border_color(rgb(theme.border_variant))
-                        .bg(rgb(theme.surface_background))
-                        .children(options),
-                )
-            })
-    }
-
-    fn provider_dropdown_option(
-        &self,
-        target: ProviderDropdownTarget,
-        provider: AiProvider,
-        selected_provider: AiProvider,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let selected = provider == selected_provider;
-        let default_model = match target {
-            ProviderDropdownTarget::Main => provider.default_model(),
-            ProviderDropdownTarget::Title => provider.default_title_model(),
-        };
-
-        div()
-            .h(px(30.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .justify_between()
-            .bg(if selected {
-                rgb(theme.element_selected)
-            } else {
-                rgba(0x00000000)
-            })
-            .text_color(rgb(if selected { theme.accent } else { theme.text }))
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    match target {
-                        ProviderDropdownTarget::Main => this.select_main_provider(provider, cx),
-                        ProviderDropdownTarget::Title => this.select_title_provider(provider, cx),
-                    }
-                    cx.stop_propagation();
-                }),
-            )
-            .child(provider.label())
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(default_model),
-            )
-            .into_any_element()
-    }
-
-    fn model_picker_control(
-        &self,
-        target: ProviderDropdownTarget,
-        _provider: AiProvider,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let picker = self.model_picker(target);
-        let input = match target {
-            ProviderDropdownTarget::Main => self.ai_model_input.clone(),
-            ProviderDropdownTarget::Title => self.ai_title_model_input.clone(),
-        };
-        let open = picker.open;
-        let loading = picker.loading;
-
-        div().flex().flex_col().flex_1().min_w_0().child(
-            div().flex().flex_row().gap_2().child(input).child(
-                div()
-                    .h(px(28.0))
-                    .min_w(px(30.0))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .border_1()
-                    .border_color(rgb(theme.border_variant))
-                    .bg(rgb(theme.surface_background))
-                    .hover(move |style| style.bg(rgb(theme.element_hover)))
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            this.focus_handle.focus(window, cx);
-                            let opening = !this.model_picker(target).open;
-                            this.main_model_picker.open = false;
-                            this.main_model_picker.anchor = None;
-                            this.title_model_picker.open = false;
-                            this.title_model_picker.anchor = None;
-                            let picker = this.model_picker_mut(target);
-                            picker.open = opening;
-                            picker.anchor = opening.then_some(point(
-                                event.position.x - px(340.0),
-                                event.position.y + px(18.0),
-                            ));
-                            this.main_provider_dropdown_open = false;
-                            this.title_provider_dropdown_open = false;
-                            cx.stop_propagation();
-                            cx.notify();
-                        }),
+                    .child(div().truncate().min_w_0().child(model.name))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(model.group),
                     )
-                    .child(if loading {
-                        "…"
-                    } else if open {
-                        "⌃"
-                    } else {
-                        "⌄"
-                    }),
-            ),
-        )
-    }
-
-    fn model_picker_option(
-        target: ProviderDropdownTarget,
-        model: AiModelInfo,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = model.id.clone();
-        let meta = model.owned_by.unwrap_or(model.label);
-        div()
-            .h(px(38.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.select_model(target, id.clone(), cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(div().truncate().child(model.id))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(theme.text_muted))
-                    .truncate()
-                    .child(meta),
-            )
-            .into_any_element()
-    }
-
-    fn model_picker_entries(
-        &self,
-        target: ProviderDropdownTarget,
-        provider: AiProvider,
-        cx: &mut Context<Self>,
-    ) -> Vec<AiModelInfo> {
-        let picker = self.model_picker(target);
-        let input = match target {
-            ProviderDropdownTarget::Main => self.ai_model_input.clone(),
-            ProviderDropdownTarget::Title => self.ai_title_model_input.clone(),
-        };
-        let query = input.read(cx).content.to_string();
-        let query_lower = query.to_ascii_lowercase();
-        let mut models = picker.models.clone();
-        let default_model = match target {
-            ProviderDropdownTarget::Main => provider.default_model(),
-            ProviderDropdownTarget::Title => provider.default_title_model(),
-        };
-
-        for model in [query.as_str(), default_model] {
-            let model = model.trim();
-            if !model.is_empty() && !models.iter().any(|entry| entry.id == model) {
-                models.push(AiModelInfo {
-                    id: model.to_string(),
-                    label: model.to_string(),
-                    owned_by: None,
-                });
+                    .into_any_element()
             }
         }
-
-        models.retain(|model| {
-            query_lower.is_empty()
-                || model.id.to_ascii_lowercase().contains(&query_lower)
-                || model.label.to_ascii_lowercase().contains(&query_lower)
-        });
-        models.sort_by(|left, right| left.id.cmp(&right.id));
-        models
     }
 
     fn model_picker_menu(
         &self,
         target: ProviderDropdownTarget,
-        provider: AiProvider,
+        settings: &Settings,
         theme: Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let entries = self.model_picker_entries(target, provider, cx);
+        let query = self.model_picker(target).query.to_string();
+        let entries = Self::settings_model_entries(settings, &query);
         let entry_count = entries.len();
+        let selected = match target {
+            ProviderDropdownTarget::Main => settings.ai.main_model.clone(),
+            ProviderDropdownTarget::Title => settings.ai.title_model.clone(),
+        };
         let scroll_handle = self.model_picker(target).scroll_handle.clone();
-        let status = self.model_picker(target).status.clone();
-        let list_id = match target {
-            ProviderDropdownTarget::Main => "settings-main-model-picker-list",
-            ProviderDropdownTarget::Title => "settings-title-model-picker-list",
+        let list_id: ElementId = match target {
+            ProviderDropdownTarget::Main => "settings-main-model-list".into(),
+            ProviderDropdownTarget::Title => "settings-title-model-list".into(),
         };
 
+        let rows = entries
+            .into_iter()
+            .map(|entry| Self::model_picker_option(target, entry, selected.clone(), theme, cx))
+            .collect::<Vec<_>>();
+
         div()
-            .w(px(380.0))
+            .w(px(280.0))
             .flex()
             .flex_col()
             .rounded(px(6.0))
@@ -2360,60 +2164,28 @@ impl SettingsWindow {
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
-            .when_some(status, |this, status| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .border_b(px(1.0))
-                        .border_color(rgb(theme.border_variant))
-                        .text_size(px(12.0))
-                        .text_color(rgb(theme.text_muted))
-                        .child(status),
-                )
-            })
             .when(entry_count == 0, |this| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_color(rgb(theme.text_muted))
-                        .child("No matching models"),
-                )
+                this.child(div().px_3().py_2().text_color(rgb(theme.text_muted)).child(
+                    if query.trim().is_empty() {
+                        "No enabled provider models"
+                    } else {
+                        "No matching models"
+                    },
+                ))
             })
             .when(entry_count > 0, |this| {
-                let row_height = 38.0;
-                let list_height = row_height * entry_count.min(8) as f32;
                 this.child(
                     div()
-                        .h(px(list_height))
+                        .id(list_id)
+                        .track_scroll(&scroll_handle)
+                        .max_h(px(320.0))
+                        .py_1()
+                        .flex()
+                        .flex_col()
+                        .overflow_y_scroll()
                         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                        .child(
-                            uniform_list(
-                                list_id,
-                                entry_count,
-                                cx.processor(move |_, visible_range: Range<usize>, _, cx| {
-                                    visible_range
-                                        .map(|ix| {
-                                            Self::model_picker_option(
-                                                target,
-                                                entries[ix].clone(),
-                                                theme,
-                                                cx,
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                }),
-                            )
-                            .track_scroll(&scroll_handle)
-                            .with_decoration(uniform_list_scrollbar_for(
-                                &scroll_handle,
-                                list_id,
-                                window,
-                                cx,
-                            ))
-                            .size_full(),
-                        ),
+                        .children(rows)
+                        .vertical_scrollbar_for(&scroll_handle, window, cx),
                 )
             })
     }
@@ -2421,7 +2193,7 @@ impl SettingsWindow {
     fn model_picker_overlay(
         &self,
         target: ProviderDropdownTarget,
-        provider: AiProvider,
+        settings: &Settings,
         theme: Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2437,7 +2209,7 @@ impl SettingsWindow {
                     .position(anchor)
                     .anchor(Anchor::TopLeft)
                     .snap_to_window_with_margin(px(8.0))
-                    .child(self.model_picker_menu(target, provider, theme, window, cx)),
+                    .child(self.model_picker_menu(target, settings, theme, window, cx)),
             )
             .with_priority(2)
             .into_any_element(),
@@ -2473,108 +2245,16 @@ impl SettingsWindow {
             .child(label)
     }
 
-    fn model_status(
-        &self,
-        target: ProviderDropdownTarget,
-        theme: Theme,
-    ) -> Option<impl IntoElement> {
-        self.model_picker(target).status.clone().map(move |status| {
-            div()
-                .text_size(px(12.0))
-                .text_color(rgb(theme.text_muted))
-                .child(status)
-        })
-    }
-
-    fn title_model_default_button(
-        &self,
-        provider: AiProvider,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .h(px(28.0))
-            .min_w(px(30.0))
-            .px_2()
-            .flex()
-            .items_center()
-            .justify_center()
-            .border_1()
-            .border_color(rgb(theme.border_variant))
-            .bg(rgb(theme.surface_background))
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    let model = provider.default_title_model().to_string();
-                    this.ai_title_model_input
-                        .update(cx, |input, cx| input.set_content(model.clone().into(), cx));
-                    this.update_title_model_settings(
-                        move |title_model| {
-                            title_model.provider = provider;
-                            title_model.model = model;
-                        },
-                        cx,
-                    );
-                    cx.stop_propagation();
-                }),
-            )
-            .child("Default")
-    }
-
-    fn title_model_clear_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .h(px(28.0))
-            .min_w(px(30.0))
-            .px_2()
-            .flex()
-            .items_center()
-            .justify_center()
-            .border_1()
-            .border_color(rgb(theme.border_variant))
-            .bg(rgb(theme.surface_background))
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.clear_title_model_settings(cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child("Clear")
-    }
-
-    fn main_model_default_button(
-        &self,
-        provider: AiProvider,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .h(px(28.0))
-            .min_w(px(30.0))
-            .px_2()
-            .flex()
-            .items_center()
-            .justify_center()
-            .border_1()
-            .border_color(rgb(theme.border_variant))
-            .bg(rgb(theme.surface_background))
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    let model = provider.default_model().to_string();
-                    this.ai_model_input
-                        .update(cx, |input, cx| input.set_content(model.clone().into(), cx));
-                    this.update_active_provider_config(move |_, config| config.model = model, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child("Default")
+    fn provider_status(&self, theme: Theme) -> Option<impl IntoElement> {
+        self.provider_model_picker
+            .status
+            .clone()
+            .map(move |status| {
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(status)
+            })
     }
 
     fn base_url_default_button(
@@ -2601,38 +2281,11 @@ impl SettingsWindow {
                     let base_url = provider.default_base_url().to_string();
                     this.ai_base_url_input
                         .update(cx, |input, cx| input.set_content(base_url.into(), cx));
-                    this.update_active_provider_config(move |_, config| config.base_url = None, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child("Default")
-    }
-
-    fn title_base_url_default_button(
-        &self,
-        provider: AiProvider,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .h(px(28.0))
-            .min_w(px(30.0))
-            .px_2()
-            .flex()
-            .items_center()
-            .justify_center()
-            .border_1()
-            .border_color(rgb(theme.border_variant))
-            .bg(rgb(theme.surface_background))
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    let base_url = provider.default_base_url().to_string();
-                    this.ai_title_base_url_input
-                        .update(cx, |input, cx| input.set_content(base_url.into(), cx));
-                    this.update_title_model_settings(move |title| title.base_url = None, cx);
+                    this.update_provider_config(
+                        provider,
+                        move |_, config| config.base_url = None,
+                        cx,
+                    );
                     cx.stop_propagation();
                 }),
             )
@@ -2815,28 +2468,81 @@ impl SettingsWindow {
         ]
     }
 
-    fn ai_tab(&self, settings: &Settings, theme: Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let provider = settings.ai.provider;
-        let title_model = settings.ai.title_model.as_ref();
-        let title_provider = title_model
-            .map(|settings| settings.provider)
-            .unwrap_or(provider);
-        let title_model_enabled = title_model.is_some();
-        let title_hint = if title_model_enabled {
-            let missing_credentials = title_model
-                .map(|settings| settings.api_key.is_empty() && settings.base_url.is_none())
-                .unwrap_or(true);
-            if missing_credentials {
-                format!(
-                    "Uses {} credentials. Add an API key below before generating titles.",
-                    title_provider.label()
+    fn ai_general_tab(
+        &self,
+        settings: &Settings,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let input_row = |label: &'static str, child: AnyElement| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .min_h(px(48.0))
+                .gap_3()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(104.0))
+                        .text_color(rgb(theme.text))
+                        .child(label),
                 )
-            } else {
-                format!("Uses {} credentials.", title_provider.label())
-            }
-        } else {
-            "Optional small model for generated chat titles".to_string()
+                .child(child)
         };
+
+        vec![
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Self::section_title("Default models", theme))
+                .child(input_row(
+                    "Main model",
+                    self.model_selector_control(ProviderDropdownTarget::Main, settings, theme, cx)
+                        .into_any_element(),
+                ))
+                .child(input_row(
+                    "Title model",
+                    self.model_selector_control(ProviderDropdownTarget::Title, settings, theme, cx)
+                        .into_any_element(),
+                ))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child("Only models from enabled providers' model lists appear here."),
+                )
+                .into_any_element(),
+        ]
+    }
+
+    fn ai_providers_tab(
+        &self,
+        settings: &Settings,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let provider = self.selected_ai_provider;
+        let config = settings.ai.provider_config(provider);
+        let provider_entries = AiProvider::ALL
+            .into_iter()
+            .map(|provider| {
+                self.provider_sidebar_entry(
+                    provider,
+                    settings.ai.provider_config(provider).enabled,
+                    theme,
+                    cx,
+                )
+            })
+            .collect::<Vec<_>>();
+        let model_rows = config
+            .models
+            .iter()
+            .cloned()
+            .map(|model| self.provider_model_row(provider, model, theme, cx))
+            .collect::<Vec<_>>();
 
         let input_row = |label: &'static str, child: AnyElement| {
             div()
@@ -2859,175 +2565,604 @@ impl SettingsWindow {
         vec![
             div()
                 .flex()
-                .flex_col()
-                .gap_1()
-                .child(Self::section_title("Main model", theme))
-                .child(input_row(
-                    "Provider",
-                    self.provider_dropdown(ProviderDropdownTarget::Main, provider, theme, cx)
-                        .into_any_element(),
-                ))
-                .child(input_row(
-                    "Model",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_2()
-                        .child(self.model_picker_control(
-                            ProviderDropdownTarget::Main,
-                            provider,
-                            theme,
-                            cx,
-                        ))
-                        .child(self.main_model_default_button(provider, theme, cx))
-                        .into_any_element(),
-                ))
-                .child(input_row(
-                    "API key",
-                    self.ai_key_input.clone().into_any_element(),
-                ))
-                .child(input_row(
-                    "Base URL",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_2()
-                        .child(self.ai_base_url_input.clone())
-                        .child(self.base_url_default_button(provider, theme, cx))
-                        .into_any_element(),
-                ))
+                .flex_row()
+                .min_h(px(520.0))
+                .border_1()
+                .border_color(rgb(theme.border_variant))
+                .bg(rgb(theme.surface_background))
                 .child(
                     div()
+                        .w(px(190.0))
+                        .flex_none()
                         .flex()
                         .flex_col()
-                        .gap_1()
-                        .when_some(
-                            self.model_status(ProviderDropdownTarget::Main, theme),
-                            |this, status| this.child(div().flex().justify_end().child(status)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .justify_end()
-                                .gap_2()
-                                .child(self.ai_action_button(
-                                    "Test connection",
-                                    theme,
-                                    |this, cx| {
-                                        this.test_connection(ProviderDropdownTarget::Main, cx)
-                                    },
-                                    cx,
-                                ))
-                                .child(self.ai_action_button(
-                                    "Fetch models",
-                                    theme,
-                                    |this, cx| this.fetch_models(ProviderDropdownTarget::Main, cx),
-                                    cx,
-                                )),
-                        ),
+                        .border_r(px(1.0))
+                        .border_color(rgb(theme.border_variant))
+                        .children(provider_entries),
                 )
-                .into_any_element(),
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(Self::section_title("Title model", theme))
                 .child(
                     div()
+                        .flex_1()
+                        .min_w_0()
                         .flex()
-                        .items_center()
-                        .justify_between()
-                        .min_h(px(32.0))
+                        .flex_col()
                         .gap_3()
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(theme.text_muted))
-                                .child(title_hint),
-                        )
-                        .child(self.title_model_clear_button(theme, cx)),
-                )
-                .child(input_row(
-                    "Provider",
-                    self.provider_dropdown(
-                        ProviderDropdownTarget::Title,
-                        title_provider,
-                        theme,
-                        cx,
-                    )
-                    .into_any_element(),
-                ))
-                .child(input_row(
-                    "Model",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_2()
-                        .child(self.model_picker_control(
-                            ProviderDropdownTarget::Title,
-                            title_provider,
-                            theme,
-                            cx,
-                        ))
-                        .child(self.title_model_default_button(title_provider, theme, cx))
-                        .into_any_element(),
-                ))
-                .child(input_row(
-                    "API key",
-                    self.ai_title_key_input.clone().into_any_element(),
-                ))
-                .child(input_row(
-                    "Base URL",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_2()
-                        .child(self.ai_title_base_url_input.clone())
-                        .child(self.title_base_url_default_button(title_provider, theme, cx))
-                        .into_any_element(),
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .when_some(
-                            self.model_status(ProviderDropdownTarget::Title, theme),
-                            |this, status| this.child(div().flex().justify_end().child(status)),
-                        )
+                        .p_4()
                         .child(
                             div()
                                 .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_size(px(16.0))
+                                                .text_color(rgb(theme.text))
+                                                .child(provider.label()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(12.0))
+                                                .text_color(rgb(theme.text_muted))
+                                                .child(provider.default_base_url()),
+                                        ),
+                                )
+                                .child(self.toggle_row(
+                                    "Enabled",
+                                    config.enabled,
+                                    move |settings| {
+                                        let config = settings.ai.provider_config_mut(provider);
+                                        config.enabled = !config.enabled;
+                                    },
+                                    theme,
+                                    cx,
+                                )),
+                        )
+                        .child(input_row(
+                            "API key",
+                            self.ai_key_input.clone().into_any_element(),
+                        ))
+                        .child(input_row(
+                            "Base URL",
+                            div()
+                                .flex()
                                 .flex_row()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_2()
+                                .child(self.ai_base_url_input.clone())
+                                .child(self.base_url_default_button(provider, theme, cx))
+                                .into_any_element(),
+                        ))
+                        .when_some(self.provider_status(theme), |this, status| {
+                            this.child(div().flex().justify_end().child(status))
+                        })
+                        .child(
+                            div()
+                                .flex()
                                 .justify_end()
                                 .gap_2()
                                 .child(self.ai_action_button(
                                     "Test connection",
                                     theme,
-                                    |this, cx| {
-                                        this.test_connection(ProviderDropdownTarget::Title, cx)
-                                    },
+                                    move |this, cx| this.test_connection(provider, cx),
                                     cx,
                                 ))
-                                .child(self.ai_action_button(
-                                    "Fetch models",
-                                    theme,
-                                    |this, cx| this.fetch_models(ProviderDropdownTarget::Title, cx),
-                                    cx,
-                                )),
+                                .child(self.fetch_models_button(provider, theme, cx)),
+                        )
+                        .child(Self::section_title("Model list", theme))
+                        .child(div().flex().flex_col().gap_1().children(model_rows).when(
+                            config.models.is_empty(),
+                            |this| {
+                                this.child(
+                                    div()
+                                        .py_2()
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("No models added yet."),
+                                )
+                            },
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap_2()
+                                .child(self.ai_model_input.clone())
+                                .child(self.add_manual_model_button(provider, theme, cx)),
                         ),
                 )
                 .into_any_element(),
         ]
+    }
+
+    fn provider_sidebar_entry(
+        &self,
+        provider: AiProvider,
+        enabled: bool,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.selected_ai_provider == provider;
+        div()
+            .h(px(34.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .bg(if selected {
+                rgb(theme.element_selected)
+            } else {
+                rgba(0x00000000)
+            })
+            .text_color(rgb(if selected {
+                theme.text
+            } else {
+                theme.text_muted
+            }))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.select_ai_provider(provider, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(div().truncate().child(provider.label()))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(if enabled {
+                        theme.success
+                    } else {
+                        theme.text_muted
+                    }))
+                    .child(if enabled { "On" } else { "Off" }),
+            )
+            .into_any_element()
+    }
+
+    fn provider_model_row(
+        &self,
+        provider: AiProvider,
+        model: AiModel,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let model_id = model.id.clone();
+        div()
+            .min_h(px(42.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .border_1()
+            .border_color(rgb(theme.border_variant))
+            .bg(rgb(theme.panel_background))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .child(div().truncate().child(model.name))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(model.id),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(model.group),
+                    )
+                    .child(self.remove_model_button(provider, model_id, theme, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn remove_model_button(
+        &self,
+        provider: AiProvider,
+        model_id: String,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .h(px(24.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(rgb(theme.border_variant))
+            .bg(rgb(theme.surface_background))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    let mut settings = cx.global::<SettingsStore>().settings.clone();
+                    settings
+                        .ai
+                        .provider_config_mut(provider)
+                        .remove_model(&model_id);
+                    if settings.ai.main_model.as_ref().is_some_and(|model_ref| {
+                        model_ref.provider == provider && model_ref.id == model_id
+                    }) {
+                        settings.ai.main_model = None;
+                    }
+                    if settings.ai.title_model.as_ref().is_some_and(|model_ref| {
+                        model_ref.provider == provider && model_ref.id == model_id
+                    }) {
+                        settings.ai.title_model = None;
+                    }
+                    this.persist_settings(settings, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child("Remove")
+    }
+
+    fn add_manual_model_button(
+        &self,
+        provider: AiProvider,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .h(px(28.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(rgb(theme.border_variant))
+            .bg(rgb(theme.surface_background))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    let model_id = this.ai_model_input.read(cx).content.trim().to_string();
+                    if model_id.is_empty() {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    let mut settings = cx.global::<SettingsStore>().settings.clone();
+                    settings
+                        .ai
+                        .provider_config_mut(provider)
+                        .ensure_model(AiModel::new(model_id.clone(), model_id, provider.label()));
+                    this.persist_settings(settings, cx);
+                    this.ai_model_input
+                        .update(cx, |input, cx| input.set_content("".into(), cx));
+                    cx.stop_propagation();
+                }),
+            )
+            .child("Add")
+    }
+
+    fn fetch_models_button(
+        &self,
+        provider: AiProvider,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let loading = self.provider_model_picker.loading;
+        div()
+            .h(px(28.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(rgb(theme.border_variant))
+            .bg(rgb(theme.surface_background))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    let anchor = point(event.position.x - px(420.0), event.position.y + px(18.0));
+                    this.fetch_provider_models(provider, Some(anchor), cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(if loading {
+                "Fetching…"
+            } else {
+                "Fetch models"
+            })
+    }
+
+    fn toggle_fetched_model(&mut self, id: String, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .provider_model_selection
+            .iter()
+            .position(|selected| selected == &id)
+        {
+            self.provider_model_selection.remove(index);
+        } else {
+            self.provider_model_selection.push(id);
+        }
+        cx.notify();
+    }
+
+    fn confirm_fetched_models(&mut self, provider: AiProvider, cx: &mut Context<Self>) {
+        let selected = self.provider_model_selection.clone();
+        if selected.is_empty() {
+            self.provider_model_picker.open = false;
+            self.provider_model_picker.anchor = None;
+            cx.notify();
+            return;
+        }
+
+        let fetched = self.provider_model_picker.models.clone();
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        let config = settings.ai.provider_config_mut(provider);
+        for model in fetched {
+            if !selected.iter().any(|id| id == &model.id) {
+                continue;
+            }
+            let group = model
+                .owned_by
+                .unwrap_or_else(|| provider.label().to_string());
+            config.ensure_model(AiModel::new(model.id, model.label, group));
+        }
+        self.persist_settings(settings, cx);
+        self.provider_model_picker.open = false;
+        self.provider_model_picker.anchor = None;
+        self.provider_model_selection.clear();
+        cx.notify();
+    }
+
+    fn provider_model_fetch_overlay(
+        &self,
+        provider: AiProvider,
+        settings: &Settings,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.provider_model_picker.open {
+            return None;
+        }
+        let anchor = self.provider_model_picker.anchor?;
+        let query = self.provider_model_picker.query.trim().to_ascii_lowercase();
+        let models = self
+            .provider_model_picker
+            .models
+            .iter()
+            .filter(|model| {
+                query.is_empty()
+                    || model.id.to_ascii_lowercase().contains(&query)
+                    || model.label.to_ascii_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let total_count = self.provider_model_picker.models.len();
+        let selected = self.provider_model_selection.clone();
+        let existing = settings.ai.provider_config(provider).models;
+        let entry_count = models.len();
+        let scroll_handle = self.provider_model_picker.fetch_scroll_handle.clone();
+        let search_input = self.fetch_model_search.clone();
+
+        Some(
+            deferred(
+                anchored()
+                    .position(anchor)
+                    .anchor(Anchor::TopLeft)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(
+                        div()
+                            .w(px(440.0))
+                            .flex()
+                            .flex_col()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(rgb(theme.border_variant))
+                            .bg(rgb(theme.surface_background))
+                            .shadow_sm()
+                            .overflow_hidden()
+                            .occlude()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .child(
+                                div()
+                                    .px_3()
+                                    .py_2()
+                                    .border_b(px(1.0))
+                                    .border_color(rgb(theme.border_variant))
+                                    .text_color(rgb(theme.text))
+                                    .child("Choose models to add"),
+                            )
+                            .child(
+                                div()
+                                    .px_3()
+                                    .py_2()
+                                    .border_b(px(1.0))
+                                    .border_color(rgb(theme.border_variant))
+                                    .flex()
+                                    .child(search_input),
+                            )
+                            .when(entry_count == 0, |this| {
+                                this.child(
+                                    div().px_3().py_2().text_color(rgb(theme.text_muted)).child(
+                                        if total_count == 0 {
+                                            "No models returned."
+                                        } else {
+                                            "No matching models."
+                                        },
+                                    ),
+                                )
+                            })
+                            .when(entry_count > 0, |this| {
+                                let list_height = 42.0 * entry_count.min(9) as f32;
+                                this.child(
+                                    div()
+                                        .h(px(list_height))
+                                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                        .child(
+                                            uniform_list(
+                                                "settings-provider-fetched-models",
+                                                entry_count,
+                                                cx.processor(
+                                                    move |_, visible_range: Range<usize>, _, cx| {
+                                                        visible_range
+                                                            .map(|ix| {
+                                                                let model = models[ix].clone();
+                                                                let already_added =
+                                                                    existing.iter().any(|entry| {
+                                                                        entry.id == model.id
+                                                                    });
+                                                                let checked = selected
+                                                                    .iter()
+                                                                    .any(|id| id == &model.id);
+                                                                Self::fetched_model_row(
+                                                                    provider,
+                                                                    model,
+                                                                    already_added,
+                                                                    checked,
+                                                                    theme,
+                                                                    cx,
+                                                                )
+                                                            })
+                                                            .collect::<Vec<_>>()
+                                                    },
+                                                ),
+                                            )
+                                            .track_scroll(&scroll_handle)
+                                            .with_decoration(uniform_list_scrollbar_for(
+                                                &scroll_handle,
+                                                "settings-provider-fetched-models",
+                                                window,
+                                                cx,
+                                            ))
+                                            .size_full(),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .px_3()
+                                    .py_2()
+                                    .border_t(px(1.0))
+                                    .border_color(rgb(theme.border_variant))
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(self.ai_action_button(
+                                        "Cancel",
+                                        theme,
+                                        |this, cx| {
+                                            this.provider_model_picker.open = false;
+                                            this.provider_model_picker.anchor = None;
+                                            this.provider_model_selection.clear();
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
+                                    .child(self.ai_action_button(
+                                        "Add selected",
+                                        theme,
+                                        move |this, cx| this.confirm_fetched_models(provider, cx),
+                                        cx,
+                                    )),
+                            ),
+                    ),
+            )
+            .with_priority(3)
+            .into_any_element(),
+        )
+    }
+
+    fn fetched_model_row(
+        provider: AiProvider,
+        model: AiModelInfo,
+        already_added: bool,
+        checked: bool,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = model.id.clone();
+        let meta = model
+            .owned_by
+            .unwrap_or_else(|| provider.label().to_string());
+        div()
+            .h(px(42.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .text_color(rgb(if already_added {
+                theme.text_muted
+            } else {
+                theme.text
+            }))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    if !already_added {
+                        this.toggle_fetched_model(id.clone(), cx);
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .w(px(28.0))
+                    .text_color(rgb(if checked {
+                        theme.accent
+                    } else {
+                        theme.text_muted
+                    }))
+                    .child(if already_added {
+                        "✓"
+                    } else if checked {
+                        "☑"
+                    } else {
+                        "☐"
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().child(model.label))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(model.id),
+                    ),
+            )
+            .child(
+                div()
+                    .max_w(px(96.0))
+                    .truncate()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(meta),
+            )
+            .into_any_element()
     }
 
     fn appearance_tab(
@@ -3501,20 +3636,22 @@ impl Render for SettingsWindow {
         let content = match self.active_tab {
             SettingsTab::General => self.general_tab(&settings, resolved, cx),
             SettingsTab::Appearance => self.appearance_tab(&settings, resolved, themes, cx),
-            SettingsTab::Ai => self.ai_tab(&settings, resolved, cx),
+            SettingsTab::AiGeneral => self.ai_general_tab(&settings, resolved, cx),
+            SettingsTab::AiProviders => self.ai_providers_tab(&settings, resolved, cx),
         };
-        let (main_model_overlay, title_model_overlay) = if self.active_tab == SettingsTab::Ai {
+        let (main_model_overlay, title_model_overlay) = if self.active_tab == SettingsTab::AiGeneral
+        {
             (
                 self.model_picker_overlay(
                     ProviderDropdownTarget::Main,
-                    settings.ai.provider,
+                    &settings,
                     resolved,
                     window,
                     cx,
                 ),
                 self.model_picker_overlay(
                     ProviderDropdownTarget::Title,
-                    Self::effective_title_provider(&settings),
+                    &settings,
                     resolved,
                     window,
                     cx,
@@ -3523,7 +3660,17 @@ impl Render for SettingsWindow {
         } else {
             (None, None)
         };
-        let focus_handle = self.focus_handle.clone();
+        let provider_model_overlay = if self.active_tab == SettingsTab::AiProviders {
+            self.provider_model_fetch_overlay(
+                self.selected_ai_provider,
+                &settings,
+                resolved,
+                window,
+                cx,
+            )
+        } else {
+            None
+        };
 
         div()
             .key_context("SettingsPanel")
@@ -3535,10 +3682,27 @@ impl Render for SettingsWindow {
             .bg(rgb(resolved.surface_background))
             .text_color(rgb(resolved.text))
             .text_size(px(13.0))
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                focus_handle.focus(window, cx);
-                cx.stop_propagation();
-            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    let mut changed = false;
+                    if this.main_model_picker.open {
+                        this.main_model_picker.open = false;
+                        this.main_model_picker.anchor = None;
+                        changed = true;
+                    }
+                    if this.title_model_picker.open {
+                        this.title_model_picker.open = false;
+                        this.title_model_picker.anchor = None;
+                        changed = true;
+                    }
+                    this.focus_handle.clone().focus(window, cx);
+                    if changed {
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }),
+            )
             .on_action(cx.listener(Self::close))
             .child(
                 div()
@@ -3604,5 +3768,6 @@ impl Render for SettingsWindow {
             )
             .when_some(main_model_overlay, |this, overlay| this.child(overlay))
             .when_some(title_model_overlay, |this, overlay| this.child(overlay))
+            .when_some(provider_model_overlay, |this, overlay| this.child(overlay))
     }
 }

@@ -322,15 +322,51 @@ pub enum AiProvider {
     DeepSeek,
     OpenRouter,
     Fireworks,
+    Groq,
+    Together,
+    Mistral,
+    Perplexity,
+    Moonshot,
+    DashScope,
+    Zhipu,
+    SiliconFlow,
+    XAi,
+    Hyperbolic,
+    Nvidia,
+    Cerebras,
+    StepFun,
+    Yi,
+    MiniMax,
+    Doubao,
+    LmStudio,
+    Ollama,
 }
 
 impl AiProvider {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 23] = [
         Self::OpenAi,
         Self::Anthropic,
         Self::DeepSeek,
         Self::OpenRouter,
         Self::Fireworks,
+        Self::Groq,
+        Self::Together,
+        Self::Mistral,
+        Self::Perplexity,
+        Self::Moonshot,
+        Self::DashScope,
+        Self::Zhipu,
+        Self::SiliconFlow,
+        Self::XAi,
+        Self::Hyperbolic,
+        Self::Nvidia,
+        Self::Cerebras,
+        Self::StepFun,
+        Self::Yi,
+        Self::MiniMax,
+        Self::Doubao,
+        Self::LmStudio,
+        Self::Ollama,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -340,6 +376,24 @@ impl AiProvider {
             Self::DeepSeek => "deepseek",
             Self::OpenRouter => "openrouter",
             Self::Fireworks => "fireworks",
+            Self::Groq => "groq",
+            Self::Together => "together",
+            Self::Mistral => "mistral",
+            Self::Perplexity => "perplexity",
+            Self::Moonshot => "moonshot",
+            Self::DashScope => "dashscope",
+            Self::Zhipu => "zhipu",
+            Self::SiliconFlow => "silicon",
+            Self::XAi => "xai",
+            Self::Hyperbolic => "hyperbolic",
+            Self::Nvidia => "nvidia",
+            Self::Cerebras => "cerebras",
+            Self::StepFun => "stepfun",
+            Self::Yi => "yi",
+            Self::MiniMax => "minimax",
+            Self::Doubao => "doubao",
+            Self::LmStudio => "lmstudio",
+            Self::Ollama => "ollama",
         }
     }
 
@@ -350,6 +404,24 @@ impl AiProvider {
             Self::DeepSeek => "DeepSeek",
             Self::OpenRouter => "OpenRouter",
             Self::Fireworks => "Fireworks",
+            Self::Groq => "Groq",
+            Self::Together => "Together",
+            Self::Mistral => "Mistral",
+            Self::Perplexity => "Perplexity",
+            Self::Moonshot => "Moonshot AI",
+            Self::DashScope => "Bailian",
+            Self::Zhipu => "ZhiPu",
+            Self::SiliconFlow => "SiliconFlow",
+            Self::XAi => "xAI",
+            Self::Hyperbolic => "Hyperbolic",
+            Self::Nvidia => "NVIDIA",
+            Self::Cerebras => "Cerebras",
+            Self::StepFun => "StepFun",
+            Self::Yi => "Yi",
+            Self::MiniMax => "MiniMax",
+            Self::Doubao => "doubao",
+            Self::LmStudio => "LM Studio",
+            Self::Ollama => "Ollama",
         }
     }
 
@@ -360,6 +432,24 @@ impl AiProvider {
             "deepseek" | "deep-seek" | "deep_seek" => Some(Self::DeepSeek),
             "openrouter" | "open-router" | "open_router" => Some(Self::OpenRouter),
             "fireworks" | "fireworks-ai" | "fireworks_ai" => Some(Self::Fireworks),
+            "groq" => Some(Self::Groq),
+            "together" | "together-ai" | "together_ai" => Some(Self::Together),
+            "mistral" | "mistral-ai" | "mistral_ai" => Some(Self::Mistral),
+            "perplexity" => Some(Self::Perplexity),
+            "moonshot" | "moonshot-ai" | "moonshot_ai" => Some(Self::Moonshot),
+            "dashscope" | "bailian" => Some(Self::DashScope),
+            "zhipu" | "zhipu-ai" | "zhipu_ai" => Some(Self::Zhipu),
+            "silicon" | "siliconflow" | "silicon-flow" | "silicon_flow" => Some(Self::SiliconFlow),
+            "xai" | "x-ai" | "x_ai" | "grok" => Some(Self::XAi),
+            "hyperbolic" => Some(Self::Hyperbolic),
+            "nvidia" => Some(Self::Nvidia),
+            "cerebras" => Some(Self::Cerebras),
+            "stepfun" | "step-fun" | "step_fun" => Some(Self::StepFun),
+            "yi" => Some(Self::Yi),
+            "minimax" | "mini-max" | "mini_max" => Some(Self::MiniMax),
+            "doubao" => Some(Self::Doubao),
+            "lmstudio" | "lm-studio" | "lm_studio" => Some(Self::LmStudio),
+            "ollama" => Some(Self::Ollama),
             _ => None,
         }
     }
@@ -371,6 +461,24 @@ impl AiProvider {
             Self::DeepSeek => "deepseek-chat",
             Self::OpenRouter => "openai/gpt-4o",
             Self::Fireworks => "accounts/fireworks/models/llama-v3p1-70b-instruct",
+            Self::Groq => "llama-3.3-70b-versatile",
+            Self::Together => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            Self::Mistral => "mistral-large-latest",
+            Self::Perplexity => "sonar-pro",
+            Self::Moonshot => "moonshot-v1-8k",
+            Self::DashScope => "qwen-plus",
+            Self::Zhipu => "glm-4-plus",
+            Self::SiliconFlow => "deepseek-ai/DeepSeek-V3",
+            Self::XAi => "grok-2-latest",
+            Self::Hyperbolic => "meta-llama/Meta-Llama-3.1-70B-Instruct",
+            Self::Nvidia => "meta/llama-3.1-70b-instruct",
+            Self::Cerebras => "llama-3.3-70b",
+            Self::StepFun => "step-2-16k",
+            Self::Yi => "yi-large",
+            Self::MiniMax => "MiniMax-Text-01",
+            Self::Doubao => "doubao-1-5-pro-32k-250115",
+            Self::LmStudio => "local-model",
+            Self::Ollama => "llama3.1",
         }
     }
 
@@ -381,6 +489,24 @@ impl AiProvider {
             Self::DeepSeek => "deepseek-chat",
             Self::OpenRouter => "openai/gpt-4o-mini",
             Self::Fireworks => "accounts/fireworks/models/llama-v3p1-8b-instruct",
+            Self::Groq => "llama-3.1-8b-instant",
+            Self::Together => "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+            Self::Mistral => "mistral-small-latest",
+            Self::Perplexity => "sonar",
+            Self::Moonshot => "moonshot-v1-8k",
+            Self::DashScope => "qwen-turbo",
+            Self::Zhipu => "glm-4-flash",
+            Self::SiliconFlow => "Qwen/Qwen2.5-7B-Instruct",
+            Self::XAi => "grok-2-latest",
+            Self::Hyperbolic => "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            Self::Nvidia => "meta/llama-3.1-8b-instruct",
+            Self::Cerebras => "llama3.1-8b",
+            Self::StepFun => "step-1-8k",
+            Self::Yi => "yi-lightning",
+            Self::MiniMax => "MiniMax-Text-01",
+            Self::Doubao => "doubao-1-5-lite-32k-250115",
+            Self::LmStudio => "local-model",
+            Self::Ollama => "llama3.1",
         }
     }
 
@@ -389,39 +515,315 @@ impl AiProvider {
             Self::OpenAi => "https://api.openai.com",
             Self::Anthropic => "https://api.anthropic.com",
             Self::DeepSeek => "https://api.deepseek.com",
-            Self::OpenRouter => "https://openrouter.ai/api",
+            Self::OpenRouter => "https://openrouter.ai/api/v1",
             Self::Fireworks => "https://api.fireworks.ai/inference",
+            Self::Groq => "https://api.groq.com/openai/v1",
+            Self::Together => "https://api.together.xyz/v1",
+            Self::Mistral => "https://api.mistral.ai/v1",
+            Self::Perplexity => "https://api.perplexity.ai",
+            Self::Moonshot => "https://api.moonshot.cn/v1",
+            Self::DashScope => "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            Self::Zhipu => "https://open.bigmodel.cn/api/paas/v4",
+            Self::SiliconFlow => "https://api.siliconflow.cn/v1",
+            Self::XAi => "https://api.x.ai/v1",
+            Self::Hyperbolic => "https://api.hyperbolic.xyz/v1",
+            Self::Nvidia => "https://integrate.api.nvidia.com/v1",
+            Self::Cerebras => "https://api.cerebras.ai/v1",
+            Self::StepFun => "https://api.stepfun.com/v1",
+            Self::Yi => "https://api.lingyiwanwu.com/v1",
+            Self::MiniMax => "https://api.minimaxi.com/v1",
+            Self::Doubao => "https://ark.cn-beijing.volces.com/api/v3",
+            Self::LmStudio => "http://localhost:1234/v1",
+            Self::Ollama => "http://localhost:11434/v1",
         }
     }
 
     pub fn api_style(self) -> AiApiStyle {
         match self {
             Self::Anthropic => AiApiStyle::Anthropic,
-            Self::OpenAi | Self::DeepSeek | Self::OpenRouter | Self::Fireworks => {
-                AiApiStyle::OpenAi
-            }
+            Self::OpenAi
+            | Self::DeepSeek
+            | Self::OpenRouter
+            | Self::Fireworks
+            | Self::Groq
+            | Self::Together
+            | Self::Mistral
+            | Self::Perplexity
+            | Self::Moonshot
+            | Self::DashScope
+            | Self::Zhipu
+            | Self::SiliconFlow
+            | Self::XAi
+            | Self::Hyperbolic
+            | Self::Nvidia
+            | Self::Cerebras
+            | Self::StepFun
+            | Self::Yi
+            | Self::MiniMax
+            | Self::Doubao
+            | Self::LmStudio
+            | Self::Ollama => AiApiStyle::OpenAi,
         }
     }
 
+    pub fn allows_keyless_requests(self) -> bool {
+        matches!(self, Self::LmStudio | Self::Ollama)
+    }
+
+    pub fn default_models(self) -> Vec<AiModel> {
+        let label = self.label();
+        let models = match self {
+            Self::OpenAi => &[
+                ("gpt-4o", "GPT-4o", "OpenAI"),
+                ("gpt-4o-mini", "GPT-4o mini", "OpenAI"),
+                ("gpt-4.1", "GPT-4.1", "OpenAI"),
+                ("gpt-4.1-mini", "GPT-4.1 mini", "OpenAI"),
+                ("o3", "o3", "OpenAI"),
+                ("o4-mini", "o4 mini", "OpenAI"),
+            ][..],
+            Self::Anthropic => &[
+                ("claude-3-5-sonnet-latest", "Claude 3.5 Sonnet", "Claude"),
+                ("claude-3-5-haiku-latest", "Claude 3.5 Haiku", "Claude"),
+                ("claude-sonnet-4-5-latest", "Claude Sonnet 4.5", "Claude"),
+            ],
+            Self::DeepSeek => &[
+                ("deepseek-chat", "DeepSeek Chat", "DeepSeek"),
+                ("deepseek-reasoner", "DeepSeek Reasoner", "DeepSeek"),
+            ],
+            Self::OpenRouter => &[
+                ("openai/gpt-4o", "GPT-4o", "OpenAI"),
+                ("openai/gpt-4o-mini", "GPT-4o mini", "OpenAI"),
+                (
+                    "anthropic/claude-3.5-sonnet",
+                    "Claude 3.5 Sonnet",
+                    "Anthropic",
+                ),
+                ("deepseek/deepseek-chat", "DeepSeek Chat", "DeepSeek"),
+            ],
+            Self::Fireworks => &[
+                (
+                    "accounts/fireworks/models/llama-v3p1-70b-instruct",
+                    "Llama 3.1 70B Instruct",
+                    "Llama",
+                ),
+                (
+                    "accounts/fireworks/models/llama-v3p1-8b-instruct",
+                    "Llama 3.1 8B Instruct",
+                    "Llama",
+                ),
+            ],
+            Self::Groq => &[
+                (
+                    "llama-3.3-70b-versatile",
+                    "Llama 3.3 70B Versatile",
+                    "Llama",
+                ),
+                ("llama-3.1-8b-instant", "Llama 3.1 8B Instant", "Llama"),
+                ("mixtral-8x7b-32768", "Mixtral 8x7B", "Mixtral"),
+            ],
+            Self::Together => &[
+                (
+                    "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                    "Llama 3.3 70B Instruct Turbo",
+                    "Llama",
+                ),
+                (
+                    "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+                    "Llama 3.1 8B Instruct Turbo",
+                    "Llama",
+                ),
+            ],
+            Self::Mistral => &[
+                ("mistral-large-latest", "Mistral Large", "Mistral"),
+                ("mistral-small-latest", "Mistral Small", "Mistral"),
+            ],
+            Self::Perplexity => &[
+                ("sonar-pro", "Sonar Pro", "Sonar"),
+                ("sonar", "Sonar", "Sonar"),
+            ],
+            Self::Moonshot => &[("moonshot-v1-8k", "Moonshot v1 8K", "Moonshot")],
+            Self::DashScope => &[
+                ("qwen-plus", "Qwen Plus", "Qwen"),
+                ("qwen-turbo", "Qwen Turbo", "Qwen"),
+            ],
+            Self::Zhipu => &[
+                ("glm-4-plus", "GLM-4 Plus", "GLM"),
+                ("glm-4-flash", "GLM-4 Flash", "GLM"),
+            ],
+            Self::SiliconFlow => &[
+                ("deepseek-ai/DeepSeek-V3", "DeepSeek V3", "DeepSeek"),
+                ("Qwen/Qwen2.5-7B-Instruct", "Qwen2.5 7B Instruct", "Qwen"),
+            ],
+            Self::XAi => &[("grok-2-latest", "Grok 2", "Grok")],
+            Self::Hyperbolic => &[
+                (
+                    "meta-llama/Meta-Llama-3.1-70B-Instruct",
+                    "Llama 3.1 70B Instruct",
+                    "Llama",
+                ),
+                (
+                    "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                    "Llama 3.1 8B Instruct",
+                    "Llama",
+                ),
+            ],
+            Self::Nvidia => &[
+                (
+                    "meta/llama-3.1-70b-instruct",
+                    "Llama 3.1 70B Instruct",
+                    "Llama",
+                ),
+                (
+                    "meta/llama-3.1-8b-instruct",
+                    "Llama 3.1 8B Instruct",
+                    "Llama",
+                ),
+            ],
+            Self::Cerebras => &[
+                ("llama-3.3-70b", "Llama 3.3 70B", "Llama"),
+                ("llama3.1-8b", "Llama 3.1 8B", "Llama"),
+            ],
+            Self::StepFun => &[
+                ("step-2-16k", "Step 2 16K", "Step"),
+                ("step-1-8k", "Step 1 8K", "Step"),
+            ],
+            Self::Yi => &[
+                ("yi-large", "Yi Large", "Yi"),
+                ("yi-lightning", "Yi Lightning", "Yi"),
+            ],
+            Self::MiniMax => &[("MiniMax-Text-01", "MiniMax Text 01", "MiniMax")],
+            Self::Doubao => &[
+                ("doubao-1-5-pro-32k-250115", "Doubao 1.5 Pro 32K", "Doubao"),
+                (
+                    "doubao-1-5-lite-32k-250115",
+                    "Doubao 1.5 Lite 32K",
+                    "Doubao",
+                ),
+            ],
+            Self::LmStudio => &[("local-model", "Local model", "Local")],
+            Self::Ollama => &[("llama3.1", "Llama 3.1", "Local")],
+        };
+        models
+            .iter()
+            .map(|(id, name, group)| {
+                let group = if group.is_empty() { label } else { *group };
+                AiModel::new(*id, *name, group)
+            })
+            .collect()
+    }
+
     pub fn default_config(self) -> AiProviderConfig {
-        AiProviderConfig {
-            model: self.default_model().to_string(),
+        let mut config = AiProviderConfig {
+            enabled: self == Self::OpenAi,
             api_key: String::new(),
             base_url: None,
+            models: self.default_models(),
+        };
+        config.sanitize(self);
+        config
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiModel {
+    pub id: String,
+    pub name: String,
+    pub group: String,
+}
+
+impl AiModel {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, group: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            group: group.into(),
         }
+    }
+
+    fn sanitize(&mut self, provider: AiProvider) {
+        self.id = self.id.trim().to_string();
+        self.name = self.name.trim().to_string();
+        self.group = self.group.trim().to_string();
+        if self.name.is_empty() {
+            self.name = self.id.clone();
+        }
+        if self.group.is_empty() {
+            self.group = provider.label().to_string();
+        }
+    }
+
+    fn from_node(provider: AiProvider, node: &KdlNode) -> Option<Self> {
+        let id = if node.name().value() == "model" {
+            node.get(0).and_then(KdlValue::as_string)?.to_string()
+        } else {
+            node.name().value().to_string()
+        };
+        let name = node
+            .get(1)
+            .and_then(KdlValue::as_string)
+            .unwrap_or(&id)
+            .to_string();
+        let group = node
+            .get(2)
+            .and_then(KdlValue::as_string)
+            .unwrap_or(provider.label())
+            .to_string();
+        let mut model = Self { id, name, group };
+        model.sanitize(provider);
+        (!model.id.is_empty()).then_some(model)
+    }
+
+    fn write_to_document(&self, document: &mut KdlDocument) {
+        let mut node = KdlNode::new("model");
+        node.push(self.id.clone());
+        node.push(self.name.clone());
+        node.push(self.group.clone());
+        document.nodes_mut().push(node);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelRef {
+    pub provider: AiProvider,
+    pub id: String,
+}
+
+impl ModelRef {
+    pub fn new(provider: AiProvider, id: impl Into<String>) -> Self {
+        Self {
+            provider,
+            id: id.into(),
+        }
+    }
+
+    fn sanitize(&mut self) {
+        self.id = self.id.trim().to_string();
+    }
+
+    fn from_node(node: &KdlNode) -> Option<Self> {
+        let provider = node.get(0).and_then(KdlValue::as_string)?;
+        let model = node.get(1).and_then(KdlValue::as_string)?;
+        Some(Self::new(AiProvider::from_str(provider)?, model))
+    }
+
+    fn write_to_document(&self, document: &mut KdlDocument, name: &str) {
+        let mut node = KdlNode::new(name);
+        node.push(self.provider.as_str());
+        node.push(self.id.clone());
+        document.nodes_mut().push(node);
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiProviderConfig {
-    pub model: String,
+    pub enabled: bool,
     pub api_key: String,
     pub base_url: Option<String>,
+    pub models: Vec<AiModel>,
 }
 
 impl AiProviderConfig {
     fn sanitize(&mut self, provider: AiProvider) {
-        self.model = self.model.trim().to_string();
         self.api_key = self.api_key.trim().to_string();
         self.base_url = self
             .base_url
@@ -429,15 +831,22 @@ impl AiProviderConfig {
             .map(|value| value.trim().trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty())
             .filter(|value| value != provider.default_base_url());
-        if self.model.is_empty() {
-            self.model = provider.default_model().to_string();
+
+        let mut models = Vec::new();
+        for mut model in self.models.drain(..) {
+            model.sanitize(provider);
+            if model.id.is_empty() || models.iter().any(|entry: &AiModel| entry.id == model.id) {
+                continue;
+            }
+            models.push(model);
         }
+        self.models = models;
     }
 
     fn from_document(provider: AiProvider, document: &KdlDocument) -> Self {
         let mut config = provider.default_config();
-        if let Some(value) = document.get_arg("model").and_then(KdlValue::as_string) {
-            config.model = value.to_string();
+        if let Some(value) = document.get_arg("enabled").and_then(KdlValue::as_bool) {
+            config.enabled = value;
         }
         if let Some(value) = document.get_arg("api_key").and_then(KdlValue::as_string) {
             config.api_key = value.to_string();
@@ -446,22 +855,58 @@ impl AiProviderConfig {
             .get_arg("base_url")
             .and_then(KdlValue::as_string)
             .map(str::to_string);
+        if let Some(models) = document.get("models").and_then(KdlNode::children) {
+            config.models = models
+                .nodes()
+                .iter()
+                .filter_map(|node| AiModel::from_node(provider, node))
+                .collect();
+        }
+        if let Some(value) = document.get_arg("model").and_then(KdlValue::as_string) {
+            config.ensure_model(AiModel::new(value, value, provider.label()));
+        }
         config.sanitize(provider);
         config
     }
 
     fn write_to_document(&self, document: &mut KdlDocument) {
-        push_value_node(document, "model", self.model.clone());
+        push_value_node(document, "enabled", self.enabled);
         if !self.api_key.is_empty() {
             push_value_node(document, "api_key", self.api_key.clone());
         }
         if let Some(base_url) = &self.base_url {
             push_value_node(document, "base_url", base_url.clone());
         }
+        let mut models = KdlNode::new("models");
+        let models_children = models.ensure_children();
+        for model in &self.models {
+            model.write_to_document(models_children);
+        }
+        document.nodes_mut().push(models);
     }
 
     fn is_default_for(&self, provider: AiProvider) -> bool {
         self == &provider.default_config()
+    }
+
+    pub fn model(&self, id: &str) -> Option<&AiModel> {
+        self.models.iter().find(|model| model.id == id)
+    }
+
+    pub fn model_name(&self, id: &str) -> String {
+        self.model(id)
+            .map(|model| model.name.clone())
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    pub fn ensure_model(&mut self, model: AiModel) {
+        if !self.models.iter().any(|entry| entry.id == model.id) {
+            self.models.push(model);
+        }
+    }
+
+    pub fn remove_model(&mut self, id: &str) {
+        self.models.retain(|model| model.id != id);
     }
 }
 
@@ -478,7 +923,11 @@ pub struct ResolvedAiConfig {
 impl ResolvedAiConfig {
     pub fn can_request(&self) -> bool {
         match self.provider.api_style() {
-            AiApiStyle::OpenAi => !self.api_key.is_empty() || self.base_url_overridden,
+            AiApiStyle::OpenAi => {
+                !self.api_key.is_empty()
+                    || self.base_url_overridden
+                    || self.provider.allows_keyless_requests()
+            }
             AiApiStyle::Anthropic => !self.api_key.is_empty(),
         }
     }
@@ -495,46 +944,10 @@ impl ResolvedAiConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AiTitleModelSettings {
-    pub provider: AiProvider,
-    pub model: String,
-    pub api_key: String,
-    pub base_url: Option<String>,
-}
-
-impl Default for AiTitleModelSettings {
-    fn default() -> Self {
-        let provider = AiProvider::OpenAi;
-        Self {
-            provider,
-            model: provider.default_title_model().to_string(),
-            api_key: String::new(),
-            base_url: None,
-        }
-    }
-}
-
-impl AiTitleModelSettings {
-    fn sanitize(&mut self) {
-        self.model = self.model.trim().to_string();
-        self.api_key = self.api_key.trim().to_string();
-        self.base_url = self
-            .base_url
-            .take()
-            .map(|value| value.trim().trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty())
-            .filter(|value| value != self.provider.default_base_url());
-        if self.model.is_empty() {
-            self.model = self.provider.default_title_model().to_string();
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiSettings {
-    pub provider: AiProvider,
     pub providers: BTreeMap<AiProvider, AiProviderConfig>,
-    pub title_model: Option<AiTitleModelSettings>,
+    pub main_model: Option<ModelRef>,
+    pub title_model: Option<ModelRef>,
     pub thinking_level: AiThinkingLevel,
 }
 
@@ -542,9 +955,9 @@ impl Default for AiSettings {
     fn default() -> Self {
         let provider = AiProvider::OpenAi;
         Self {
-            provider,
             providers: BTreeMap::from([(provider, provider.default_config())]),
-            title_model: None,
+            main_model: Some(ModelRef::new(provider, provider.default_model())),
+            title_model: Some(ModelRef::new(provider, provider.default_title_model())),
             thinking_level: AiThinkingLevel::Medium,
         }
     }
@@ -555,14 +968,57 @@ impl AiSettings {
         for (provider, config) in self.providers.iter_mut() {
             config.sanitize(*provider);
         }
-        self.providers
-            .entry(self.provider)
-            .or_insert_with(|| self.provider.default_config());
-        if let Some(title_model) = self.title_model.as_mut() {
-            title_model.sanitize();
+
+        if self.main_model.is_none() {
+            self.main_model = self.first_model_ref(false);
         }
-        let config = self.provider_config(self.provider);
-        self.thinking_level = self.thinking_level.clamp_for(self.provider, &config.model);
+        if self.title_model.is_none() {
+            self.title_model = self.first_model_ref(true);
+        }
+
+        let refs = [self.main_model.clone(), self.title_model.clone()];
+        for mut model_ref in refs.into_iter().flatten() {
+            model_ref.sanitize();
+            if model_ref.id.is_empty() {
+                continue;
+            }
+            let config = self.provider_config_mut(model_ref.provider);
+            if config.enabled {
+                config.ensure_model(AiModel::new(
+                    model_ref.id.clone(),
+                    model_ref.id.clone(),
+                    model_ref.provider.label(),
+                ));
+            }
+        }
+
+        if self
+            .main_model
+            .as_ref()
+            .is_none_or(|model_ref| !self.provider_config(model_ref.provider).enabled)
+        {
+            self.main_model = self.first_model_ref(false);
+        }
+        if self
+            .title_model
+            .as_ref()
+            .is_none_or(|model_ref| !self.provider_config(model_ref.provider).enabled)
+        {
+            self.title_model = self.first_model_ref(true);
+        }
+
+        if let Some(model_ref) = self.main_model.as_mut() {
+            model_ref.sanitize();
+        }
+        if let Some(model_ref) = self.main_model.as_ref() {
+            let config = self.provider_config(model_ref.provider);
+            self.thinking_level = self
+                .thinking_level
+                .clamp_for(model_ref.provider, &config.model_name(&model_ref.id));
+        }
+        if let Some(model_ref) = self.title_model.as_mut() {
+            model_ref.sanitize();
+        }
     }
 
     pub fn provider_config(&self, provider: AiProvider) -> AiProviderConfig {
@@ -579,26 +1035,40 @@ impl AiSettings {
     }
 
     pub fn resolved_main(&self) -> ResolvedAiConfig {
-        let config = self.provider_config(self.provider);
-        let thinking_level = self.thinking_level.clamp_for(self.provider, &config.model);
-        self.resolved_for(self.provider, config.model, thinking_level)
+        let Some(model_ref) = self
+            .main_model
+            .clone()
+            .filter(|model_ref| self.provider_config(model_ref.provider).enabled)
+            .or_else(|| self.first_model_ref(false))
+        else {
+            return ResolvedAiConfig {
+                provider: AiProvider::OpenAi,
+                model: AiProvider::OpenAi.default_model().to_string(),
+                api_key: String::new(),
+                base_url: AiProvider::OpenAi.default_base_url().to_string(),
+                base_url_overridden: false,
+                thinking_level: AiThinkingLevel::Off,
+            };
+        };
+        let thinking_level = self
+            .thinking_level
+            .clamp_for(model_ref.provider, &model_ref.id);
+        self.resolved_for(model_ref.provider, model_ref.id, thinking_level)
     }
 
     pub fn resolved_title(&self) -> Option<ResolvedAiConfig> {
-        let title_model = self.title_model.as_ref()?;
-        let base_url_overridden = title_model.base_url.is_some();
-        let resolved = ResolvedAiConfig {
-            provider: title_model.provider,
-            model: title_model.model.clone(),
-            api_key: title_model.api_key.clone(),
-            base_url: title_model
-                .base_url
-                .clone()
-                .unwrap_or_else(|| title_model.provider.default_base_url().to_string()),
-            base_url_overridden,
-            thinking_level: AiThinkingLevel::Off,
-        };
+        let title_model = self
+            .title_model
+            .clone()
+            .filter(|model_ref| self.provider_config(model_ref.provider).enabled)?;
+        let resolved =
+            self.resolved_for(title_model.provider, title_model.id, AiThinkingLevel::Off);
         resolved.can_request().then_some(resolved)
+    }
+
+    pub fn model_label(&self, model_ref: &ModelRef) -> String {
+        self.provider_config(model_ref.provider)
+            .model_name(&model_ref.id)
     }
 
     fn resolved_for(
@@ -620,6 +1090,27 @@ impl AiSettings {
             base_url_overridden,
             thinking_level,
         }
+    }
+
+    fn first_model_ref(&self, title: bool) -> Option<ModelRef> {
+        for provider in AiProvider::ALL {
+            let config = self.provider_config(provider);
+            if !config.enabled || config.models.is_empty() {
+                continue;
+            }
+            let preferred = if title {
+                provider.default_title_model()
+            } else {
+                provider.default_model()
+            };
+            let model = config
+                .models
+                .iter()
+                .find(|model| model.id == preferred)
+                .or_else(|| config.models.first())?;
+            return Some(ModelRef::new(provider, model.id.clone()));
+        }
+        None
     }
 }
 
@@ -719,12 +1210,16 @@ impl Settings {
         }
 
         if let Some(ai) = document.get("ai").and_then(KdlNode::children) {
+            let mut legacy_provider = AiProvider::OpenAi;
+            let mut legacy_provider_set = false;
             if let Some(value) = ai
                 .get_arg("provider")
                 .and_then(KdlValue::as_string)
                 .and_then(AiProvider::from_str)
             {
-                settings.ai.provider = value;
+                legacy_provider = value;
+                legacy_provider_set = true;
+                settings.ai.main_model = Some(ModelRef::new(value, value.default_model()));
             }
 
             if let Some(value) = ai
@@ -749,15 +1244,22 @@ impl Settings {
                     );
                 }
             }
+            if legacy_provider_set {
+                settings.ai.provider_config_mut(legacy_provider).enabled = true;
+            }
 
-            let legacy_provider = settings.ai.provider;
+            if let Some(model_ref) = ai.get("main_model").and_then(ModelRef::from_node) {
+                settings.ai.main_model = Some(model_ref);
+            }
+
             if ai.get("model").is_some()
                 || ai.get("api_key").is_some()
                 || ai.get("base_url").is_some()
             {
                 let mut config = settings.ai.provider_config(legacy_provider);
                 if let Some(value) = ai.get_arg("model").and_then(KdlValue::as_string) {
-                    config.model = value.to_string();
+                    config.ensure_model(AiModel::new(value, value, legacy_provider.label()));
+                    settings.ai.main_model = Some(ModelRef::new(legacy_provider, value));
                 }
                 if let Some(value) = ai.get_arg("api_key").and_then(KdlValue::as_string) {
                     config.api_key = value.to_string();
@@ -766,31 +1268,52 @@ impl Settings {
                     .get_arg("base_url")
                     .and_then(KdlValue::as_string)
                     .map(str::to_string);
+                config.enabled = true;
                 config.sanitize(legacy_provider);
                 settings.ai.providers.insert(legacy_provider, config);
             }
 
-            if let Some(title_model) = ai.get("title_model").and_then(KdlNode::children) {
-                let mut settings_title_model = AiTitleModelSettings::default();
-                if let Some(value) = title_model
-                    .get_arg("provider")
-                    .and_then(KdlValue::as_string)
-                    .and_then(AiProvider::from_str)
-                {
-                    settings_title_model.provider = value;
+            if let Some(title_model) = ai.get("title_model") {
+                if let Some(model_ref) = ModelRef::from_node(title_model) {
+                    settings.ai.title_model = Some(model_ref);
+                } else if let Some(title_model) = title_model.children() {
+                    let mut provider = AiProvider::OpenAi;
+                    if let Some(value) = title_model
+                        .get_arg("provider")
+                        .and_then(KdlValue::as_string)
+                        .and_then(AiProvider::from_str)
+                    {
+                        provider = value;
+                    }
+                    let model = title_model
+                        .get_arg("model")
+                        .and_then(KdlValue::as_string)
+                        .unwrap_or_else(|| provider.default_title_model())
+                        .to_string();
+                    let mut config = settings.ai.provider_config(provider);
+                    if let Some(value) =
+                        title_model.get_arg("api_key").and_then(KdlValue::as_string)
+                        && config.api_key.is_empty()
+                    {
+                        config.api_key = value.to_string();
+                    }
+                    if let Some(value) = title_model
+                        .get_arg("base_url")
+                        .and_then(KdlValue::as_string)
+                        && config.base_url.is_none()
+                    {
+                        config.base_url = Some(value.to_string());
+                    }
+                    config.enabled = true;
+                    config.ensure_model(AiModel::new(
+                        model.clone(),
+                        model.clone(),
+                        provider.label(),
+                    ));
+                    config.sanitize(provider);
+                    settings.ai.providers.insert(provider, config);
+                    settings.ai.title_model = Some(ModelRef::new(provider, model));
                 }
-                if let Some(value) = title_model.get_arg("model").and_then(KdlValue::as_string) {
-                    settings_title_model.model = value.to_string();
-                }
-                if let Some(value) = title_model.get_arg("api_key").and_then(KdlValue::as_string) {
-                    settings_title_model.api_key = value.to_string();
-                }
-                settings_title_model.base_url = title_model
-                    .get_arg("base_url")
-                    .and_then(KdlValue::as_string)
-                    .map(str::to_string);
-
-                settings.ai.title_model = Some(settings_title_model);
             }
         }
 
@@ -855,7 +1378,12 @@ impl Settings {
         if self.ai != AiSettings::default() {
             let mut ai = KdlNode::new("ai");
             let ai_children = ai.ensure_children();
-            push_value_node(ai_children, "provider", self.ai.provider.as_str());
+            if let Some(main_model) = &self.ai.main_model {
+                main_model.write_to_document(ai_children, "main_model");
+            }
+            if let Some(title_model) = &self.ai.title_model {
+                title_model.write_to_document(ai_children, "title_model");
+            }
             if self.ai.thinking_level != AiThinkingLevel::default() {
                 push_value_node(ai_children, "thinking", self.ai.thinking_level.as_str());
             }
@@ -876,24 +1404,6 @@ impl Settings {
             }
             if !providers_children.nodes().is_empty() {
                 ai_children.nodes_mut().push(providers);
-            }
-
-            if let Some(title_model) = &self.ai.title_model {
-                let mut title_model_node = KdlNode::new("title_model");
-                let title_model_children = title_model_node.ensure_children();
-                push_value_node(
-                    title_model_children,
-                    "provider",
-                    title_model.provider.as_str(),
-                );
-                push_value_node(title_model_children, "model", title_model.model.clone());
-                if !title_model.api_key.is_empty() {
-                    push_value_node(title_model_children, "api_key", title_model.api_key.clone());
-                }
-                if let Some(base_url) = &title_model.base_url {
-                    push_value_node(title_model_children, "base_url", base_url.clone());
-                }
-                ai_children.nodes_mut().push(title_model_node);
             }
             document.nodes_mut().push(ai);
         }
@@ -1178,9 +1688,16 @@ ai {
         )
         .unwrap();
 
-        assert_eq!(settings.ai.provider, AiProvider::Anthropic);
+        assert_eq!(
+            settings.ai.main_model,
+            Some(ModelRef::new(
+                AiProvider::Anthropic,
+                "claude-3-5-sonnet-latest"
+            ))
+        );
         let config = settings.ai.provider_config(AiProvider::Anthropic);
-        assert_eq!(config.model, "claude-3-5-sonnet-latest");
+        assert!(config.enabled);
+        assert!(config.model("claude-3-5-sonnet-latest").is_some());
         assert_eq!(config.api_key, "test-key");
         assert_eq!(config.base_url, Some("https://api.example.com".to_string()));
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
@@ -1208,17 +1725,24 @@ ai {
         )
         .unwrap();
 
-        assert_eq!(settings.ai.provider, AiProvider::DeepSeek);
+        assert_eq!(
+            settings.ai.main_model,
+            Some(ModelRef::new(
+                AiProvider::DeepSeek,
+                AiProvider::DeepSeek.default_model()
+            ))
+        );
         assert_eq!(settings.ai.thinking_level, AiThinkingLevel::Medium);
         let deepseek = settings.ai.provider_config(AiProvider::DeepSeek);
-        assert_eq!(deepseek.model, "deepseek-chat");
+        assert!(deepseek.enabled);
+        assert!(deepseek.model("deepseek-chat").is_some());
         assert_eq!(deepseek.api_key, "deepseek-key");
         assert_eq!(
             deepseek.base_url,
             Some("https://api.deepseek.com/v1".to_string())
         );
         let openrouter = settings.ai.provider_config(AiProvider::OpenRouter);
-        assert_eq!(openrouter.model, "openai/gpt-4o-mini");
+        assert!(openrouter.model("openai/gpt-4o-mini").is_some());
         assert_eq!(openrouter.api_key, "openrouter-key");
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
@@ -1257,20 +1781,18 @@ ai {
 
         let title_model = settings.ai.title_model.as_ref().unwrap();
         assert_eq!(title_model.provider, AiProvider::OpenAi);
-        assert_eq!(title_model.model, "gpt-4o-mini");
-        assert_eq!(title_model.api_key, "title-key");
+        assert_eq!(title_model.id, "gpt-4o-mini");
+        let config = settings.ai.provider_config(AiProvider::OpenAi);
+        assert_eq!(config.api_key, "title-key");
         assert_eq!(
-            title_model.base_url,
+            config.base_url,
             Some("https://api.example.com/v1".to_string())
         );
-        let config = settings.ai.provider_config(AiProvider::OpenAi);
-        assert!(config.api_key.is_empty());
-        assert_eq!(config.base_url, None);
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 
     #[test]
-    fn title_model_credentials_are_independent_from_main_provider() {
+    fn title_model_uses_provider_credentials() {
         let settings = parse_settings(
             r##"
 ai {
@@ -1297,8 +1819,8 @@ ai {
         let title = settings.ai.resolved_title().unwrap();
         assert_eq!(main.api_key, "main-key");
         assert_eq!(main.base_url, "https://main.example.com");
-        assert_eq!(title.api_key, "title-key");
-        assert_eq!(title.base_url, "https://title.example.com");
+        assert_eq!(title.api_key, "main-key");
+        assert_eq!(title.base_url, "https://main.example.com");
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 
