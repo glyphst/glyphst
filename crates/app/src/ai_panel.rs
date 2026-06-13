@@ -4,6 +4,7 @@ use crate::{
     ai_client::{AiModelInfo, list_ai_models},
     library::{AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp},
     pdf_view::PdfView,
+    scrollbar::{WithScrollbar as _, uniform_list_scrollbar_for},
     settings::{AiApiStyle, AiProvider, AiThinkingLevel, ResolvedAiConfig, SettingsStore},
     settings_window::PanelEvent,
 };
@@ -159,6 +160,7 @@ pub struct AiPanel {
     drag_origin: Option<GpuiPoint<Pixels>>,
     loading: bool,
     scroll_handle: ScrollHandle,
+    sessions_scroll: ScrollHandle,
     pending_stream: Option<Task<()>>,
     pending_title_task: Option<Task<()>>,
     pdf_view: WeakEntity<PdfView>,
@@ -228,6 +230,7 @@ impl AiPanel {
             drag_origin: None,
             loading: false,
             scroll_handle: ScrollHandle::new(),
+            sessions_scroll: ScrollHandle::new(),
             pending_stream: None,
             pending_title_task: None,
             pdf_view,
@@ -1407,6 +1410,8 @@ impl AiPanel {
         current_session_id: u64,
         loading: bool,
         theme: crate::theme::Theme,
+        scroll_handle: &ScrollHandle,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut list = div().flex().flex_col().gap_1().p_2();
@@ -1499,7 +1504,9 @@ impl AiPanel {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(scroll_handle)
             .child(list)
+            .vertical_scrollbar_for(scroll_handle, window, cx)
     }
 
     fn render_mention_completion_menu(
@@ -1687,6 +1694,7 @@ impl AiPanel {
     fn render_model_menu(
         state: ModelMenuRenderState,
         theme: crate::theme::Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let query = state.search_query.to_string();
@@ -1913,6 +1921,12 @@ impl AiPanel {
                             }),
                         )
                         .track_scroll(&scroll_handle)
+                        .with_decoration(uniform_list_scrollbar_for(
+                            &scroll_handle,
+                            "ai-model-menu-scrollbar",
+                            window,
+                            cx,
+                        ))
                         .size_full(),
                     ),
             );
@@ -2365,6 +2379,8 @@ impl Render for AiPanel {
                     current_session_id,
                     loading,
                     theme,
+                    &self.sessions_scroll,
+                    window,
                     cx,
                 ))
             })
@@ -2377,7 +2393,8 @@ impl Render for AiPanel {
                             .min_h_0()
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll_handle)
-                            .child(messages),
+                            .child(messages)
+                            .vertical_scrollbar_for(&self.scroll_handle, window, cx),
                     )
                 })
                 .child(
@@ -2645,6 +2662,7 @@ impl Render for AiPanel {
                                     focused: model_search_focused,
                                 },
                                 theme,
+                                window,
                                 cx,
                             )),
                     )

@@ -1,6 +1,7 @@
 use crate::{
     ai_client::{AiModelInfo, list_ai_models, test_ai_connection},
     keybindings,
+    scrollbar::{WithScrollbar as _, uniform_list_scrollbar_for},
     settings::{
         AiProvider, AiProviderConfig, AiThinkingLevel, AiTitleModelSettings, KeymapPreset,
         ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility, WindowBackgroundMode,
@@ -2333,6 +2334,7 @@ impl SettingsWindow {
         target: ProviderDropdownTarget,
         provider: AiProvider,
         theme: Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let entries = self.model_picker_entries(target, provider, cx);
@@ -2404,6 +2406,12 @@ impl SettingsWindow {
                                 }),
                             )
                             .track_scroll(&scroll_handle)
+                            .with_decoration(uniform_list_scrollbar_for(
+                                &scroll_handle,
+                                list_id,
+                                window,
+                                cx,
+                            ))
                             .size_full(),
                         ),
                 )
@@ -2415,6 +2423,7 @@ impl SettingsWindow {
         target: ProviderDropdownTarget,
         provider: AiProvider,
         theme: Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let picker = self.model_picker(target);
@@ -2428,7 +2437,7 @@ impl SettingsWindow {
                     .position(anchor)
                     .anchor(Anchor::TopLeft)
                     .snap_to_window_with_margin(px(8.0))
-                    .child(self.model_picker_menu(target, provider, theme, cx)),
+                    .child(self.model_picker_menu(target, provider, theme, window, cx)),
             )
             .with_priority(2)
             .into_any_element(),
@@ -3480,7 +3489,7 @@ impl Focusable for SettingsWindow {
 }
 
 impl Render for SettingsWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (settings, resolved, themes) = {
             let store = cx.global::<SettingsStore>();
             (
@@ -3500,12 +3509,14 @@ impl Render for SettingsWindow {
                     ProviderDropdownTarget::Main,
                     settings.ai.provider,
                     resolved,
+                    window,
                     cx,
                 ),
                 self.model_picker_overlay(
                     ProviderDropdownTarget::Title,
                     Self::effective_title_provider(&settings),
                     resolved,
+                    window,
                     cx,
                 ),
             )
@@ -3562,7 +3573,8 @@ impl Render for SettingsWindow {
                             .overflow_y_scroll()
                             .px_4()
                             .py_3()
-                            .children(content),
+                            .children(content)
+                            .vertical_scrollbar_for(&self.content_scroll, window, cx),
                     ),
             )
             .child(

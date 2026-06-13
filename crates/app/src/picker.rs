@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use crate::scrollbar::uniform_list_scrollbar_for;
 use crate::settings::SettingsStore;
 use crate::theme::Theme;
 use gpui::{
@@ -608,7 +609,7 @@ impl<D: PickerDelegate> Focusable for Picker<D> {
 }
 
 impl<D: PickerDelegate> Render for Picker<D> {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let match_count = self.match_count();
@@ -735,6 +736,12 @@ impl<D: PickerDelegate> Render for Picker<D> {
                                     ),
                                 )
                                 .track_scroll(&scroll_handle)
+                                .with_decoration(uniform_list_scrollbar_for(
+                                    &scroll_handle,
+                                    "picker-matches-scrollbar",
+                                    window,
+                                    cx,
+                                ))
                                 .size_full(),
                             )
                     }),

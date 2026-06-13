@@ -23,6 +23,7 @@ mod note_editor;
 mod notes;
 mod pdf_view;
 mod picker;
+mod scrollbar;
 mod search;
 mod settings;
 mod settings_window;

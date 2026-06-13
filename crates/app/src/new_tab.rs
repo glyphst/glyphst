@@ -17,6 +17,7 @@ use smallvec::smallvec;
 
 use crate::{
     library::{HistoryEntry, LibraryStore},
+    scrollbar::uniform_list_scrollbar_for,
     settings::SettingsStore,
     theme::Theme,
 };
@@ -323,7 +324,7 @@ impl NewTabEntry {
 impl EventEmitter<NewTabEvent> for NewTab {}
 
 impl Render for NewTab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let cols = self.cols.max(1);
         let rows = self.entries.len().div_ceil(cols);
@@ -421,6 +422,12 @@ impl Render for NewTab {
                         }),
                     )
                     .track_scroll(&scroll_handle)
+                    .with_decoration(uniform_list_scrollbar_for(
+                        &scroll_handle,
+                        "new-tab-scrollbar",
+                        window,
+                        cx,
+                    ))
                     .size_full(),
                 )
                 .into_any_element()
