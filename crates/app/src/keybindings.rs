@@ -16,10 +16,10 @@ use crate::{
         AddBookmark, CloseTab, CopySelection, GoToBeginning, GoToEnd, GridCursorDown,
         GridCursorLeft, GridCursorRight, GridCursorUp, GridOverviewConfirm, JumpBackward,
         JumpForward, NextHalfPage, NextPage, OpenBookmarks, OpenFile, OpenHistory, OpenNewTab,
-        OpenNotes, OpenSettings, PreviousHalfPage, PreviousPage, ResetZoom, Search, SearchNext,
-        SearchPrev, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette, ToggleFullScreen,
-        ToggleGridOverview, ToggleNotes, ToggleThumbnailSidebar, ToggleToc, ToggleTransparency,
-        ZoomIn, ZoomOut,
+        OpenNotes, OpenSettings, PreviousHalfPage, PreviousPage, Reload, ResetZoom, Search,
+        SearchNext, SearchPrev, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette,
+        ToggleFullScreen, ToggleGridOverview, ToggleNotes, ToggleThumbnailSidebar, ToggleToc,
+        ToggleTransparency, ZoomIn, ZoomOut,
     },
     picker::{
         PickerBackspace, PickerCancel, PickerConfirm, PickerCopy, PickerCut, PickerDelete,
@@ -88,6 +88,7 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<ZoomIn>("shift-=", PDF_CONTEXT),
         bind::<ZoomOut>("-", PDF_CONTEXT),
         bind::<ResetZoom>("=", PDF_CONTEXT),
+        bind::<Reload>("f5", PDF_CONTEXT),
         bind::<GoToBeginning>("home", PDF_CONTEXT),
         bind::<GoToEnd>("end", PDF_CONTEXT),
         bind::<GoToBeginning>("ctrl-home", PDF_CONTEXT),
@@ -148,6 +149,7 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind::<PreviousHalfPage>("shift-pageup", GRID_OVERVIEW_CONTEXT),
             bind::<OpenBookmarks>("ctrl-b", PDF_NO_SEARCH_CONTEXT),
             bind::<AddBookmark>("ctrl-d", PDF_CONTEXT),
+            bind::<Reload>("ctrl-r", PDF_CONTEXT),
         ]),
         KeymapPreset::Vim => bindings.extend([
             bind::<Search>("/", PDF_CONTEXT),
@@ -169,6 +171,7 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind::<JumpForward>("ctrl-i", PDF_CONTEXT),
             bind::<OpenBookmarks>("'", PDF_NO_SEARCH_CONTEXT),
             bind::<AddBookmark>("m", PDF_CONTEXT),
+            bind::<Reload>("r", PDF_CONTEXT),
         ]),
     }
 
@@ -557,6 +560,11 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["reset-zoom"],
             context: Some(PDF_CONTEXT),
             build: boxed::<ResetZoom>,
+        },
+        ActionSpec {
+            aliases: &["reload", "reload-document"],
+            context: Some(PDF_CONTEXT),
+            build: boxed::<Reload>,
         },
         ActionSpec {
             aliases: &["search"],

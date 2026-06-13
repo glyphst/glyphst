@@ -10,7 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::ai_panel::{AI_PANEL_WIDTH, AiPanel};
@@ -57,6 +57,7 @@ gpui::actions!(
         ZoomIn,
         ZoomOut,
         ResetZoom,
+        Reload,
         Search,
         SearchNext,
         SearchPrev,
@@ -135,6 +136,13 @@ const PAGE_EXPORT_SCALE: f32 = 300.0 / 72.0;
 const SIDEBAR_PAGE_NUMBER_WIDTH: f32 = 38.0;
 const INFERRED_SPACE_WIDTH_RATIO: f32 = 0.75;
 const INFERRED_SPACE_HEIGHT_RATIO: f32 = 0.20;
+const FILE_WATCH_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const FILE_WATCH_STABLE_DELAY: Duration = Duration::from_millis(300);
+const PREVIOUS_DOCUMENT_EVICT_DELAY: Duration = Duration::from_millis(1500);
+const DIFF_FLASH_DURATION: Duration = Duration::from_millis(800);
+const DIFF_FLASH_TILE_SIZE: u32 = 24;
+const DIFF_FLASH_PIXEL_THRESHOLD: u16 = 32;
+const DIFF_FLASH_MAX_RECTS: usize = 64;
 
 static NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -183,6 +191,17 @@ struct LoadedText {
     glyphs: Vec<Glyph>,
     links: Vec<PdfLink>,
     page_glyph_ranges: Vec<Range<usize>>,
+}
+
+struct ReloadData {
+    page_count: usize,
+    loaded: LoadedPages,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileSignature {
+    modified: Option<SystemTime>,
+    len: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -447,8 +466,29 @@ struct PaintPage {
 
 type HighlightOverlay = (Bounds<Pixels>, HighlightColor);
 
+#[derive(Clone, Copy)]
+struct DiffFlash {
+    page_idx: usize,
+    rect: Rect,
+    started_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct DiffRenderInput {
+    key: RenderKey,
+    page_bounds: Rect,
+    page_width: f32,
+    page_height: f32,
+}
+
+struct DiffFlashOverlay {
+    bounds: Bounds<Pixels>,
+    alpha: u8,
+}
+
 struct PaintData {
     pages: Vec<PaintPage>,
+    diff_flash_overlays: Vec<DiffFlashOverlay>,
     highlight_overlays: Vec<HighlightOverlay>,
     selected_highlight_borders: Vec<Bounds<Pixels>>,
     note_underlines: Vec<(Bounds<Pixels>, HighlightColor)>,
@@ -690,6 +730,13 @@ pub struct PdfView {
     loading_error: Option<String>,
     pending_initial_position: Option<DocumentPosition>,
     loading_task: Option<Task<()>>,
+    file_watch_task: Option<Task<()>>,
+    reload_task: Option<Task<()>>,
+    previous_doc_id: Option<u64>,
+    previous_doc_evict_task: Option<Task<()>>,
+    diff_flashes: Vec<DiffFlash>,
+    diff_pending_pages: BTreeSet<usize>,
+    diff_flash_clear_task: Option<Task<()>>,
     text_indexing: bool,
     text_indexing_task: Option<Task<()>>,
     position_save_task: Option<Task<()>>,
@@ -896,6 +943,13 @@ impl PdfView {
             loading_error: None,
             pending_initial_position: options.initial_position,
             loading_task: None,
+            file_watch_task: None,
+            reload_task: None,
+            previous_doc_id: None,
+            previous_doc_evict_task: None,
+            diff_flashes: Vec::new(),
+            diff_pending_pages: BTreeSet::new(),
+            diff_flash_clear_task: None,
             text_indexing: false,
             text_indexing_task: None,
             position_save_task: None,
@@ -912,9 +966,19 @@ impl PdfView {
     pub(crate) fn register_cache_eviction(cx: &mut Context<Self>) {
         cx.on_release(|this, cx| {
             if cx.has_global::<RenderCache>() {
-                let removed_images = cx.global_mut::<RenderCache>().evict_document(this.doc_id);
-                for image in removed_images {
-                    cx.drop_image(image, None);
+                let mut doc_ids = Vec::with_capacity(2);
+                doc_ids.push(this.doc_id);
+                if let Some(previous_doc_id) = this.previous_doc_id
+                    && previous_doc_id != this.doc_id
+                {
+                    doc_ids.push(previous_doc_id);
+                }
+
+                for doc_id in doc_ids {
+                    let removed_images = cx.global_mut::<RenderCache>().evict_document(doc_id);
+                    for image in removed_images {
+                        cx.drop_image(image, None);
+                    }
                 }
             }
         })
@@ -940,6 +1004,8 @@ impl PdfView {
             return;
         }
 
+        self.start_file_watch(cx);
+
         let path = self.path.clone();
         let page_count = self.page_count;
         let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
@@ -954,6 +1020,269 @@ impl PdfView {
 
             let result = result.and_then(|chunk| Self::merge_page_chunks(vec![chunk], page_gap));
             Self::finish_loading(this, cx, result);
+        }));
+    }
+
+    fn file_signature(path: &Path) -> Option<FileSignature> {
+        let metadata = fs::metadata(path).ok()?;
+        Some(FileSignature {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        })
+    }
+
+    fn start_file_watch(&mut self, cx: &mut Context<Self>) {
+        if self.file_watch_task.is_some() {
+            return;
+        }
+
+        let path = self.path.clone();
+        self.file_watch_task = Some(cx.spawn(async move |this, cx| {
+            let mut last_signature = cx
+                .background_spawn({
+                    let path = path.clone();
+                    async move { Self::file_signature(&path) }
+                })
+                .await;
+            let mut pending_since: Option<Instant> = None;
+
+            loop {
+                cx.background_executor()
+                    .timer(FILE_WATCH_POLL_INTERVAL)
+                    .await;
+
+                let signature = cx
+                    .background_spawn({
+                        let path = path.clone();
+                        async move { Self::file_signature(&path) }
+                    })
+                    .await;
+
+                let Some(signature) = signature else {
+                    continue;
+                };
+
+                if last_signature != Some(signature) {
+                    last_signature = Some(signature);
+                    pending_since = Some(Instant::now());
+                    continue;
+                }
+
+                if let Some(since) = pending_since
+                    && since.elapsed() >= FILE_WATCH_STABLE_DELAY
+                {
+                    pending_since = None;
+                    if this.update(cx, |this, cx| this.reload(cx)).is_err() {
+                        break;
+                    }
+                }
+            }
+        }));
+    }
+
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.loading || self.reload_task.is_some() {
+            return;
+        }
+
+        let path = self.path.clone();
+        let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
+
+        self.reload_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn({
+                    let path = path.clone();
+                    async move {
+                        Self::load_reload_data(&path, page_gap)
+                            .map_err(|error| format!("{error:#}"))
+                    }
+                })
+                .await;
+
+            Self::finish_reload(this, cx, path, result);
+        }));
+    }
+
+    fn load_reload_data(path: &Path, page_gap: f32) -> Result<ReloadData> {
+        let document = mupdf::Document::open(path)?;
+        let page_count = document.page_count()?;
+        if page_count <= 0 {
+            bail!("PDF has no pages");
+        }
+        let page_count = page_count as usize;
+        drop(document);
+
+        let chunk = Self::load_page_chunk(path, 0, page_count)?;
+        let loaded =
+            Self::merge_page_chunks(vec![chunk], page_gap).map_err(|error| anyhow!(error))?;
+
+        Ok(ReloadData { page_count, loaded })
+    }
+
+    fn finish_reload(
+        this: gpui::WeakEntity<Self>,
+        cx: &mut AsyncApp,
+        path: PathBuf,
+        result: std::result::Result<ReloadData, String>,
+    ) {
+        let update_result = this.update(cx, |this, cx| {
+            this.reload_task = None;
+            match result {
+                Ok(reload) => {
+                    if let Err(error) = this.apply_reloaded_document(&path, reload, cx) {
+                        eprintln!("failed to reload PDF: {error:#}");
+                    }
+                }
+                Err(error) => eprintln!("failed to reload PDF: {error}"),
+            }
+        });
+        if let Err(error) = update_result
+            && error.to_string() != "entity released"
+        {
+            eprintln!("failed to update reloaded PDF: {error:#}");
+        }
+    }
+
+    fn apply_reloaded_document(
+        &mut self,
+        path: &Path,
+        reload: ReloadData,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let document = mupdf::Document::open(path)?;
+        let document_page_count = document.page_count()?;
+        if document_page_count <= 0 {
+            bail!("PDF has no pages");
+        }
+        let document_page_count = document_page_count as usize;
+        if document_page_count != reload.page_count {
+            bail!(
+                "PDF changed while reloading: loaded {} pages, reopened {} pages",
+                reload.page_count,
+                document_page_count
+            );
+        }
+
+        let toc = match document.outlines() {
+            Ok(outlines) => Self::flatten_toc(outlines, reload.page_count),
+            Err(error) => {
+                eprintln!("failed to read PDF table of contents: {error:#}");
+                Vec::new()
+            }
+        };
+        let diff_pending_pages = self
+            .page_image_bounds
+            .iter()
+            .enumerate()
+            .filter_map(|(page_idx, bounds)| bounds.as_ref().map(|_| page_idx))
+            .filter(|page_idx| *page_idx < reload.loaded.pages.len())
+            .collect::<BTreeSet<_>>();
+
+        self.evict_previous_document(cx);
+        self.loading_task = None;
+        self.text_indexing_task = None;
+        self.pending_renders.clear();
+        self.diff_flash_clear_task = None;
+        self.diff_flashes.clear();
+
+        let previous_doc_id = self.doc_id;
+        self.previous_doc_id = Some(previous_doc_id);
+        self.doc_id = next_document_id();
+        self.schedule_previous_document_eviction(previous_doc_id, cx);
+
+        self._document = document;
+        self.page_count = reload.page_count;
+        self.toc = toc;
+        self.toc_collapsed
+            .retain(|entry_ix| *entry_ix < self.toc.len());
+        if self
+            .toc_sidebar_selected
+            .is_some_and(|entry_ix| entry_ix >= self.toc.len())
+        {
+            self.toc_sidebar_selected = None;
+        }
+        self.toc_sidebar_entries_dirty = true;
+        self.pages = reload.loaded.pages;
+        self.max_page_width = reload.loaded.max_page_width.max(1.0);
+        self.content_height_doc = reload.loaded.content_height_doc;
+        self.glyphs.clear();
+        self.links.clear();
+        self.search.matches.clear();
+        self.search.active = None;
+        self.selection = None;
+        self.pending_selection_anchor = None;
+        self.hovered_link = None;
+        self.pending_link = None;
+        self.page_image_bounds = (0..self.pages.len()).map(|_| None).collect();
+        self.loading = false;
+        self.loading_error = None;
+        self.text_indexing = false;
+        self.pending_initial_position = None;
+        self.diff_pending_pages = diff_pending_pages;
+        self.grid_overview_cursor = self.grid_overview_cursor.min(self.last_page_index());
+        self.thumbnail_sidebar_current_page = self
+            .thumbnail_sidebar_current_page
+            .min(self.last_page_index());
+        self.grid_overview_selection
+            .retain(|page_idx| *page_idx < self.pages.len());
+        self.thumbnail_sidebar_selection
+            .retain(|page_idx| *page_idx < self.pages.len());
+        if self
+            .context_menu_page
+            .is_some_and(|page_idx| page_idx >= self.pages.len())
+        {
+            self.context_menu_page = None;
+        }
+        self.clamp_scroll();
+        self.refresh_notes_sidebar_entries();
+        self.sync_search_bar(cx);
+        self.start_text_indexing(cx);
+        cx.notify();
+
+        Ok(())
+    }
+
+    fn evict_cached_document(doc_id: u64, cx: &mut Context<Self>) {
+        let removed_images = cx.global_mut::<RenderCache>().evict_document(doc_id);
+        for image in removed_images {
+            cx.drop_image(image, None);
+        }
+    }
+
+    fn evict_previous_document(&mut self, cx: &mut Context<Self>) {
+        self.previous_doc_evict_task = None;
+        if let Some(previous_doc_id) = self.previous_doc_id.take() {
+            Self::evict_cached_document(previous_doc_id, cx);
+        }
+    }
+
+    fn schedule_previous_document_eviction(&mut self, doc_id: u64, cx: &mut Context<Self>) {
+        self.previous_doc_evict_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(PREVIOUS_DOCUMENT_EVICT_DELAY)
+                .await;
+
+            let update_result = this.update(cx, |this, cx| {
+                if this.previous_doc_id != Some(doc_id) {
+                    return;
+                }
+
+                if !this.pending_renders.is_empty() {
+                    this.previous_doc_evict_task = None;
+                    this.schedule_previous_document_eviction(doc_id, cx);
+                    return;
+                }
+
+                this.previous_doc_id = None;
+                this.previous_doc_evict_task = None;
+                Self::evict_cached_document(doc_id, cx);
+                cx.notify();
+            });
+            if let Err(error) = update_result
+                && error.to_string() != "entity released"
+            {
+                eprintln!("failed to evict previous PDF render cache: {error:#}");
+            }
         }));
     }
 
@@ -1630,6 +1959,37 @@ impl PdfView {
         Ok(start..glyphs.len())
     }
 
+    fn diff_flash_overlays(&self, now: Instant) -> Vec<DiffFlashOverlay> {
+        let duration = DIFF_FLASH_DURATION.as_secs_f32().max(f32::EPSILON);
+        self.diff_flashes
+            .iter()
+            .filter_map(|flash| {
+                if flash.page_idx >= self.pages.len() {
+                    return None;
+                }
+
+                let elapsed = now.saturating_duration_since(flash.started_at);
+                if elapsed >= DIFF_FLASH_DURATION {
+                    return None;
+                }
+
+                let image_bounds = *self
+                    .page_image_bounds
+                    .get(flash.page_idx)
+                    .and_then(Option::as_ref)?;
+                let progress = (elapsed.as_secs_f32() / duration).clamp(0.0, 1.0);
+                let alpha = (0x66 as f32 * (1.0 - progress))
+                    .round()
+                    .clamp(0.0, 0x66 as f32) as u8;
+
+                Some(DiffFlashOverlay {
+                    bounds: self.pdf_rect_to_screen(flash.page_idx, flash.rect, image_bounds),
+                    alpha,
+                })
+            })
+            .collect()
+    }
+
     fn paint_data(
         &mut self,
         bounds: Bounds<Pixels>,
@@ -1693,9 +2053,14 @@ impl PdfView {
         let selection_highlights = self.selection_highlights();
         let (search_highlights, active_search_highlights) = self.search_highlights();
         let link_highlights = self.link_highlights();
+        let now = Instant::now();
+        self.diff_flashes
+            .retain(|flash| now.saturating_duration_since(flash.started_at) < DIFF_FLASH_DURATION);
+        let diff_flash_overlays = self.diff_flash_overlays(now);
 
         Ok(PaintData {
             pages,
+            diff_flash_overlays,
             highlight_overlays,
             selected_highlight_borders,
             note_underlines,
@@ -2058,8 +2423,14 @@ impl PdfView {
             self.start_background_render(key, cx);
         }
         let render_scale = key.physical_width as f32 / self.pages[key.page_idx].width;
-        cx.global_mut::<RenderCache>()
-            .scaled_render(self.doc_id, key.page_idx, render_scale)
+        let render_cache = cx.global_mut::<RenderCache>();
+        if let Some(image) = render_cache.scaled_render(self.doc_id, key.page_idx, render_scale) {
+            return Some(image);
+        }
+
+        self.previous_doc_id.and_then(|previous_doc_id| {
+            render_cache.scaled_render(previous_doc_id, key.page_idx, render_scale)
+        })
     }
 
     fn insert_cached_render(
@@ -2150,7 +2521,21 @@ impl PdfView {
 
                     match result {
                         Ok(image) => {
-                            this.insert_cached_render(key, image, cx);
+                            let previous_image = this.take_previous_render_for_diff(key, cx);
+                            this.insert_cached_render(key, image.clone(), cx);
+                            if let Some(previous_image) = previous_image {
+                                this.start_diff_flash_task(
+                                    DiffRenderInput {
+                                        key,
+                                        page_bounds,
+                                        page_width,
+                                        page_height,
+                                    },
+                                    previous_image,
+                                    image,
+                                    cx,
+                                );
+                            }
                             cx.notify();
                         }
                         Err(error) => eprintln!("failed to render PDF page: {error:#}"),
@@ -2161,6 +2546,73 @@ impl PdfView {
 
         self.pending_renders
             .push(PendingRender { key, _task: task });
+    }
+
+    fn take_previous_render_for_diff(
+        &mut self,
+        key: RenderKey,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<RenderImage>> {
+        let previous_doc_id = self.previous_doc_id?;
+        if !self.diff_pending_pages.remove(&key.page_idx) {
+            return None;
+        }
+
+        let previous_key = RenderKey {
+            doc_id: previous_doc_id,
+            ..key
+        };
+        let render_scale = key.physical_width as f32 / self.pages[key.page_idx].width;
+        let render_cache = cx.global_mut::<RenderCache>();
+        render_cache
+            .render(previous_key)
+            .or_else(|| render_cache.scaled_render(previous_doc_id, key.page_idx, render_scale))
+    }
+
+    fn start_diff_flash_task(
+        &mut self,
+        input: DiffRenderInput,
+        previous_image: Arc<RenderImage>,
+        image: Arc<RenderImage>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let rects = cx
+                .background_spawn(async move {
+                    Self::diff_render_images(
+                        &previous_image,
+                        &image,
+                        input.page_bounds,
+                        input.page_width,
+                        input.page_height,
+                        input.key.physical_width,
+                        input.key.physical_height,
+                    )
+                })
+                .await;
+
+            if rects.is_empty() {
+                return;
+            }
+
+            let update_result = this.update(cx, |this, cx| {
+                let started_at = Instant::now();
+                this.diff_flashes
+                    .extend(rects.into_iter().map(|rect| DiffFlash {
+                        page_idx: input.key.page_idx,
+                        rect,
+                        started_at,
+                    }));
+                this.arm_diff_flash_clear(cx);
+                cx.notify();
+            });
+            if let Err(error) = update_result
+                && error.to_string() != "entity released"
+            {
+                eprintln!("failed to show PDF reload diff flash: {error:#}");
+            }
+        })
+        .detach();
     }
 
     fn render_page(
@@ -2222,6 +2674,150 @@ impl PdfView {
         );
 
         Ok(Arc::new(RenderImage::new(smallvec![frame])))
+    }
+
+    fn arm_diff_flash_clear(&mut self, cx: &mut Context<Self>) {
+        self.diff_flash_clear_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DIFF_FLASH_DURATION).await;
+            let update_result = this.update(cx, |this, cx| {
+                this.diff_flashes.clear();
+                this.diff_flash_clear_task = None;
+                cx.notify();
+            });
+            if let Err(error) = update_result
+                && error.to_string() != "entity released"
+            {
+                eprintln!("failed to clear PDF reload diff flash: {error:#}");
+            }
+        }));
+    }
+
+    fn diff_render_images(
+        previous_image: &RenderImage,
+        image: &RenderImage,
+        page_bounds: Rect,
+        page_width: f32,
+        page_height: f32,
+        physical_width: u32,
+        physical_height: u32,
+    ) -> Vec<Rect> {
+        if physical_width == 0 || physical_height == 0 {
+            return Vec::new();
+        }
+
+        let Some(expected_len) = (physical_width as usize)
+            .checked_mul(physical_height as usize)
+            .and_then(|len| len.checked_mul(4))
+        else {
+            return Vec::new();
+        };
+        let Some(previous_bytes) = previous_image.as_bytes(0) else {
+            return Vec::new();
+        };
+        let Some(bytes) = image.as_bytes(0) else {
+            return Vec::new();
+        };
+        if previous_bytes.len() != expected_len || bytes.len() != expected_len {
+            return Vec::new();
+        }
+
+        let tile_size = DIFF_FLASH_TILE_SIZE.max(1);
+        let cols = physical_width.div_ceil(tile_size);
+        let rows = physical_height.div_ceil(tile_size);
+        let Some(cell_count) = (cols as usize).checked_mul(rows as usize) else {
+            return Vec::new();
+        };
+        let mut changed_cells = vec![false; cell_count];
+
+        for row in 0..rows {
+            for col in 0..cols {
+                let x0 = col * tile_size;
+                let y0 = row * tile_size;
+                let x1 = ((col + 1) * tile_size).min(physical_width);
+                let y1 = ((row + 1) * tile_size).min(physical_height);
+                let area = (x1 - x0).saturating_mul(y1 - y0);
+                let changed_threshold = (area / 100).max(2);
+                let mut changed_pixels = 0_u32;
+
+                'tile: for y in y0..y1 {
+                    for x in x0..x1 {
+                        let offset = ((y as usize * physical_width as usize) + x as usize) * 4;
+                        let delta = u16::from(previous_bytes[offset].abs_diff(bytes[offset]))
+                            + u16::from(previous_bytes[offset + 1].abs_diff(bytes[offset + 1]))
+                            + u16::from(previous_bytes[offset + 2].abs_diff(bytes[offset + 2]));
+                        if delta > DIFF_FLASH_PIXEL_THRESHOLD {
+                            changed_pixels += 1;
+                            if changed_pixels >= changed_threshold {
+                                changed_cells[(row as usize * cols as usize) + col as usize] = true;
+                                break 'tile;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut runs = Vec::new();
+        for row in 0..rows {
+            let mut col = 0;
+            while col < cols {
+                if !changed_cells[(row as usize * cols as usize) + col as usize] {
+                    col += 1;
+                    continue;
+                }
+
+                let start_col = col;
+                while col < cols && changed_cells[(row as usize * cols as usize) + col as usize] {
+                    col += 1;
+                }
+                let end_col = col;
+
+                if let Some((last_x0, _, last_x1, last_y1)) = runs.last_mut()
+                    && *last_x0 == start_col
+                    && *last_x1 == end_col
+                    && *last_y1 == row
+                {
+                    *last_y1 = row + 1;
+                } else {
+                    runs.push((start_col, row, end_col, row + 1));
+                }
+            }
+        }
+
+        if runs.len() > DIFF_FLASH_MAX_RECTS {
+            let mut min_x = u32::MAX;
+            let mut min_y = u32::MAX;
+            let mut max_x = 0;
+            let mut max_y = 0;
+            for (x0, y0, x1, y1) in runs {
+                min_x = min_x.min(x0);
+                min_y = min_y.min(y0);
+                max_x = max_x.max(x1);
+                max_y = max_y.max(y1);
+            }
+            runs = vec![(min_x, min_y, max_x, max_y)];
+        }
+
+        let scale_x = page_width / physical_width as f32;
+        let scale_y = page_height / physical_height as f32;
+        runs.into_iter()
+            .filter_map(|(cell_x0, cell_y0, cell_x1, cell_y1)| {
+                let pixel_x0 = (cell_x0 * tile_size).min(physical_width);
+                let pixel_y0 = (cell_y0 * tile_size).min(physical_height);
+                let pixel_x1 = (cell_x1 * tile_size).min(physical_width);
+                let pixel_y1 = (cell_y1 * tile_size).min(physical_height);
+                if pixel_x1 <= pixel_x0 || pixel_y1 <= pixel_y0 {
+                    return None;
+                }
+
+                Some(Rect::new(
+                    page_bounds.x0 + pixel_x0 as f32 * scale_x,
+                    page_bounds.y0 + pixel_y0 as f32 * scale_y,
+                    page_bounds.x0 + pixel_x1 as f32 * scale_x,
+                    page_bounds.y0 + pixel_y1 as f32 * scale_y,
+                ))
+            })
+            .collect()
     }
 
     fn collect_images(display_list: &DisplayList) -> Result<Vec<CollectedImage>> {
@@ -6613,7 +7209,12 @@ impl PdfView {
         underlines
     }
 
-    fn render_loading_state(&self, theme: Theme, opacity: f32) -> AnyElement {
+    fn render_loading_state(
+        &self,
+        theme: Theme,
+        opacity: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let content = if let Some(error) = &self.loading_error {
             div()
                 .flex()
@@ -6703,6 +7304,9 @@ impl PdfView {
             .size_full()
             .key_context("PdfView")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &Reload, _, cx| {
+                this.reload(cx);
+            }))
             .flex()
             .flex_col()
             .bg(rgb(theme.tab_active_background))
@@ -6970,9 +7574,12 @@ impl Render for PdfView {
         }
         let opacity = window_settings.effective_opacity(self.transparency_enabled);
         if self.loading || self.loading_error.is_some() {
-            return self.render_loading_state(theme, opacity);
+            return self.render_loading_state(theme, opacity, cx);
         }
 
+        if !self.diff_flashes.is_empty() {
+            window.request_animation_frame();
+        }
         self.step_scroll_animation(window, cx);
         let context_menu_highlight_color = if self.grid_overview_open {
             None
@@ -7053,6 +7660,9 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &ResetZoom, _, cx| {
                 this.reset_zoom(cx);
+            }))
+            .on_action(cx.listener(|this, _: &Reload, _, cx| {
+                this.reload(cx);
             }))
             .on_action(cx.listener(|this, _: &Search, window, cx| {
                 this.toggle_search(window, cx);
@@ -7427,6 +8037,16 @@ impl Render for PdfView {
                                                         false,
                                                     );
                                                 }
+                                            }
+
+                                            for overlay in paint_data.diff_flash_overlays {
+                                                window.paint_quad(fill(
+                                                    overlay.bounds,
+                                                    rgba(Self::with_alpha(
+                                                        theme.accent,
+                                                        overlay.alpha,
+                                                    )),
+                                                ));
                                             }
 
                                             for (highlight, color) in paint_data.highlight_overlays
