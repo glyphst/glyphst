@@ -16,8 +16,8 @@ use crate::{
         AddBookmark, CloseTab, CopySelection, GoToBeginning, GoToEnd, GridCursorDown,
         GridCursorLeft, GridCursorRight, GridCursorUp, GridOverviewConfirm, JumpBackward,
         JumpForward, NextHalfPage, NextPage, OpenBookmarks, OpenFile, OpenHistory, OpenNewTab,
-        OpenNotes, OpenSettings, PreviousHalfPage, PreviousPage, Reload, ResetZoom, Search,
-        SearchNext, SearchPrev, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette,
+        OpenNotes, OpenQuickAsk, OpenSettings, PreviousHalfPage, PreviousPage, Reload, ResetZoom,
+        Search, SearchNext, SearchPrev, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette,
         ToggleFullScreen, ToggleGridOverview, ToggleNotes, ToggleThumbnailSidebar, ToggleToc,
         ToggleTransparency, ZoomIn, ZoomOut,
     },
@@ -43,16 +43,17 @@ use crate::{
 };
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
 
-const PDF_CONTEXT: &str = "PdfView && !GridOverview && !CommandPalette && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
-const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !GridOverview && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
-const WORKSPACE_CONTEXT: &str = "Workspace && !GridOverview && !CommandPalette && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
-const COMMAND_PALETTE_CONTEXT: &str = "Workspace && !Search && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
+const PDF_CONTEXT: &str = "PdfView && !GridOverview && !CommandPalette && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
+const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !GridOverview && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
+const WORKSPACE_CONTEXT: &str = "Workspace && !GridOverview && !CommandPalette && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
+const COMMAND_PALETTE_CONTEXT: &str = "Workspace && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
 const GRID_OVERVIEW_CONTEXT: &str = "GridOverview && !SettingsPanel";
 const PALETTE_CONTEXT: &str = "CommandPalette";
 const SEARCH_CONTEXT: &str = "Search";
 const SETTINGS_CONTEXT: &str = "SettingsPanel";
 const SETTINGS_INPUT_CONTEXT: &str = "SettingsInput";
 const AI_PANEL_CONTEXT: &str = "AiPanel";
+const QUICK_ASK_CONTEXT: &str = "QuickAsk";
 const TOC_CONTEXT: &str = "Toc";
 const NOTES_CONTEXT: &str = "Notes";
 const HISTORY_CONTEXT: &str = "History";
@@ -89,6 +90,7 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<ZoomOut>("-", PDF_CONTEXT),
         bind::<ResetZoom>("=", PDF_CONTEXT),
         bind::<Reload>("f5", PDF_CONTEXT),
+        bind::<OpenQuickAsk>(":", PDF_CONTEXT),
         bind::<GoToBeginning>("home", PDF_CONTEXT),
         bind::<GoToEnd>("end", PDF_CONTEXT),
         bind::<GoToBeginning>("ctrl-home", PDF_CONTEXT),
@@ -401,6 +403,33 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<AiPanelCut>("cmd-x", AI_PANEL_CONTEXT),
         bind::<AiPanelPaste>("ctrl-v", AI_PANEL_CONTEXT),
         bind::<AiPanelPaste>("cmd-v", AI_PANEL_CONTEXT),
+        bind::<AiPanelSubmit>("enter", QUICK_ASK_CONTEXT),
+        bind::<AiPanelSubmit>("ctrl-enter", QUICK_ASK_CONTEXT),
+        bind::<AiPanelSubmit>("cmd-enter", QUICK_ASK_CONTEXT),
+        bind::<AiPanelClose>("escape", QUICK_ASK_CONTEXT),
+        bind::<AiPanelNewline>("shift-enter", QUICK_ASK_CONTEXT),
+        bind::<AiPanelBackspace>("backspace", QUICK_ASK_CONTEXT),
+        bind::<AiPanelDelete>("delete", QUICK_ASK_CONTEXT),
+        bind::<AiPanelLeft>("left", QUICK_ASK_CONTEXT),
+        bind::<AiPanelRight>("right", QUICK_ASK_CONTEXT),
+        bind::<AiPanelUp>("up", QUICK_ASK_CONTEXT),
+        bind::<AiPanelDown>("down", QUICK_ASK_CONTEXT),
+        bind::<AiPanelHome>("home", QUICK_ASK_CONTEXT),
+        bind::<AiPanelEnd>("end", QUICK_ASK_CONTEXT),
+        bind::<AiPanelSelectAll>("ctrl-a", QUICK_ASK_CONTEXT),
+        bind::<AiPanelSelectAll>("cmd-a", QUICK_ASK_CONTEXT),
+        bind::<AiPanelSelectLeft>("shift-left", QUICK_ASK_CONTEXT),
+        bind::<AiPanelSelectRight>("shift-right", QUICK_ASK_CONTEXT),
+        bind::<AiPanelSelectUp>("shift-up", QUICK_ASK_CONTEXT),
+        bind::<AiPanelSelectDown>("shift-down", QUICK_ASK_CONTEXT),
+        bind::<AiPanelSelectHome>("shift-home", QUICK_ASK_CONTEXT),
+        bind::<AiPanelSelectEnd>("shift-end", QUICK_ASK_CONTEXT),
+        bind::<AiPanelCopy>("ctrl-c", QUICK_ASK_CONTEXT),
+        bind::<AiPanelCopy>("cmd-c", QUICK_ASK_CONTEXT),
+        bind::<AiPanelCut>("ctrl-x", QUICK_ASK_CONTEXT),
+        bind::<AiPanelCut>("cmd-x", QUICK_ASK_CONTEXT),
+        bind::<AiPanelPaste>("ctrl-v", QUICK_ASK_CONTEXT),
+        bind::<AiPanelPaste>("cmd-v", QUICK_ASK_CONTEXT),
     ]);
 
     bindings
@@ -724,6 +753,11 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["toggle-ai-panel", "ai-panel", "ai", "assistant"],
             context: Some(PDF_NO_SEARCH_CONTEXT),
             build: boxed::<ToggleAiPanel>,
+        },
+        ActionSpec {
+            aliases: &["open-quick-ask", "quick-ask"],
+            context: Some(PDF_CONTEXT),
+            build: boxed::<OpenQuickAsk>,
         },
         ActionSpec {
             aliases: &["open-history", "history", "recent-files"],

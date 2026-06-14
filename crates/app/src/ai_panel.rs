@@ -142,6 +142,12 @@ enum AiPanelView {
     Sessions,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AiPanelMode {
+    Sidebar,
+    QuickAsk,
+}
+
 enum AiStreamEvent {
     Delta(String),
     Error(String),
@@ -151,6 +157,7 @@ enum AiStreamEvent {
 pub struct AiPanel {
     focus_handle: FocusHandle,
     previous_focus_handle: FocusHandle,
+    mode: AiPanelMode,
     messages: Vec<ChatMessage>,
     width: f32,
     content: SharedString,
@@ -202,6 +209,17 @@ struct PrepaintState {
     selections: Vec<PaintQuad>,
 }
 
+struct AiPanelInit {
+    previous_focus_handle: FocusHandle,
+    pdf_view: WeakEntity<PdfView>,
+    document_path: PathBuf,
+    current_page: usize,
+    width: f32,
+    mode: AiPanelMode,
+    session_id: u64,
+    sessions: Vec<AiSession>,
+}
+
 impl AiPanel {
     pub fn new(
         previous_focus_handle: FocusHandle,
@@ -213,11 +231,51 @@ impl AiPanel {
     ) -> Self {
         let session_id = cx.global_mut::<LibraryStore>().next_ai_session_id();
         let sessions = cx.global::<LibraryStore>().ai_sessions_for(&document_path);
+        Self::new_with_mode(
+            AiPanelInit {
+                previous_focus_handle,
+                pdf_view,
+                document_path,
+                current_page,
+                width,
+                mode: AiPanelMode::Sidebar,
+                session_id,
+                sessions,
+            },
+            cx,
+        )
+    }
+
+    pub fn new_quick_ask(
+        previous_focus_handle: FocusHandle,
+        pdf_view: WeakEntity<PdfView>,
+        document_path: PathBuf,
+        current_page: usize,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_mode(
+            AiPanelInit {
+                previous_focus_handle,
+                pdf_view,
+                document_path,
+                current_page,
+                width,
+                mode: AiPanelMode::QuickAsk,
+                session_id: 0,
+                sessions: Vec::new(),
+            },
+            cx,
+        )
+    }
+
+    fn new_with_mode(init: AiPanelInit, cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
-            previous_focus_handle,
+            previous_focus_handle: init.previous_focus_handle,
+            mode: init.mode,
             messages: Vec::new(),
-            width,
+            width: init.width,
             content: SharedString::default(),
             selected_range: 0..0,
             selection_reversed: false,
@@ -230,14 +288,14 @@ impl AiPanel {
             sessions_scroll: ScrollHandle::new(),
             pending_stream: None,
             pending_title_task: None,
-            pdf_view,
-            document_path,
-            current_page,
-            session_id,
+            pdf_view: init.pdf_view,
+            document_path: init.document_path,
+            current_page: init.current_page,
+            session_id: init.session_id,
             session_title: DEFAULT_SESSION_TITLE.to_string(),
             session_created: 0,
             session_updated: 0,
-            sessions,
+            sessions: init.sessions,
             view: AiPanelView::Chat,
             mention_completion: None,
             last_cursor_pos: None,
@@ -263,7 +321,9 @@ impl AiPanel {
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.update_current_page(cx);
-        self.save_current_session(cx);
+        if self.mode == AiPanelMode::Sidebar {
+            self.save_current_session(cx);
+        }
         self.previous_focus_handle.focus(window, cx);
         cx.emit(PanelEvent::Dismissed);
     }
@@ -273,11 +333,14 @@ impl AiPanel {
     }
 
     fn submit(&mut self, _: &AiPanelSubmit, _: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm_mention_completion(cx) {
+            return;
+        }
         self.send_message(cx);
     }
 
     fn newline(&mut self, _: &AiPanelNewline, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm_mention_completion(cx) {
+        if self.mode == AiPanelMode::Sidebar && self.confirm_mention_completion(cx) {
             return;
         }
         self.replace_text_in_range(None, "\n", window, cx);
@@ -406,11 +469,18 @@ impl AiPanel {
         let settings = cx.global::<SettingsStore>().settings.ai.resolved_main();
         self.update_current_page(cx);
         let request_content = self.request_content_for_prompt(&prompt, cx);
-        if self.messages.is_empty() {
+        if self.mode == AiPanelMode::QuickAsk {
+            self.messages.clear();
+        } else if self.messages.is_empty() {
             self.session_title = session_title_for_prompt(&prompt);
         }
-        self.content = SharedString::default();
-        self.selected_range = 0..0;
+        if self.mode == AiPanelMode::Sidebar {
+            self.content = SharedString::default();
+            self.selected_range = 0..0;
+        } else {
+            self.content = prompt.clone().into();
+            self.selected_range = prompt.len()..prompt.len();
+        }
         self.selection_reversed = false;
         self.marked_range = None;
         self.mention_completion = None;
@@ -427,7 +497,9 @@ impl AiPanel {
             request_content: None,
         });
         self.loading = true;
-        self.save_current_session(cx);
+        if self.mode == AiPanelMode::Sidebar {
+            self.save_current_session(cx);
+        }
         cx.notify();
 
         let request_messages = self.messages[..self.messages.len().saturating_sub(1)].to_vec();
@@ -479,18 +551,26 @@ impl AiPanel {
                     message.content.push_str(&error);
                 }
                 self.pending_stream = None;
-                self.save_current_session(cx);
+                if self.mode == AiPanelMode::Sidebar {
+                    self.save_current_session(cx);
+                }
             }
             AiStreamEvent::Done => {
                 self.loading = false;
                 self.pending_stream = None;
-                self.maybe_generate_title(cx);
-                self.save_current_session(cx);
+                if self.mode == AiPanelMode::Sidebar {
+                    self.maybe_generate_title(cx);
+                    self.save_current_session(cx);
+                }
             }
         }
     }
 
     fn maybe_generate_title(&mut self, cx: &mut Context<Self>) {
+        if self.mode == AiPanelMode::QuickAsk {
+            return;
+        }
+
         if self.pending_title_task.is_some() || !self.is_first_turn() {
             return;
         }
@@ -619,6 +699,10 @@ impl AiPanel {
     }
 
     pub(crate) fn save_current_session(&mut self, cx: &mut Context<Self>) {
+        if self.mode == AiPanelMode::QuickAsk {
+            return;
+        }
+
         if self
             .messages
             .iter()
@@ -1196,6 +1280,153 @@ impl AiPanel {
             self.content[self.selected_range.clone()].to_string(),
         ));
         true
+    }
+
+    fn render_quick_ask(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let entity = cx.entity();
+        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let loading = self.loading;
+        let attached_mentions = mentioned_kinds(&self.content);
+        let completion_matches = self.mention_completion_matches();
+        let completion_selected = self
+            .mention_completion
+            .as_ref()
+            .map(|completion| completion.selected_ix)
+            .unwrap_or(0);
+        let completion_anchor = if completion_matches.is_empty() {
+            None
+        } else {
+            self.last_bounds
+                .zip(self.last_cursor_pos)
+                .map(|(bounds, position)| {
+                    let max_left = px((self.width - COMPLETION_MENU_WIDTH - 24.0).max(0.0));
+                    let left = if position.x < px(0.0) {
+                        px(0.0)
+                    } else if position.x > max_left {
+                        max_left
+                    } else {
+                        position.x
+                    };
+                    point(
+                        bounds.origin.x + left,
+                        bounds.origin.y + position.y - px(8.0),
+                    )
+                })
+        };
+        let answer = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Assistant)
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        let show_answer = loading || !answer.is_empty();
+
+        div()
+            .key_context("QuickAsk")
+            .track_focus(&self.focus_handle)
+            .flex()
+            .flex_col()
+            .w_full()
+            .border_t(px(1.0))
+            .border_color(rgb(theme.border))
+            .bg(rgba(with_alpha(theme.surface_background, 0xe8)))
+            .text_size(px(13.0))
+            .text_color(rgb(theme.text))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .on_action(cx.listener(Self::close))
+            .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::newline))
+            .on_action(cx.listener(Self::backspace))
+            .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::left))
+            .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
+            .on_action(cx.listener(Self::home))
+            .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::select_left))
+            .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::cut))
+            .on_action(cx.listener(Self::paste))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .when(!attached_mentions.is_empty(), |this| {
+                        this.child(Self::render_attachment_chips(attached_mentions, theme, cx))
+                    })
+                    .child(
+                        div()
+                            .relative()
+                            .min_h(px(32.0))
+                            .px_3()
+                            .py_2()
+                            .cursor(CursorStyle::IBeam)
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
+                            .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
+                            .on_mouse_move(cx.listener(Self::on_mouse_move))
+                            .child(AiInputElement { panel: entity }),
+                    ),
+            )
+            .when(show_answer, |this| {
+                this.child(
+                    div()
+                        .border_t(px(1.0))
+                        .border_color(rgb(theme.border_variant))
+                        .child(
+                            div()
+                                .id("quick-ask-answer")
+                                .track_scroll(&self.scroll_handle)
+                                .max_h(px(320.0))
+                                .p_3()
+                                .flex()
+                                .flex_col()
+                                .overflow_y_scroll()
+                                .text_color(rgb(theme.text))
+                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                .when(answer.is_empty(), |this| {
+                                    this.child(Self::render_loading_indicator(theme))
+                                })
+                                .when(!answer.is_empty(), |this| {
+                                    this.child(render_text_lines(&answer))
+                                }),
+                        )
+                        .vertical_scrollbar_for(&self.scroll_handle, window, cx),
+                )
+            })
+            .when_some(completion_anchor, |this, anchor| {
+                this.child(
+                    deferred(
+                        anchored()
+                            .position(anchor)
+                            .anchor(Anchor::BottomLeft)
+                            .snap_to_window_with_margin(px(8.0))
+                            .child(Self::render_mention_completion_menu(
+                                completion_matches,
+                                completion_selected,
+                                theme,
+                                cx,
+                            )),
+                    )
+                    .with_priority(1),
+                )
+            })
     }
 
     fn index_for_mouse_position(&self, position: GpuiPoint<Pixels>, window: &mut Window) -> usize {
@@ -2044,6 +2275,10 @@ impl Focusable for AiPanel {
 
 impl Render for AiPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.mode == AiPanelMode::QuickAsk {
+            return self.render_quick_ask(window, cx).into_any_element();
+        }
+
         let entity = cx.entity();
         let (theme, ai_settings) = {
             let store = cx.global::<SettingsStore>();
@@ -2583,6 +2818,7 @@ impl Render for AiPanel {
                     .with_priority(2),
                 )
             })
+            .into_any_element()
     }
 }
 
@@ -2615,18 +2851,32 @@ impl Element for AiInputElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let input = self.panel.read(cx);
         let content = input.content.clone();
-        let empty_chat = input.messages.is_empty();
+        let empty_chat = input.mode == AiPanelMode::Sidebar && input.messages.is_empty();
         let chars_per_line = ((input.width - 32.0) / 7.0).floor().max(12.0) as usize;
         let text = content.as_ref();
+        let min_lines = if input.mode == AiPanelMode::QuickAsk {
+            1
+        } else {
+            3
+        };
+        let max_lines = if input.mode == AiPanelMode::QuickAsk {
+            4
+        } else {
+            8
+        };
         let estimated_lines = if text.is_empty() {
-            if empty_chat { 1 } else { 3 }
+            if input.mode == AiPanelMode::QuickAsk || empty_chat {
+                1
+            } else {
+                3
+            }
         } else {
             text.lines()
                 .map(|line| line.chars().count().saturating_sub(1) / chars_per_line + 1)
                 .sum::<usize>()
                 + usize::from(text.ends_with('\n'))
         }
-        .clamp(3, 8);
+        .clamp(min_lines, max_lines);
 
         let mut style = Style::default();
         style.size.width = relative(1.0).into();

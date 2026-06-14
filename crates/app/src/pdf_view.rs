@@ -84,6 +84,7 @@ gpui::actions!(
         OpenBookmarks,
         OpenFile,
         OpenNewTab,
+        OpenQuickAsk,
         CloseTab,
         AddBookmark,
         ToggleGridOverview,
@@ -702,6 +703,7 @@ pub struct PdfView {
     target_scroll_y_doc: f32,
     document_scroll: ManualScrollHandle,
     ai_panel: Option<Entity<AiPanel>>,
+    quick_ask: Option<Entity<AiPanel>>,
     search_bar: Option<Entity<SearchBar>>,
     toc_palette: Option<Entity<TocPalette>>,
     notes_palette: Option<Entity<NotesPalette>>,
@@ -916,6 +918,7 @@ impl PdfView {
             target_scroll_y_doc: 0.0,
             document_scroll: ManualScrollHandle::new(),
             ai_panel: None,
+            quick_ask: None,
             search_bar: None,
             toc_palette: None,
             notes_palette: None,
@@ -4710,6 +4713,7 @@ impl PdfView {
     }
 
     fn close_all_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_quick_ask(window, cx);
         self.close_search_bar(window, cx);
         self.close_toc_palette(window, cx);
         self.close_notes_palette(window, cx);
@@ -4722,6 +4726,52 @@ impl PdfView {
         let settings = cx.global::<SettingsStore>().settings.window;
         window.set_background_appearance(settings.background_appearance(self.transparency_enabled));
         cx.notify();
+    }
+
+    fn toggle_quick_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quick_ask.is_some() {
+            self.close_quick_ask(window, cx);
+            return;
+        }
+
+        self.close_all_overlays(window, cx);
+
+        let previous_focus_handle = self.focus_handle.clone();
+        let document_path = self.path.clone();
+        let current_page = self.current_page();
+        let pdf_view = cx.entity().downgrade();
+        let width = self.viewport_width.max(320.0);
+        let quick_ask = cx.new(|cx| {
+            AiPanel::new_quick_ask(
+                previous_focus_handle.clone(),
+                pdf_view.clone(),
+                document_path.clone(),
+                current_page,
+                width,
+                cx,
+            )
+        });
+
+        cx.subscribe_in(
+            &quick_ask,
+            window,
+            |this, _, event: &PanelEvent, window, cx| match event {
+                PanelEvent::Dismissed => this.close_quick_ask(window, cx),
+                PanelEvent::Changed => {}
+            },
+        )
+        .detach();
+
+        quick_ask.focus_handle(cx).focus(window, cx);
+        self.quick_ask = Some(quick_ask);
+        cx.notify();
+    }
+
+    fn close_quick_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quick_ask.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
     }
 
     fn toggle_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -7755,6 +7805,9 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &Search, window, cx| {
                 this.toggle_search(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenQuickAsk, window, cx| {
+                this.toggle_quick_ask(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &SearchNext, _, cx| {
                 this.navigate_search(false, cx);
             }))
@@ -7929,6 +7982,7 @@ impl Render for PdfView {
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     if this.search_bar.is_some()
+                        || this.quick_ask.is_some()
                         || this.toc_palette.is_some()
                         || this.history_palette.is_some()
                         || this.bookmark_palette.is_some()
@@ -8337,6 +8391,17 @@ impl Render for PdfView {
                         .top(px(12.0))
                         .right(px(16.0))
                         .child(search_bar),
+                )
+            })
+            .when_some(self.quick_ask.clone(), |this, quick_ask| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .bottom(px(26.0))
+                        .flex()
+                        .child(quick_ask),
                 )
             })
             .when_some(self.toc_palette.clone(), |this, palette| {
