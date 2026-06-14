@@ -17,7 +17,7 @@ use crate::{
         PdfViewEvent, ToggleCommandPalette,
     },
     picker::{Picker, PickerEvent},
-    settings::{SettingsStore, TabBarVisibility},
+    settings::{SettingsStore, TabBarVisibility, setup_ui_font},
     settings_window::open_settings_window,
     theme::Theme,
 };
@@ -1183,6 +1183,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui_font = setup_ui_font(window, cx);
         let (theme, tab_bar_visibility) = {
             let store = cx.global::<SettingsStore>();
             (store.resolved_theme, store.settings.tab_bar_visibility)
@@ -1197,6 +1198,7 @@ impl Render for Workspace {
             .flex_col()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            .font(ui_font)
             .on_drag_move::<DraggedTab>(cx.listener(
                 |this, event: &DragMoveEvent<DraggedTab>, window, cx| {
                     this.track_dragged_tab_outside_window(event, window, cx);

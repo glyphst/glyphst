@@ -14,6 +14,7 @@ mod ai_client;
 mod ai_panel;
 mod bookmarks;
 mod command_palette;
+mod fonts;
 mod history;
 mod instance;
 mod keybindings;
@@ -53,6 +54,9 @@ fn main() {
     }
 
     application().run(move |cx: &mut App| {
+        if let Err(error) = fonts::load_embedded_fonts(cx) {
+            eprintln!("failed to load embedded fonts: {error:#}");
+        }
         cx.set_global(SettingsStore::load());
         cx.set_global(LibraryStore::load());
         cx.set_global(RenderCache::new());

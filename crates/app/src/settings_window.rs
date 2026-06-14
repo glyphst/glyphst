@@ -3,8 +3,9 @@ use crate::{
     keybindings,
     scrollbar::{WithScrollbar as _, uniform_list_scrollbar_for},
     settings::{
-        AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, KeymapPreset, ModelRef,
-        ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility, WindowBackgroundMode,
+        AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, FontSettings, KeymapPreset,
+        ModelRef, ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility,
+        WindowBackgroundMode, setup_ui_font,
     },
     theme::{PartialTheme, Theme, ThemeMetadata, format_rgb_hex, format_rgba_hex},
 };
@@ -767,6 +768,8 @@ fn offset_from_utf16_in_text(text: &str, offset: usize) -> usize {
 const NUMBER_STEP_SMALL: f32 = 0.05;
 const OPACITY_STEP: f32 = 0.05;
 const PAGE_GAP_STEP: f32 = 4.0;
+const FONT_SIZE_STEP: f32 = 1.0;
+const FONT_WEIGHT_STEP: f32 = 100.0;
 const COLOR_SWATCHES: [u32; 10] = [
     0x101010, 0x181818, 0x202020, 0x282c34, 0x1e1e2e, 0x313244, 0x61afef, 0x89b4fa, 0xf5f5f5,
     0xffffff,
@@ -859,6 +862,7 @@ enum SettingsSection {
     GeneralWindow,
     GeneralTabs,
     AppearanceTheme,
+    AppearanceFonts,
     AppearanceOverrides,
     AiGeneral,
     AiProviders,
@@ -871,8 +875,9 @@ const GENERAL_SECTIONS: [SettingsSection; 5] = [
     SettingsSection::GeneralWindow,
     SettingsSection::GeneralTabs,
 ];
-const APPEARANCE_SECTIONS: [SettingsSection; 2] = [
+const APPEARANCE_SECTIONS: [SettingsSection; 3] = [
     SettingsSection::AppearanceTheme,
+    SettingsSection::AppearanceFonts,
     SettingsSection::AppearanceOverrides,
 ];
 const AI_GENERAL_SECTIONS: [SettingsSection; 1] = [SettingsSection::AiGeneral];
@@ -886,7 +891,9 @@ impl SettingsSection {
             | Self::GeneralKeymap
             | Self::GeneralWindow
             | Self::GeneralTabs => SettingsTab::General,
-            Self::AppearanceTheme | Self::AppearanceOverrides => SettingsTab::Appearance,
+            Self::AppearanceTheme | Self::AppearanceFonts | Self::AppearanceOverrides => {
+                SettingsTab::Appearance
+            }
             Self::AiGeneral => SettingsTab::AiGeneral,
             Self::AiProviders => SettingsTab::AiProviders,
         }
@@ -900,6 +907,7 @@ impl SettingsSection {
             Self::GeneralWindow => "Window",
             Self::GeneralTabs => "Tabs",
             Self::AppearanceTheme => "Theme",
+            Self::AppearanceFonts => "Fonts",
             Self::AppearanceOverrides => "Overrides",
             Self::AiGeneral => "General",
             Self::AiProviders => "Model Providers",
@@ -966,6 +974,36 @@ impl Default for ModelPickerState {
     }
 }
 
+struct FontPickerState {
+    open: bool,
+    anchor: Option<GpuiPoint<Pixels>>,
+    fonts: Vec<String>,
+    scroll_handle: ScrollHandle,
+}
+
+impl FontPickerState {
+    fn new(cx: &App, font_settings: &FontSettings) -> Self {
+        let mut fonts = cx.text_system().all_font_names();
+        fonts.extend(
+            [".ZedSans", ".ZedMono", ".SystemUIFont"]
+                .into_iter()
+                .map(str::to_string),
+        );
+        fonts.push(font_settings.ui_font_family.clone());
+        fonts.extend(font_settings.ui_font_fallbacks.clone());
+        fonts.extend(FontSettings::default().ui_font_fallbacks);
+        fonts.sort_by_cached_key(|font| font.to_ascii_lowercase());
+        fonts.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+
+        Self {
+            open: false,
+            anchor: None,
+            fonts,
+            scroll_handle: ScrollHandle::new(),
+        }
+    }
+}
+
 #[derive(Clone)]
 enum SettingsModelMenuEntry {
     Header(AiProvider),
@@ -985,6 +1023,9 @@ pub struct SettingsWindow {
     title_model_picker: ModelPickerState,
     provider_model_picker: ModelPickerState,
     provider_model_selection: Vec<String>,
+    font_picker: FontPickerState,
+    font_search_input: Entity<SettingsTextInput>,
+    ui_font_fallbacks_input: Entity<SettingsTextInput>,
     ai_model_input: Entity<SettingsTextInput>,
     ai_key_input: Entity<SettingsTextInput>,
     ai_base_url_input: Entity<SettingsTextInput>,
@@ -994,16 +1035,55 @@ pub struct SettingsWindow {
 }
 
 impl SettingsWindow {
+    fn font_fallbacks_input_value(font: &FontSettings) -> SharedString {
+        font.ui_font_fallbacks.join(", ").into()
+    }
+
+    fn parse_font_fallbacks_input(value: &str) -> Vec<String> {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|fallback| !fallback.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let (provider, config) = {
-            let ai = &cx.global::<SettingsStore>().settings.ai;
+        let (provider, config, font_settings) = {
+            let settings = &cx.global::<SettingsStore>().settings;
+            let ai = &settings.ai;
             let provider = ai
                 .main_model
                 .as_ref()
                 .map(|model_ref| model_ref.provider)
                 .unwrap_or(AiProvider::OpenAi);
-            (provider, ai.provider_config(provider))
+            (
+                provider,
+                ai.provider_config(provider),
+                settings.font.clone(),
+            )
         };
+
+        let font_picker = FontPickerState::new(cx, &font_settings);
+        let font_search_input =
+            cx.new(|cx| SettingsTextInput::new("".into(), "Search fonts…".into(), false, cx));
+        cx.subscribe(&font_search_input, |_, _, _, cx| cx.notify())
+            .detach();
+
+        let ui_font_fallbacks_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                Self::font_fallbacks_input_value(&font_settings),
+                "Noto Sans CJK SC, Source Han Sans SC".into(),
+                false,
+                cx,
+            )
+        });
+        cx.subscribe(&ui_font_fallbacks_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let fallbacks = Self::parse_font_fallbacks_input(value.as_ref());
+            this.update_font_settings(move |font| font.ui_font_fallbacks = fallbacks, cx);
+        })
+        .detach();
 
         let ai_model_input =
             cx.new(|cx| SettingsTextInput::new("".into(), "model id…".into(), false, cx));
@@ -1097,6 +1177,9 @@ impl SettingsWindow {
             title_model_picker: ModelPickerState::default(),
             provider_model_picker: ModelPickerState::default(),
             provider_model_selection: Vec::new(),
+            font_picker,
+            font_search_input,
+            ui_font_fallbacks_input,
             ai_model_input,
             ai_key_input,
             ai_base_url_input,
@@ -1116,6 +1199,7 @@ impl SettingsWindow {
             )
         };
         keybindings::apply(cx, keymap_preset, &keybinding_overrides);
+        cx.refresh_windows();
         self.status = None;
         self.save_error = result.err().map(|e| format!("{e:#}").into());
         cx.emit(PanelEvent::Changed);
@@ -1138,6 +1222,16 @@ impl SettingsWindow {
     ) {
         let mut settings = cx.global::<SettingsStore>().settings.clone();
         update(provider, settings.ai.provider_config_mut(provider));
+        self.persist_settings(settings, cx);
+    }
+
+    fn update_font_settings(
+        &mut self,
+        update: impl FnOnce(&mut FontSettings),
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        update(&mut settings.font);
         self.persist_settings(settings, cx);
     }
 
@@ -1676,6 +1770,29 @@ impl SettingsWindow {
             )
     }
 
+    fn text_input_row(
+        &self,
+        label: &'static str,
+        input: Entity<SettingsTextInput>,
+        theme: Theme,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .min_h(px(44.0))
+            .gap_3()
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(132.0))
+                    .text_color(rgb(theme.text))
+                    .child(label),
+            )
+            .child(input)
+    }
+
     fn small_button(
         &self,
         label: &'static str,
@@ -1703,6 +1820,37 @@ impl SettingsWindow {
                 }),
             )
             .child(label)
+    }
+
+    fn reset_font_settings_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .h(px(28.0))
+            .min_w(px(30.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .justify_center()
+            .border_1()
+            .border_color(rgb(theme.border_variant))
+            .bg(rgb(theme.surface_background))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    let defaults = FontSettings::default();
+                    this.font_picker.open = false;
+                    this.font_picker.anchor = None;
+                    this.font_search_input
+                        .update(cx, |input, cx| input.set_content("".into(), cx));
+                    this.ui_font_fallbacks_input.update(cx, |input, cx| {
+                        input.set_content(Self::font_fallbacks_input_value(&defaults), cx);
+                    });
+                    this.change_settings(move |settings| settings.font = defaults, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child("Reset fonts")
     }
 
     fn color_row(
@@ -1958,6 +2106,246 @@ impl SettingsWindow {
                 }),
             )
             .child(preset.label())
+    }
+
+    fn font_picker_entries(&self, selected_family: &str, query: &str) -> Vec<String> {
+        let query = query.trim().to_ascii_lowercase();
+        let mut fonts = self.font_picker.fonts.clone();
+        if !fonts
+            .iter()
+            .any(|font| font.eq_ignore_ascii_case(selected_family))
+        {
+            fonts.push(selected_family.to_string());
+            fonts.sort_by_cached_key(|font| font.to_ascii_lowercase());
+            fonts.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        }
+        if !query.is_empty() {
+            fonts.retain(|font| font.to_ascii_lowercase().contains(&query));
+        }
+        fonts
+    }
+
+    fn font_family_row(
+        &self,
+        settings: &Settings,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .min_h(px(44.0))
+            .gap_3()
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(132.0))
+                    .text_color(rgb(theme.text))
+                    .child("UI font family"),
+            )
+            .child(self.font_family_control(settings, theme, cx))
+    }
+
+    fn font_family_control(
+        &self,
+        settings: &Settings,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let open = self.font_picker.open;
+        let font_family = settings.font.ui_font_family.clone();
+
+        div()
+            .w(px(280.0))
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .border_1()
+            .border_color(rgb(if open {
+                theme.accent
+            } else {
+                theme.border_variant
+            }))
+            .bg(rgb(theme.surface_background))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    let open = !this.font_picker.open;
+                    this.main_model_picker.open = false;
+                    this.main_model_picker.anchor = None;
+                    this.title_model_picker.open = false;
+                    this.title_model_picker.anchor = None;
+                    this.font_picker.open = open;
+                    this.font_picker.anchor = open
+                        .then(|| point(event.position.x - px(8.0), event.position.y + px(20.0)));
+                    this.font_search_input.update(cx, |input, cx| {
+                        input.set_content("".into(), cx);
+                    });
+                    if open {
+                        this.font_search_input
+                            .read(cx)
+                            .focus_handle
+                            .clone()
+                            .focus(window, cx);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(font_family))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted))
+                    .child(if open { "⌃" } else { "⌄" }),
+            )
+    }
+
+    fn select_font_family(&mut self, family: String, cx: &mut Context<Self>) {
+        self.font_picker.open = false;
+        self.font_picker.anchor = None;
+        self.font_search_input.update(cx, |input, cx| {
+            input.set_content("".into(), cx);
+        });
+        self.update_font_settings(move |font| font.ui_font_family = family, cx);
+    }
+
+    fn font_picker_option(
+        family: String,
+        selected_family: String,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = family == selected_family;
+        let family_for_click = family.clone();
+
+        div()
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(px(4.0))
+            .bg(if selected {
+                rgb(theme.element_selected)
+            } else {
+                rgba(0x00000000)
+            })
+            .text_color(rgb(if selected { theme.accent } else { theme.text }))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.select_font_family(family_for_click.clone(), cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .w(px(18.0))
+                    .flex_none()
+                    .text_color(rgb(theme.accent))
+                    .child(if selected { "✓" } else { "" }),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(family))
+            .into_any_element()
+    }
+
+    fn font_picker_menu(
+        &self,
+        settings: &Settings,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = settings.font.ui_font_family.clone();
+        let query = self.font_search_input.read(cx).content.to_string();
+        let fonts = self.font_picker_entries(&selected, &query);
+        let entry_count = fonts.len();
+        let scroll_handle = self.font_picker.scroll_handle.clone();
+        let search_input = self.font_search_input.clone();
+        let rows = fonts
+            .into_iter()
+            .map(|font| Self::font_picker_option(font, selected.clone(), theme, cx))
+            .collect::<Vec<_>>();
+
+        div()
+            .w(px(280.0))
+            .flex()
+            .flex_col()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(theme.border_variant))
+            .bg(rgb(theme.surface_background))
+            .shadow_sm()
+            .overflow_hidden()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .px_2()
+                    .py_2()
+                    .border_b(px(1.0))
+                    .border_color(rgb(theme.border_variant))
+                    .flex()
+                    .child(search_input),
+            )
+            .when(entry_count == 0, |this| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_color(rgb(theme.text_muted))
+                        .child("No matching fonts"),
+                )
+            })
+            .when(entry_count > 0, |this| {
+                this.child(
+                    div()
+                        .id("settings-font-family-list")
+                        .track_scroll(&scroll_handle)
+                        .max_h(px(320.0))
+                        .py_1()
+                        .flex()
+                        .flex_col()
+                        .overflow_y_scroll()
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        .children(rows)
+                        .vertical_scrollbar_for(&scroll_handle, window, cx),
+                )
+            })
+    }
+
+    fn font_picker_overlay(
+        &self,
+        settings: &Settings,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.font_picker.open {
+            return None;
+        }
+        let anchor = self.font_picker.anchor?;
+        Some(
+            deferred(
+                anchored()
+                    .position(anchor)
+                    .anchor(Anchor::TopLeft)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(self.font_picker_menu(settings, theme, window, cx)),
+            )
+            .with_priority(2)
+            .into_any_element(),
+        )
     }
 
     fn model_selector_control(
@@ -3193,6 +3581,46 @@ impl SettingsWindow {
                 .flex()
                 .flex_col()
                 .gap_1()
+                .child(Self::section_title("Fonts", resolved))
+                .child(self.font_family_row(settings, resolved, cx))
+                .child(self.text_input_row(
+                    "UI font fallbacks",
+                    self.ui_font_fallbacks_input.clone(),
+                    resolved,
+                ))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(resolved.text_muted))
+                        .child("Separate fallback font names with commas."),
+                )
+                .child(self.number_row(
+                    "UI font size",
+                    settings.font.ui_font_size,
+                    |settings| settings.font.ui_font_size -= FONT_SIZE_STEP,
+                    |settings| settings.font.ui_font_size += FONT_SIZE_STEP,
+                    resolved,
+                    cx,
+                ))
+                .child(self.number_row(
+                    "UI font weight",
+                    settings.font.ui_font_weight,
+                    |settings| settings.font.ui_font_weight -= FONT_WEIGHT_STEP,
+                    |settings| settings.font.ui_font_weight += FONT_WEIGHT_STEP,
+                    resolved,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .child(self.reset_font_settings_button(resolved, cx)),
+                )
+                .into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
                 .child(Self::section_title("Overrides", resolved))
                 .child(self.number_row(
                     "Page gap",
@@ -3625,6 +4053,7 @@ impl Focusable for SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui_font = setup_ui_font(window, cx);
         let (settings, resolved, themes) = {
             let store = cx.global::<SettingsStore>();
             (
@@ -3671,6 +4100,11 @@ impl Render for SettingsWindow {
         } else {
             None
         };
+        let font_picker_overlay = if self.active_tab == SettingsTab::Appearance {
+            self.font_picker_overlay(&settings, resolved, window, cx)
+        } else {
+            None
+        };
 
         div()
             .key_context("SettingsPanel")
@@ -3680,6 +4114,7 @@ impl Render for SettingsWindow {
             .size_full()
             .overflow_hidden()
             .bg(rgb(resolved.surface_background))
+            .font(ui_font)
             .text_color(rgb(resolved.text))
             .text_size(px(13.0))
             .on_mouse_down(
@@ -3694,6 +4129,11 @@ impl Render for SettingsWindow {
                     if this.title_model_picker.open {
                         this.title_model_picker.open = false;
                         this.title_model_picker.anchor = None;
+                        changed = true;
+                    }
+                    if this.font_picker.open {
+                        this.font_picker.open = false;
+                        this.font_picker.anchor = None;
                         changed = true;
                     }
                     this.focus_handle.clone().focus(window, cx);
@@ -3769,5 +4209,6 @@ impl Render for SettingsWindow {
             .when_some(main_model_overlay, |this, overlay| this.child(overlay))
             .when_some(title_model_overlay, |this, overlay| this.child(overlay))
             .when_some(provider_model_overlay, |this, overlay| this.child(overlay))
+            .when_some(font_picker_overlay, |this, overlay| this.child(overlay))
     }
 }

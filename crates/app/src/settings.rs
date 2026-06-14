@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use gpui::{Global, WindowBackgroundAppearance};
+use gpui::{App, Font, FontFallbacks, FontWeight, Global, Window, WindowBackgroundAppearance};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 
 use crate::theme::{
@@ -15,14 +15,27 @@ use crate::theme::{
 pub const DEFAULT_ZOOM: f32 = 1.0;
 pub const DEFAULT_ZOOM_STEP: f32 = 1.1;
 pub const DEFAULT_SMOOTH_SCROLLING: bool = true;
+pub const DEFAULT_UI_FONT_FAMILY: &str = ".ZedSans";
+pub const DEFAULT_UI_FONT_SIZE: f32 = 13.0;
+pub const DEFAULT_UI_FONT_WEIGHT: f32 = 400.0;
 
 const MIN_ZOOM_SETTING: f32 = 0.25;
 const MAX_ZOOM_SETTING: f32 = 8.0;
 const MIN_ZOOM_STEP: f32 = 1.01;
 const MAX_ZOOM_STEP: f32 = 4.0;
+const MIN_UI_FONT_SIZE: f32 = 6.0;
+const MAX_UI_FONT_SIZE: f32 = 100.0;
+const MIN_UI_FONT_WEIGHT: f32 = 100.0;
+const MAX_UI_FONT_WEIGHT: f32 = 900.0;
 const DEFAULT_WINDOW_OPACITY: f32 = 1.0;
 const MIN_WINDOW_OPACITY: f32 = 0.1;
 const MAX_WINDOW_OPACITY: f32 = 1.0;
+const DEFAULT_UI_FONT_FALLBACKS: &[&str] = &[
+    "Noto Sans CJK SC",
+    "Noto Sans SC",
+    "Source Han Sans SC",
+    "WenQuanYi Micro Hei",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BehaviorSettings {
@@ -46,6 +59,76 @@ impl BehaviorSettings {
         self.default_zoom = self.default_zoom.clamp(MIN_ZOOM_SETTING, MAX_ZOOM_SETTING);
         self.zoom_step = self.zoom_step.clamp(MIN_ZOOM_STEP, MAX_ZOOM_STEP);
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FontSettings {
+    pub ui_font_family: String,
+    pub ui_font_fallbacks: Vec<String>,
+    pub ui_font_size: f32,
+    pub ui_font_weight: f32,
+}
+
+impl Default for FontSettings {
+    fn default() -> Self {
+        Self {
+            ui_font_family: DEFAULT_UI_FONT_FAMILY.to_string(),
+            ui_font_fallbacks: DEFAULT_UI_FONT_FALLBACKS
+                .iter()
+                .map(|fallback| fallback.to_string())
+                .collect(),
+            ui_font_size: DEFAULT_UI_FONT_SIZE,
+            ui_font_weight: DEFAULT_UI_FONT_WEIGHT,
+        }
+    }
+}
+
+impl FontSettings {
+    pub fn sanitize(&mut self) {
+        self.ui_font_family = self.ui_font_family.trim().to_string();
+        if self.ui_font_family.is_empty() {
+            self.ui_font_family = DEFAULT_UI_FONT_FAMILY.to_string();
+        }
+
+        let mut fallbacks = Vec::new();
+        for fallback in self.ui_font_fallbacks.drain(..) {
+            let fallback = fallback.trim().to_string();
+            if fallback.is_empty() || fallbacks.iter().any(|entry| entry == &fallback) {
+                continue;
+            }
+            fallbacks.push(fallback);
+        }
+        self.ui_font_fallbacks = fallbacks;
+
+        self.ui_font_size = if self.ui_font_size.is_finite() {
+            self.ui_font_size.clamp(MIN_UI_FONT_SIZE, MAX_UI_FONT_SIZE)
+        } else {
+            DEFAULT_UI_FONT_SIZE
+        };
+        self.ui_font_weight = if self.ui_font_weight.is_finite() {
+            self.ui_font_weight
+                .clamp(MIN_UI_FONT_WEIGHT, MAX_UI_FONT_WEIGHT)
+        } else {
+            DEFAULT_UI_FONT_WEIGHT
+        };
+    }
+
+    pub fn ui_font(&self) -> Font {
+        Font {
+            family: self.ui_font_family.clone().into(),
+            features: Default::default(),
+            fallbacks: (!self.ui_font_fallbacks.is_empty())
+                .then(|| FontFallbacks::from_fonts(self.ui_font_fallbacks.clone())),
+            weight: FontWeight(self.ui_font_weight),
+            style: Default::default(),
+        }
+    }
+}
+
+pub fn setup_ui_font(window: &mut Window, cx: &mut App) -> Font {
+    let font_settings = cx.global::<SettingsStore>().settings.font.clone();
+    window.set_rem_size(gpui::px(font_settings.ui_font_size));
+    font_settings.ui_font()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1117,6 +1200,7 @@ impl AiSettings {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub behavior: BehaviorSettings,
+    pub font: FontSettings,
     pub window: WindowSettings,
     pub tab_bar_visibility: TabBarVisibility,
     pub ai: AiSettings,
@@ -1130,6 +1214,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             behavior: BehaviorSettings::default(),
+            font: FontSettings::default(),
             window: WindowSettings::default(),
             tab_bar_visibility: TabBarVisibility::default(),
             ai: AiSettings::default(),
@@ -1144,6 +1229,7 @@ impl Default for Settings {
 impl Settings {
     pub fn sanitize(&mut self) {
         self.behavior.sanitize();
+        self.font.sanitize();
         self.window.sanitize();
         self.ai.sanitize();
         self.overrides.sanitize();
@@ -1170,6 +1256,26 @@ impl Settings {
             .and_then(KeymapPreset::from_str)
         {
             settings.keymap_preset = preset;
+        }
+
+        if let Some(font) = document.get("font").and_then(KdlNode::children) {
+            if let Some(value) = font.get_arg("ui_font_family").and_then(KdlValue::as_string) {
+                settings.font.ui_font_family = value.to_string();
+            }
+            if let Some(value) = font.get_arg("ui_font_size").and_then(value_to_f32) {
+                settings.font.ui_font_size = value;
+            }
+            if let Some(value) = font.get_arg("ui_font_weight").and_then(value_to_f32) {
+                settings.font.ui_font_weight = value;
+            }
+            if let Some(fallbacks) = font.get("ui_font_fallbacks") {
+                settings.font.ui_font_fallbacks = fallbacks
+                    .entries()
+                    .iter()
+                    .filter(|entry| entry.name().is_none())
+                    .filter_map(|entry| entry.value().as_string().map(str::to_string))
+                    .collect();
+            }
         }
 
         if let Some(zoom) = document.get("zoom").and_then(KdlNode::children) {
@@ -1355,6 +1461,28 @@ impl Settings {
 
         push_value_node(&mut document, "theme", self.theme_name.clone());
         push_value_node(&mut document, "keymap", self.keymap_preset.as_str());
+
+        let mut font = KdlNode::new("font");
+        let font_children = font.ensure_children();
+        push_value_node(
+            font_children,
+            "ui_font_family",
+            self.font.ui_font_family.clone(),
+        );
+        push_value_node(font_children, "ui_font_size", self.font.ui_font_size as f64);
+        push_value_node(
+            font_children,
+            "ui_font_weight",
+            self.font.ui_font_weight as f64,
+        );
+        if !self.font.ui_font_fallbacks.is_empty() {
+            let mut fallbacks = KdlNode::new("ui_font_fallbacks");
+            for fallback in &self.font.ui_font_fallbacks {
+                fallbacks.push(fallback.clone());
+            }
+            font_children.nodes_mut().push(fallbacks);
+        }
+        document.nodes_mut().push(font);
 
         let mut window = KdlNode::new("window");
         let window_children = window.ensure_children();
@@ -1672,6 +1800,48 @@ tabs {
 
         assert_eq!(settings.tab_bar_visibility, TabBarVisibility::Always);
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn parses_and_exports_font_settings() {
+        let settings = parse_settings(
+            r##"
+font {
+    ui_font_family "Noto Sans CJK SC"
+    ui_font_size 14
+    ui_font_weight 500
+    ui_font_fallbacks "Noto Sans CJK SC" "Source Han Sans SC" "Noto Sans CJK SC" ""
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.font.ui_font_family, "Noto Sans CJK SC");
+        assert_eq!(settings.font.ui_font_size, 14.0);
+        assert_eq!(settings.font.ui_font_weight, 500.0);
+        assert_eq!(
+            settings.font.ui_font_fallbacks,
+            vec!["Noto Sans CJK SC", "Source Han Sans SC"]
+        );
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn clamps_font_settings() {
+        let settings = parse_settings(
+            r##"
+font {
+    ui_font_family ""
+    ui_font_size 1000
+    ui_font_weight 10
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.font.ui_font_family, DEFAULT_UI_FONT_FAMILY);
+        assert_eq!(settings.font.ui_font_size, MAX_UI_FONT_SIZE);
+        assert_eq!(settings.font.ui_font_weight, MIN_UI_FONT_WEIGHT);
     }
 
     #[test]
