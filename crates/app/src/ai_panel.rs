@@ -1232,7 +1232,10 @@ impl AiPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let entity = cx.entity();
-        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let (theme, quick_ask) = {
+            let store = cx.global::<SettingsStore>();
+            (store.resolved_theme, store.settings.ai.quick_ask)
+        };
         let loading = self.loading;
         let attached_mentions = mentioned_kinds(&self.content);
         let completion_matches = self.mention_completion_matches();
@@ -1278,8 +1281,11 @@ impl AiPanel {
             .w_full()
             .border_t(px(1.0))
             .border_color(rgb(theme.border))
-            .bg(rgba(with_alpha(theme.surface_background, 0xe8)))
-            .text_size(px(13.0))
+            .bg(rgba(with_alpha(
+                theme.surface_background,
+                quick_ask.background_alpha(),
+            )))
+            .text_size(px(quick_ask.text_size))
             .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();

@@ -30,6 +30,12 @@ const MAX_UI_FONT_WEIGHT: f32 = 900.0;
 const DEFAULT_WINDOW_OPACITY: f32 = 1.0;
 const MIN_WINDOW_OPACITY: f32 = 0.1;
 const MAX_WINDOW_OPACITY: f32 = 1.0;
+const DEFAULT_QUICK_ASK_TRANSPARENCY: f32 = 23.0 / 255.0;
+const DEFAULT_QUICK_ASK_TEXT_SIZE: f32 = 13.0;
+const MIN_QUICK_ASK_TRANSPARENCY: f32 = 0.0;
+const MAX_QUICK_ASK_TRANSPARENCY: f32 = 1.0;
+const MIN_QUICK_ASK_TEXT_SIZE: f32 = 8.0;
+const MAX_QUICK_ASK_TEXT_SIZE: f32 = 32.0;
 const DEFAULT_UI_FONT_FALLBACKS: &[&str] = &[
     "Noto Sans CJK SC",
     "Noto Sans SC",
@@ -1036,12 +1042,55 @@ impl ResolvedAiConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QuickAskSettings {
+    pub transparency: f32,
+    pub text_size: f32,
+}
+
+impl Default for QuickAskSettings {
+    fn default() -> Self {
+        Self {
+            transparency: DEFAULT_QUICK_ASK_TRANSPARENCY,
+            text_size: DEFAULT_QUICK_ASK_TEXT_SIZE,
+        }
+    }
+}
+
+impl QuickAskSettings {
+    fn sanitize(&mut self) {
+        self.transparency = if self.transparency.is_finite() {
+            self.transparency
+                .clamp(MIN_QUICK_ASK_TRANSPARENCY, MAX_QUICK_ASK_TRANSPARENCY)
+        } else {
+            DEFAULT_QUICK_ASK_TRANSPARENCY
+        };
+        self.text_size = if self.text_size.is_finite() {
+            self.text_size
+                .clamp(MIN_QUICK_ASK_TEXT_SIZE, MAX_QUICK_ASK_TEXT_SIZE)
+        } else {
+            DEFAULT_QUICK_ASK_TEXT_SIZE
+        };
+    }
+
+    pub fn background_alpha(self) -> u8 {
+        let transparency = if self.transparency.is_finite() {
+            self.transparency
+                .clamp(MIN_QUICK_ASK_TRANSPARENCY, MAX_QUICK_ASK_TRANSPARENCY)
+        } else {
+            DEFAULT_QUICK_ASK_TRANSPARENCY
+        };
+        ((1.0 - transparency) * u8::MAX as f32).round() as u8
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct AiSettings {
     pub providers: BTreeMap<AiProvider, AiProviderConfig>,
     pub main_model: Option<ModelRef>,
     pub title_model: Option<ModelRef>,
     pub thinking_level: AiThinkingLevel,
+    pub quick_ask: QuickAskSettings,
 }
 
 impl Default for AiSettings {
@@ -1052,12 +1101,15 @@ impl Default for AiSettings {
             main_model: Some(ModelRef::new(provider, provider.default_model())),
             title_model: Some(ModelRef::new(provider, provider.default_title_model())),
             thinking_level: AiThinkingLevel::Medium,
+            quick_ask: QuickAskSettings::default(),
         }
     }
 }
 
 impl AiSettings {
     fn sanitize(&mut self) {
+        self.quick_ask.sanitize();
+
         for (provider, config) in self.providers.iter_mut() {
             config.sanitize(*provider);
         }
@@ -1346,6 +1398,15 @@ impl Settings {
                 settings.ai.thinking_level = value;
             }
 
+            if let Some(quick_ask) = ai.get("quick_ask").and_then(KdlNode::children) {
+                if let Some(value) = quick_ask.get_arg("transparency").and_then(value_to_f32) {
+                    settings.ai.quick_ask.transparency = value;
+                }
+                if let Some(value) = quick_ask.get_arg("text_size").and_then(value_to_f32) {
+                    settings.ai.quick_ask.text_size = value;
+                }
+            }
+
             if let Some(providers) = ai.get("providers").and_then(KdlNode::children) {
                 for node in providers.nodes() {
                     let Some(provider) = AiProvider::from_str(node.name().value()) else {
@@ -1524,6 +1585,21 @@ impl Settings {
             }
             if self.ai.thinking_level != AiThinkingLevel::default() {
                 push_value_node(ai_children, "thinking", self.ai.thinking_level.as_str());
+            }
+            if self.ai.quick_ask != QuickAskSettings::default() {
+                let mut quick_ask = KdlNode::new("quick_ask");
+                let quick_ask_children = quick_ask.ensure_children();
+                push_value_node(
+                    quick_ask_children,
+                    "transparency",
+                    self.ai.quick_ask.transparency as f64,
+                );
+                push_value_node(
+                    quick_ask_children,
+                    "text_size",
+                    self.ai.quick_ask.text_size as f64,
+                );
+                ai_children.nodes_mut().push(quick_ask);
             }
 
             let mut providers = KdlNode::new("providers");
@@ -1941,6 +2017,64 @@ ai {
 
         assert_eq!(settings.ai.thinking_level, AiThinkingLevel::High);
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn parses_and_exports_quick_ask_settings() {
+        let settings = parse_settings(
+            r##"
+ai {
+    quick_ask {
+        transparency 0.35
+        text_size 18
+    }
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.ai.quick_ask.transparency, 0.35);
+        assert_eq!(settings.ai.quick_ask.text_size, 18.0);
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn clamps_quick_ask_settings() {
+        let settings = parse_settings(
+            r##"
+ai {
+    quick_ask {
+        transparency 2
+        text_size 100
+    }
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings.ai.quick_ask.transparency,
+            MAX_QUICK_ASK_TRANSPARENCY
+        );
+        assert_eq!(settings.ai.quick_ask.text_size, MAX_QUICK_ASK_TEXT_SIZE);
+
+        let settings = parse_settings(
+            r##"
+ai {
+    quick_ask {
+        transparency -1
+        text_size 1
+    }
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings.ai.quick_ask.transparency,
+            MIN_QUICK_ASK_TRANSPARENCY
+        );
+        assert_eq!(settings.ai.quick_ask.text_size, MIN_QUICK_ASK_TEXT_SIZE);
     }
 
     #[test]

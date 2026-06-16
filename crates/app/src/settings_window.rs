@@ -2903,6 +2903,28 @@ impl SettingsWindow {
                         .child("Only models from enabled providers' model lists appear here."),
                 )
                 .into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(Self::section_title("Quick AI chat", theme))
+                .child(self.number_row(
+                    "Transparency",
+                    settings.ai.quick_ask.transparency,
+                    |settings| settings.ai.quick_ask.transparency -= OPACITY_STEP,
+                    |settings| settings.ai.quick_ask.transparency += OPACITY_STEP,
+                    theme,
+                    cx,
+                ))
+                .child(self.number_row(
+                    "Text size",
+                    settings.ai.quick_ask.text_size,
+                    |settings| settings.ai.quick_ask.text_size -= FONT_SIZE_STEP,
+                    |settings| settings.ai.quick_ask.text_size += FONT_SIZE_STEP,
+                    theme,
+                    cx,
+                ))
+                .into_any_element(),
         ]
     }
 
