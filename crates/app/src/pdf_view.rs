@@ -704,6 +704,7 @@ pub struct PdfView {
     document_scroll: ManualScrollHandle,
     ai_panel: Option<Entity<AiPanel>>,
     quick_ask: Option<Entity<AiPanel>>,
+    quick_ask_visible: bool,
     search_bar: Option<Entity<SearchBar>>,
     toc_palette: Option<Entity<TocPalette>>,
     notes_palette: Option<Entity<NotesPalette>>,
@@ -919,6 +920,7 @@ impl PdfView {
             document_scroll: ManualScrollHandle::new(),
             ai_panel: None,
             quick_ask: None,
+            quick_ask_visible: false,
             search_bar: None,
             toc_palette: None,
             notes_palette: None,
@@ -4733,8 +4735,14 @@ impl PdfView {
     }
 
     fn toggle_quick_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.quick_ask.is_some() {
-            self.close_quick_ask(window, cx);
+        if let Some(quick_ask) = self.quick_ask.clone() {
+            self.quick_ask_visible = !self.quick_ask_visible;
+            if self.quick_ask_visible {
+                quick_ask.focus_handle(cx).focus(window, cx);
+            } else {
+                self.focus_handle.focus(window, cx);
+            }
+            cx.notify();
             return;
         }
 
@@ -4768,10 +4776,12 @@ impl PdfView {
 
         quick_ask.focus_handle(cx).focus(window, cx);
         self.quick_ask = Some(quick_ask);
+        self.quick_ask_visible = true;
         cx.notify();
     }
 
     fn close_quick_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.quick_ask_visible = false;
         if self.quick_ask.take().is_some() {
             self.focus_handle.focus(window, cx);
             cx.notify();
@@ -8397,16 +8407,18 @@ impl Render for PdfView {
                         .child(search_bar),
                 )
             })
-            .when_some(self.quick_ask.clone(), |this, quick_ask| {
-                this.child(
-                    div()
-                        .absolute()
-                        .left(px(0.0))
-                        .right(px(0.0))
-                        .bottom(px(26.0))
-                        .flex()
-                        .child(quick_ask),
-                )
+            .when(self.quick_ask_visible, |this| {
+                this.when_some(self.quick_ask.clone(), |this, quick_ask| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .bottom(px(26.0))
+                            .flex()
+                            .child(quick_ask),
+                    )
+                })
             })
             .when_some(self.toc_palette.clone(), |this, palette| {
                 this.child(Self::render_centered_overlay(
