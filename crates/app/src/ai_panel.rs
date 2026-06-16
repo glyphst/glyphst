@@ -1,15 +1,19 @@
-use std::{collections::HashSet, io::Read as _, ops::Range, path::PathBuf, thread};
+use std::{ops::Range, path::PathBuf, thread};
 
 use crate::{
+    ai_chat::{
+        AiStreamEvent, ChatMessage, ContextBlock, DEFAULT_SESSION_TITLE, DocumentContext,
+        MentionKind, Role, TITLE_GENERATION_PROMPT, find_mention_ranges, mention_matches_query,
+        mentioned_kinds, session_title_for_prompt, stream_completion, thinking_level_description,
+        title_from_response,
+    },
     library::{AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp},
     pdf_view::PdfView,
     scrollbar::WithScrollbar as _,
-    settings::{
-        AiApiStyle, AiModel, AiProvider, AiThinkingLevel, ModelRef, ResolvedAiConfig, SettingsStore,
-    },
+    settings::{AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore},
     settings_window::PanelEvent,
 };
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::anyhow;
 use futures::{StreamExt, channel::mpsc};
 use gpui::{
     Anchor, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
@@ -19,7 +23,6 @@ use gpui::{
     SharedString, Style, Task, TextRun, UTF16Selection, WeakEntity, Window, WrappedLine, anchored,
     deferred, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
-use serde_json::{Value, json};
 
 gpui::actions!(
     ai_panel,
@@ -51,26 +54,7 @@ gpui::actions!(
 pub const AI_PANEL_WIDTH: f32 = 360.0;
 const COMPLETION_MENU_WIDTH: f32 = 248.0;
 const COMPLETION_MENU_ROW_HEIGHT: f32 = 46.0;
-const MAX_CONTEXT_CHARS: usize = 12_000;
-const DEFAULT_SESSION_TITLE: &str = "New Chat";
-const TITLE_GENERATION_PROMPT: &str = "Generate a concise 3-7 word title for this conversation, \
-omitting punctuation. Go straight to the title, without any preamble or prefix like `Title:`. \
-If the conversation is about a specific subject, include it in the title. Be descriptive. \
-Do not speak in the first person.";
 const DRAG_SELECT_THRESHOLD: f32 = 2.0;
-
-#[derive(Clone, PartialEq, Eq)]
-enum Role {
-    User,
-    Assistant,
-}
-
-#[derive(Clone)]
-struct ChatMessage {
-    role: Role,
-    content: String,
-    request_content: Option<String>,
-}
 
 struct ModelMenuRenderState {
     selected_provider: AiProvider,
@@ -85,49 +69,6 @@ struct ModelMenuRenderState {
 enum ModelMenuEntry {
     Header(AiProvider),
     Model(AiProvider, AiModel),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum MentionKind {
-    CurrentPageText,
-    Selection,
-    DocumentText,
-}
-
-impl MentionKind {
-    const ALL: [Self; 3] = [Self::CurrentPageText, Self::Selection, Self::DocumentText];
-
-    fn token(self) -> &'static str {
-        match self {
-            Self::CurrentPageText => "@current page text",
-            Self::Selection => "@selection",
-            Self::DocumentText => "@document text",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::CurrentPageText => "Current page text",
-            Self::Selection => "Selection",
-            Self::DocumentText => "Whole PDF text",
-        }
-    }
-
-    fn description(self) -> &'static str {
-        match self {
-            Self::CurrentPageText => "Attach text from the visible page",
-            Self::Selection => "Attach the selected PDF text",
-            Self::DocumentText => "Attach extracted text from the PDF",
-        }
-    }
-
-    fn context_title(self) -> &'static str {
-        match self {
-            Self::CurrentPageText => "Current page text",
-            Self::Selection => "Selection",
-            Self::DocumentText => "Whole PDF text",
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -146,12 +87,6 @@ enum AiPanelView {
 enum AiPanelMode {
     Sidebar,
     QuickAsk,
-}
-
-enum AiStreamEvent {
-    Delta(String),
-    Error(String),
-    Done,
 }
 
 pub struct AiPanel {
@@ -468,7 +403,8 @@ impl AiPanel {
 
         let settings = cx.global::<SettingsStore>().settings.ai.resolved_main();
         self.update_current_page(cx);
-        let request_content = self.request_content_for_prompt(&prompt, cx);
+        let contexts = self.context_blocks_for_prompt(&prompt, cx);
+        let document = self.document_context(cx);
         if self.mode == AiPanelMode::QuickAsk {
             self.messages.clear();
         } else if self.messages.is_empty() {
@@ -486,16 +422,8 @@ impl AiPanel {
         self.mention_completion = None;
         self.last_cursor_pos = None;
         self.close_composer_menus();
-        self.messages.push(ChatMessage {
-            role: Role::User,
-            content: prompt,
-            request_content: Some(request_content),
-        });
-        self.messages.push(ChatMessage {
-            role: Role::Assistant,
-            content: String::new(),
-            request_content: None,
-        });
+        self.messages.push(ChatMessage::user(prompt, contexts));
+        self.messages.push(ChatMessage::assistant(String::new()));
         self.loading = true;
         if self.mode == AiPanelMode::Sidebar {
             self.save_current_session(cx);
@@ -507,7 +435,7 @@ impl AiPanel {
 
         thread::spawn(move || {
             let mut send_event = |event| tx.unbounded_send(event).map_err(|_| anyhow!("closed"));
-            let result = stream_completion(settings, request_messages, &mut send_event);
+            let result = stream_completion(settings, request_messages, document, &mut send_event);
             match result {
                 Ok(()) => {
                     let _ = send_event(AiStreamEvent::Done);
@@ -538,17 +466,17 @@ impl AiPanel {
         match event {
             AiStreamEvent::Delta(delta) => {
                 if let Some(message) = self.messages.last_mut() {
-                    message.content.push_str(&delta);
+                    message.push_text(&delta);
                 }
             }
             AiStreamEvent::Error(error) => {
                 self.loading = false;
                 if let Some(message) = self.messages.last_mut() {
-                    if !message.content.is_empty() {
-                        message.content.push_str("\n\n");
+                    if !message.display_text().is_empty() {
+                        message.push_text("\n\n");
                     }
-                    message.content.push_str("Error: ");
-                    message.content.push_str(&error);
+                    message.push_text("Error: ");
+                    message.push_text(&error);
                 }
                 self.pending_stream = None;
                 if self.mode == AiPanelMode::Sidebar {
@@ -581,17 +509,14 @@ impl AiPanel {
 
         let session_id = self.session_id;
         let mut title_messages = self.messages.clone();
-        title_messages.push(ChatMessage {
-            role: Role::User,
-            content: TITLE_GENERATION_PROMPT.to_string(),
-            request_content: None,
-        });
+        title_messages.push(ChatMessage::user_text(TITLE_GENERATION_PROMPT.to_string()));
+        let document = self.document_context(cx);
 
         let (tx, mut rx) = mpsc::unbounded::<AiStreamEvent>();
 
         thread::spawn(move || {
             let mut send_event = |event| tx.unbounded_send(event).map_err(|_| anyhow!("closed"));
-            let result = stream_completion(settings, title_messages, &mut send_event);
+            let result = stream_completion(settings, title_messages, document, &mut send_event);
             match result {
                 Ok(()) => {
                     let _ = send_event(AiStreamEvent::Done);
@@ -638,55 +563,78 @@ impl AiPanel {
             && self.messages[1].role == Role::Assistant
     }
 
-    fn request_content_for_prompt(&self, prompt: &str, cx: &mut Context<Self>) -> String {
-        let mentions = mentioned_kinds(prompt);
-        if mentions.is_empty() {
-            return prompt.to_string();
-        }
-
-        let mut request = prompt.to_string();
-        request.push_str("\n\nAttached PDF context from @ mentions:");
-        for mention in mentions {
-            let context = self.resolve_mention(mention, cx);
-            request.push_str("\n\n### ");
-            request.push_str(mention.context_title());
-            request.push('\n');
-            request.push_str(&context);
-        }
-        request
+    fn context_blocks_for_prompt(&self, prompt: &str, cx: &mut Context<Self>) -> Vec<ContextBlock> {
+        mentioned_kinds(prompt)
+            .into_iter()
+            .map(|mention| self.resolve_mention(mention, cx))
+            .collect()
     }
 
-    fn resolve_mention(&self, mention: MentionKind, cx: &mut Context<Self>) -> String {
+    fn resolve_mention(&self, mention: MentionKind, cx: &mut Context<Self>) -> ContextBlock {
         let resolved = self
             .pdf_view
             .update(cx, |pdf_view, _| match mention {
-                MentionKind::CurrentPageText => pdf_view.current_page_text().map(|text| {
+                MentionKind::CurrentPageText => {
                     let page = pdf_view.current_page();
-                    format!(
-                        "Page {page}:\n{}",
-                        truncate_context(text).unwrap_or_else(|| {
-                            "No text is available on the current page.".to_string()
-                        })
-                    )
-                }),
-                MentionKind::Selection => pdf_view.selected_text().map(|text| {
-                    truncate_context(text)
-                        .unwrap_or_else(|| "No selected text is currently available.".to_string())
-                }),
-                MentionKind::DocumentText => pdf_view.document_text().map(|text| {
-                    truncate_context(text).unwrap_or_else(|| {
+                    let text = pdf_view
+                        .current_page_text()
+                        .unwrap_or_else(|| "No text is available on the current page.".to_string());
+                    ContextBlock::new(mention, Some(page), text)
+                }
+                MentionKind::Selection => ContextBlock::new(
+                    mention,
+                    None,
+                    pdf_view
+                        .selected_text()
+                        .unwrap_or_else(|| "No selected text is currently available.".to_string()),
+                ),
+                MentionKind::DocumentText => ContextBlock::new(
+                    mention,
+                    None,
+                    pdf_view.document_text().unwrap_or_else(|| {
                         "No extracted text is available for this PDF.".to_string()
-                    })
-                }),
+                    }),
+                ),
             })
-            .ok()
-            .flatten();
+            .ok();
 
-        resolved.unwrap_or_else(|| match mention {
-            MentionKind::CurrentPageText => "No current page text is available.".to_string(),
-            MentionKind::Selection => "No selected text is currently available.".to_string(),
-            MentionKind::DocumentText => "No extracted text is available for this PDF.".to_string(),
+        resolved.unwrap_or_else(|| {
+            let message = match mention {
+                MentionKind::CurrentPageText => "No current page text is available.",
+                MentionKind::Selection => "No selected text is currently available.",
+                MentionKind::DocumentText => "No extracted text is available for this PDF.",
+            };
+            ContextBlock::new(mention, None, message.to_string())
         })
+    }
+
+    fn document_context(&self, cx: &mut Context<Self>) -> DocumentContext {
+        let mut document = DocumentContext {
+            file_name: self
+                .document_path
+                .file_name()
+                .and_then(|file_name| file_name.to_str())
+                .map(str::to_string),
+            page_count: 0,
+            current_page: self.current_page,
+            has_selection: false,
+        };
+
+        if let Ok((page_count, current_page, has_selection)) =
+            self.pdf_view.update(cx, |pdf_view, _| {
+                (
+                    pdf_view.page_count(),
+                    pdf_view.current_page(),
+                    pdf_view.selected_text().is_some(),
+                )
+            })
+        {
+            document.page_count = page_count;
+            document.current_page = current_page;
+            document.has_selection = has_selection;
+        }
+
+        document
     }
 
     fn update_current_page(&mut self, cx: &mut Context<Self>) {
@@ -703,11 +651,7 @@ impl AiPanel {
             return;
         }
 
-        if self
-            .messages
-            .iter()
-            .all(|message| message.content.trim().is_empty())
-        {
+        if self.messages.iter().all(ChatMessage::is_display_empty) {
             return;
         }
 
@@ -725,16 +669,17 @@ impl AiPanel {
             messages: self
                 .messages
                 .iter()
-                .map(|message| AiSessionMessage {
-                    role: match message.role {
-                        Role::User => AiSessionRole::User,
-                        Role::Assistant => AiSessionRole::Assistant,
-                    },
-                    content: message.content.clone(),
-                    request_content: message
-                        .request_content
-                        .clone()
-                        .filter(|content| content != &message.content),
+                .map(|message| {
+                    let content = message.display_text();
+                    let request_content = message.request_text();
+                    AiSessionMessage {
+                        role: match message.role {
+                            Role::User => AiSessionRole::User,
+                            Role::Assistant => AiSessionRole::Assistant,
+                        },
+                        content: content.clone(),
+                        request_content: (request_content != content).then_some(request_content),
+                    }
                 })
                 .collect(),
             created: self.session_created,
@@ -912,13 +857,12 @@ impl AiPanel {
         self.messages = session
             .messages
             .into_iter()
-            .map(|message| ChatMessage {
-                role: match message.role {
+            .map(|message| {
+                let role = match message.role {
                     AiSessionRole::User => Role::User,
                     AiSessionRole::Assistant => Role::Assistant,
-                },
-                content: message.content,
-                request_content: message.request_content,
+                };
+                ChatMessage::from_persisted(role, message.content, message.request_content)
             })
             .collect();
         self.content = SharedString::default();
@@ -1322,7 +1266,7 @@ impl AiPanel {
             .iter()
             .rev()
             .find(|message| message.role == Role::Assistant)
-            .map(|message| message.content.clone())
+            .map(ChatMessage::display_text)
             .unwrap_or_default();
         let show_answer = loading || !answer.is_empty();
 
@@ -1522,7 +1466,7 @@ impl AiPanel {
     ) -> impl IntoElement {
         let is_user = message.role == Role::User;
         let label = if is_user { "You" } else { "Assistant" };
-        let content = message.content;
+        let content = message.display_text();
         let is_loading = content.is_empty();
         let row_width = (panel_width - 24.0).max(160.0);
         let max_width = (row_width - 24.0).max(160.0);
@@ -3054,410 +2998,6 @@ impl Element for AiInputElement {
     }
 }
 
-fn stream_completion(
-    settings: ResolvedAiConfig,
-    messages: Vec<ChatMessage>,
-    send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
-) -> Result<()> {
-    if !settings.can_request() {
-        return Err(anyhow!(settings.missing_credentials_message()));
-    }
-
-    let client = reqwest::blocking::Client::builder()
-        .build()
-        .context("failed to create HTTP client")?;
-
-    match settings.provider.api_style() {
-        AiApiStyle::OpenAi => stream_openai(&client, settings, messages, send_event),
-        AiApiStyle::Anthropic => stream_anthropic(&client, settings, messages, send_event),
-    }
-}
-
-fn stream_openai(
-    client: &reqwest::blocking::Client,
-    settings: ResolvedAiConfig,
-    messages: Vec<ChatMessage>,
-    send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
-) -> Result<()> {
-    let url = openai_chat_url(&settings.base_url);
-    let native_thinking =
-        supports_openai_reasoning(settings.provider, &settings.model, settings.thinking_level);
-    let mut request_messages = Vec::new();
-    request_messages.push(json!({
-        "role": "system",
-        "content": system_prompt(settings.thinking_level, native_thinking),
-    }));
-    for message in messages {
-        request_messages.push(json!({
-            "role": match message.role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-            },
-            "content": message.request_content.unwrap_or(message.content),
-        }));
-    }
-
-    let mut body = json!({
-        "model": settings.model.clone(),
-        "messages": request_messages,
-        "stream": true,
-    });
-    apply_openai_thinking(
-        &mut body,
-        settings.provider,
-        &settings.model,
-        settings.thinking_level,
-    );
-
-    let mut request = client.post(url).json(&body);
-    if !settings.api_key.is_empty() {
-        request = request.bearer_auth(settings.api_key);
-    }
-
-    let response = request
-        .send()
-        .with_context(|| format!("failed to send {} request", settings.provider.label()))?;
-    read_sse_response(response, AiApiStyle::OpenAi, send_event)
-}
-
-fn stream_anthropic(
-    client: &reqwest::blocking::Client,
-    settings: ResolvedAiConfig,
-    messages: Vec<ChatMessage>,
-    send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
-) -> Result<()> {
-    let base_url = settings.base_url.trim_end_matches('/');
-    let url = if base_url.ends_with("/v1/messages") {
-        base_url.to_string()
-    } else if base_url.ends_with("/v1") {
-        format!("{base_url}/messages")
-    } else {
-        format!("{base_url}/v1/messages")
-    };
-
-    let request_messages = messages
-        .into_iter()
-        .map(|message| {
-            json!({
-                "role": match message.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                },
-                "content": message.request_content.unwrap_or(message.content),
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let native_thinking =
-        supports_anthropic_thinking(settings.provider, &settings.model, settings.thinking_level);
-    let mut body = json!({
-        "model": settings.model.clone(),
-        "messages": request_messages,
-        "max_tokens": 4096,
-        "stream": true,
-    });
-    body["system"] = json!(system_prompt(settings.thinking_level, native_thinking));
-    apply_anthropic_thinking(
-        &mut body,
-        settings.provider,
-        &settings.model,
-        settings.thinking_level,
-    );
-
-    let response = client
-        .post(url)
-        .header("x-api-key", settings.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&body)
-        .send()
-        .context("failed to send Anthropic request")?;
-    read_sse_response(response, AiApiStyle::Anthropic, send_event)
-}
-
-fn read_sse_response(
-    mut response: reqwest::blocking::Response,
-    api_style: AiApiStyle,
-    send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
-) -> Result<()> {
-    if !response.status().is_success() {
-        let status = response.status();
-        let mut body = String::new();
-        if let Err(error) = response.read_to_string(&mut body) {
-            body = format!("failed to read error body: {error:#}");
-        }
-        return Err(anyhow!("AI request failed with status {status}: {body}"));
-    }
-
-    let mut pending = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = response
-            .read(&mut buffer)
-            .context("failed to read AI stream")?;
-        if read == 0 {
-            break;
-        }
-        pending.extend_from_slice(&buffer[..read]);
-
-        while let Some(newline_ix) = pending.iter().position(|byte| *byte == b'\n') {
-            let line = pending.drain(..=newline_ix).collect::<Vec<_>>();
-            let line = std::str::from_utf8(&line)
-                .context("AI stream emitted invalid UTF-8")?
-                .trim();
-            if process_sse_line(api_style, line, send_event)? {
-                return Ok(());
-            }
-        }
-    }
-
-    if !pending.is_empty() {
-        let line = std::str::from_utf8(&pending)
-            .context("AI stream emitted invalid UTF-8")?
-            .trim();
-        process_sse_line(api_style, line, send_event)?;
-    }
-
-    Ok(())
-}
-
-fn process_sse_line(
-    api_style: AiApiStyle,
-    line: &str,
-    send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
-) -> Result<bool> {
-    let Some(data) = line.strip_prefix("data:") else {
-        return Ok(false);
-    };
-    let data = data.trim();
-    if data == "[DONE]" {
-        return Ok(true);
-    }
-
-    let value = serde_json::from_str::<Value>(data).context("failed to parse AI stream event")?;
-    match api_style {
-        AiApiStyle::OpenAi => {
-            if let Some(delta) = value["choices"][0]["delta"]["content"].as_str()
-                && !delta.is_empty()
-            {
-                send_event(AiStreamEvent::Delta(delta.to_string()))?;
-            }
-            Ok(false)
-        }
-        AiApiStyle::Anthropic => {
-            match value["type"].as_str() {
-                Some("content_block_delta") => {
-                    if let Some(delta) = value["delta"]["text"].as_str()
-                        && !delta.is_empty()
-                    {
-                        send_event(AiStreamEvent::Delta(delta.to_string()))?;
-                    }
-                }
-                Some("message_stop") => return Ok(true),
-                _ => {}
-            }
-            Ok(false)
-        }
-    }
-}
-
-fn openai_chat_url(base_url: &str) -> String {
-    let base_url = base_url.trim_end_matches('/');
-    if base_url.ends_with("/v1/chat/completions") {
-        base_url.to_string()
-    } else if openai_base_url_has_version(base_url) {
-        format!("{base_url}/chat/completions")
-    } else {
-        format!("{base_url}/v1/chat/completions")
-    }
-}
-
-fn openai_base_url_has_version(base_url: &str) -> bool {
-    base_url.rsplit('/').next().is_some_and(|segment| {
-        segment.len() > 1
-            && segment.starts_with('v')
-            && segment[1..].chars().all(|ch| ch.is_ascii_digit())
-    })
-}
-
-fn system_prompt(thinking_level: AiThinkingLevel, native_thinking: bool) -> String {
-    let mut prompt = "You are an AI assistant embedded in a PDF viewer. Help the user understand and work with the document. Be conversational but professional. Refer to the user in the second person and yourself in the first person. Format responses in Markdown. Never invent document details; if the needed PDF context is missing, say what context you need. When the user includes @selection, @current page text, or @document text context, ground your answer in that attached context. Do not reveal hidden chain-of-thought; provide concise reasoning summaries only when useful.".to_string();
-
-    if thinking_level != AiThinkingLevel::Off && !native_thinking {
-        prompt.push_str(" Use ");
-        prompt.push_str(thinking_level.as_str());
-        prompt.push_str(" internal reasoning effort before answering.");
-    }
-
-    prompt
-}
-
-fn thinking_level_description(level: AiThinkingLevel) -> &'static str {
-    match level {
-        AiThinkingLevel::Off => "No extra reasoning",
-        AiThinkingLevel::Minimal => "Minimal reasoning",
-        AiThinkingLevel::Low => "Fast light reasoning",
-        AiThinkingLevel::Medium => "Balanced reasoning",
-        AiThinkingLevel::High => "Deeper reasoning",
-        AiThinkingLevel::XHigh => "Maximum OpenAI reasoning",
-        AiThinkingLevel::Max => "Maximum Anthropic thinking",
-    }
-}
-
-fn supports_openai_reasoning(provider: AiProvider, model: &str, level: AiThinkingLevel) -> bool {
-    provider == AiProvider::OpenAi && level.supports_native_for(provider, model)
-}
-
-fn supports_anthropic_thinking(provider: AiProvider, model: &str, level: AiThinkingLevel) -> bool {
-    provider == AiProvider::Anthropic && level.supports_native_for(provider, model)
-}
-
-fn apply_openai_thinking(
-    body: &mut Value,
-    provider: AiProvider,
-    model: &str,
-    level: AiThinkingLevel,
-) {
-    if !supports_openai_reasoning(provider, model, level) {
-        return;
-    }
-
-    let level = level.clamp_for(provider, model);
-    body["reasoning_effort"] = json!(match level {
-        AiThinkingLevel::Off => return,
-        AiThinkingLevel::Minimal => "minimal",
-        AiThinkingLevel::Low => "low",
-        AiThinkingLevel::Medium => "medium",
-        AiThinkingLevel::High => "high",
-        AiThinkingLevel::XHigh | AiThinkingLevel::Max => "xhigh",
-    });
-}
-
-fn apply_anthropic_thinking(
-    body: &mut Value,
-    provider: AiProvider,
-    model: &str,
-    level: AiThinkingLevel,
-) {
-    if !supports_anthropic_thinking(provider, model, level) {
-        return;
-    }
-
-    let level = level.clamp_for(provider, model);
-    body["thinking"] = json!({
-        "type": "enabled",
-        "budget_tokens": match level {
-            AiThinkingLevel::Off => return,
-            AiThinkingLevel::Minimal => 1024,
-            AiThinkingLevel::Low => 1024,
-            AiThinkingLevel::Medium => 2048,
-            AiThinkingLevel::High => 3072,
-            AiThinkingLevel::XHigh | AiThinkingLevel::Max => 4096,
-        },
-    });
-    body["output_config"] = json!({
-        "effort": match level {
-            AiThinkingLevel::Off => return,
-            AiThinkingLevel::Minimal | AiThinkingLevel::Low => "low",
-            AiThinkingLevel::Medium => "medium",
-            AiThinkingLevel::High => "high",
-            AiThinkingLevel::XHigh | AiThinkingLevel::Max => "max",
-        },
-    });
-}
-
-fn mentioned_kinds(text: &str) -> Vec<MentionKind> {
-    let mut seen = HashSet::new();
-    let mut mentions = Vec::new();
-    for (_, mention) in find_mention_ranges(text) {
-        if seen.insert(mention) {
-            mentions.push(mention);
-        }
-    }
-    mentions
-}
-
-fn find_mention_ranges(text: &str) -> Vec<(Range<usize>, MentionKind)> {
-    let mut ranges = Vec::new();
-    for (start, ch) in text.char_indices() {
-        if ch != '@' {
-            continue;
-        }
-        for mention in MentionKind::ALL {
-            let token = mention.token();
-            if text[start..].starts_with(token) {
-                let end = start + token.len();
-                if is_mention_boundary(text[end..].chars().next()) {
-                    ranges.push((start..end, mention));
-                    break;
-                }
-            }
-        }
-    }
-    ranges
-}
-
-fn is_mention_boundary(next: Option<char>) -> bool {
-    next.is_none_or(|ch| {
-        ch.is_whitespace() || matches!(ch, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}')
-    })
-}
-
-fn mention_matches_query(mention: MentionKind, query: &str) -> bool {
-    let query = query.trim_start().to_ascii_lowercase();
-    if query.is_empty() {
-        return true;
-    }
-
-    let query_without_trailing = query.trim_end();
-    let label = mention.label().to_ascii_lowercase();
-    let token = mention.token().trim_start_matches('@').to_ascii_lowercase();
-
-    if query.ends_with(' ') && (query_without_trailing == label || query_without_trailing == token)
-    {
-        return false;
-    }
-
-    label.contains(query_without_trailing) || token.contains(query_without_trailing)
-}
-
-fn truncate_context(text: String) -> Option<String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    Some(text.chars().take(MAX_CONTEXT_CHARS).collect())
-}
-
-fn session_title_for_prompt(prompt: &str) -> String {
-    let title = prompt
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or(DEFAULT_SESSION_TITLE)
-        .trim()
-        .chars()
-        .take(48)
-        .collect::<String>();
-    if title.is_empty() {
-        DEFAULT_SESSION_TITLE.to_string()
-    } else {
-        title
-    }
-}
-
-fn title_from_response(response: &str) -> Option<String> {
-    let title = response
-        .lines()
-        .find(|line| !line.trim().is_empty())?
-        .trim()
-        .trim_matches(['"', '\'', '`'])
-        .trim()
-        .trim_end_matches(['.', '!', '?', ':'])
-        .chars()
-        .take(80)
-        .collect::<String>();
-    (!title.is_empty()).then_some(title)
-}
-
 fn input_text_runs(
     text: &str,
     base_run: TextRun,
@@ -3675,100 +3215,4 @@ fn offset_to_utf16_in_text(text: &str, offset: usize) -> usize {
 
 fn with_alpha(rgb: u32, alpha: u8) -> u32 {
     (rgb << 8) | u32::from(alpha)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn parses_pdf_context_mentions_in_order_without_duplicates() {
-        assert_eq!(
-            mentioned_kinds(
-                "Summarize @selection and compare with @current page text plus @document text"
-            ),
-            vec![
-                MentionKind::Selection,
-                MentionKind::CurrentPageText,
-                MentionKind::DocumentText,
-            ]
-        );
-        assert_eq!(
-            mentioned_kinds("@selection then @selection again"),
-            vec![MentionKind::Selection]
-        );
-    }
-
-    #[test]
-    fn mention_completion_keeps_current_page_space_query_open() {
-        assert!(mention_matches_query(
-            MentionKind::CurrentPageText,
-            "current "
-        ));
-        assert!(mention_matches_query(MentionKind::CurrentPageText, "page"));
-        assert!(!mention_matches_query(
-            MentionKind::CurrentPageText,
-            "current page text "
-        ));
-    }
-
-    #[test]
-    fn derives_session_title_from_first_prompt_line() {
-        assert_eq!(
-            session_title_for_prompt("\n  Explain the introduction in detail"),
-            "Explain the introduction in detail"
-        );
-        assert_eq!(session_title_for_prompt(""), DEFAULT_SESSION_TITLE);
-    }
-
-    #[test]
-    fn extracts_generated_title_from_first_response_line() {
-        assert_eq!(
-            title_from_response("  `Fourier Transform Basics`\n\nOther text"),
-            Some("Fourier Transform Basics".to_string())
-        );
-        assert_eq!(title_from_response("   \n"), None);
-    }
-
-    #[test]
-    fn configures_native_thinking_for_supported_models() {
-        let mut openai_body = json!({});
-        apply_openai_thinking(
-            &mut openai_body,
-            AiProvider::OpenAi,
-            "gpt-5",
-            AiThinkingLevel::XHigh,
-        );
-        assert_eq!(openai_body["reasoning_effort"], "xhigh");
-
-        let mut anthropic_body = json!({});
-        apply_anthropic_thinking(
-            &mut anthropic_body,
-            AiProvider::Anthropic,
-            "claude-sonnet-4-5-latest",
-            AiThinkingLevel::Max,
-        );
-        assert_eq!(anthropic_body["thinking"]["budget_tokens"], 4096);
-        assert_eq!(anthropic_body["output_config"]["effort"], "max");
-
-        let mut unsupported_body = json!({});
-        apply_openai_thinking(
-            &mut unsupported_body,
-            AiProvider::OpenRouter,
-            "openai/gpt-5",
-            AiThinkingLevel::High,
-        );
-        assert!(unsupported_body.get("reasoning_effort").is_none());
-    }
-
-    #[test]
-    fn unsupported_thinking_uses_system_prompt_instruction() {
-        let prompt = system_prompt(AiThinkingLevel::Low, false);
-        assert!(prompt.contains("Use low internal reasoning effort"));
-        assert!(prompt.contains("Do not reveal hidden chain-of-thought"));
-
-        let native_prompt = system_prompt(AiThinkingLevel::Low, true);
-        assert!(!native_prompt.contains("Use low internal reasoning effort"));
-    }
 }

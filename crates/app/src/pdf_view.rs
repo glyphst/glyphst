@@ -4487,6 +4487,10 @@ impl PdfView {
         self.current_page_index() + 1
     }
 
+    pub(crate) fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
     fn last_page_index(&self) -> usize {
         self.pages.len().saturating_sub(1)
     }

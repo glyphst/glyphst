@@ -324,14 +324,14 @@ impl AiThinkingLevel {
     }
 
     pub fn supported_for(provider: AiProvider, model: &str) -> &'static [Self] {
-        if provider == AiProvider::OpenAi && Self::openai_supports_native_thinking(model) {
-            &Self::OPENAI_REASONING
-        } else if provider == AiProvider::Anthropic
-            && Self::anthropic_supports_native_thinking(model)
-        {
-            &Self::ANTHROPIC_THINKING
-        } else {
-            &Self::FALLBACK
+        match provider.api_style() {
+            AiApiStyle::OpenAi if Self::openai_supports_native_thinking(model) => {
+                &Self::OPENAI_REASONING
+            }
+            AiApiStyle::Anthropic if Self::anthropic_supports_native_thinking(model) => {
+                &Self::ANTHROPIC_THINKING
+            }
+            _ => &Self::FALLBACK,
         }
     }
 
@@ -361,13 +361,14 @@ impl AiThinkingLevel {
 
     pub fn supports_native_for(self, provider: AiProvider, model: &str) -> bool {
         self != Self::Off
-            && ((provider == AiProvider::OpenAi && Self::openai_supports_native_thinking(model))
-                || (provider == AiProvider::Anthropic
-                    && Self::anthropic_supports_native_thinking(model)))
+            && match provider.api_style() {
+                AiApiStyle::OpenAi => Self::openai_supports_native_thinking(model),
+                AiApiStyle::Anthropic => Self::anthropic_supports_native_thinking(model),
+            }
     }
 
     fn openai_supports_native_thinking(model: &str) -> bool {
-        let model = model.to_ascii_lowercase();
+        let model = Self::model_family(model);
         model.starts_with("o1")
             || model.starts_with("o3")
             || model.starts_with("o4")
@@ -375,12 +376,21 @@ impl AiThinkingLevel {
     }
 
     fn anthropic_supports_native_thinking(model: &str) -> bool {
-        let model = model.to_ascii_lowercase();
+        let model = Self::model_family(model);
         model.contains("claude-3-7")
             || model.contains("claude-4")
             || model.contains("opus-4")
             || model.contains("sonnet-4")
             || model.contains("haiku-4")
+    }
+
+    fn model_family(model: &str) -> String {
+        model
+            .rsplit('/')
+            .next()
+            .unwrap_or(model)
+            .trim()
+            .to_ascii_lowercase()
     }
 
     fn from_str(value: &str) -> Option<Self> {
@@ -2008,8 +2018,20 @@ ai {
             AiThinkingLevel::supported_for(AiProvider::Anthropic, "claude-sonnet-4-5-latest")
                 .contains(&AiThinkingLevel::Max)
         );
+        assert!(
+            AiThinkingLevel::supported_for(AiProvider::OpenRouter, "openai/gpt-5.5")
+                .contains(&AiThinkingLevel::XHigh)
+        );
+        assert!(
+            !AiThinkingLevel::supported_for(AiProvider::OpenRouter, "openai/gpt-4o")
+                .contains(&AiThinkingLevel::XHigh)
+        );
         assert_eq!(
             AiThinkingLevel::Max.clamp_for(AiProvider::OpenAi, "gpt-5"),
+            AiThinkingLevel::XHigh
+        );
+        assert_eq!(
+            AiThinkingLevel::Max.clamp_for(AiProvider::OpenRouter, "openai/gpt-5.5"),
             AiThinkingLevel::XHigh
         );
     }

@@ -10,6 +10,7 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+mod ai_chat;
 mod ai_client;
 mod ai_panel;
 mod bookmarks;
