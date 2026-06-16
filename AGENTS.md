@@ -9,3 +9,5 @@ Relevent projects are cloned in `probe` directory for reference purpose:
 - `zathura` (A PDF viewer)
 - `sioyek` (A PDF viewer)
 - `catppuccin` (Theme/Color palette)
+- `cherry-studio` (An AI chat application)
+- `lucide` (Icon)
