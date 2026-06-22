@@ -15,11 +15,11 @@ use crate::{
     pdf_view::{
         AddBookmark, CloseTab, CopySelection, GoToBeginning, GoToEnd, GridCursorDown,
         GridCursorLeft, GridCursorRight, GridCursorUp, GridOverviewConfirm, JumpBackward,
-        JumpForward, NextHalfPage, NextPage, OpenBookmarks, OpenFile, OpenHistory, OpenNewTab,
-        OpenNotes, OpenQuickAsk, OpenSettings, PreviousHalfPage, PreviousPage, Reload, ResetZoom,
-        Search, SearchNext, SearchPrev, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette,
-        ToggleFullScreen, ToggleGridOverview, ToggleNotes, ToggleThumbnailSidebar, ToggleToc,
-        ToggleTransparency, ZoomIn, ZoomOut,
+        JumpForward, NextHalfPage, NextPage, OpenBookmarks, OpenFile, OpenGoToPage, OpenHistory,
+        OpenNewTab, OpenNotes, OpenQuickAsk, OpenSettings, PreviousHalfPage, PreviousPage, Reload,
+        ResetZoom, Search, SearchNext, SearchPrev, SelectAll, Toc, ToggleAiPanel,
+        ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview, ToggleNotes,
+        ToggleThumbnailSidebar, ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
     },
     picker::{
         PickerBackspace, PickerCancel, PickerConfirm, PickerCopy, PickerCut, PickerDelete,
@@ -43,10 +43,10 @@ use crate::{
 };
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
 
-const PDF_CONTEXT: &str = "PdfView && !GridOverview && !CommandPalette && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
-const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !GridOverview && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
-const WORKSPACE_CONTEXT: &str = "Workspace && !GridOverview && !CommandPalette && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
-const COMMAND_PALETTE_CONTEXT: &str = "Workspace && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !NoteEditor && !AiPanel && !SettingsPanel";
+const PDF_CONTEXT: &str = "PdfView && !GridOverview && !CommandPalette && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !GoToPage && !NoteEditor && !AiPanel && !SettingsPanel";
+const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !GridOverview && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !GoToPage && !NoteEditor && !AiPanel && !SettingsPanel";
+const WORKSPACE_CONTEXT: &str = "Workspace && !GridOverview && !CommandPalette && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !GoToPage && !NoteEditor && !AiPanel && !SettingsPanel";
+const COMMAND_PALETTE_CONTEXT: &str = "Workspace && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !GoToPage && !NoteEditor && !AiPanel && !SettingsPanel";
 const GRID_OVERVIEW_CONTEXT: &str = "GridOverview && !SettingsPanel";
 const PALETTE_CONTEXT: &str = "CommandPalette";
 const SEARCH_CONTEXT: &str = "Search";
@@ -59,6 +59,7 @@ const NOTES_CONTEXT: &str = "Notes";
 const HISTORY_CONTEXT: &str = "History";
 const BOOKMARKS_CONTEXT: &str = "Bookmarks";
 const BOOKMARK_PROMPT_CONTEXT: &str = "BookmarkPrompt";
+const GO_TO_PAGE_CONTEXT: &str = "GoToPage";
 const NOTE_EDITOR_CONTEXT: &str = "NoteEditor";
 
 struct ActionSpec {
@@ -90,7 +91,6 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<ZoomOut>("-", PDF_CONTEXT),
         bind::<ResetZoom>("=", PDF_CONTEXT),
         bind::<Reload>("f5", PDF_CONTEXT),
-        bind::<OpenQuickAsk>(":", PDF_CONTEXT),
         bind::<OpenQuickAsk>("tab", PDF_CONTEXT),
         bind::<GoToBeginning>("home", PDF_CONTEXT),
         bind::<GoToEnd>("end", PDF_CONTEXT),
@@ -164,6 +164,7 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind::<PreviousHalfPage>("ctrl-u", PDF_CONTEXT),
             bind::<GoToBeginning>("g g", PDF_CONTEXT),
             bind::<GoToEnd>("shift-g", PDF_CONTEXT),
+            bind::<OpenGoToPage>(":", PDF_CONTEXT),
             bind::<NextPage>("ctrl-f", GRID_OVERVIEW_CONTEXT),
             bind::<PreviousPage>("ctrl-b", GRID_OVERVIEW_CONTEXT),
             bind::<NextHalfPage>("ctrl-d", GRID_OVERVIEW_CONTEXT),
@@ -351,6 +352,26 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<PickerCut>("cmd-x", BOOKMARK_PROMPT_CONTEXT),
         bind::<PickerPaste>("ctrl-v", BOOKMARK_PROMPT_CONTEXT),
         bind::<PickerPaste>("cmd-v", BOOKMARK_PROMPT_CONTEXT),
+        bind::<PickerConfirm>("enter", GO_TO_PAGE_CONTEXT),
+        bind::<PickerCancel>("escape", GO_TO_PAGE_CONTEXT),
+        bind::<PickerBackspace>("backspace", GO_TO_PAGE_CONTEXT),
+        bind::<PickerDelete>("delete", GO_TO_PAGE_CONTEXT),
+        bind::<PickerLeft>("left", GO_TO_PAGE_CONTEXT),
+        bind::<PickerRight>("right", GO_TO_PAGE_CONTEXT),
+        bind::<PickerHome>("home", GO_TO_PAGE_CONTEXT),
+        bind::<PickerEnd>("end", GO_TO_PAGE_CONTEXT),
+        bind::<PickerSelectAll>("ctrl-a", GO_TO_PAGE_CONTEXT),
+        bind::<PickerSelectAll>("cmd-a", GO_TO_PAGE_CONTEXT),
+        bind::<PickerSelectLeft>("shift-left", GO_TO_PAGE_CONTEXT),
+        bind::<PickerSelectRight>("shift-right", GO_TO_PAGE_CONTEXT),
+        bind::<PickerSelectHome>("shift-home", GO_TO_PAGE_CONTEXT),
+        bind::<PickerSelectEnd>("shift-end", GO_TO_PAGE_CONTEXT),
+        bind::<PickerCopy>("ctrl-c", GO_TO_PAGE_CONTEXT),
+        bind::<PickerCopy>("cmd-c", GO_TO_PAGE_CONTEXT),
+        bind::<PickerCut>("ctrl-x", GO_TO_PAGE_CONTEXT),
+        bind::<PickerCut>("cmd-x", GO_TO_PAGE_CONTEXT),
+        bind::<PickerPaste>("ctrl-v", GO_TO_PAGE_CONTEXT),
+        bind::<PickerPaste>("cmd-v", GO_TO_PAGE_CONTEXT),
         bind::<NoteSave>("ctrl-enter", NOTE_EDITOR_CONTEXT),
         bind::<NoteSave>("cmd-enter", NOTE_EDITOR_CONTEXT),
         bind::<NoteCancel>("escape", NOTE_EDITOR_CONTEXT),
@@ -760,6 +781,11 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["open-quick-ask", "quick-ask"],
             context: Some(PDF_CONTEXT),
             build: boxed::<OpenQuickAsk>,
+        },
+        ActionSpec {
+            aliases: &["go-to-page", "goto-page", "open-go-to-page"],
+            context: Some(PDF_CONTEXT),
+            build: boxed::<OpenGoToPage>,
         },
         ActionSpec {
             aliases: &["open-history", "history", "recent-files"],

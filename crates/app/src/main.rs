@@ -16,6 +16,7 @@ mod ai_panel;
 mod bookmarks;
 mod command_palette;
 mod fonts;
+mod go_to_page;
 mod history;
 mod instance;
 mod keybindings;

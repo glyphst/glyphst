@@ -17,6 +17,7 @@ use crate::ai_panel::{AI_PANEL_WIDTH, AiPanel};
 use crate::bookmarks::{
     BookmarkPalette, BookmarkPaletteDelegate, BookmarkPrompt, BookmarkPromptDelegate,
 };
+use crate::go_to_page::{GoToPagePrompt, GoToPagePromptDelegate};
 use crate::history::{HistoryPalette, HistoryPaletteDelegate};
 use crate::library::{
     DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore, Note, SidebarWidths,
@@ -85,6 +86,7 @@ gpui::actions!(
         OpenFile,
         OpenNewTab,
         OpenQuickAsk,
+        OpenGoToPage,
         CloseTab,
         AddBookmark,
         ToggleGridOverview,
@@ -711,6 +713,7 @@ pub struct PdfView {
     history_palette: Option<Entity<HistoryPalette>>,
     bookmark_palette: Option<Entity<BookmarkPalette>>,
     bookmark_prompt: Option<Entity<BookmarkPrompt>>,
+    go_to_page_prompt: Option<Entity<GoToPagePrompt>>,
     note_editor: Option<Entity<NoteEditor>>,
     note_target: Option<NoteTarget>,
     toc: Vec<TocEntry>,
@@ -927,6 +930,7 @@ impl PdfView {
             history_palette: None,
             bookmark_palette: None,
             bookmark_prompt: None,
+            go_to_page_prompt: None,
             note_editor: None,
             note_target: None,
             toc,
@@ -4726,6 +4730,7 @@ impl PdfView {
         self.close_history_palette(window, cx);
         self.close_bookmark_palette(window, cx);
         self.close_bookmark_prompt(window, cx);
+        self.close_go_to_page_prompt(window, cx);
     }
 
     fn apply_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5113,6 +5118,38 @@ impl PdfView {
         }
     }
 
+    fn toggle_go_to_page_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.go_to_page_prompt.is_some() {
+            self.close_go_to_page_prompt(window, cx);
+            return;
+        }
+
+        self.close_all_overlays(window, cx);
+
+        let previous_focus_handle = self.focus_handle.clone();
+        let delegate = GoToPagePromptDelegate::new(cx.entity().downgrade(), self.page_count());
+        let current_page = self.current_page().to_string().into();
+        let prompt = cx.new(|cx| {
+            Picker::with_content(previous_focus_handle.clone(), delegate, current_page, cx)
+        });
+
+        cx.subscribe_in(&prompt, window, |this, _, _: &PickerEvent, window, cx| {
+            this.close_go_to_page_prompt(window, cx);
+        })
+        .detach();
+
+        prompt.focus_handle(cx).focus(window, cx);
+        self.go_to_page_prompt = Some(prompt);
+        cx.notify();
+    }
+
+    fn close_go_to_page_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.go_to_page_prompt.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
     fn default_bookmark_label(&self) -> SharedString {
         let current_page = self.current_page_index();
         self.toc
@@ -5178,6 +5215,14 @@ impl PdfView {
         self.jump_forward.clear();
         self.position_from_search = false;
         self.set_scroll_doc(scroll_x_doc, scroll_y_doc, cx);
+    }
+
+    pub(crate) fn navigate_to_page_number(&mut self, page_number: usize, cx: &mut Context<Self>) {
+        if !(1..=self.page_count()).contains(&page_number) {
+            return;
+        }
+
+        self.navigate_to_pdf_destination(page_number - 1, None, None, cx);
     }
 
     pub(crate) fn navigate_to_document_position(
@@ -7822,6 +7867,9 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &OpenQuickAsk, window, cx| {
                 this.toggle_quick_ask(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenGoToPage, window, cx| {
+                this.toggle_go_to_page_prompt(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &SearchNext, _, cx| {
                 this.navigate_search(false, cx);
             }))
@@ -8001,6 +8049,7 @@ impl Render for PdfView {
                         || this.history_palette.is_some()
                         || this.bookmark_palette.is_some()
                         || this.bookmark_prompt.is_some()
+                        || this.go_to_page_prompt.is_some()
                         || this.note_editor.is_some()
                     {
                         window.prevent_default();
@@ -8456,6 +8505,14 @@ impl Render for PdfView {
                 this.child(Self::render_centered_overlay(
                     prompt,
                     |this, window, cx| this.close_bookmark_prompt(window, cx),
+                    theme,
+                    cx,
+                ))
+            })
+            .when_some(self.go_to_page_prompt.clone(), |this, prompt| {
+                this.child(Self::render_centered_overlay(
+                    prompt,
+                    |this, window, cx| this.close_go_to_page_prompt(window, cx),
                     theme,
                     cx,
                 ))
