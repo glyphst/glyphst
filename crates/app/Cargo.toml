@@ -16,6 +16,7 @@ kdl = "6"
 mupdf = "0.7"
 redb = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "blocking"] }
+rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"

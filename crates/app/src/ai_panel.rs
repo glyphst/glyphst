@@ -10,7 +10,7 @@ use crate::{
     library::{AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp},
     pdf_view::PdfView,
     scrollbar::WithScrollbar as _,
-    settings::{AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore},
+    settings::{AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore, ui_rems},
     settings_window::PanelEvent,
 };
 use anyhow::anyhow;
@@ -1488,7 +1488,7 @@ impl AiPanel {
                     .flex()
                     .items_center()
                     .when(is_user, |this| this.justify_end())
-                    .text_size(px(11.0))
+                    .text_size(ui_rems(11.0))
                     .text_color(rgb(theme.text_muted))
                     .child(label),
             )
@@ -1508,7 +1508,7 @@ impl AiPanel {
                                     .py_1()
                             })
                             .when(!is_user, |this| this.px_1().py_1())
-                            .text_size(px(13.0))
+                            .text_size(ui_rems(13.0))
                             .text_color(rgb(theme.text))
                             .when(is_loading, |this| {
                                 this.child(Self::render_loading_indicator(theme))
@@ -1557,7 +1557,7 @@ impl AiPanel {
                 .bg(rgba(with_alpha(theme.accent, 0x18)))
                 .px_2()
                 .py_2()
-                .text_size(px(13.0))
+                .text_size(ui_rems(13.0))
                 .text_color(if loading {
                     rgb(theme.text_muted)
                 } else {
@@ -1583,7 +1583,7 @@ impl AiPanel {
                     .items_center()
                     .justify_center()
                     .h(px(120.0))
-                    .text_size(px(13.0))
+                    .text_size(ui_rems(13.0))
                     .text_color(rgb(theme.text_muted))
                     .child("No previous AI sessions for this PDF"),
             );
@@ -1618,13 +1618,13 @@ impl AiPanel {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(13.0))
+                            .text_size(ui_rems(13.0))
                             .text_color(rgb(if active { theme.accent } else { theme.text }))
                             .child(title),
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_rems(11.0))
                             .text_color(rgb(theme.text_muted))
                             .child(meta),
                     ),
@@ -1659,7 +1659,7 @@ impl AiPanel {
             .bg(rgb(theme.surface_background))
             .shadow_sm()
             .overflow_hidden()
-            .text_size(px(12.0));
+            .text_size(ui_rems(12.0));
 
         for (ix, mention) in matches.into_iter().enumerate() {
             let selected = ix == selected_ix;
@@ -1703,7 +1703,7 @@ impl AiPanel {
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_rems(11.0))
                             .text_color(rgb(theme.text_muted))
                             .child(mention.description()),
                     ),
@@ -1724,7 +1724,7 @@ impl AiPanel {
             .gap_1()
             .px_2()
             .pt_2()
-            .text_size(px(11.0));
+            .text_size(ui_rems(11.0));
 
         for mention in mentions {
             row = row.child(
@@ -1774,7 +1774,7 @@ impl AiPanel {
             .bg(rgb(theme.surface_background))
             .shadow_sm()
             .overflow_hidden()
-            .text_size(px(12.0))
+            .text_size(ui_rems(12.0))
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -1806,14 +1806,14 @@ impl AiPanel {
                             .child(div().text_color(rgb(theme.text)).child(mention.label()))
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(ui_rems(11.0))
                                     .text_color(rgb(theme.text_muted))
                                     .child(mention.description()),
                             ),
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_rems(11.0))
                             .text_color(rgb(theme.text_muted))
                             .child(mention.token()),
                     ),
@@ -1864,7 +1864,7 @@ impl AiPanel {
             .bg(rgb(theme.surface_background))
             .shadow_sm()
             .overflow_hidden()
-            .text_size(px(12.0))
+            .text_size(ui_rems(12.0))
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -1922,7 +1922,7 @@ impl AiPanel {
                     .gap_2()
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_rems(11.0))
                             .text_color(rgb(theme.text_muted))
                             .child("Select provider/model"),
                     ),
@@ -1949,7 +1949,7 @@ impl AiPanel {
                         .flex()
                         .items_center()
                         .px_2()
-                        .text_size(px(11.0))
+                        .text_size(ui_rems(11.0))
                         .text_color(rgb(theme.text_muted))
                         .child(provider.label())
                         .into_any_element(),
@@ -1986,7 +1986,7 @@ impl AiPanel {
                                     .flex_none()
                                     .max_w(px(96.0))
                                     .truncate()
-                                    .text_size(px(11.0))
+                                    .text_size(ui_rems(11.0))
                                     .text_color(rgb(theme.text_muted))
                                     .child(model.group),
                             )
@@ -2029,7 +2029,7 @@ impl AiPanel {
             .bg(rgb(theme.surface_background))
             .shadow_sm()
             .overflow_hidden()
-            .text_size(px(12.0))
+            .text_size(ui_rems(12.0))
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -2064,7 +2064,7 @@ impl AiPanel {
                     .child(level.label())
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_rems(11.0))
                             .text_color(rgb(theme.text_muted))
                             .child(thinking_level_description(level)),
                     ),
@@ -2359,7 +2359,7 @@ impl Render for AiPanel {
                     .px_2()
                     .border_b(px(1.0))
                     .border_color(rgb(theme.border))
-                    .text_size(px(12.0))
+                    .text_size(ui_rems(12.0))
                     .child(
                         div()
                             .flex()
@@ -2367,14 +2367,14 @@ impl Render for AiPanel {
                             .min_w_0()
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(ui_rems(10.0))
                                     .text_color(rgb(theme.text_muted))
                                     .child("AI"),
                             )
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(13.0))
+                                    .text_size(ui_rems(13.0))
                                     .text_color(rgb(theme.text))
                                     .child(session_title),
                             ),
@@ -2391,7 +2391,7 @@ impl Render for AiPanel {
                                     .justify_center()
                                     .w(px(24.0))
                                     .h(px(24.0))
-                                    .text_size(px(14.0))
+                                    .text_size(ui_rems(14.0))
                                     .text_color(if loading {
                                         rgb(theme.text_muted)
                                     } else {
@@ -2415,7 +2415,7 @@ impl Render for AiPanel {
                                     .justify_center()
                                     .w(px(24.0))
                                     .h(px(24.0))
-                                    .text_size(px(14.0))
+                                    .text_size(ui_rems(14.0))
                                     .text_color(rgb(if showing_sessions {
                                         theme.accent
                                     } else {
@@ -2443,7 +2443,7 @@ impl Render for AiPanel {
                                     .justify_center()
                                     .w(px(24.0))
                                     .h(px(24.0))
-                                    .text_size(px(14.0))
+                                    .text_size(ui_rems(14.0))
                                     .text_color(rgb(theme.text_muted))
                                     .cursor_pointer()
                                     .hover(move |style| style.bg(rgb(theme.element_hover)))
@@ -2530,7 +2530,7 @@ impl Render for AiPanel {
                                 .px_2()
                                 .pb_2()
                                 .pt_1()
-                                .text_size(px(11.0))
+                                .text_size(ui_rems(11.0))
                                 .text_color(rgb(theme.text_muted))
                                 .child(
                                     div()
@@ -2548,7 +2548,7 @@ impl Render for AiPanel {
                                                 .px_2()
                                                 .py_1()
                                                 .rounded(px(4.0))
-                                                .text_size(px(11.0))
+                                                .text_size(ui_rems(11.0))
                                                 .text_color(rgb(if attachment_menu_open {
                                                     theme.accent
                                                 } else {

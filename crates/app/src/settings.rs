@@ -43,6 +43,10 @@ const DEFAULT_UI_FONT_FALLBACKS: &[&str] = &[
     "WenQuanYi Micro Hei",
 ];
 
+pub fn ui_rems(px: f32) -> gpui::Rems {
+    gpui::rems(px / DEFAULT_UI_FONT_SIZE)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BehaviorSettings {
     pub default_zoom: f32,

@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use crate::scrollbar::uniform_list_scrollbar_for;
-use crate::settings::SettingsStore;
+use crate::settings::{SettingsStore, ui_rems};
 use crate::theme::Theme;
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
@@ -706,7 +706,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                                                         .w_full()
                                                         .h(px(row_height))
                                                         .px_3()
-                                                        .text_size(px(13.0))
+                                                        .text_size(ui_rems(13.0))
                                                         .bg(if selected {
                                                             rgb(theme.element_selected)
                                                         } else {

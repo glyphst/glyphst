@@ -5,7 +5,7 @@ use crate::{
     settings::{
         AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, FontSettings, KeymapPreset,
         ModelRef, ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility,
-        WindowBackgroundMode, setup_ui_font,
+        WindowBackgroundMode, setup_ui_font, ui_rems,
     },
     theme::{PartialTheme, Theme, ThemeMetadata, format_rgb_hex, format_rgba_hex},
 };
@@ -2462,7 +2462,7 @@ impl SettingsWindow {
                 .px_3()
                 .flex()
                 .items_center()
-                .text_size(px(11.0))
+                .text_size(ui_rems(11.0))
                 .text_color(rgb(theme.text_muted))
                 .child(provider.label())
                 .into_any_element(),
@@ -2503,7 +2503,7 @@ impl SettingsWindow {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(11.0))
+                            .text_size(ui_rems(11.0))
                             .text_color(rgb(theme.text_muted))
                             .child(model.group),
                     )
@@ -2639,7 +2639,7 @@ impl SettingsWindow {
             .clone()
             .map(move |status| {
                 div()
-                    .text_size(px(12.0))
+                    .text_size(ui_rems(12.0))
                     .text_color(rgb(theme.text_muted))
                     .child(status)
             })
@@ -2898,7 +2898,7 @@ impl SettingsWindow {
                 ))
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(ui_rems(12.0))
                         .text_color(rgb(theme.text_muted))
                         .child("Only models from enabled providers' model lists appear here."),
                 )
@@ -3009,13 +3009,13 @@ impl SettingsWindow {
                                         .flex_col()
                                         .child(
                                             div()
-                                                .text_size(px(16.0))
+                                                .text_size(ui_rems(16.0))
                                                 .text_color(rgb(theme.text))
                                                 .child(provider.label()),
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(12.0))
+                                                .text_size(ui_rems(12.0))
                                                 .text_color(rgb(theme.text_muted))
                                                 .child(provider.default_base_url()),
                                         ),
@@ -3125,7 +3125,7 @@ impl SettingsWindow {
             .child(div().truncate().child(provider.label()))
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(ui_rems(11.0))
                     .text_color(rgb(if enabled {
                         theme.success
                     } else {
@@ -3163,7 +3163,7 @@ impl SettingsWindow {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(11.0))
+                            .text_size(ui_rems(11.0))
                             .text_color(rgb(theme.text_muted))
                             .child(model.id),
                     ),
@@ -3175,7 +3175,7 @@ impl SettingsWindow {
                     .gap_2()
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_rems(11.0))
                             .text_color(rgb(theme.text_muted))
                             .child(model.group),
                     )
@@ -3559,7 +3559,7 @@ impl SettingsWindow {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(11.0))
+                            .text_size(ui_rems(11.0))
                             .text_color(rgb(theme.text_muted))
                             .child(model.id),
                     ),
@@ -3568,7 +3568,7 @@ impl SettingsWindow {
                 div()
                     .max_w(px(96.0))
                     .truncate()
-                    .text_size(px(11.0))
+                    .text_size(ui_rems(11.0))
                     .text_color(rgb(theme.text_muted))
                     .child(meta),
             )
@@ -3612,7 +3612,7 @@ impl SettingsWindow {
                 ))
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(ui_rems(12.0))
                         .text_color(rgb(resolved.text_muted))
                         .child("Separate fallback font names with commas."),
                 )
@@ -4138,7 +4138,7 @@ impl Render for SettingsWindow {
             .bg(rgb(resolved.surface_background))
             .font(ui_font)
             .text_color(rgb(resolved.text))
-            .text_size(px(13.0))
+            .text_size(ui_rems(13.0))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -4177,7 +4177,7 @@ impl Render for SettingsWindow {
                     .px_4()
                     .border_b(px(1.0))
                     .border_color(rgb(resolved.border))
-                    .child(div().text_size(px(16.0)).child("Settings"))
+                    .child(div().text_size(ui_rems(16.0)).child("Settings"))
                     .child(div().text_color(rgb(resolved.text_muted)).child("Esc")),
             )
             .child(

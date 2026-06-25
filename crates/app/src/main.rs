@@ -13,11 +13,13 @@ static GLOBAL: Jemalloc = Jemalloc;
 mod ai_chat;
 mod ai_client;
 mod ai_panel;
+mod assets;
 mod bookmarks;
 mod command_palette;
 mod fonts;
 mod go_to_page;
 mod history;
+mod icons;
 mod instance;
 mod keybindings;
 mod library;
@@ -55,44 +57,47 @@ fn main() {
         return;
     }
 
-    application().run(move |cx: &mut App| {
-        if let Err(error) = fonts::load_embedded_fonts(cx) {
-            eprintln!("failed to load embedded fonts: {error:#}");
-        }
-        cx.set_global(SettingsStore::load());
-        cx.set_global(LibraryStore::load());
-        cx.set_global(RenderCache::new());
-        cx.on_app_quit(|cx| {
-            if let Err(error) = cx.global::<LibraryStore>().save() {
-                eprintln!("failed to save PDF library: {error:#}");
+    application()
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            if let Err(error) = fonts::load_embedded_fonts(cx) {
+                eprintln!("failed to load embedded fonts: {error:#}");
             }
-            if let Err(error) = instance::remove_socket_file() {
-                eprintln!("failed to remove IPC socket: {error:#}");
-            }
-            async {}
-        })
-        .detach();
+            cx.set_global(SettingsStore::load());
+            cx.set_global(LibraryStore::load());
+            cx.set_global(RenderCache::new());
+            cx.on_app_quit(|cx| {
+                if let Err(error) = cx.global::<LibraryStore>().save() {
+                    eprintln!("failed to save PDF library: {error:#}");
+                }
+                if let Err(error) = instance::remove_socket_file() {
+                    eprintln!("failed to remove IPC socket: {error:#}");
+                }
+                async {}
+            })
+            .detach();
 
-        let (keymap_preset, keybinding_overrides) = {
-            let store = cx.global::<SettingsStore>();
-            (
-                store.settings.keymap_preset,
-                store.settings.keybinding_overrides.clone(),
-            )
-        };
-        keybindings::apply(cx, keymap_preset, &keybinding_overrides);
+            let (keymap_preset, keybinding_overrides) = {
+                let store = cx.global::<SettingsStore>();
+                (
+                    store.settings.keymap_preset,
+                    store.settings.keybinding_overrides.clone(),
+                )
+            };
+            keybindings::apply(cx, keymap_preset, &keybinding_overrides);
 
-        open_workspace_window(request.path.clone(), cx).expect("failed to open workspace window");
+            open_workspace_window(request.path.clone(), cx)
+                .expect("failed to open workspace window");
 
-        cx.activate(true);
+            cx.activate(true);
 
-        cx.spawn(async move |cx| {
-            while let Some(request) = open_rx.next().await {
-                cx.update(|cx| handle_open_request(request, cx));
-            }
-        })
-        .detach();
-    });
+            cx.spawn(async move |cx| {
+                while let Some(request) = open_rx.next().await {
+                    cx.update(|cx| handle_open_request(request, cx));
+                }
+            })
+            .detach();
+        });
 }
 
 fn handle_open_request(request: instance::OpenRequest, cx: &mut App) {

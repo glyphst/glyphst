@@ -4,6 +4,7 @@ use crate::{
     library::{HighlightColor, Note},
     pdf_view::PdfView,
     picker::{Picker, PickerDelegate, fuzzy_match, normalize_query},
+    settings::ui_rems,
     theme::Theme,
 };
 use gpui::{
@@ -206,7 +207,7 @@ impl PickerDelegate for NotesPaletteDelegate {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(11.0))
+                            .text_size(ui_rems(11.0))
                             .text_color(rgb(theme.text_muted))
                             .child(entry.text.clone()),
                     ),

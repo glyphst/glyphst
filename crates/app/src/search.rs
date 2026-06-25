@@ -1,6 +1,6 @@
 use std::{ops::Range, time::Duration};
 
-use crate::settings::SettingsStore;
+use crate::settings::{SettingsStore, ui_rems};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
@@ -589,7 +589,7 @@ impl Render for SearchBar {
             .border_1()
             .border_color(rgb(theme.border))
             .bg(rgb(theme.surface_background))
-            .text_size(px(13.0))
+            .text_size(ui_rems(13.0))
             .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();

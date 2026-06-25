@@ -18,7 +18,7 @@ use smallvec::smallvec;
 use crate::{
     library::{HistoryEntry, LibraryStore},
     scrollbar::uniform_list_scrollbar_for,
-    settings::SettingsStore,
+    settings::{SettingsStore, ui_rems},
     theme::Theme,
 };
 
@@ -218,7 +218,7 @@ impl NewTab {
                     .mt_3()
                     .w_full()
                     .truncate()
-                    .text_size(px(13.0))
+                    .text_size(ui_rems(13.0))
                     .child(file_name),
             )
             .child(
@@ -226,7 +226,7 @@ impl NewTab {
                     .mt_1()
                     .w_full()
                     .truncate()
-                    .text_size(px(11.0))
+                    .text_size(ui_rems(11.0))
                     .text_color(rgb(theme.text_muted))
                     .child(directory),
             )
@@ -235,7 +235,7 @@ impl NewTab {
                     .mt_1()
                     .w_full()
                     .truncate()
-                    .text_size(px(11.0))
+                    .text_size(ui_rems(11.0))
                     .text_color(rgb(theme.text_muted))
                     .child(format!("Last read: p. {page}")),
             )
@@ -271,7 +271,7 @@ impl NewTab {
                 .border_1()
                 .border_color(rgb(theme.border))
                 .bg(rgb(theme.page))
-                .text_size(px(11.0))
+                .text_size(ui_rems(11.0))
                 .text_color(rgb(theme.text_muted))
                 .child("Rendering preview…")
                 .into_any_element(),
@@ -284,7 +284,7 @@ impl NewTab {
                 .border_1()
                 .border_color(rgb(theme.border))
                 .bg(rgba(((theme.error & 0x00ff_ffff) << 8) | 0x18))
-                .text_size(px(11.0))
+                .text_size(ui_rems(11.0))
                 .text_color(rgb(theme.text_muted))
                 .child("Preview unavailable")
                 .into_any_element(),
@@ -356,10 +356,10 @@ impl Render for NewTab {
                 .justify_center()
                 .gap_2()
                 .text_color(rgb(theme.text_muted))
-                .child(div().text_size(px(16.0)).child("No recent PDFs"))
+                .child(div().text_size(ui_rems(16.0)).child("No recent PDFs"))
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(ui_rems(12.0))
                         .child("Open a PDF to add it to history."),
                 )
                 .into_any_element()
@@ -442,7 +442,7 @@ impl Render for NewTab {
             .flex()
             .flex_col()
             .bg(rgb(theme.tab_active_background))
-            .text_size(px(12.0))
+            .text_size(ui_rems(12.0))
             .text_color(rgb(theme.text))
             .child(measure)
             .child(content)

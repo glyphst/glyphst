@@ -1,6 +1,9 @@
 use std::ops::Range;
 
-use crate::{library::HighlightColor, settings::SettingsStore};
+use crate::{
+    library::HighlightColor,
+    settings::{SettingsStore, ui_rems},
+};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
@@ -642,7 +645,7 @@ impl Render for NoteEditor {
                     .px_3()
                     .border_b(px(1.0))
                     .border_color(rgb(theme.border))
-                    .text_size(px(14.0))
+                    .text_size(ui_rems(14.0))
                     .child("Note"),
             )
             .child(
@@ -666,7 +669,7 @@ impl Render for NoteEditor {
                     .px_3()
                     .border_t(px(1.0))
                     .border_color(rgb(theme.border))
-                    .text_size(px(12.0))
+                    .text_size(ui_rems(12.0))
                     .text_color(rgb(theme.text_muted))
                     .child(color_palette)
                     .child("Ctrl+Enter saves · Esc cancels"),

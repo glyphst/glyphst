@@ -19,6 +19,7 @@ use crate::bookmarks::{
 };
 use crate::go_to_page::{GoToPagePrompt, GoToPagePromptDelegate};
 use crate::history::{HistoryPalette, HistoryPaletteDelegate};
+use crate::icons::{Icon, IconName};
 use crate::library::{
     DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore, Note, SidebarWidths,
     normalize_path,
@@ -28,7 +29,7 @@ use crate::notes::{NotePaletteEntry, NotesPalette, NotesPaletteDelegate};
 use crate::picker::{Picker, PickerEvent};
 use crate::scrollbar::{ManualScrollHandle, WithScrollbar as _, uniform_list_scrollbar_for};
 use crate::search::{SearchBar, SearchEvent};
-use crate::settings::{BehaviorSettings, SettingsStore, WindowSettings};
+use crate::settings::{BehaviorSettings, SettingsStore, WindowSettings, ui_rems};
 use crate::settings_window::{PanelEvent, open_settings_window};
 use crate::smooth_scroll::advance_toward;
 use crate::theme::Theme;
@@ -149,6 +150,9 @@ const DIFF_FLASH_DURATION: Duration = Duration::from_millis(800);
 const DIFF_FLASH_TILE_SIZE: u32 = 24;
 const DIFF_FLASH_PIXEL_THRESHOLD: u16 = 32;
 const DIFF_FLASH_MAX_RECTS: usize = 64;
+const FOOTBAR_HEIGHT: f32 = 26.0;
+const FOOTBAR_BUTTON_HEIGHT: f32 = 20.0;
+const FOOTBAR_ICON_SIZE: f32 = 14.0;
 
 static NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -5352,7 +5356,7 @@ impl PdfView {
             .items_center()
             .h(px(30.0))
             .px_3()
-            .text_size(px(13.0))
+            .text_size(ui_rems(13.0))
             .text_color(rgb(theme.text))
             .cursor_pointer()
             .hover(move |style| style.bg(rgb(theme.element_hover)))
@@ -5373,7 +5377,7 @@ impl PdfView {
             .items_center()
             .h(px(24.0))
             .px_3()
-            .text_size(px(12.0))
+            .text_size(ui_rems(12.0))
             .text_color(rgb(theme.text_muted))
             .child(label)
     }
@@ -5393,7 +5397,7 @@ impl PdfView {
             .border_1()
             .border_color(rgb(theme.border))
             .bg(rgba(0x00000000))
-            .text_size(px(12.0))
+            .text_size(ui_rems(12.0))
             .text_color(rgb(theme.text))
             .cursor_pointer()
             .hover(move |style| style.bg(rgb(theme.element_hover)))
@@ -5418,7 +5422,7 @@ impl PdfView {
             .items_center()
             .h(px(30.0))
             .px_3()
-            .text_size(px(13.0))
+            .text_size(ui_rems(13.0))
             .text_color(rgb(theme.text))
             .cursor_pointer()
             .hover(move |style| style.bg(rgb(theme.element_hover)))
@@ -5485,7 +5489,7 @@ impl PdfView {
             .border_1()
             .border_color(rgb(theme.border))
             .bg(rgb(theme.surface_background))
-            .text_size(px(13.0))
+            .text_size(ui_rems(13.0))
             .text_color(rgb(theme.text));
 
         for line in body.as_ref().lines() {
@@ -5571,7 +5575,7 @@ impl PdfView {
             .border_r(px(1.0))
             .border_color(rgb(theme.border))
             .bg(rgb(theme.surface_background))
-            .text_size(px(12.0))
+            .text_size(ui_rems(12.0))
             .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -5594,7 +5598,7 @@ impl PdfView {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(13.0))
+                            .text_size(ui_rems(13.0))
                             .child(title),
                     )
                     .child(div().flex_none().child(header_end)),
@@ -5867,16 +5871,21 @@ impl PdfView {
         self.toc_sidebar_entries_dirty = false;
     }
 
-    fn render_toc_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let open = self.toc_sidebar_open;
-
+    fn render_footbar_icon_button(
+        icon: IconName,
+        open: bool,
+        theme: Theme,
+        handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .flex()
             .flex_none()
             .items_center()
             .justify_center()
-            .h(px(20.0))
+            .h(ui_rems(FOOTBAR_BUTTON_HEIGHT))
             .px_2()
+            .rounded(px(4.0))
             .text_color(rgb(if open {
                 theme.accent
             } else {
@@ -5891,45 +5900,40 @@ impl PdfView {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.toggle_toc_sidebar(window, cx);
+                cx.listener(move |this, _, window, cx| {
+                    handler(this, window, cx);
                     cx.stop_propagation();
                 }),
             )
-            .child("☰")
+            .child(Icon::new(
+                icon,
+                ui_rems(FOOTBAR_ICON_SIZE),
+                rgb(if open {
+                    theme.accent
+                } else {
+                    theme.footer_text
+                }),
+            ))
+    }
+
+    fn render_toc_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        Self::render_footbar_icon_button(
+            IconName::TableOfContents,
+            self.toc_sidebar_open,
+            theme,
+            |this, window, cx| this.toggle_toc_sidebar(window, cx),
+            cx,
+        )
     }
 
     fn render_notes_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let open = self.notes_sidebar_open;
-
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .h(px(20.0))
-            .px_2()
-            .mr_2()
-            .text_color(rgb(if open {
-                theme.accent
-            } else {
-                theme.footer_text
-            }))
-            .bg(if open {
-                rgb(theme.element_selected)
-            } else {
-                rgba(0x00000000)
-            })
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.toggle_notes_sidebar(window, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child("✎")
+        Self::render_footbar_icon_button(
+            IconName::NotebookTabs,
+            self.notes_sidebar_open,
+            theme,
+            |this, window, cx| this.toggle_notes_sidebar(window, cx),
+            cx,
+        )
     }
 
     fn render_thumbnail_sidebar_button(
@@ -5937,36 +5941,13 @@ impl PdfView {
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let open = self.thumbnail_sidebar_open;
-
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .h(px(20.0))
-            .px_2()
-            .mr_2()
-            .text_color(rgb(if open {
-                theme.accent
-            } else {
-                theme.footer_text
-            }))
-            .bg(if open {
-                rgb(theme.element_selected)
-            } else {
-                rgba(0x00000000)
-            })
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.toggle_thumbnail_sidebar(window, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child("▤")
+        Self::render_footbar_icon_button(
+            IconName::PanelLeft,
+            self.thumbnail_sidebar_open,
+            theme,
+            |this, window, cx| this.toggle_thumbnail_sidebar(window, cx),
+            cx,
+        )
     }
 
     fn render_grid_overview_button(
@@ -5974,69 +5955,23 @@ impl PdfView {
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let open = self.grid_overview_open;
-
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .h(px(20.0))
-            .px_2()
-            .mr_2()
-            .text_color(rgb(if open {
-                theme.accent
-            } else {
-                theme.footer_text
-            }))
-            .bg(if open {
-                rgb(theme.element_selected)
-            } else {
-                rgba(0x00000000)
-            })
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.toggle_grid_overview(cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child("⊞")
+        Self::render_footbar_icon_button(
+            IconName::LayoutGrid,
+            self.grid_overview_open,
+            theme,
+            |this, _, cx| this.toggle_grid_overview(cx),
+            cx,
+        )
     }
 
     fn render_ai_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let open = self.ai_panel.is_some();
-
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .h(px(20.0))
-            .px_2()
-            .mr_2()
-            .text_color(rgb(if open {
-                theme.accent
-            } else {
-                theme.footer_text
-            }))
-            .bg(if open {
-                rgb(theme.element_selected)
-            } else {
-                rgba(0x00000000)
-            })
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.toggle_ai_panel(window, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child("AI")
+        Self::render_footbar_icon_button(
+            IconName::Bot,
+            self.ai_panel.is_some(),
+            theme,
+            |this, window, cx| this.toggle_ai_panel(window, cx),
+            cx,
+        )
     }
 
     fn selected_page_indices(&self, source: PageSelectionSource) -> Vec<usize> {
@@ -6613,7 +6548,7 @@ impl PdfView {
                                                                                     0xe8,
                                                                                 ),
                                                                             ))
-                                                                            .text_size(px(13.0))
+                                                                            .text_size(ui_rems(13.0))
                                                                             .text_color(rgb(
                                                                                 if selected {
                                                                                     theme.accent
@@ -6633,7 +6568,7 @@ impl PdfView {
                                                             div()
                                                                 .mt_1()
                                                                 .h(px(THUMBNAIL_SIDEBAR_LABEL_HEIGHT))
-                                                                .text_size(px(11.0))
+                                                                .text_size(ui_rems(11.0))
                                                                 .text_color(rgb(label_color))
                                                                 .child(format!("{}", page_idx + 1)),
                                                         ),
@@ -6729,7 +6664,7 @@ impl PdfView {
             .flex()
             .flex_col()
             .bg(rgb(theme.surface_background))
-            .text_size(px(12.0))
+            .text_size(ui_rems(12.0))
             .text_color(rgb(theme.text))
             .on_mouse_down(
                 MouseButton::Left,
@@ -6768,7 +6703,7 @@ impl PdfView {
                     .px_3()
                     .border_b(px(1.0))
                     .border_color(rgb(theme.border))
-                    .child(div().text_size(px(13.0)).child("Page Overview"))
+                    .child(div().text_size(ui_rems(13.0)).child("Page Overview"))
                     .child(
                         {
                             let mut toolbar = div().flex().items_center().gap_2();
@@ -7002,7 +6937,7 @@ impl PdfView {
                                                                                     0xe8,
                                                                                 ),
                                                                             ))
-                                                                            .text_size(px(13.0))
+                                                                            .text_size(ui_rems(13.0))
                                                                             .text_color(rgb(
                                                                                 if selected {
                                                                                     theme.accent
@@ -7021,7 +6956,7 @@ impl PdfView {
                                                         .child(
                                                             div()
                                                                 .mt_1()
-                                                                .text_size(px(11.0))
+                                                                .text_size(ui_rems(11.0))
                                                                 .text_color(rgb(label_color))
                                                                 .child(format!("{}", page_idx + 1)),
                                                         ),
@@ -7313,14 +7248,14 @@ impl PdfView {
                                                     .child(
                                                         div()
                                                             .truncate()
-                                                            .text_size(px(13.0))
+                                                            .text_size(ui_rems(13.0))
                                                             .text_color(rgb(theme.text))
                                                             .child(body),
                                                     )
                                                     .child(
                                                         div()
                                                             .truncate()
-                                                            .text_size(px(11.0))
+                                                            .text_size(ui_rems(11.0))
                                                             .text_color(rgb(theme.text_muted))
                                                             .child(text),
                                                     ),
@@ -7414,14 +7349,14 @@ impl PdfView {
                 .text_align(gpui::TextAlign::Center)
                 .child(
                     div()
-                        .text_size(px(15.0))
+                        .text_size(ui_rems(15.0))
                         .text_color(rgb(theme.error))
                         .child("Failed to load PDF"),
                 )
                 .child(
                     div()
                         .max_w(px(520.0))
-                        .text_size(px(12.0))
+                        .text_size(ui_rems(12.0))
                         .text_color(rgb(theme.text_muted))
                         .child(error.clone()),
                 )
@@ -7477,13 +7412,13 @@ impl PdfView {
                 )
                 .child(
                     div()
-                        .text_size(px(14.0))
+                        .text_size(ui_rems(14.0))
                         .text_color(rgb(theme.text_muted))
                         .child(format!("Loading {}", self.file_name)),
                 )
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(ui_rems(12.0))
                         .text_color(rgb(theme.text_muted))
                         .child(format!("{} pages", self.page_count)),
                 )
@@ -8411,12 +8346,12 @@ impl Render for PdfView {
                             .justify_between()
                             .w_full()
                             .flex_none()
-                            .h(px(26.0))
+                            .h(ui_rems(FOOTBAR_HEIGHT))
                             .px_3()
                             .border_t(px(1.0))
                             .border_color(rgb(theme.border))
                             .bg(rgb(theme.tab_bar_background))
-                            .text_size(px(12.0))
+                            .text_size(ui_rems(12.0))
                             .text_color(rgb(theme.footer_text))
                             .child(
                                 div()
@@ -8424,6 +8359,7 @@ impl Render for PdfView {
                                     .min_w_0()
                                     .flex()
                                     .items_center()
+                                    .gap_1()
                                     .child(self.render_toc_button(theme, cx))
                                     .child(self.render_notes_button(theme, cx))
                                     .child(self.render_thumbnail_sidebar_button(theme, cx))
@@ -8463,7 +8399,7 @@ impl Render for PdfView {
                             .absolute()
                             .left(px(0.0))
                             .right(px(0.0))
-                            .bottom(px(26.0))
+                            .bottom(ui_rems(FOOTBAR_HEIGHT))
                             .flex()
                             .child(quick_ask),
                     )

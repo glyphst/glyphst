@@ -9,6 +9,7 @@ use gpui::{
 
 use crate::{
     command_palette::{CommandPalette, CommandPaletteDelegate},
+    icons::{Icon, IconName},
     library::{DocumentPosition, LibraryStore, normalize_path},
     new_tab::{NewTab, NewTabEvent},
     open_workspace_window_at,
@@ -17,7 +18,7 @@ use crate::{
         PdfViewEvent, ToggleCommandPalette,
     },
     picker::{Picker, PickerEvent},
-    settings::{SettingsStore, TabBarVisibility, setup_ui_font},
+    settings::{SettingsStore, TabBarVisibility, setup_ui_font, ui_rems},
     settings_window::open_settings_window,
     theme::Theme,
 };
@@ -47,16 +48,16 @@ struct DraggedTab {
 impl Render for DraggedTab {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .h(px(32.0))
-            .max_w(px(220.0))
-            .min_w(px(120.0))
+            .h(ui_rems(TOOLBAR_HEIGHT))
+            .max_w(ui_rems(220.0))
+            .min_w(ui_rems(120.0))
             .px_2()
             .flex()
             .items_center()
             .border_1()
             .border_color(rgb(self.theme.border))
             .bg(rgb(self.theme.tab_active_background))
-            .text_size(px(12.0))
+            .text_size(ui_rems(12.0))
             .text_color(rgb(self.theme.text))
             .child(
                 div()
@@ -74,6 +75,18 @@ enum ToolbarMenu {
     File,
     Tab,
 }
+
+const TOOLBAR_HEIGHT: f32 = 32.0;
+const TOOLBAR_MENU_TEXT_SIZE: f32 = 12.0;
+const TOOLBAR_DROPDOWN_TEXT_SIZE: f32 = 13.0;
+const TOOLBAR_DROPDOWN_WIDTH: f32 = 190.0;
+const TOOLBAR_ICON_SIZE: f32 = 16.0;
+const TOOLBAR_BUTTON_HEIGHT: f32 = 24.0;
+const TOOLBAR_PADDING_X: f32 = 4.0;
+const TOOLBAR_GAP: f32 = 4.0;
+const TOOLBAR_GLYPHST_WIDTH: f32 = 84.0;
+const TOOLBAR_FILE_WIDTH: f32 = 56.0;
+const TOOLBAR_TAB_WIDTH: f32 = 52.0;
 
 pub(crate) struct Workspace {
     tabs: Vec<Tab>,
@@ -738,15 +751,23 @@ impl Workspace {
         }
     }
 
-    fn render_toolbar_icon_button(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn toolbar_icon_button(
+        icon: IconName,
+        active: bool,
+        theme: Theme,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
-            .w(px(32.0))
-            .h_full()
+            .flex_none()
+            .w(ui_rems(28.0))
+            .h(ui_rems(TOOLBAR_BUTTON_HEIGHT))
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(14.0))
-            .text_color(rgb(theme.text_muted))
+            .rounded(px(4.0))
+            .text_color(rgb(if active { theme.text } else { theme.text_muted }))
+            .when(active, |this| this.bg(rgb(theme.element_hover)))
             .hover(move |style| {
                 style
                     .bg(rgb(theme.element_hover))
@@ -755,20 +776,24 @@ impl Workspace {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.toolbar_menu_open = true;
-                    this.toolbar_open_menu = Some(ToolbarMenu::Glyphst);
+                cx.listener(move |this, _, window, cx| {
+                    on_click(this, window, cx);
                     cx.notify();
                     cx.stop_propagation();
                 }),
             )
-            .child("☰")
+            .child(Icon::new(
+                icon,
+                ui_rems(TOOLBAR_ICON_SIZE),
+                rgb(if active { theme.text } else { theme.text_muted }),
+            ))
             .into_any_element()
     }
 
     fn render_toolbar_menu_button(
         &self,
         label: &'static str,
+        icon: IconName,
         menu: ToolbarMenu,
         width: f32,
         theme: Theme,
@@ -777,12 +802,15 @@ impl Workspace {
         let active = self.toolbar_open_menu == Some(menu);
 
         div()
-            .w(px(width))
-            .h_full()
+            .w(ui_rems(width))
+            .h(ui_rems(TOOLBAR_BUTTON_HEIGHT))
+            .px_2()
             .flex()
+            .gap_1()
             .items_center()
             .justify_center()
-            .text_size(px(12.0))
+            .rounded(px(4.0))
+            .text_size(ui_rems(TOOLBAR_MENU_TEXT_SIZE))
             .text_color(rgb(if active { theme.text } else { theme.text_muted }))
             .when(active, |this| this.bg(rgb(theme.element_hover)))
             .hover(move |style| {
@@ -804,6 +832,11 @@ impl Workspace {
                     cx.stop_propagation();
                 }),
             )
+            .child(Icon::new(
+                icon,
+                ui_rems(TOOLBAR_ICON_SIZE),
+                rgb(if active { theme.text } else { theme.text_muted }),
+            ))
             .child(label)
             .into_any_element()
     }
@@ -812,13 +845,15 @@ impl Workspace {
         let expanded = self.toolbar_menu_open || self.active_tab_is_new_tab();
         let mut toolbar = div()
             .flex_none()
-            .h(px(32.0))
+            .h(ui_rems(TOOLBAR_HEIGHT))
             .flex()
             .items_center()
+            .gap_1()
+            .px_1()
             .border_b(px(1.0))
             .border_color(rgb(theme.border))
             .bg(rgb(theme.tab_bar_background))
-            .text_size(px(12.0))
+            .text_size(ui_rems(TOOLBAR_MENU_TEXT_SIZE))
             .text_color(rgb(theme.text))
             .on_mouse_down(
                 MouseButton::Left,
@@ -832,22 +867,47 @@ impl Workspace {
             toolbar = toolbar
                 .child(self.render_toolbar_menu_button(
                     "Glyphst",
+                    IconName::AppWindow,
                     ToolbarMenu::Glyphst,
-                    64.0,
+                    TOOLBAR_GLYPHST_WIDTH,
                     theme,
                     cx,
                 ))
-                .child(self.render_toolbar_menu_button("File", ToolbarMenu::File, 44.0, theme, cx))
-                .child(self.render_toolbar_menu_button("Tab", ToolbarMenu::Tab, 42.0, theme, cx));
+                .child(self.render_toolbar_menu_button(
+                    "File",
+                    IconName::File,
+                    ToolbarMenu::File,
+                    TOOLBAR_FILE_WIDTH,
+                    theme,
+                    cx,
+                ))
+                .child(self.render_toolbar_menu_button(
+                    "Tab",
+                    IconName::Plus,
+                    ToolbarMenu::Tab,
+                    TOOLBAR_TAB_WIDTH,
+                    theme,
+                    cx,
+                ));
         } else {
-            toolbar = toolbar.child(self.render_toolbar_icon_button(theme, cx));
+            toolbar = toolbar.child(Self::toolbar_icon_button(
+                IconName::Menu,
+                false,
+                theme,
+                |this, _, cx| {
+                    this.toolbar_menu_open = true;
+                    this.toolbar_open_menu = Some(ToolbarMenu::Glyphst);
+                    cx.notify();
+                },
+                cx,
+            ));
             if let Some(label) = self.active_document_label(cx) {
                 toolbar = toolbar.child(
                     div()
                         .min_w_0()
                         .max_w(px(360.0))
                         .truncate()
-                        .px_2()
+                        .px_1()
                         .text_color(rgb(theme.text_muted))
                         .child(label),
                 );
@@ -866,9 +926,9 @@ impl Workspace {
         div()
             .flex()
             .items_center()
-            .h(px(30.0))
+            .h(ui_rems(30.0))
             .px_3()
-            .text_size(px(13.0))
+            .text_size(ui_rems(TOOLBAR_DROPDOWN_TEXT_SIZE))
             .text_color(rgb(theme.text))
             .cursor_pointer()
             .hover(move |style| style.bg(rgb(theme.element_hover)))
@@ -884,11 +944,17 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn toolbar_menu_left(menu: ToolbarMenu) -> f32 {
+    fn toolbar_menu_left(menu: ToolbarMenu) -> gpui::Rems {
         match menu {
-            ToolbarMenu::Glyphst => 4.0,
-            ToolbarMenu::File => 64.0,
-            ToolbarMenu::Tab => 108.0,
+            ToolbarMenu::Glyphst => ui_rems(TOOLBAR_PADDING_X),
+            ToolbarMenu::File => ui_rems(TOOLBAR_PADDING_X + TOOLBAR_GLYPHST_WIDTH + TOOLBAR_GAP),
+            ToolbarMenu::Tab => ui_rems(
+                TOOLBAR_PADDING_X
+                    + TOOLBAR_GLYPHST_WIDTH
+                    + TOOLBAR_GAP
+                    + TOOLBAR_FILE_WIDTH
+                    + TOOLBAR_GAP,
+            ),
         }
     }
 
@@ -902,13 +968,13 @@ impl Workspace {
             .occlude()
             .absolute()
             .top_0()
-            .left(px(Self::toolbar_menu_left(menu)))
-            .w(px(190.0))
+            .left(Self::toolbar_menu_left(menu))
+            .w(ui_rems(TOOLBAR_DROPDOWN_WIDTH))
             .py_1()
             .border_1()
             .border_color(rgb(theme.border))
             .bg(rgb(theme.surface_background))
-            .text_size(px(13.0))
+            .text_size(ui_rems(TOOLBAR_DROPDOWN_TEXT_SIZE))
             .text_color(rgb(theme.text))
             .on_mouse_down(
                 MouseButton::Left,
@@ -972,7 +1038,7 @@ impl Workspace {
 
         div()
             .absolute()
-            .top(px(32.0))
+            .top(ui_rems(TOOLBAR_HEIGHT))
             .left_0()
             .size_full()
             .on_mouse_down(
@@ -1006,9 +1072,9 @@ impl Workspace {
 
         div()
             .id(("tab", tab_ix))
-            .h(px(32.0))
-            .max_w(px(220.0))
-            .min_w(px(120.0))
+            .h(ui_rems(TOOLBAR_HEIGHT))
+            .max_w(ui_rems(220.0))
+            .min_w(ui_rems(120.0))
             .px_2()
             .flex()
             .items_center()
@@ -1066,11 +1132,12 @@ impl Workspace {
             .child(
                 div()
                     .flex_none()
-                    .w(px(20.0))
-                    .h(px(20.0))
+                    .w(ui_rems(22.0))
+                    .h(ui_rems(22.0))
                     .flex()
                     .items_center()
                     .justify_center()
+                    .rounded(px(4.0))
                     .text_color(rgb(theme.text_muted))
                     .hover(move |style| {
                         style
@@ -1084,7 +1151,7 @@ impl Workspace {
                             cx.stop_propagation();
                         }),
                     )
-                    .child("×"),
+                    .child(Icon::new(IconName::X, ui_rems(14.0), rgb(theme.text_muted))),
             )
             .into_any_element()
     }
@@ -1101,14 +1168,14 @@ impl Workspace {
 
         div()
             .flex_none()
-            .h(px(32.0))
+            .h(ui_rems(TOOLBAR_HEIGHT))
             .flex()
             .items_stretch()
             .bg(rgb(theme.tab_bar_background))
             .children(tabs)
             .child(
                 div()
-                    .w(px(32.0))
+                    .w(ui_rems(32.0))
                     .h_full()
                     .flex()
                     .items_center()
@@ -1116,7 +1183,6 @@ impl Workspace {
                     .border_r(px(1.0))
                     .border_b(px(1.0))
                     .border_color(rgb(theme.border))
-                    .text_size(px(18.0))
                     .text_color(rgb(theme.text_muted))
                     .hover(move |style| {
                         style
@@ -1131,7 +1197,11 @@ impl Workspace {
                             cx.stop_propagation();
                         }),
                     )
-                    .child("+"),
+                    .child(Icon::new(
+                        IconName::Plus,
+                        ui_rems(16.0),
+                        rgb(theme.text_muted),
+                    )),
             )
             .child(
                 div()
