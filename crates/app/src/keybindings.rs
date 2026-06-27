@@ -17,8 +17,8 @@ use crate::{
         GridCursorLeft, GridCursorRight, GridCursorUp, GridOverviewConfirm, JumpBackward,
         JumpForward, NextHalfPage, NextPage, OpenBookmarks, OpenFile, OpenGoToPage, OpenHistory,
         OpenNewTab, OpenNotes, OpenQuickAsk, OpenSettings, PreviousHalfPage, PreviousPage, Reload,
-        ResetZoom, Search, SearchNext, SearchPrev, SelectAll, Toc, ToggleAiPanel,
-        ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview, ToggleNotes,
+        ResetZoom, ScrollLineDown, ScrollLineUp, Search, SearchNext, SearchPrev, SelectAll, Toc,
+        ToggleAiPanel, ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview, ToggleNotes,
         ToggleThumbnailSidebar, ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
     },
     picker::{
@@ -158,6 +158,8 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind::<Search>("/", PDF_CONTEXT),
             bind::<SearchNext>("n", PDF_CONTEXT),
             bind::<SearchPrev>("shift-n", PDF_CONTEXT),
+            bind::<ScrollLineDown>("j", PDF_CONTEXT),
+            bind::<ScrollLineUp>("k", PDF_CONTEXT),
             bind::<NextPage>("ctrl-f", PDF_CONTEXT),
             bind::<PreviousPage>("ctrl-b", PDF_CONTEXT),
             bind::<NextHalfPage>("ctrl-d", PDF_CONTEXT),
@@ -652,6 +654,16 @@ fn action_specs() -> &'static [ActionSpec] {
             aliases: &["previous-half-page", "prev-half-page"],
             context: Some(PDF_CONTEXT),
             build: boxed::<PreviousHalfPage>,
+        },
+        ActionSpec {
+            aliases: &["scroll-line-down", "scroll-down"],
+            context: Some(PDF_CONTEXT),
+            build: boxed::<ScrollLineDown>,
+        },
+        ActionSpec {
+            aliases: &["scroll-line-up", "scroll-up"],
+            context: Some(PDF_CONTEXT),
+            build: boxed::<ScrollLineUp>,
         },
         ActionSpec {
             aliases: &[

@@ -68,6 +68,8 @@ gpui::actions!(
         PreviousPage,
         NextHalfPage,
         PreviousHalfPage,
+        ScrollLineDown,
+        ScrollLineUp,
         GoToBeginning,
         GoToEnd,
         JumpBackward,
@@ -103,6 +105,7 @@ const INITIAL_SELECTION_TOLERANCE_PX: f32 = 24.0;
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 8.0;
 const SCROLL_LINE_MULTIPLIER: f32 = 20.0;
+const SCROLL_LINE_STEP_PX: f32 = 120.0;
 const SMOOTH_SCROLL_LARGE_JUMP_VIEWPORTS: f32 = 3.0;
 const CTRL_SCROLL_ZOOM_STEP_MULTIPLIER: f32 = 0.25;
 const MAX_CACHED_RENDERS: usize = 2048;
@@ -4682,6 +4685,17 @@ impl PdfView {
         }
     }
 
+    fn scroll_line(&mut self, direction: f32, cx: &mut Context<Self>) {
+        let delta = SCROLL_LINE_STEP_PX / self.effective_scale();
+        if self.set_scroll_doc_target(
+            self.target_scroll_x_doc,
+            self.target_scroll_y_doc + direction * delta,
+            cx,
+        ) {
+            self.mark_manual_navigation();
+        }
+    }
+
     fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         if self.control_down {
             let zoom_delta = match event.delta {
@@ -7822,6 +7836,12 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &PreviousHalfPage, _, cx| {
                 this.previous_half_page(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ScrollLineDown, _, cx| {
+                this.scroll_line(1.0, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ScrollLineUp, _, cx| {
+                this.scroll_line(-1.0, cx);
             }))
             .on_action(cx.listener(|this, _: &GoToBeginning, _, cx| {
                 this.go_to_beginning(cx);
