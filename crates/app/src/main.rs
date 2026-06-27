@@ -26,6 +26,7 @@ mod library;
 mod new_tab;
 mod note_editor;
 mod notes;
+mod pane;
 mod pdf_view;
 mod picker;
 mod scrollbar;

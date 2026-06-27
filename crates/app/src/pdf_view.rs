@@ -2350,7 +2350,7 @@ impl PdfView {
         self.clamp_scroll();
     }
 
-    fn current_document_position(&self) -> DocumentPosition {
+    pub(crate) fn current_document_position(&self) -> DocumentPosition {
         DocumentPosition {
             scroll_x_doc: self.target_scroll_x_doc,
             scroll_y_doc: self.target_scroll_y_doc,
