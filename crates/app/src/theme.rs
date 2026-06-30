@@ -14,9 +14,27 @@ pub const DEFAULT_PAGE_GAP: f32 = 4.0;
 const MIN_PAGE_GAP: f32 = 0.0;
 const MAX_PAGE_GAP: f32 = 240.0;
 
-const BUILTIN_THEMES: [(&str, &str); 2] = [
+const BUILTIN_THEMES: [(&str, &str); 8] = [
     ("one-light", include_str!("../themes/one-light.kdl")),
     ("one-dark", include_str!("../themes/one-dark.kdl")),
+    ("modus-operandi", include_str!("../themes/modus-operandi.kdl")),
+    ("modus-vivendi", include_str!("../themes/modus-vivendi.kdl")),
+    (
+        "modus-operandi-tinted",
+        include_str!("../themes/modus-operandi-tinted.kdl"),
+    ),
+    (
+        "modus-operandi-deuteranopia",
+        include_str!("../themes/modus-operandi-deuteranopia.kdl"),
+    ),
+    (
+        "modus-vivendi-tinted",
+        include_str!("../themes/modus-vivendi-tinted.kdl"),
+    ),
+    (
+        "modus-vivendi-deuteranopia",
+        include_str!("../themes/modus-vivendi-deuteranopia.kdl"),
+    ),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
