@@ -1,10 +1,13 @@
 use std::ops::Range;
 
-use crate::picker::{Picker, PickerDelegate, fuzzy_match};
-use crate::theme::Theme;
+use crate::{
+    picker::{Picker, PickerDelegate, fuzzy_match},
+    settings::ui_rems,
+    theme::Theme,
+};
 use gpui::{
-    Action, AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, SharedString, StyledText,
-    Window, div, prelude::*, rgb,
+    Action, AnyElement, Context, FocusHandle, HighlightStyle, SharedString, StyledText, Window,
+    div, prelude::*, rgb,
 };
 
 const MAX_VISIBLE_MATCHES: usize = 10;
@@ -145,7 +148,6 @@ impl PickerDelegate for CommandPaletteDelegate {
                     range,
                     HighlightStyle {
                         color: Some(rgb(theme.match_highlight).into()),
-                        font_weight: Some(FontWeight::BOLD),
                         ..Default::default()
                     },
                 )
@@ -158,6 +160,7 @@ impl PickerDelegate for CommandPaletteDelegate {
             .items_center()
             .justify_between()
             .w_full()
+            .text_size(ui_rems(11.0))
             .child(
                 div()
                     .flex_1()
@@ -206,41 +209,114 @@ fn normalize_action_query(input: &str) -> String {
     let mut last_char = None;
 
     for char in input.trim().chars() {
-        match (last_char, char) {
+        let normalized_char = if char == '_' { ' ' } else { char };
+        match (last_char, normalized_char) {
             (Some(':'), ':') => continue,
             (Some(last_char), char) if last_char.is_whitespace() && char.is_whitespace() => {
                 continue;
             }
             _ => {
-                last_char = Some(char);
+                last_char = Some(normalized_char);
             }
         }
-        result.push(char);
+        result.push(normalized_char);
     }
 
     result
 }
 
 fn humanize_action_name(name: &str) -> String {
-    let capacity = name.len() + name.chars().filter(|ch| ch.is_uppercase()).count();
+    let chars = name.chars().collect::<Vec<_>>();
+    let capacity = name.len() + chars.iter().filter(|ch| ch.is_uppercase()).count();
     let mut result = String::with_capacity(capacity);
-    for char in name.chars() {
+    let mut index = 0;
+
+    while index < chars.len() {
+        let char = chars[index];
         if char == ':' {
             if result.ends_with(':') {
                 result.push(' ');
             } else {
                 result.push(':');
             }
+            index += 1;
         } else if char == '_' {
             result.push(' ');
+            index += 1;
         } else if char.is_uppercase() {
-            if !result.ends_with(' ') {
-                result.push(' ');
+            let start = index;
+            index += 1;
+            while chars
+                .get(index)
+                .is_some_and(|next_char| next_char.is_uppercase())
+            {
+                index += 1;
             }
-            result.extend(char.to_lowercase());
+
+            let uppercase_run = &chars[start..index];
+            if uppercase_run.len() > 1 {
+                let split_before_last = chars
+                    .get(index)
+                    .is_some_and(|next_char| next_char.is_lowercase());
+                let acronym_end = if split_before_last {
+                    uppercase_run.len() - 1
+                } else {
+                    uppercase_run.len()
+                };
+
+                if acronym_end > 0 {
+                    if !result.ends_with(' ') {
+                        result.push(' ');
+                    }
+                    result.extend(&uppercase_run[..acronym_end]);
+                }
+
+                if split_before_last {
+                    if !result.ends_with(' ') {
+                        result.push(' ');
+                    }
+                    result.extend(uppercase_run[acronym_end].to_lowercase());
+                }
+            } else {
+                if !result.ends_with(' ') {
+                    result.push(' ');
+                }
+                result.extend(char.to_lowercase());
+            }
         } else {
             result.push(char);
+            index += 1;
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_action_queries_like_zed() {
+        assert_eq!(
+            normalize_action_query("terminal_panel::Toggle"),
+            "terminal panel:Toggle"
+        );
+        assert_eq!(
+            normalize_action_query("editor:    backspace"),
+            "editor: backspace"
+        );
+    }
+
+    #[test]
+    fn humanizes_action_names_like_zed() {
+        assert_eq!(
+            humanize_action_name("editor::GoToDefinition"),
+            "editor: go to definition"
+        );
+        assert_eq!(humanize_action_name("editor::OpenURL"), "editor: open URL");
+        assert_eq!(
+            humanize_action_name("editor::OpenURLParser"),
+            "editor: open URL parser"
+        );
+    }
 }

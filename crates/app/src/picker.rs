@@ -4,12 +4,12 @@ use crate::scrollbar::uniform_list_scrollbar_for;
 use crate::settings::{SettingsStore, ui_rems};
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
+    AnyElement, App, Bounds, BoxShadow, ClipboardItem, Context, CursorStyle, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollStrategy,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UniformListScrollHandle, Window, div,
-    fill, point, prelude::*, px, relative, rgb, rgba, size, uniform_list,
+    fill, hsla, point, prelude::*, px, relative, rgb, rgba, size, uniform_list,
 };
 
 gpui::actions!(
@@ -37,8 +37,11 @@ gpui::actions!(
     ]
 );
 
-const INPUT_HEIGHT: f32 = 50.0;
+const INPUT_HEIGHT: f32 = 40.0;
 const DRAG_SELECT_THRESHOLD: f32 = 2.0;
+const LIST_VERTICAL_PADDING: f32 = 4.0;
+const MODAL_RADIUS: f32 = 8.0;
+const ROW_RADIUS: f32 = 6.0;
 
 pub enum PickerEvent {
     Dismissed,
@@ -622,8 +625,10 @@ impl<D: PickerDelegate> Render for Picker<D> {
             .flex()
             .flex_col()
             .w(px(self.delegate.width()))
+            .rounded(px(MODAL_RADIUS))
             .border_1()
-            .border_color(rgb(theme.border))
+            .border_color(rgb(theme.border_variant))
+            .shadow(modal_shadow(theme))
             .overflow_hidden()
             .bg(rgb(theme.surface_background))
             .text_color(rgb(theme.text))
@@ -656,7 +661,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                     .h(px(INPUT_HEIGHT))
                     .px_3()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.border))
+                    .border_color(rgb(theme.border_variant))
                     .cursor(CursorStyle::IBeam)
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -670,6 +675,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
+                    .py(px(LIST_VERTICAL_PADDING))
                     .when(match_count == 0, |this| {
                         this.child(
                             div()
@@ -682,68 +688,89 @@ impl<D: PickerDelegate> Render for Picker<D> {
                         )
                     })
                     .when(match_count > 0, |this| {
-                        this.h(px(list_height))
-                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                            .child(
-                                uniform_list(
-                                    "picker-matches",
-                                    match_count,
-                                    cx.processor(
-                                        move |this, visible_range: Range<usize>, window, cx| {
-                                            let theme = cx.global::<SettingsStore>().resolved_theme;
-                                            let row_height = this.row_height();
-                                            let previous_focus_handle =
-                                                this.previous_focus_handle.clone();
+                        this.child(
+                            div()
+                                .h(px(list_height))
+                                .overflow_hidden()
+                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                .child(
+                                    uniform_list(
+                                        "picker-matches",
+                                        match_count,
+                                        cx.processor(
+                                            move |this, visible_range: Range<usize>, window, cx| {
+                                                let theme =
+                                                    cx.global::<SettingsStore>().resolved_theme;
+                                                let row_height = this.row_height();
+                                                let previous_focus_handle =
+                                                    this.previous_focus_handle.clone();
 
-                                            visible_range
-                                                .map(|match_ix| {
-                                                    let selected = match_ix == this.selected_ix;
-                                                    div()
-                                                        .flex()
-                                                        .flex_row()
-                                                        .items_center()
-                                                        .justify_between()
-                                                        .w_full()
-                                                        .h(px(row_height))
-                                                        .px_3()
-                                                        .text_size(ui_rems(13.0))
-                                                        .bg(if selected {
-                                                            rgb(theme.element_selected)
-                                                        } else {
-                                                            rgba(0x00000000)
-                                                        })
-                                                        .on_mouse_down(
-                                                            MouseButton::Left,
-                                                            cx.listener(
-                                                                move |this, _, window, cx| {
-                                                                    this.selected_ix = match_ix;
-                                                                    this.confirm_selected(
-                                                                        window, cx,
-                                                                    );
-                                                                    cx.stop_propagation();
-                                                                },
-                                                            ),
-                                                        )
-                                                        .child(this.delegate.render_match(
-                                                            match_ix,
-                                                            theme,
-                                                            &previous_focus_handle,
-                                                            window,
-                                                        ))
-                                                })
-                                                .collect::<Vec<_>>()
-                                        },
-                                    ),
-                                )
-                                .track_scroll(&scroll_handle)
-                                .with_decoration(uniform_list_scrollbar_for(
-                                    &scroll_handle,
-                                    "picker-matches-scrollbar",
-                                    window,
-                                    cx,
-                                ))
-                                .size_full(),
-                            )
+                                                visible_range
+                                                    .map(|match_ix| {
+                                                        let selected = match_ix == this.selected_ix;
+                                                        div()
+                                                            .w_full()
+                                                            .h(px(row_height))
+                                                            .px_1()
+                                                            .text_size(ui_rems(13.0))
+                                                            .cursor_pointer()
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                cx.listener(
+                                                                    move |this, _, window, cx| {
+                                                                        this.selected_ix = match_ix;
+                                                                        this.confirm_selected(
+                                                                            window, cx,
+                                                                        );
+                                                                        cx.stop_propagation();
+                                                                    },
+                                                                ),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .flex()
+                                                                    .flex_row()
+                                                                    .items_center()
+                                                                    .justify_between()
+                                                                    .size_full()
+                                                                    .rounded(px(ROW_RADIUS))
+                                                                    .px_2()
+                                                                    .bg(if selected {
+                                                                        rgb(theme.element_selected)
+                                                                    } else {
+                                                                        rgba(0x00000000)
+                                                                    })
+                                                                    .when(!selected, |this| {
+                                                                        this.hover(move |style| {
+                                                                            style
+                                                                                .bg(rgb(theme
+                                                                                    .element_hover))
+                                                                        })
+                                                                    })
+                                                                    .child(
+                                                                        this.delegate.render_match(
+                                                                            match_ix,
+                                                                            theme,
+                                                                            &previous_focus_handle,
+                                                                            window,
+                                                                        ),
+                                                                    ),
+                                                            )
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                            },
+                                        ),
+                                    )
+                                    .track_scroll(&scroll_handle)
+                                    .with_decoration(uniform_list_scrollbar_for(
+                                        &scroll_handle,
+                                        "picker-matches-scrollbar",
+                                        window,
+                                        cx,
+                                    ))
+                                    .size_full(),
+                                ),
+                        )
                     }),
             )
     }
@@ -945,6 +972,39 @@ impl<D: PickerDelegate> Element for PickerTextElement<D> {
     }
 }
 
+fn modal_shadow(theme: Theme) -> Vec<BoxShadow> {
+    let is_light = is_light_surface(theme);
+
+    vec![
+        BoxShadow::new(
+            px(0.0),
+            px(2.0),
+            hsla(0.0, 0.0, 0.0, if is_light { 0.06 } else { 0.12 }),
+        )
+        .blur_radius(px(3.0)),
+        BoxShadow::new(
+            px(0.0),
+            px(3.0),
+            hsla(0.0, 0.0, 0.0, if is_light { 0.06 } else { 0.08 }),
+        )
+        .blur_radius(px(6.0)),
+        BoxShadow::new(px(0.0), px(6.0), hsla(0.0, 0.0, 0.0, 0.04)).blur_radius(px(12.0)),
+        BoxShadow::new(
+            px(0.0),
+            px(1.0),
+            hsla(0.0, 0.0, 0.0, if is_light { 0.04 } else { 0.12 }),
+        ),
+    ]
+}
+
+fn is_light_surface(theme: Theme) -> bool {
+    let color = theme.surface_background;
+    let r = ((color >> 16) & 0xff) as f32 / 255.0;
+    let g = ((color >> 8) & 0xff) as f32 / 255.0;
+    let b = (color & 0xff) as f32 / 255.0;
+    0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5
+}
+
 pub fn offset_from_utf16_in_text(text: &str, offset: usize) -> usize {
     let mut utf8_offset = 0;
     let mut utf16_count = 0;
@@ -966,40 +1026,105 @@ pub fn fuzzy_match(candidate: &str, query: &str) -> Option<(Vec<Range<usize>>, u
     }
 
     let candidate_chars = candidate.char_indices().collect::<Vec<_>>();
-    let mut highlights = Vec::new();
-    let mut search_start = 0;
-    let mut last_match_ix = None;
-    let mut score = 0;
+    if candidate_chars.is_empty() {
+        return None;
+    }
 
-    for query_ch in query.chars().map(|ch| ch.to_ascii_lowercase()) {
-        let mut found = None;
+    let mut states = vec![None::<MatchState>; candidate_chars.len()];
 
-        for (char_ix, (byte_ix, candidate_ch)) in candidate_chars
-            .iter()
-            .copied()
-            .enumerate()
-            .skip(search_start)
-        {
-            if candidate_ch.to_ascii_lowercase() == query_ch {
-                found = Some((char_ix, byte_ix, candidate_ch.len_utf8()));
-                break;
+    for (query_ix, query_ch) in query.chars().map(|ch| ch.to_ascii_lowercase()).enumerate() {
+        let mut next_states = vec![None::<MatchState>; candidate_chars.len()];
+
+        if query_ix == 0 {
+            for (char_ix, (byte_ix, candidate_ch)) in candidate_chars.iter().copied().enumerate() {
+                if candidate_ch.to_ascii_lowercase() == query_ch {
+                    let mut highlights = Vec::with_capacity(query.len());
+                    highlights.push(byte_ix..byte_ix + candidate_ch.len_utf8());
+                    let state = MatchState {
+                        highlights,
+                        score: fuzzy_match_score(candidate, char_ix, byte_ix, None),
+                    };
+                    replace_state_if_better(&mut next_states[char_ix], state);
+                }
+            }
+        } else {
+            for (previous_ix, state) in states.iter().enumerate() {
+                let Some(state) = state else {
+                    continue;
+                };
+
+                for (char_ix, (byte_ix, candidate_ch)) in candidate_chars
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .skip(previous_ix + 1)
+                {
+                    if candidate_ch.to_ascii_lowercase() != query_ch {
+                        continue;
+                    }
+
+                    let mut next_state = state.clone();
+                    next_state.score +=
+                        fuzzy_match_score(candidate, char_ix, byte_ix, Some(previous_ix));
+                    next_state
+                        .highlights
+                        .push(byte_ix..byte_ix + candidate_ch.len_utf8());
+                    replace_state_if_better(&mut next_states[char_ix], next_state);
+                }
             }
         }
 
-        let (char_ix, byte_ix, byte_len) = found?;
-        score += match last_match_ix {
-            Some(previous_ix) => (char_ix - previous_ix - 1) * 2,
-            None => char_ix,
-        };
-        if is_word_start(candidate, byte_ix) {
-            score = score.saturating_sub(2);
+        if next_states.iter().all(Option::is_none) {
+            return None;
         }
-        highlights.push(byte_ix..byte_ix + byte_len);
-        last_match_ix = Some(char_ix);
-        search_start = char_ix + 1;
+
+        states = next_states;
     }
 
-    Some((highlights, score))
+    states
+        .into_iter()
+        .flatten()
+        .min_by_key(|state| state.score)
+        .map(|state| (state.highlights, state.score))
+}
+
+fn replace_state_if_better(slot: &mut Option<MatchState>, state: MatchState) {
+    if slot
+        .as_ref()
+        .is_none_or(|current| state.score < current.score)
+    {
+        *slot = Some(state);
+    }
+}
+
+#[derive(Clone)]
+struct MatchState {
+    highlights: Vec<Range<usize>>,
+    score: usize,
+}
+
+fn fuzzy_match_score(
+    candidate: &str,
+    char_ix: usize,
+    byte_ix: usize,
+    last_match_ix: Option<usize>,
+) -> usize {
+    let mut score = match last_match_ix {
+        Some(previous_ix) => (char_ix - previous_ix - 1) * 2,
+        None => char_ix,
+    };
+
+    if is_word_start(candidate, byte_ix) {
+        score = score.saturating_sub(10);
+    } else {
+        score += 6;
+    }
+
+    if last_match_ix.is_some_and(|previous_ix| char_ix == previous_ix + 1) {
+        score = score.saturating_sub(4);
+    }
+
+    score
 }
 
 fn is_word_start(text: &str, byte_ix: usize) -> bool {
@@ -1033,4 +1158,22 @@ pub fn normalize_query(input: &str) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fuzzy_match_returns_utf8_ranges() {
+        let (highlights, _) = fuzzy_match("open café", "cé").unwrap();
+        assert_eq!(highlights, vec![5..6, 8..10]);
+    }
+
+    #[test]
+    fn fuzzy_match_prefers_word_starts() {
+        let (_, word_start_score) = fuzzy_match("command palette: toggle", "pt").unwrap();
+        let (_, middle_score) = fuzzy_match("capture total", "pt").unwrap();
+        assert!(word_start_score < middle_score);
+    }
 }
