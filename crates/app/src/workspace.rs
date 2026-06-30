@@ -121,6 +121,12 @@ impl Workspace {
             pane,
             window,
             move |this, _, event: &PaneEvent, window, cx| match event {
+                PaneEvent::Activate => {
+                    if this.active_pane != pane_for_events {
+                        this.active_pane = pane_for_events.clone();
+                        cx.notify();
+                    }
+                }
                 PaneEvent::OpenDocument {
                     path,
                     position,
@@ -167,6 +173,23 @@ impl Workspace {
             }
         })
         .detach();
+
+        let pane_for_observe = pane.clone();
+        cx.observe(pane, move |this, _, cx| {
+            if this.active_pane == pane_for_observe {
+                cx.notify();
+            }
+        })
+        .detach();
+    }
+
+    fn sync_tab_bar_visibility(&mut self, cx: &mut Context<Self>) {
+        let force_show_tab_bar = self.pane_group.panes().len() > 1;
+        for pane in self.pane_group.panes() {
+            pane.update(cx, |pane, cx| {
+                pane.set_force_show_tab_bar(force_show_tab_bar, cx);
+            });
+        }
     }
 
     fn create_pane(
@@ -327,6 +350,7 @@ impl Workspace {
 
         let active_ix = remove_ix.min(remaining.len() - 1);
         self.active_pane = remaining[active_ix].clone();
+        self.sync_tab_bar_visibility(cx);
         self.active_pane
             .update(cx, |pane, cx| pane.focus(window, cx));
         cx.notify();
@@ -347,6 +371,7 @@ impl Workspace {
         let new_pane = self.create_pane(initial_path, initial_position, window, cx);
         self.pane_group.split(&active_pane, &new_pane, direction);
         self.active_pane = new_pane.clone();
+        self.sync_tab_bar_visibility(cx);
         new_pane.update(cx, |pane, cx| pane.focus(window, cx));
         cx.notify();
     }
@@ -416,6 +441,7 @@ impl Workspace {
             }
         }
         self.pane_group.retain_only(self.active_pane.clone());
+        self.sync_tab_bar_visibility(cx);
         self.active_pane
             .update(cx, |pane, cx| pane.focus(window, cx));
         cx.notify();
@@ -424,6 +450,30 @@ impl Workspace {
     fn reset_pane_sizes(&mut self, cx: &mut Context<Self>) {
         self.pane_group.reset_pane_sizes();
         cx.notify();
+    }
+
+    fn render_body(
+        &self,
+        theme: Theme,
+        dim_inactive_panes: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let center =
+            self.pane_group
+                .render(&self.active_pane, theme, dim_inactive_panes, window, cx);
+        let active_pdf_view = self.active_pane.read(cx).active_pdf_view();
+
+        if let Some(active_pdf_view) = active_pdf_view {
+            let has_global_chrome = active_pdf_view.read(cx).has_global_chrome();
+            if has_global_chrome {
+                return active_pdf_view.update(cx, |pdf_view, cx| {
+                    pdf_view.render_workspace_body_with_chrome(center, theme, window, cx)
+                });
+            }
+        }
+
+        center
     }
 
     fn handle_dragged_tab_drop(
@@ -464,6 +514,7 @@ impl Workspace {
                 self.pane_group.split(target_pane, &new_pane, direction);
                 self.active_pane = new_pane.clone();
                 self.remove_dragged_source_tab(dragged_tab, window, cx);
+                self.sync_tab_bar_visibility(cx);
                 new_pane.update(cx, |pane, cx| pane.focus(window, cx));
             }
             target => {
@@ -1013,7 +1064,13 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font = setup_ui_font(window, cx);
-        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let (theme, dim_inactive_panes) = {
+            let store = cx.global::<SettingsStore>();
+            (
+                store.resolved_theme,
+                store.settings.behavior.dim_inactive_panes,
+            )
+        };
 
         div()
             .id("workspace")
@@ -1137,8 +1194,10 @@ impl Render for Workspace {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .flex()
+                    .flex_col()
                     .overflow_hidden()
-                    .child(self.pane_group.render(&self.active_pane, theme, window, cx)),
+                    .child(self.render_body(theme, dim_inactive_panes, window, cx)),
             )
             .when_some(self.toolbar_open_menu, |this, menu| {
                 this.child(self.render_toolbar_dropdown(menu, theme, cx))

@@ -7463,6 +7463,177 @@ impl PdfView {
             .into_any_element()
     }
 
+    pub(crate) fn has_global_chrome(&self) -> bool {
+        !self.loading && self.loading_error.is_none()
+    }
+
+    pub(crate) fn render_workspace_body_with_chrome(
+        &mut self,
+        center: AnyElement,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .size_full()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.tab_active_background))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .on_drag_move(
+                        cx.listener(|this, e: &DragMoveEvent<DraggedSidebar>, _, cx| {
+                            let dragged_sidebar = *e.drag(cx);
+                            let max_width = (e.bounds.size.width.as_f32()
+                                * SIDEBAR_MAX_WIDTH_RATIO)
+                                .max(SIDEBAR_MIN_WIDTH);
+                            let new_width = match dragged_sidebar {
+                                DraggedSidebar::Thumbnails => {
+                                    (e.event.position.x - e.bounds.left()).as_f32()
+                                }
+                                DraggedSidebar::Toc => {
+                                    let thumbnail_offset = if this.thumbnail_sidebar_open {
+                                        this.thumbnail_sidebar_width
+                                    } else {
+                                        0.0
+                                    };
+                                    (e.event.position.x - e.bounds.left()).as_f32()
+                                        - thumbnail_offset
+                                }
+                                DraggedSidebar::Notes => {
+                                    let thumbnail_offset = if this.thumbnail_sidebar_open {
+                                        this.thumbnail_sidebar_width
+                                    } else {
+                                        0.0
+                                    };
+                                    let toc_offset = if this.toc_sidebar_open {
+                                        this.toc_sidebar_width
+                                    } else {
+                                        0.0
+                                    };
+                                    (e.event.position.x - e.bounds.left()).as_f32()
+                                        - thumbnail_offset
+                                        - toc_offset
+                                }
+                                DraggedSidebar::AiPanel => {
+                                    (e.bounds.right() - e.event.position.x).as_f32()
+                                }
+                            }
+                            .clamp(SIDEBAR_MIN_WIDTH, max_width);
+
+                            match dragged_sidebar {
+                                DraggedSidebar::Thumbnails => {
+                                    this.thumbnail_sidebar_width = new_width;
+                                }
+                                DraggedSidebar::Toc => {
+                                    this.toc_sidebar_width = new_width;
+                                }
+                                DraggedSidebar::Notes => {
+                                    this.notes_sidebar_width = new_width;
+                                }
+                                DraggedSidebar::AiPanel => {
+                                    this.ai_panel_width = new_width;
+                                    if let Some(panel) = &this.ai_panel {
+                                        panel.update(cx, |panel, cx| {
+                                            panel.set_width(new_width);
+                                            cx.notify();
+                                        });
+                                    }
+                                }
+                            }
+                            this.schedule_sidebar_width_save(cx);
+                            cx.notify();
+                        }),
+                    )
+                    .when(self.thumbnail_sidebar_open, |this| {
+                        this.child(self.render_thumbnail_sidebar(theme, window, cx))
+                    })
+                    .when(self.toc_sidebar_open, |this| {
+                        this.child(self.render_toc_sidebar(theme, window, cx))
+                    })
+                    .when(self.notes_sidebar_open, |this| {
+                        this.child(self.render_notes_sidebar(theme, window, cx))
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(center),
+                    )
+                    .when_some(self.ai_panel.clone(), |this, panel| {
+                        this.child(
+                            div()
+                                .relative()
+                                .flex()
+                                .flex_none()
+                                .min_h_0()
+                                .h_full()
+                                .w(px(self.ai_panel_width))
+                                .child(panel)
+                                .child(Self::render_sidebar_resize_handle(
+                                    "ai-panel-resize-handle",
+                                    DraggedSidebar::AiPanel,
+                                    true,
+                                    cx,
+                                )),
+                        )
+                    }),
+            )
+            .child(self.render_workspace_footbar(theme, cx))
+            .into_any_element()
+    }
+
+    pub(crate) fn render_workspace_footbar(
+        &self,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .flex_none()
+            .h(ui_rems(FOOTBAR_HEIGHT))
+            .px_3()
+            .border_t(px(1.0))
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.tab_bar_background))
+            .text_size(ui_rems(12.0))
+            .text_color(rgb(theme.footer_text))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(self.render_toc_button(theme, cx))
+                    .child(self.render_notes_button(theme, cx))
+                    .child(self.render_thumbnail_sidebar_button(theme, cx))
+                    .child(self.render_grid_overview_button(theme, cx)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(format!("{} / {}", self.current_page(), self.pages.len()))
+                    .child(self.render_ai_button(theme, cx)),
+            )
+            .into_any_element()
+    }
+
     fn highlight_rect_to_screen(&self, rect: &HighlightRect) -> Option<Bounds<Pixels>> {
         let image_bounds = *self.page_image_bounds.get(rect.page_idx)?.as_ref()?;
         Some(self.pdf_rect_to_screen(
@@ -8098,306 +8269,141 @@ impl Render for PdfView {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .min_h_0()
-                            .flex()
-                            .flex_row()
-                            .on_drag_move(cx.listener(
-                                |this, e: &DragMoveEvent<DraggedSidebar>, _, cx| {
-                                    let dragged_sidebar = *e.drag(cx);
-                                    let max_width = (e.bounds.size.width.as_f32()
-                                        * SIDEBAR_MAX_WIDTH_RATIO)
-                                        .max(SIDEBAR_MIN_WIDTH);
-                                    let new_width = match dragged_sidebar {
-                                        DraggedSidebar::Thumbnails => {
-                                            (e.event.position.x - e.bounds.left()).as_f32()
-                                        }
-                                        DraggedSidebar::Toc => {
-                                            let thumbnail_offset = if this.thumbnail_sidebar_open {
-                                                this.thumbnail_sidebar_width
-                                            } else {
-                                                0.0
-                                            };
-                                            (e.event.position.x - e.bounds.left()).as_f32()
-                                                - thumbnail_offset
-                                        }
-                                        DraggedSidebar::Notes => {
-                                            let thumbnail_offset = if this.thumbnail_sidebar_open {
-                                                this.thumbnail_sidebar_width
-                                            } else {
-                                                0.0
-                                            };
-                                            let toc_offset = if this.toc_sidebar_open {
-                                                this.toc_sidebar_width
-                                            } else {
-                                                0.0
-                                            };
-                                            (e.event.position.x - e.bounds.left()).as_f32()
-                                                - thumbnail_offset
-                                                - toc_offset
-                                        }
-                                        DraggedSidebar::AiPanel => {
-                                            (e.bounds.right() - e.event.position.x).as_f32()
-                                        }
-                                    }
-                                    .clamp(SIDEBAR_MIN_WIDTH, max_width);
+                            .overflow_hidden()
+                            .child(
+                                canvas(
+                                    move |bounds, window, cx| {
+                                        prepaint_view.update(cx, |this, cx| {
+                                            this.paint_data(bounds, window.scale_factor(), cx)
+                                                .expect("failed to render PDF")
+                                        })
+                                    },
+                                    move |_, paint_data, window, _| {
+                                        for page in paint_data.pages {
+                                            window.paint_quad(fill(page.bounds, rgb(theme.page)));
 
-                                    match dragged_sidebar {
-                                        DraggedSidebar::Thumbnails => {
-                                            this.thumbnail_sidebar_width = new_width;
-                                        }
-                                        DraggedSidebar::Toc => {
-                                            this.toc_sidebar_width = new_width;
-                                        }
-                                        DraggedSidebar::Notes => {
-                                            this.notes_sidebar_width = new_width;
-                                        }
-                                        DraggedSidebar::AiPanel => {
-                                            this.ai_panel_width = new_width;
-                                            if let Some(panel) = &this.ai_panel {
-                                                panel.update(cx, |panel, cx| {
-                                                    panel.set_width(new_width);
-                                                    cx.notify();
-                                                });
+                                            if let Some(image) = page.image {
+                                                let _ = window.paint_image(
+                                                    page.bounds,
+                                                    Corners::default(),
+                                                    image,
+                                                    0,
+                                                    false,
+                                                );
                                             }
                                         }
-                                    }
-                                    this.schedule_sidebar_width_save(cx);
-                                    cx.notify();
-                                },
-                            ))
-                            .when(self.thumbnail_sidebar_open, |this| {
-                                this.child(self.render_thumbnail_sidebar(theme, window, cx))
-                            })
-                            .when(self.toc_sidebar_open, |this| {
-                                this.child(self.render_toc_sidebar(theme, window, cx))
-                            })
-                            .when(self.notes_sidebar_open, |this| {
-                                this.child(self.render_notes_sidebar(theme, window, cx))
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .min_h_0()
-                                    .overflow_hidden()
-                                    .child(
-                                        canvas(
-                                            move |bounds, window, cx| {
-                                                prepaint_view.update(cx, |this, cx| {
-                                                    this.paint_data(
-                                                        bounds,
-                                                        window.scale_factor(),
-                                                        cx,
+
+                                        for overlay in paint_data.diff_flash_overlays {
+                                            window.paint_quad(fill(
+                                                overlay.bounds,
+                                                rgba(Self::with_alpha(theme.accent, overlay.alpha)),
+                                            ));
+                                        }
+
+                                        for (highlight, color) in paint_data.highlight_overlays {
+                                            window.paint_quad(fill(
+                                                highlight,
+                                                rgba(theme.highlight_color(color)),
+                                            ));
+                                        }
+
+                                        for (note, color) in paint_data.note_underlines {
+                                            let dot = px(3.0);
+                                            let gap = px(3.0);
+                                            let step = dot + gap;
+                                            let y =
+                                                note.origin.y + note.size.height - dot - px(1.0);
+                                            let right = note.origin.x + note.size.width;
+                                            let mut x = note.origin.x;
+                                            while x < right {
+                                                let width =
+                                                    if x + dot > right { right - x } else { dot };
+                                                window.paint_quad(
+                                                    fill(
+                                                        Bounds::new(point(x, y), size(width, dot)),
+                                                        rgba(theme.note_color(color)),
                                                     )
-                                                    .expect("failed to render PDF")
-                                                })
-                                            },
-                                            move |_, paint_data, window, _| {
-                                                for page in paint_data.pages {
-                                                    window.paint_quad(fill(
-                                                        page.bounds,
-                                                        rgb(theme.page),
-                                                    ));
+                                                    .corner_radii(Corners::all(dot / 2.0)),
+                                                );
+                                                x += step;
+                                            }
+                                        }
 
-                                                    if let Some(image) = page.image {
-                                                        let _ = window.paint_image(
-                                                            page.bounds,
-                                                            Corners::default(),
-                                                            image,
-                                                            0,
-                                                            false,
-                                                        );
-                                                    }
-                                                }
+                                        for highlight in paint_data.search_highlights {
+                                            window.paint_quad(fill(
+                                                highlight,
+                                                rgba(Self::with_alpha(theme.match_highlight, 0x66)),
+                                            ));
+                                        }
 
-                                                for overlay in paint_data.diff_flash_overlays {
-                                                    window.paint_quad(fill(
-                                                        overlay.bounds,
-                                                        rgba(Self::with_alpha(
-                                                            theme.accent,
-                                                            overlay.alpha,
-                                                        )),
-                                                    ));
-                                                }
+                                        for highlight in paint_data.active_search_highlights {
+                                            window.paint_quad(fill(
+                                                highlight,
+                                                rgba(Self::with_alpha(theme.accent, 0x99)),
+                                            ));
+                                        }
 
-                                                for (highlight, color) in
-                                                    paint_data.highlight_overlays
-                                                {
-                                                    window.paint_quad(fill(
-                                                        highlight,
-                                                        rgba(theme.highlight_color(color)),
-                                                    ));
-                                                }
+                                        for highlight in paint_data.link_highlights {
+                                            window.paint_quad(fill(
+                                                highlight,
+                                                rgba(Self::with_alpha(theme.accent, 0x33)),
+                                            ));
+                                        }
 
-                                                for (note, color) in paint_data.note_underlines {
-                                                    let dot = px(3.0);
-                                                    let gap = px(3.0);
-                                                    let step = dot + gap;
-                                                    let y = note.origin.y + note.size.height
-                                                        - dot
-                                                        - px(1.0);
-                                                    let right = note.origin.x + note.size.width;
-                                                    let mut x = note.origin.x;
-                                                    while x < right {
-                                                        let width = if x + dot > right {
-                                                            right - x
-                                                        } else {
-                                                            dot
-                                                        };
-                                                        window.paint_quad(
-                                                            fill(
-                                                                Bounds::new(
-                                                                    point(x, y),
-                                                                    size(width, dot),
-                                                                ),
-                                                                rgba(theme.note_color(color)),
-                                                            )
-                                                            .corner_radii(Corners::all(dot / 2.0)),
-                                                        );
-                                                        x += step;
-                                                    }
-                                                }
+                                        for border in paint_data.selected_highlight_borders {
+                                            let color = rgba(Self::with_alpha(theme.accent, 0xdd));
+                                            let thickness = px(1.0);
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    border.origin,
+                                                    size(border.size.width, thickness),
+                                                ),
+                                                color,
+                                            ));
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    point(
+                                                        border.origin.x,
+                                                        border.origin.y + border.size.height
+                                                            - thickness,
+                                                    ),
+                                                    size(border.size.width, thickness),
+                                                ),
+                                                color,
+                                            ));
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    border.origin,
+                                                    size(thickness, border.size.height),
+                                                ),
+                                                color,
+                                            ));
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    point(
+                                                        border.origin.x + border.size.width
+                                                            - thickness,
+                                                        border.origin.y,
+                                                    ),
+                                                    size(thickness, border.size.height),
+                                                ),
+                                                color,
+                                            ));
+                                        }
 
-                                                for highlight in paint_data.search_highlights {
-                                                    window.paint_quad(fill(
-                                                        highlight,
-                                                        rgba(Self::with_alpha(
-                                                            theme.match_highlight,
-                                                            0x66,
-                                                        )),
-                                                    ));
-                                                }
-
-                                                for highlight in paint_data.active_search_highlights
-                                                {
-                                                    window.paint_quad(fill(
-                                                        highlight,
-                                                        rgba(Self::with_alpha(theme.accent, 0x99)),
-                                                    ));
-                                                }
-
-                                                for highlight in paint_data.link_highlights {
-                                                    window.paint_quad(fill(
-                                                        highlight,
-                                                        rgba(Self::with_alpha(theme.accent, 0x33)),
-                                                    ));
-                                                }
-
-                                                for border in paint_data.selected_highlight_borders
-                                                {
-                                                    let color =
-                                                        rgba(Self::with_alpha(theme.accent, 0xdd));
-                                                    let thickness = px(1.0);
-                                                    window.paint_quad(fill(
-                                                        Bounds::new(
-                                                            border.origin,
-                                                            size(border.size.width, thickness),
-                                                        ),
-                                                        color,
-                                                    ));
-                                                    window.paint_quad(fill(
-                                                        Bounds::new(
-                                                            point(
-                                                                border.origin.x,
-                                                                border.origin.y
-                                                                    + border.size.height
-                                                                    - thickness,
-                                                            ),
-                                                            size(border.size.width, thickness),
-                                                        ),
-                                                        color,
-                                                    ));
-                                                    window.paint_quad(fill(
-                                                        Bounds::new(
-                                                            border.origin,
-                                                            size(thickness, border.size.height),
-                                                        ),
-                                                        color,
-                                                    ));
-                                                    window.paint_quad(fill(
-                                                        Bounds::new(
-                                                            point(
-                                                                border.origin.x + border.size.width
-                                                                    - thickness,
-                                                                border.origin.y,
-                                                            ),
-                                                            size(thickness, border.size.height),
-                                                        ),
-                                                        color,
-                                                    ));
-                                                }
-
-                                                for highlight in paint_data.selection_highlights {
-                                                    window.paint_quad(fill(
-                                                        highlight,
-                                                        rgba(theme.selection_highlight),
-                                                    ));
-                                                }
-                                            },
-                                        )
-                                        .size_full(),
-                                    )
-                                    .vertical_scrollbar_for(&self.document_scroll, window, cx),
-                            )
-                            .when_some(self.ai_panel.clone(), |this, panel| {
-                                this.child(
-                                    div()
-                                        .relative()
-                                        .flex()
-                                        .flex_none()
-                                        .min_h_0()
-                                        .h_full()
-                                        .w(px(self.ai_panel_width))
-                                        .child(panel)
-                                        .child(Self::render_sidebar_resize_handle(
-                                            "ai-panel-resize-handle",
-                                            DraggedSidebar::AiPanel,
-                                            true,
-                                            cx,
-                                        )),
+                                        for highlight in paint_data.selection_highlights {
+                                            window.paint_quad(fill(
+                                                highlight,
+                                                rgba(theme.selection_highlight),
+                                            ));
+                                        }
+                                    },
                                 )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .w_full()
-                            .flex_none()
-                            .h(ui_rems(FOOTBAR_HEIGHT))
-                            .px_3()
-                            .border_t(px(1.0))
-                            .border_color(rgb(theme.border))
-                            .bg(rgb(theme.tab_bar_background))
-                            .text_size(ui_rems(12.0))
-                            .text_color(rgb(theme.footer_text))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(self.render_toc_button(theme, cx))
-                                    .child(self.render_notes_button(theme, cx))
-                                    .child(self.render_thumbnail_sidebar_button(theme, cx))
-                                    .child(self.render_grid_overview_button(theme, cx)),
+                                .size_full(),
                             )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(format!(
-                                        "{} / {}",
-                                        self.current_page(),
-                                        self.pages.len()
-                                    ))
-                                    .child(self.render_ai_button(theme, cx)),
-                            ),
+                            .vertical_scrollbar_for(&self.document_scroll, window, cx),
                     ),
             )
             .when(self.grid_overview_open, |this| {
@@ -8419,7 +8425,7 @@ impl Render for PdfView {
                             .absolute()
                             .left(px(0.0))
                             .right(px(0.0))
-                            .bottom(ui_rems(FOOTBAR_HEIGHT))
+                            .bottom_0()
                             .flex()
                             .child(quick_ask),
                     )

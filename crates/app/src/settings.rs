@@ -52,6 +52,7 @@ pub struct BehaviorSettings {
     pub default_zoom: f32,
     pub zoom_step: f32,
     pub smooth_scrolling: bool,
+    pub dim_inactive_panes: bool,
 }
 
 impl Default for BehaviorSettings {
@@ -60,6 +61,7 @@ impl Default for BehaviorSettings {
             default_zoom: DEFAULT_ZOOM,
             zoom_step: DEFAULT_ZOOM_STEP,
             smooth_scrolling: DEFAULT_SMOOTH_SCROLLING,
+            dim_inactive_panes: false,
         }
     }
 }
@@ -1359,6 +1361,12 @@ impl Settings {
             settings.behavior.smooth_scrolling = value;
         }
 
+        if let Some(panes) = document.get("panes").and_then(KdlNode::children)
+            && let Some(value) = panes.get_arg("dim_inactive").and_then(KdlValue::as_bool)
+        {
+            settings.behavior.dim_inactive_panes = value;
+        }
+
         if let Some(window) = document.get("window").and_then(KdlNode::children) {
             if let Some(value) = window.get_arg("opacity").and_then(value_to_f32) {
                 settings.window.opacity = value;
@@ -1533,6 +1541,15 @@ impl Settings {
         let scroll_children = scroll.ensure_children();
         push_value_node(scroll_children, "smooth", self.behavior.smooth_scrolling);
         document.nodes_mut().push(scroll);
+
+        let mut panes = KdlNode::new("panes");
+        let panes_children = panes.ensure_children();
+        push_value_node(
+            panes_children,
+            "dim_inactive",
+            self.behavior.dim_inactive_panes,
+        );
+        document.nodes_mut().push(panes);
 
         push_value_node(&mut document, "theme", self.theme_name.clone());
         push_value_node(&mut document, "keymap", self.keymap_preset.as_str());
@@ -1798,6 +1815,7 @@ theme-overrides {
         assert_eq!(settings.behavior.default_zoom, 1.5);
         assert_eq!(settings.behavior.zoom_step, DEFAULT_ZOOM_STEP);
         assert_eq!(settings.behavior.smooth_scrolling, DEFAULT_SMOOTH_SCROLLING);
+        assert!(!settings.behavior.dim_inactive_panes);
         assert_eq!(settings.window.opacity, 0.85);
         assert_eq!(
             settings.window.background,
@@ -1831,6 +1849,7 @@ window {
                 default_zoom: 1.5,
                 zoom_step: 1.2,
                 smooth_scrolling: false,
+                dim_inactive_panes: true,
             },
             theme_name: "one-dark".to_string(),
             overrides: PartialTheme {
@@ -2298,6 +2317,7 @@ page-gap 36
                 default_zoom: 1.5,
                 zoom_step: 1.2,
                 smooth_scrolling: false,
+                dim_inactive_panes: true,
             },
             theme_name: DEFAULT_THEME_ID.to_string(),
             overrides: PartialTheme {

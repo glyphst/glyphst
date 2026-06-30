@@ -2852,6 +2852,15 @@ impl SettingsWindow {
                                 )),
                         ),
                 )
+                .child(self.toggle_row(
+                    "Dim inactive panes",
+                    settings.behavior.dim_inactive_panes,
+                    |settings| {
+                        settings.behavior.dim_inactive_panes = !settings.behavior.dim_inactive_panes
+                    },
+                    theme,
+                    cx,
+                ))
                 .into_any_element(),
         ]
     }

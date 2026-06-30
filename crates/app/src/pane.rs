@@ -110,6 +110,7 @@ pub(crate) enum PaneDropTarget {
 
 #[derive(Clone)]
 pub(crate) enum PaneEvent {
+    Activate,
     OpenDocument {
         path: PathBuf,
         position: Option<DocumentPosition>,
@@ -127,6 +128,7 @@ pub(crate) struct Pane {
     active_tab: usize,
     focus_handle: FocusHandle,
     drag_split_direction: Option<SplitDirection>,
+    force_show_tab_bar: bool,
 }
 
 impl Pane {
@@ -141,6 +143,7 @@ impl Pane {
             active_tab: 0,
             focus_handle: cx.focus_handle(),
             drag_split_direction: None,
+            force_show_tab_bar: false,
         };
 
         let initial_tab = initial_path
@@ -191,6 +194,24 @@ impl Pane {
                 ))
             }
             Some(Tab::NewTab(_)) | None => None,
+        }
+    }
+
+    pub(crate) fn active_pdf_view(&self) -> Option<Entity<PdfView>> {
+        match self.tabs.get(self.active_tab) {
+            Some(Tab::Document(pdf_view)) => Some(pdf_view.clone()),
+            Some(Tab::NewTab(_)) | None => None,
+        }
+    }
+
+    pub(crate) fn set_force_show_tab_bar(
+        &mut self,
+        force_show_tab_bar: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.force_show_tab_bar != force_show_tab_bar {
+            self.force_show_tab_bar = force_show_tab_bar;
+            cx.notify();
         }
     }
 
@@ -482,6 +503,7 @@ impl Pane {
             },
         )
         .detach();
+        cx.observe(pdf_view, |_, _, cx| cx.notify()).detach();
     }
 
     fn activate_tab(&mut self, tab_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -792,16 +814,17 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         let rect = event.bounds.size;
-        let threshold = rect.width.min(rect.height) * DROP_TARGET_SIZE;
+        let horizontal_threshold = rect.width * DROP_TARGET_SIZE;
+        let vertical_threshold = rect.height * DROP_TARGET_SIZE;
         let relative_cursor = Point::new(
             event.event.position.x - event.bounds.left(),
             event.event.position.y - event.bounds.top(),
         );
 
-        let direction = if relative_cursor.x < threshold
-            || relative_cursor.x > rect.width - threshold
-            || relative_cursor.y < threshold
-            || relative_cursor.y > rect.height - threshold
+        let direction = if relative_cursor.x < horizontal_threshold
+            || relative_cursor.x > rect.width - horizontal_threshold
+            || relative_cursor.y < vertical_threshold
+            || relative_cursor.y > rect.height - vertical_threshold
         {
             [
                 SplitDirection::Up,
@@ -834,10 +857,22 @@ impl Pane {
 
     fn render_drop_overlay(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         let direction = self.drag_split_direction;
-        let mut overlay = div()
+        let half = relative(0.5);
+        let preview = match direction {
+            None => div().absolute().top_0().right_0().bottom_0().left_0(),
+            Some(SplitDirection::Up) => div().absolute().top_0().left_0().right_0().h(half),
+            Some(SplitDirection::Down) => div().absolute().left_0().bottom_0().right_0().h(half),
+            Some(SplitDirection::Left) => div().absolute().top_0().left_0().bottom_0().w(half),
+            Some(SplitDirection::Right) => div().absolute().top_0().bottom_0().right_0().w(half),
+        };
+
+        div()
             .invisible()
             .absolute()
-            .bg(rgba(theme.overlay))
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .left_0()
             .drag_over::<DraggedTab>(|style, _, _, _| style.visible())
             .on_drop(cx.listener(move |this, dragged_tab: &DraggedTab, _, cx| {
                 let split_direction = this.drag_split_direction.take();
@@ -851,18 +886,9 @@ impl Pane {
                 |this, event: &DragMoveEvent<DraggedTab>, _, cx| {
                     this.handle_content_drag_move(event, cx);
                 },
-            ));
-
-        let half = relative(0.5);
-        overlay = match direction {
-            None => overlay.top_0().right_0().bottom_0().left_0(),
-            Some(SplitDirection::Up) => overlay.top_0().left_0().right_0().h(half),
-            Some(SplitDirection::Down) => overlay.left_0().bottom_0().right_0().h(half),
-            Some(SplitDirection::Left) => overlay.top_0().left_0().bottom_0().w(half),
-            Some(SplitDirection::Right) => overlay.top_0().bottom_0().right_0().w(half),
-        };
-
-        overlay.into_any_element()
+            ))
+            .child(preview.bg(rgba(theme.overlay)))
+            .into_any_element()
     }
 }
 
@@ -874,7 +900,9 @@ impl Render for Pane {
             let store = cx.global::<SettingsStore>();
             (store.resolved_theme, store.settings.tab_bar_visibility)
         };
-        let show_tab_bar = tab_bar_visibility == TabBarVisibility::Always || self.tabs.len() >= 2;
+        let show_tab_bar = tab_bar_visibility == TabBarVisibility::Always
+            || self.force_show_tab_bar
+            || self.tabs.len() >= 2;
 
         div()
             .size_full()
@@ -882,6 +910,11 @@ impl Render for Pane {
             .flex()
             .flex_col()
             .overflow_hidden()
+            .track_focus(&self.focus_handle)
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.focus_handle.focus(window, cx);
+                cx.emit(PaneEvent::Activate);
+            }))
             .when(show_tab_bar, |this| {
                 this.child(self.render_tab_bar(theme, window, cx))
             })
@@ -1079,10 +1112,13 @@ impl PaneGroup {
         &self,
         active_pane: &Entity<Pane>,
         theme: Theme,
+        dim_inactive_panes: bool,
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        self.root.render(0, active_pane, theme, window, cx).element
+        self.root
+            .render(0, active_pane, theme, dim_inactive_panes, window, cx)
+            .element
     }
 
     fn find_pane_at_border(&self, direction: SplitDirection) -> Option<Entity<Pane>> {
@@ -1149,6 +1185,7 @@ impl Member {
         basis: usize,
         active_pane: &Entity<Pane>,
         theme: Theme,
+        dim_inactive_panes: bool,
         window: &mut Window,
         cx: &mut App,
     ) -> PaneRenderResult {
@@ -1162,7 +1199,14 @@ impl Member {
                     .into_any_element(),
                 contains_active_pane: pane == active_pane,
             },
-            Member::Axis(axis) => axis.render(basis + 1, active_pane, theme, window, cx),
+            Member::Axis(axis) => axis.render(
+                basis + 1,
+                active_pane,
+                theme,
+                dim_inactive_panes,
+                window,
+                cx,
+            ),
         }
     }
 }
@@ -1425,6 +1469,7 @@ impl PaneAxis {
         basis: usize,
         active_pane: &Entity<Pane>,
         theme: Theme,
+        dim_inactive_panes: bool,
         window: &mut Window,
         cx: &mut App,
     ) -> PaneRenderResult {
@@ -1442,7 +1487,14 @@ impl PaneAxis {
                         active_pane_ix = Some(ix);
                     }
                 }
-                let result = member.render((basis + ix) * 10, active_pane, theme, window, cx);
+                let result = member.render(
+                    (basis + ix) * 10,
+                    active_pane,
+                    theme,
+                    dim_inactive_panes,
+                    window,
+                    cx,
+                );
                 if result.contains_active_pane {
                     contains_active_pane = true;
                 }
@@ -1456,6 +1508,7 @@ impl PaneAxis {
             self.flexes.clone(),
             self.bounding_boxes.clone(),
             theme,
+            dim_inactive_panes,
         )
         .with_active_pane(active_pane_ix)
         .with_is_leaf_pane_mask(is_leaf_pane)
@@ -1475,6 +1528,7 @@ fn pane_axis(
     flexes: Rc<RefCell<Vec<f32>>>,
     bounding_boxes: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
     theme: Theme,
+    dim_inactive_panes: bool,
 ) -> PaneAxisElement {
     PaneAxisElement {
         axis,
@@ -1485,6 +1539,7 @@ fn pane_axis(
         active_pane_ix: None,
         is_leaf_pane_mask: Vec::new(),
         theme,
+        dim_inactive_panes,
     }
 }
 
@@ -1497,6 +1552,7 @@ struct PaneAxisElement {
     active_pane_ix: Option<usize>,
     is_leaf_pane_mask: Vec<bool>,
     theme: Theme,
+    dim_inactive_panes: bool,
 }
 
 struct PaneAxisLayout {
@@ -1762,7 +1818,7 @@ impl Element for PaneAxisElement {
                     .apply_along(Axis::Horizontal, |value| value - px(1.0)),
             };
 
-            if child.is_leaf_pane && self.active_pane_ix != Some(ix) {
+            if self.dim_inactive_panes && child.is_leaf_pane && self.active_pane_ix != Some(ix) {
                 window.paint_quad(fill(overlay_bounds, rgba(self.theme.overlay)));
             }
 
