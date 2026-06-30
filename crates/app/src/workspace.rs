@@ -99,7 +99,7 @@ impl Workspace {
         };
 
         workspace.subscribe_to_pane(&pane, window, cx);
-        workspace.focus_handle.focus(window, cx);
+        workspace.focus_active_pane(window, cx);
         cx.observe_global::<SettingsStore>(|_, cx| cx.notify())
             .detach();
         workspace
@@ -181,6 +181,11 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    fn focus_active_pane(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let active_pane = self.active_pane.clone();
+        active_pane.update(cx, |pane, cx| pane.focus(window, cx));
     }
 
     fn sync_tab_bar_visibility(&mut self, cx: &mut Context<Self>) {
@@ -670,9 +675,9 @@ impl Workspace {
             return;
         }
 
-        let Some(previous_focus_handle) = window.focused(cx) else {
-            return;
-        };
+        let previous_focus_handle = window
+            .focused(cx)
+            .unwrap_or_else(|| self.active_pane.read(cx).focus_handle());
         let actions = window
             .available_actions(cx)
             .into_iter()
@@ -695,10 +700,11 @@ impl Workspace {
 
     fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.command_palette.take().is_some() {
-            self.command_palette_previous_focus_handle
-                .take()
-                .unwrap_or_else(|| self.focus_handle.clone())
-                .focus(window, cx);
+            if let Some(previous_focus_handle) = self.command_palette_previous_focus_handle.take() {
+                previous_focus_handle.focus(window, cx);
+            } else {
+                self.focus_active_pane(window, cx);
+            }
             cx.notify();
         }
     }
