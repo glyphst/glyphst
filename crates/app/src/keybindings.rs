@@ -16,11 +16,12 @@ use crate::{
     pdf_view::{
         AddBookmark, CloseTab, CopySelection, GoToBeginning, GoToEnd, GridCursorDown,
         GridCursorLeft, GridCursorRight, GridCursorUp, GridOverviewConfirm, JumpBackward,
-        JumpForward, NextHalfPage, NextPage, OpenBookmarks, OpenFile, OpenGoToPage, OpenHistory,
-        OpenNewTab, OpenNotes, OpenQuickAsk, OpenSettings, PreviousHalfPage, PreviousPage, Reload,
-        ResetZoom, ScrollLineDown, ScrollLineUp, Search, SearchNext, SearchPrev, SelectAll, Toc,
-        ToggleAiPanel, ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview, ToggleNotes,
-        ToggleThumbnailSidebar, ToggleToc, ToggleTransparency, ZoomIn, ZoomOut,
+        JumpForward, NextHalfPage, NextPage, NextSearchResult, OpenBookmarks, OpenFile,
+        OpenGoToPage, OpenHistory, OpenNewTab, OpenNotes, OpenQuickAsk, OpenSettings,
+        PrevSearchResult, PreviousHalfPage, PreviousPage, Reload, ResetZoom, ScrollLineDown,
+        ScrollLineUp, Search, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette,
+        ToggleFullScreen, ToggleGridOverview, ToggleNotes, ToggleThumbnailSidebar, ToggleToc,
+        ToggleTransparency, ZoomIn, ZoomOut,
     },
     picker::{
         PickerBackspace, PickerCancel, PickerConfirm, PickerCopy, PickerCut, PickerDelete,
@@ -116,7 +117,6 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         bind::<ToggleAiPanel>("cmd-shift-a", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenHistory>("ctrl-h", PDF_NO_SEARCH_CONTEXT),
         bind::<ToggleThumbnailSidebar>("ctrl-shift-g", PDF_NO_SEARCH_CONTEXT),
-        bind::<ToggleThumbnailSidebar>("cmd-shift-g", PDF_NO_SEARCH_CONTEXT),
         bind::<OpenFile>("cmd-o", WORKSPACE_CONTEXT),
         bind::<OpenNewTab>("cmd-t", WORKSPACE_CONTEXT),
         bind::<OpenNewTab>("ctrl-t", WORKSPACE_CONTEXT),
@@ -146,8 +146,12 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind::<Search>("ctrl-f", PDF_CONTEXT),
             bind::<Search>("cmd-f", PDF_CONTEXT),
             bind::<Search>("/", PDF_CONTEXT),
-            bind::<SearchNext>("f3", PDF_CONTEXT),
-            bind::<SearchPrev>("shift-f3", PDF_CONTEXT),
+            bind::<NextSearchResult>("f3", PDF_CONTEXT),
+            bind::<NextSearchResult>("ctrl-alt-g", PDF_CONTEXT),
+            bind::<NextSearchResult>("cmd-g", PDF_CONTEXT),
+            bind::<PrevSearchResult>("shift-f3", PDF_CONTEXT),
+            bind::<PrevSearchResult>("ctrl-alt-shift-g", PDF_CONTEXT),
+            bind::<PrevSearchResult>("cmd-shift-g", PDF_CONTEXT),
             bind::<NextPage>("pagedown", PDF_CONTEXT),
             bind::<PreviousPage>("pageup", PDF_CONTEXT),
             bind::<NextHalfPage>("shift-pagedown", PDF_CONTEXT),
@@ -176,8 +180,8 @@ fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
         ]),
         KeymapPreset::Vim => bindings.extend([
             bind::<Search>("/", PDF_CONTEXT),
-            bind::<SearchNext>("n", PDF_CONTEXT),
-            bind::<SearchPrev>("shift-n", PDF_CONTEXT),
+            bind::<NextSearchResult>("n", PDF_CONTEXT),
+            bind::<PrevSearchResult>("shift-n", PDF_CONTEXT),
             bind::<ScrollLineDown>("j", PDF_CONTEXT),
             bind::<ScrollLineUp>("k", PDF_CONTEXT),
             bind::<NextPage>("ctrl-f", PDF_CONTEXT),
@@ -686,14 +690,30 @@ fn action_specs() -> &'static [ActionSpec] {
             build: boxed::<Search>,
         },
         ActionSpec {
-            aliases: &["search-next"],
+            aliases: &[
+                "next-search-result",
+                "search-next",
+                "search-next-result",
+                "select-next-match",
+                "search::SelectNextMatch",
+            ],
             context: Some(PDF_CONTEXT),
-            build: boxed::<SearchNext>,
+            build: boxed::<NextSearchResult>,
         },
         ActionSpec {
-            aliases: &["search-prev", "search-previous"],
+            aliases: &[
+                "prev-search-result",
+                "previous-search-result",
+                "search-prev",
+                "search-previous",
+                "search-previous-result",
+                "select-prev-match",
+                "select-previous-match",
+                "search::SelectPrevMatch",
+                "search::SelectPreviousMatch",
+            ],
             context: Some(PDF_CONTEXT),
-            build: boxed::<SearchPrev>,
+            build: boxed::<PrevSearchResult>,
         },
         ActionSpec {
             aliases: &["next-page"],
@@ -1650,4 +1670,46 @@ fn action_specs() -> &'static [ActionSpec] {
             build: boxed::<PanelClose>,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_action_aliases<A>(aliases: &[&str])
+    where
+        A: Action + Default + 'static,
+    {
+        let expected = A::default().name().to_string();
+
+        for alias in aliases {
+            let actions = known_actions(alias);
+            assert_eq!(actions.len(), 1, "alias `{alias}` should resolve once");
+            assert_eq!(actions[0].0.name(), expected);
+            assert_eq!(actions[0].1, Some(PDF_CONTEXT));
+        }
+    }
+
+    #[test]
+    fn search_navigation_aliases_resolve_to_result_actions() {
+        assert_action_aliases::<NextSearchResult>(&[
+            "next-search-result",
+            "search-next",
+            "search-next-result",
+            "select-next-match",
+            "search::SelectNextMatch",
+        ]);
+
+        assert_action_aliases::<PrevSearchResult>(&[
+            "prev-search-result",
+            "previous-search-result",
+            "search-prev",
+            "search-previous",
+            "search-previous-result",
+            "select-prev-match",
+            "select-previous-match",
+            "search::SelectPrevMatch",
+            "search::SelectPreviousMatch",
+        ]);
+    }
 }

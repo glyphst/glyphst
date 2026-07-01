@@ -62,8 +62,8 @@ gpui::actions!(
         ResetZoom,
         Reload,
         Search,
-        SearchNext,
-        SearchPrev,
+        NextSearchResult,
+        PrevSearchResult,
         NextPage,
         PreviousPage,
         NextHalfPage,
@@ -7990,10 +7990,10 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &OpenGoToPage, window, cx| {
                 this.toggle_go_to_page_prompt(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &SearchNext, _, cx| {
+            .on_action(cx.listener(|this, _: &NextSearchResult, _, cx| {
                 this.navigate_search(false, cx);
             }))
-            .on_action(cx.listener(|this, _: &SearchPrev, _, cx| {
+            .on_action(cx.listener(|this, _: &PrevSearchResult, _, cx| {
                 this.navigate_search(true, cx);
             }))
             .on_action(cx.listener(|this, _: &NextPage, _, cx| {

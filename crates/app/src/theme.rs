@@ -17,7 +17,10 @@ const MAX_PAGE_GAP: f32 = 240.0;
 const BUILTIN_THEMES: [(&str, &str); 8] = [
     ("one-light", include_str!("../themes/one-light.kdl")),
     ("one-dark", include_str!("../themes/one-dark.kdl")),
-    ("modus-operandi", include_str!("../themes/modus-operandi.kdl")),
+    (
+        "modus-operandi",
+        include_str!("../themes/modus-operandi.kdl"),
+    ),
     ("modus-vivendi", include_str!("../themes/modus-vivendi.kdl")),
     (
         "modus-operandi-tinted",
