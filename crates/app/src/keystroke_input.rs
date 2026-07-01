@@ -66,9 +66,13 @@ impl KeystrokeInput {
     fn record_keystroke(
         &mut self,
         event: &gpui::KeystrokeEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.inner_focus_handle.is_focused(window) {
+            return;
+        }
+
         cx.stop_propagation();
 
         let keystroke = KeybindingKeystroke::new_with_mapper(
@@ -76,7 +80,7 @@ impl KeystrokeInput {
             false,
             cx.keyboard_mapper().as_ref(),
         )
-        .to_string();
+        .unparse();
 
         if self.close_keystroke_detected(&keystroke) {
             cx.emit(KeystrokeInputEvent::Cancel);
@@ -177,42 +181,62 @@ impl Render for KeystrokeInput {
             .items_center()
             .justify_end()
             .gap_1()
-            .child(
-                IconButton::new(
-                    IconName::Keyboard,
-                    rgb(theme.text_muted),
-                    rgb(theme.element_hover),
+            .when(recording, |this| {
+                this.child(
+                    IconButton::new(
+                        IconName::Stop,
+                        rgb(theme.error),
+                        rgb(theme.element_hover),
+                    )
+                    .into_div()
+                    .id("keystroke-stop")
+                    .tooltip(text_tooltip("Stop Recording"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.focus_handle.focus(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
                 )
-                .toggle_state(recording)
-                .toggled_icon_color(rgb(theme.accent))
-                .into_div()
-                .id("keystroke-record")
-                .tooltip(text_tooltip("Record"))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
-                        this.inner_focus_handle.focus(window, cx);
-                        cx.stop_propagation();
-                    }),
-                ),
-            )
-            .child(
-                IconButton::new(
-                    IconName::Delete,
-                    rgb(theme.text_muted),
-                    rgb(theme.element_hover),
+                .child(
+                    IconButton::new(
+                        IconName::Delete,
+                        rgb(theme.text_muted),
+                        rgb(theme.element_hover),
+                    )
+                    .into_div()
+                    .id("keystroke-clear")
+                    .tooltip(text_tooltip("Clear"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.clear(cx);
+                            this.inner_focus_handle.focus(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
                 )
-                .into_div()
-                .id("keystroke-clear")
-                .tooltip(text_tooltip("Clear"))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.clear(cx);
-                        cx.stop_propagation();
-                    }),
-                ),
-            );
+            })
+            .when(!recording, |this| {
+                this.child(
+                    IconButton::new(
+                        IconName::Play,
+                        rgb(theme.text_muted),
+                        rgb(theme.element_hover),
+                    )
+                    .into_div()
+                    .id("keystroke-record")
+                    .tooltip(text_tooltip("Record"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.inner_focus_handle.focus(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
+                )
+            });
 
         div()
             .key_context("KeystrokeInput")
