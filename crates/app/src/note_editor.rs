@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 use crate::{
+    input,
     library::HighlightColor,
     settings::{SettingsStore, ui_rems},
 };
@@ -13,32 +14,7 @@ use gpui::{
     size,
 };
 
-gpui::actions!(
-    note_editor,
-    [
-        NoteSave,
-        NoteCancel,
-        NoteNewline,
-        NoteBackspace,
-        NoteDelete,
-        NoteLeft,
-        NoteRight,
-        NoteUp,
-        NoteDown,
-        NoteHome,
-        NoteEnd,
-        NoteSelectAll,
-        NoteSelectLeft,
-        NoteSelectRight,
-        NoteSelectUp,
-        NoteSelectDown,
-        NoteSelectHome,
-        NoteSelectEnd,
-        NoteCopy,
-        NoteCut,
-        NotePaste
-    ]
-);
+gpui::actions!(note_editor, [NoteSave, NoteCancel]);
 
 const DRAG_SELECT_THRESHOLD: f32 = 2.0;
 
@@ -113,25 +89,25 @@ impl NoteEditor {
         cx.emit(NoteEditorEvent::Cancel);
     }
 
-    fn newline(&mut self, _: &NoteNewline, window: &mut Window, cx: &mut Context<Self>) {
+    fn newline(&mut self, _: &input::Newline, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_text_in_range(None, "\n", window, cx);
     }
 
-    fn backspace(&mut self, _: &NoteBackspace, window: &mut Window, cx: &mut Context<Self>) {
+    fn backspace(&mut self, _: &input::Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn delete(&mut self, _: &NoteDelete, window: &mut Window, cx: &mut Context<Self>) {
+    fn delete(&mut self, _: &input::Delete, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor_offset()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn left(&mut self, _: &NoteLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn left(&mut self, _: &input::Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);
         } else {
@@ -139,7 +115,7 @@ impl NoteEditor {
         }
     }
 
-    fn right(&mut self, _: &NoteRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn right(&mut self, _: &input::Right, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.next_boundary(self.selected_range.end), cx);
         } else {
@@ -147,62 +123,62 @@ impl NoteEditor {
         }
     }
 
-    fn up(&mut self, _: &NoteUp, window: &mut Window, cx: &mut Context<Self>) {
+    fn up(&mut self, _: &input::Up, window: &mut Window, cx: &mut Context<Self>) {
         self.move_vertically(-1, false, window, cx);
     }
 
-    fn down(&mut self, _: &NoteDown, window: &mut Window, cx: &mut Context<Self>) {
+    fn down(&mut self, _: &input::Down, window: &mut Window, cx: &mut Context<Self>) {
         self.move_vertically(1, false, window, cx);
     }
 
-    fn home(&mut self, _: &NoteHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn home(&mut self, _: &input::Home, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.line_start_offset(), cx);
     }
 
-    fn end(&mut self, _: &NoteEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn end(&mut self, _: &input::End, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.line_end_offset(), cx);
     }
 
-    fn select_all(&mut self, _: &NoteSelectAll, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_all(&mut self, _: &input::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
 
-    fn select_left(&mut self, _: &NoteSelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_left(&mut self, _: &input::SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_right(&mut self, _: &NoteSelectRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_right(&mut self, _: &input::SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_up(&mut self, _: &NoteSelectUp, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_up(&mut self, _: &input::SelectUp, window: &mut Window, cx: &mut Context<Self>) {
         self.move_vertically(-1, true, window, cx);
     }
 
-    fn select_down(&mut self, _: &NoteSelectDown, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_down(&mut self, _: &input::SelectDown, window: &mut Window, cx: &mut Context<Self>) {
         self.move_vertically(1, true, window, cx);
     }
 
-    fn select_home(&mut self, _: &NoteSelectHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_home(&mut self, _: &input::SelectHome, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.line_start_offset(), cx);
     }
 
-    fn select_end(&mut self, _: &NoteSelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_end(&mut self, _: &input::SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.line_end_offset(), cx);
     }
 
-    fn copy(&mut self, _: &NoteCopy, _: &mut Window, cx: &mut Context<Self>) {
+    fn copy(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
         self.copy_selected_text(cx);
     }
 
-    fn cut(&mut self, _: &NoteCut, window: &mut Window, cx: &mut Context<Self>) {
+    fn cut(&mut self, _: &input::Cut, window: &mut Window, cx: &mut Context<Self>) {
         if self.copy_selected_text(cx) {
             self.replace_text_in_range(None, "", window, cx);
         }
     }
 
-    fn paste(&mut self, _: &NotePaste, window: &mut Window, cx: &mut Context<Self>) {
+    fn paste(&mut self, _: &input::Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace("\r\n", "\n").replace('\r', "\n");
             self.replace_text_in_range(None, &text, window, cx);
@@ -603,7 +579,7 @@ impl Render for NoteEditor {
         }
 
         div()
-            .key_context("NoteEditor")
+            .key_context("NoteEditor TextInput")
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()

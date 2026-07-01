@@ -100,7 +100,7 @@ impl BookmarkPromptDelegate {
 
 impl PickerDelegate for BookmarkPaletteDelegate {
     fn key_context(&self) -> &'static str {
-        "Bookmarks"
+        "Bookmarks Menu TextInput"
     }
 
     fn placeholder(&self) -> SharedString {
@@ -275,7 +275,7 @@ impl PickerDelegate for BookmarkPaletteDelegate {
 
 impl PickerDelegate for BookmarkPromptDelegate {
     fn key_context(&self) -> &'static str {
-        "BookmarkPrompt"
+        "BookmarkPrompt Menu TextInput"
     }
 
     fn placeholder(&self) -> SharedString {

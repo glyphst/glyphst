@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use gpui::{App, Font, FontFallbacks, FontWeight, Global, Window, WindowBackgroundAppearance};
-use kdl::{KdlDocument, KdlNode, KdlValue};
+use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use crate::theme::{
     DEFAULT_THEME_ID, PartialTheme, Theme, ThemeRegistry, push_value_node, value_to_f32,
@@ -278,6 +278,7 @@ impl KeymapPreset {
 pub struct KeyBindingOverride {
     pub action: String,
     pub keystrokes: String,
+    pub context: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1307,7 +1308,13 @@ impl Settings {
         self.keybinding_overrides.retain_mut(|binding| {
             binding.action = binding.action.trim().to_string();
             binding.keystrokes = binding.keystrokes.trim().to_string();
-            !binding.action.is_empty() && !binding.keystrokes.is_empty()
+            binding.context = binding
+                .context
+                .as_deref()
+                .map(str::trim)
+                .filter(|context| !context.is_empty())
+                .map(str::to_string);
+            !binding.action.is_empty()
         });
     }
 
@@ -1515,10 +1522,17 @@ impl Settings {
                 .nodes()
                 .iter()
                 .filter_map(|node| {
-                    let keystrokes = node.get(0).and_then(KdlValue::as_string)?;
+                    let keystrokes = node
+                        .get("keys")
+                        .and_then(KdlValue::as_string)
+                        .or_else(|| node.get(0).and_then(KdlValue::as_string))?;
                     Some(KeyBindingOverride {
                         action: node.name().value().to_string(),
                         keystrokes: keystrokes.to_string(),
+                        context: node
+                            .get("context")
+                            .and_then(KdlValue::as_string)
+                            .map(str::to_string),
                     })
                 })
                 .collect();
@@ -1647,11 +1661,12 @@ impl Settings {
             let mut keybindings = KdlNode::new("keybindings");
             let keybinding_children = keybindings.ensure_children();
             for binding in &self.keybinding_overrides {
-                push_value_node(
-                    keybinding_children,
-                    &binding.action,
-                    binding.keystrokes.clone(),
-                );
+                let mut node = KdlNode::new(binding.action.clone());
+                node.push(KdlEntry::new_prop("keys", binding.keystrokes.clone()));
+                if let Some(context) = binding.context.as_ref() {
+                    node.push(KdlEntry::new_prop("context", context.clone()));
+                }
+                keybinding_children.nodes_mut().push(node);
             }
             document.nodes_mut().push(keybindings);
         }
@@ -1885,14 +1900,46 @@ keybindings {
                 KeyBindingOverride {
                     action: "next-page".to_string(),
                     keystrokes: "j".to_string(),
+                    context: None,
                 },
                 KeyBindingOverride {
                     action: "jump-backward".to_string(),
                     keystrokes: "ctrl-o".to_string(),
+                    context: None,
                 },
             ]
         );
 
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn parses_and_exports_contextual_keybindings() {
+        let settings = parse_settings(
+            r##"
+keybindings {
+    next-search-result keys="ctrl-g" context="search_results"
+    next-page keys="" context="pdf_view"
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings.keybinding_overrides,
+            vec![
+                KeyBindingOverride {
+                    action: "next-search-result".to_string(),
+                    keystrokes: "ctrl-g".to_string(),
+                    context: Some("search_results".to_string()),
+                },
+                KeyBindingOverride {
+                    action: "next-page".to_string(),
+                    keystrokes: String::new(),
+                    context: Some("pdf_view".to_string()),
+                },
+            ]
+        );
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 

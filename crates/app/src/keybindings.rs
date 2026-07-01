@@ -1,47 +1,23 @@
-use std::rc::Rc;
+use std::{rc::Rc, sync::OnceLock};
 
 use crate::{
-    ai_panel::{
-        AiPanelBackspace, AiPanelClose, AiPanelCopy, AiPanelCut, AiPanelDelete, AiPanelDown,
-        AiPanelEnd, AiPanelHome, AiPanelLeft, AiPanelNewline, AiPanelPaste, AiPanelRight,
-        AiPanelSelectAll, AiPanelSelectDown, AiPanelSelectEnd, AiPanelSelectHome,
-        AiPanelSelectLeft, AiPanelSelectRight, AiPanelSelectUp, AiPanelSubmit, AiPanelUp,
-    },
-    note_editor::{
-        NoteBackspace, NoteCancel, NoteCopy, NoteCut, NoteDelete, NoteDown, NoteEnd, NoteHome,
-        NoteLeft, NoteNewline, NotePaste, NoteRight, NoteSave, NoteSelectAll, NoteSelectDown,
-        NoteSelectEnd, NoteSelectHome, NoteSelectLeft, NoteSelectRight, NoteSelectUp, NoteUp,
-    },
+    ai_panel::{AiPanelClose, AiPanelSubmit},
+    input, menu,
+    note_editor::{NoteCancel, NoteSave},
     pane::{SplitDown, SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical},
     pdf_view::{
         AddBookmark, CloseTab, CopySelection, GoToBeginning, GoToEnd, GridCursorDown,
         GridCursorLeft, GridCursorRight, GridCursorUp, GridOverviewConfirm, JumpBackward,
         JumpForward, NextHalfPage, NextPage, NextSearchResult, OpenBookmarks, OpenFile,
-        OpenGoToPage, OpenHistory, OpenNewTab, OpenNotes, OpenQuickAsk, OpenSettings,
-        PrevSearchResult, PreviousHalfPage, PreviousPage, Reload, ResetZoom, ScrollLineDown,
-        ScrollLineUp, Search, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette,
+        OpenGoToPage, OpenHistory, OpenKeybindings, OpenNewTab, OpenNotes, OpenQuickAsk,
+        OpenSettings, PrevSearchResult, PreviousHalfPage, PreviousPage, Reload, ResetZoom,
+        ScrollLineDown, ScrollLineUp, Search, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette,
         ToggleFullScreen, ToggleGridOverview, ToggleNotes, ToggleThumbnailSidebar, ToggleToc,
         ToggleTransparency, ZoomIn, ZoomOut,
     },
-    picker::{
-        PickerBackspace, PickerCancel, PickerConfirm, PickerCopy, PickerCut, PickerDelete,
-        PickerEnd, PickerHome, PickerLeft, PickerPaste, PickerRemove, PickerRight, PickerSelectAll,
-        PickerSelectEnd, PickerSelectHome, PickerSelectLeft, PickerSelectNext, PickerSelectPrev,
-        PickerSelectRight,
-    },
-    search::{
-        SearchInputBackspace, SearchInputCancel, SearchInputConfirm, SearchInputCopy,
-        SearchInputCut, SearchInputDelete, SearchInputEnd, SearchInputHome, SearchInputLeft,
-        SearchInputPaste, SearchInputPrevious, SearchInputRight, SearchInputSelectAll,
-        SearchInputSelectEnd, SearchInputSelectHome, SearchInputSelectLeft, SearchInputSelectRight,
-    },
-    settings::{KeyBindingOverride, KeymapPreset},
-    settings_window::{
-        PanelClose, SettingsInputBackspace, SettingsInputCopy, SettingsInputCut,
-        SettingsInputDelete, SettingsInputEnd, SettingsInputHome, SettingsInputLeft,
-        SettingsInputPaste, SettingsInputRight, SettingsInputSelectAll, SettingsInputSelectEnd,
-        SettingsInputSelectHome, SettingsInputSelectLeft, SettingsInputSelectRight,
-    },
+    search::{SearchInputCancel, SearchInputConfirm, SearchInputPrevious},
+    settings::{KeyBindingOverride, KeymapPreset, Settings},
+    settings_window::PanelClose,
     workspace::{
         ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight, ActivatePaneUp,
         ActivatePreviousPane, CloseOtherPanes, MovePaneDown, MovePaneLeft, MovePaneRight,
@@ -51,572 +27,159 @@ use crate::{
 };
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
 
-const PDF_CONTEXT: &str = "PdfView && !GridOverview && !CommandPalette && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !GoToPage && !NoteEditor && !AiPanel && !SettingsPanel";
-const PDF_NO_SEARCH_CONTEXT: &str = "PdfView && !GridOverview && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !GoToPage && !NoteEditor && !AiPanel && !SettingsPanel";
-const WORKSPACE_CONTEXT: &str = "Workspace && !GridOverview && !CommandPalette && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !GoToPage && !NoteEditor && !AiPanel && !SettingsPanel";
-const COMMAND_PALETTE_CONTEXT: &str = "Workspace && !Search && !QuickAsk && !Toc && !Notes && !History && !Bookmarks && !BookmarkPrompt && !GoToPage && !NoteEditor && !AiPanel && !SettingsPanel";
-const GRID_OVERVIEW_CONTEXT: &str = "GridOverview && !SettingsPanel";
-const PALETTE_CONTEXT: &str = "CommandPalette";
-const SEARCH_CONTEXT: &str = "Search";
-const SETTINGS_CONTEXT: &str = "SettingsPanel";
-const SETTINGS_INPUT_CONTEXT: &str = "SettingsInput";
-const AI_PANEL_CONTEXT: &str = "AiPanel";
-const QUICK_ASK_CONTEXT: &str = "QuickAsk";
-const TOC_CONTEXT: &str = "Toc";
-const NOTES_CONTEXT: &str = "Notes";
-const HISTORY_CONTEXT: &str = "History";
-const BOOKMARKS_CONTEXT: &str = "Bookmarks";
-const BOOKMARK_PROMPT_CONTEXT: &str = "BookmarkPrompt";
-const GO_TO_PAGE_CONTEXT: &str = "GoToPage";
-const NOTE_EDITOR_CONTEXT: &str = "NoteEditor";
+const OVERLAY_CONTEXTS: &[&str] = &[
+    "GridOverview",
+    "CommandPalette",
+    "Search",
+    "QuickAsk",
+    "Toc",
+    "Notes",
+    "History",
+    "Bookmarks",
+    "BookmarkPrompt",
+    "GoToPage",
+    "NoteEditor",
+    "AiPanel",
+    "SettingsPanel",
+];
 
-struct ActionSpec {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KeyBindingCategory {
+    Workspace,
+    PdfView,
+    PageOverview,
+    SearchResults,
+}
+
+impl KeyBindingCategory {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::PdfView => "pdf_view",
+            Self::PageOverview => "page_overview",
+            Self::SearchResults => "search_results",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Workspace => "Workspace",
+            Self::PdfView => "PDF View",
+            Self::PageOverview => "Page Overview",
+            Self::SearchResults => "Search Results",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Workspace => {
+                "App-wide commands such as files, tabs, panes, settings, and panels."
+            }
+            Self::PdfView => "Reading commands for the active PDF.",
+            Self::PageOverview => "Commands used while the page overview grid is open.",
+            Self::SearchResults => "Commands used while the search box is focused.",
+        }
+    }
+
+    pub fn from_id(value: &str) -> Option<Self> {
+        match value {
+            "workspace" | "global" => Some(Self::Workspace),
+            "pdf_view" | "pdf" | "main_pdf_view" => Some(Self::PdfView),
+            "page_overview" | "grid_overview" | "overview" => Some(Self::PageOverview),
+            "search_results" | "search" => Some(Self::SearchResults),
+            _ => None,
+        }
+    }
+
+    fn predicate(self) -> String {
+        match self {
+            Self::Workspace => context_without_overlays("Workspace"),
+            Self::PdfView => context_without_overlays("PdfView"),
+            Self::PageOverview => "GridOverview && !SettingsPanel".to_string(),
+            Self::SearchResults => "Search".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EditableKeyBinding {
+    pub action: &'static str,
+    pub label: &'static str,
+    pub category: KeyBindingCategory,
+    pub keystrokes: Vec<String>,
+    pub default_keystrokes: Vec<String>,
+}
+
+struct CommandSpec {
+    action: &'static str,
+    label: &'static str,
     aliases: &'static [&'static str],
-    context: Option<&'static str>,
+    category: KeyBindingCategory,
+    modern: &'static [&'static str],
+    vim: &'static [&'static str],
+    legacy_default: bool,
     build: fn() -> Box<dyn Action>,
 }
 
 pub fn apply(cx: &mut App, preset: KeymapPreset, overrides: &[KeyBindingOverride]) {
-    let mut bindings = base_bindings(preset);
+    let mut bindings = Vec::new();
+
+    for spec in command_specs() {
+        let context = spec.category.predicate();
+        for keystrokes in effective_keystrokes(spec, preset, overrides) {
+            add_boxed_binding(
+                cx,
+                &mut bindings,
+                spec.action,
+                &keystrokes,
+                (spec.build)(),
+                Some(&context),
+            );
+        }
+    }
+
+    add_internal_bindings(cx, &mut bindings);
+
     for binding in overrides {
-        bindings.extend(bindings_for_override(cx, binding));
+        if command_specs()
+            .iter()
+            .any(|spec| override_applies_to_spec(binding, spec))
+        {
+            continue;
+        }
+        bindings.extend(bindings_for_unknown_override(cx, binding));
     }
 
     cx.clear_key_bindings();
     cx.bind_keys(bindings);
 }
 
-fn base_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
-    let mut bindings = Vec::new();
-
-    bindings.extend([
-        bind::<CopySelection>("ctrl-c", PDF_CONTEXT),
-        bind::<CopySelection>("cmd-c", PDF_CONTEXT),
-        bind::<SelectAll>("ctrl-a", PDF_CONTEXT),
-        bind::<SelectAll>("cmd-a", PDF_CONTEXT),
-        bind::<ZoomIn>("+", PDF_CONTEXT),
-        bind::<ZoomIn>("shift-=", PDF_CONTEXT),
-        bind::<ZoomOut>("-", PDF_CONTEXT),
-        bind::<ResetZoom>("=", PDF_CONTEXT),
-        bind::<Reload>("f5", PDF_CONTEXT),
-        bind::<OpenQuickAsk>("tab", PDF_CONTEXT),
-        bind::<GoToBeginning>("home", PDF_CONTEXT),
-        bind::<GoToEnd>("end", PDF_CONTEXT),
-        bind::<GoToBeginning>("ctrl-home", PDF_CONTEXT),
-        bind::<GoToEnd>("ctrl-end", PDF_CONTEXT),
-        bind::<GoToBeginning>("alt-<", PDF_CONTEXT),
-        bind::<GoToEnd>("alt->", PDF_CONTEXT),
-        bind::<ToggleCommandPalette>("ctrl-shift-p", COMMAND_PALETTE_CONTEXT),
-        bind::<ToggleCommandPalette>("cmd-shift-p", COMMAND_PALETTE_CONTEXT),
-        bind::<ToggleFullScreen>("f11", PDF_NO_SEARCH_CONTEXT),
-        bind::<ToggleTransparency>("ctrl-shift-t", PDF_CONTEXT),
-        bind::<ToggleTransparency>("cmd-shift-t", PDF_CONTEXT),
-        bind::<OpenSettings>("ctrl-,", PDF_NO_SEARCH_CONTEXT),
-        bind::<OpenSettings>("cmd-,", PDF_NO_SEARCH_CONTEXT),
-        bind::<ToggleAiPanel>("ctrl-shift-a", PDF_NO_SEARCH_CONTEXT),
-        bind::<ToggleAiPanel>("cmd-shift-a", PDF_NO_SEARCH_CONTEXT),
-        bind::<OpenHistory>("ctrl-h", PDF_NO_SEARCH_CONTEXT),
-        bind::<ToggleThumbnailSidebar>("ctrl-shift-g", PDF_NO_SEARCH_CONTEXT),
-        bind::<OpenFile>("cmd-o", WORKSPACE_CONTEXT),
-        bind::<OpenNewTab>("cmd-t", WORKSPACE_CONTEXT),
-        bind::<OpenNewTab>("ctrl-t", WORKSPACE_CONTEXT),
-        bind::<CloseTab>("cmd-w", WORKSPACE_CONTEXT),
-        bind::<ToggleGridOverview>("ctrl-g", PDF_NO_SEARCH_CONTEXT),
-        bind::<ZoomIn>("+", GRID_OVERVIEW_CONTEXT),
-        bind::<ZoomIn>("shift-=", GRID_OVERVIEW_CONTEXT),
-        bind::<ZoomOut>("-", GRID_OVERVIEW_CONTEXT),
-        bind::<GridCursorUp>("up", GRID_OVERVIEW_CONTEXT),
-        bind::<GridCursorDown>("down", GRID_OVERVIEW_CONTEXT),
-        bind::<GridCursorLeft>("left", GRID_OVERVIEW_CONTEXT),
-        bind::<GridCursorRight>("right", GRID_OVERVIEW_CONTEXT),
-        bind::<GoToBeginning>("home", GRID_OVERVIEW_CONTEXT),
-        bind::<GoToEnd>("end", GRID_OVERVIEW_CONTEXT),
-        bind::<GoToBeginning>("ctrl-home", GRID_OVERVIEW_CONTEXT),
-        bind::<GoToEnd>("ctrl-end", GRID_OVERVIEW_CONTEXT),
-        bind::<GoToBeginning>("alt-<", GRID_OVERVIEW_CONTEXT),
-        bind::<GoToEnd>("alt->", GRID_OVERVIEW_CONTEXT),
-        bind::<GridOverviewConfirm>("enter", GRID_OVERVIEW_CONTEXT),
-        bind::<ToggleGridOverview>("ctrl-g", GRID_OVERVIEW_CONTEXT),
-        bind::<ToggleGridOverview>("escape", GRID_OVERVIEW_CONTEXT),
-    ]);
-
-    match preset {
-        KeymapPreset::Modern => bindings.extend([
-            bind::<OpenFile>("ctrl-o", WORKSPACE_CONTEXT),
-            bind::<Search>("ctrl-f", PDF_CONTEXT),
-            bind::<Search>("cmd-f", PDF_CONTEXT),
-            bind::<Search>("/", PDF_CONTEXT),
-            bind::<NextSearchResult>("f3", PDF_CONTEXT),
-            bind::<NextSearchResult>("ctrl-alt-g", PDF_CONTEXT),
-            bind::<NextSearchResult>("cmd-g", PDF_CONTEXT),
-            bind::<PrevSearchResult>("shift-f3", PDF_CONTEXT),
-            bind::<PrevSearchResult>("ctrl-alt-shift-g", PDF_CONTEXT),
-            bind::<PrevSearchResult>("cmd-shift-g", PDF_CONTEXT),
-            bind::<NextPage>("pagedown", PDF_CONTEXT),
-            bind::<PreviousPage>("pageup", PDF_CONTEXT),
-            bind::<NextHalfPage>("shift-pagedown", PDF_CONTEXT),
-            bind::<PreviousHalfPage>("shift-pageup", PDF_CONTEXT),
-            bind::<NextPage>("pagedown", GRID_OVERVIEW_CONTEXT),
-            bind::<PreviousPage>("pageup", GRID_OVERVIEW_CONTEXT),
-            bind::<NextHalfPage>("shift-pagedown", GRID_OVERVIEW_CONTEXT),
-            bind::<PreviousHalfPage>("shift-pageup", GRID_OVERVIEW_CONTEXT),
-            bind::<OpenBookmarks>("ctrl-b", PDF_NO_SEARCH_CONTEXT),
-            bind::<AddBookmark>("ctrl-d", PDF_CONTEXT),
-            bind::<Reload>("ctrl-r", PDF_CONTEXT),
-            bind::<CloseTab>("ctrl-w", WORKSPACE_CONTEXT),
-            bind::<SplitRight>("ctrl-\\", WORKSPACE_CONTEXT),
-            bind::<SplitUp>("ctrl-k up", WORKSPACE_CONTEXT),
-            bind::<SplitDown>("ctrl-k down", WORKSPACE_CONTEXT),
-            bind::<SplitLeft>("ctrl-k left", WORKSPACE_CONTEXT),
-            bind::<SplitRight>("ctrl-k right", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneLeft>("ctrl-k ctrl-left", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneRight>("ctrl-k ctrl-right", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneUp>("ctrl-k ctrl-up", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneDown>("ctrl-k ctrl-down", WORKSPACE_CONTEXT),
-            bind::<SwapPaneLeft>("ctrl-k shift-left", WORKSPACE_CONTEXT),
-            bind::<SwapPaneRight>("ctrl-k shift-right", WORKSPACE_CONTEXT),
-            bind::<SwapPaneUp>("ctrl-k shift-up", WORKSPACE_CONTEXT),
-            bind::<SwapPaneDown>("ctrl-k shift-down", WORKSPACE_CONTEXT),
-        ]),
-        KeymapPreset::Vim => bindings.extend([
-            bind::<Search>("/", PDF_CONTEXT),
-            bind::<NextSearchResult>("n", PDF_CONTEXT),
-            bind::<PrevSearchResult>("shift-n", PDF_CONTEXT),
-            bind::<ScrollLineDown>("j", PDF_CONTEXT),
-            bind::<ScrollLineUp>("k", PDF_CONTEXT),
-            bind::<NextPage>("ctrl-f", PDF_CONTEXT),
-            bind::<PreviousPage>("ctrl-b", PDF_CONTEXT),
-            bind::<NextHalfPage>("ctrl-d", PDF_CONTEXT),
-            bind::<PreviousHalfPage>("ctrl-u", PDF_CONTEXT),
-            bind::<GoToBeginning>("g g", PDF_CONTEXT),
-            bind::<GoToEnd>("shift-g", PDF_CONTEXT),
-            bind::<OpenGoToPage>(":", PDF_CONTEXT),
-            bind::<NextPage>("ctrl-f", GRID_OVERVIEW_CONTEXT),
-            bind::<PreviousPage>("ctrl-b", GRID_OVERVIEW_CONTEXT),
-            bind::<NextHalfPage>("ctrl-d", GRID_OVERVIEW_CONTEXT),
-            bind::<PreviousHalfPage>("ctrl-u", GRID_OVERVIEW_CONTEXT),
-            bind::<GoToBeginning>("g g", GRID_OVERVIEW_CONTEXT),
-            bind::<GoToEnd>("shift-g", GRID_OVERVIEW_CONTEXT),
-            bind::<JumpBackward>("ctrl-o", PDF_CONTEXT),
-            bind::<JumpForward>("ctrl-i", PDF_CONTEXT),
-            bind::<OpenBookmarks>("'", PDF_NO_SEARCH_CONTEXT),
-            bind::<AddBookmark>("m", PDF_CONTEXT),
-            bind::<Reload>("r", PDF_CONTEXT),
-            bind::<ActivatePaneLeft>("ctrl-w left", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneRight>("ctrl-w right", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneUp>("ctrl-w up", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneDown>("ctrl-w down", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneLeft>("ctrl-w h", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneRight>("ctrl-w l", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneUp>("ctrl-w k", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneDown>("ctrl-w j", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneLeft>("ctrl-w ctrl-h", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneRight>("ctrl-w ctrl-l", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneUp>("ctrl-w ctrl-k", WORKSPACE_CONTEXT),
-            bind::<ActivatePaneDown>("ctrl-w ctrl-j", WORKSPACE_CONTEXT),
-            bind::<SwapPaneLeft>("ctrl-w shift-left", WORKSPACE_CONTEXT),
-            bind::<SwapPaneRight>("ctrl-w shift-right", WORKSPACE_CONTEXT),
-            bind::<SwapPaneUp>("ctrl-w shift-up", WORKSPACE_CONTEXT),
-            bind::<SwapPaneDown>("ctrl-w shift-down", WORKSPACE_CONTEXT),
-            bind::<MovePaneLeft>("ctrl-w shift-h", WORKSPACE_CONTEXT),
-            bind::<MovePaneRight>("ctrl-w shift-l", WORKSPACE_CONTEXT),
-            bind::<MovePaneUp>("ctrl-w shift-k", WORKSPACE_CONTEXT),
-            bind::<MovePaneDown>("ctrl-w shift-j", WORKSPACE_CONTEXT),
-            bind::<ResizePaneRight>("ctrl-w >", WORKSPACE_CONTEXT),
-            bind::<ResizePaneLeft>("ctrl-w <", WORKSPACE_CONTEXT),
-            bind::<ResizePaneDown>("ctrl-w -", WORKSPACE_CONTEXT),
-            bind::<ResizePaneUp>("ctrl-w +", WORKSPACE_CONTEXT),
-            bind::<ResetPaneSizes>("ctrl-w =", WORKSPACE_CONTEXT),
-            bind::<ActivateNextPane>("ctrl-w w", WORKSPACE_CONTEXT),
-            bind::<ActivateNextPane>("ctrl-w ctrl-w", WORKSPACE_CONTEXT),
-            bind::<ActivatePreviousPane>("ctrl-w p", WORKSPACE_CONTEXT),
-            bind::<ActivatePreviousPane>("ctrl-w ctrl-p", WORKSPACE_CONTEXT),
-            bind::<SplitVertical>("ctrl-w v", WORKSPACE_CONTEXT),
-            bind::<SplitVertical>("ctrl-w ctrl-v", WORKSPACE_CONTEXT),
-            bind::<SplitHorizontal>("ctrl-w s", WORKSPACE_CONTEXT),
-            bind::<SplitHorizontal>("ctrl-w ctrl-s", WORKSPACE_CONTEXT),
-            bind::<SplitHorizontal>("ctrl-w shift-s", WORKSPACE_CONTEXT),
-            bind::<CloseTab>("ctrl-w q", WORKSPACE_CONTEXT),
-            bind::<CloseTab>("ctrl-w c", WORKSPACE_CONTEXT),
-            bind::<CloseTab>("ctrl-w ctrl-q", WORKSPACE_CONTEXT),
-            bind::<CloseTab>("ctrl-w ctrl-c", WORKSPACE_CONTEXT),
-            bind::<CloseOtherPanes>("ctrl-w o", WORKSPACE_CONTEXT),
-            bind::<CloseOtherPanes>("ctrl-w ctrl-o", WORKSPACE_CONTEXT),
-        ]),
-    }
-
-    bindings.extend([
-        bind::<PickerConfirm>("enter", PALETTE_CONTEXT),
-        bind::<PickerCancel>("escape", PALETTE_CONTEXT),
-        bind::<PickerSelectNext>("down", PALETTE_CONTEXT),
-        bind::<PickerSelectPrev>("up", PALETTE_CONTEXT),
-        bind::<PickerBackspace>("backspace", PALETTE_CONTEXT),
-        bind::<PickerDelete>("delete", PALETTE_CONTEXT),
-        bind::<PickerLeft>("left", PALETTE_CONTEXT),
-        bind::<PickerRight>("right", PALETTE_CONTEXT),
-        bind::<PickerHome>("home", PALETTE_CONTEXT),
-        bind::<PickerEnd>("end", PALETTE_CONTEXT),
-        bind::<PickerSelectAll>("ctrl-a", PALETTE_CONTEXT),
-        bind::<PickerSelectAll>("cmd-a", PALETTE_CONTEXT),
-        bind::<PickerSelectLeft>("shift-left", PALETTE_CONTEXT),
-        bind::<PickerSelectRight>("shift-right", PALETTE_CONTEXT),
-        bind::<PickerSelectHome>("shift-home", PALETTE_CONTEXT),
-        bind::<PickerSelectEnd>("shift-end", PALETTE_CONTEXT),
-        bind::<PickerCopy>("ctrl-c", PALETTE_CONTEXT),
-        bind::<PickerCopy>("cmd-c", PALETTE_CONTEXT),
-        bind::<PickerCut>("ctrl-x", PALETTE_CONTEXT),
-        bind::<PickerCut>("cmd-x", PALETTE_CONTEXT),
-        bind::<PickerPaste>("ctrl-v", PALETTE_CONTEXT),
-        bind::<PickerPaste>("cmd-v", PALETTE_CONTEXT),
-        bind::<SearchInputConfirm>("enter", SEARCH_CONTEXT),
-        bind::<SearchInputPrevious>("shift-enter", SEARCH_CONTEXT),
-        bind::<SearchInputCancel>("escape", SEARCH_CONTEXT),
-        bind::<SearchInputBackspace>("backspace", SEARCH_CONTEXT),
-        bind::<SearchInputDelete>("delete", SEARCH_CONTEXT),
-        bind::<SearchInputLeft>("left", SEARCH_CONTEXT),
-        bind::<SearchInputRight>("right", SEARCH_CONTEXT),
-        bind::<SearchInputHome>("home", SEARCH_CONTEXT),
-        bind::<SearchInputEnd>("end", SEARCH_CONTEXT),
-        bind::<SearchInputSelectAll>("ctrl-a", SEARCH_CONTEXT),
-        bind::<SearchInputSelectAll>("cmd-a", SEARCH_CONTEXT),
-        bind::<SearchInputSelectLeft>("shift-left", SEARCH_CONTEXT),
-        bind::<SearchInputSelectRight>("shift-right", SEARCH_CONTEXT),
-        bind::<SearchInputSelectHome>("shift-home", SEARCH_CONTEXT),
-        bind::<SearchInputSelectEnd>("shift-end", SEARCH_CONTEXT),
-        bind::<SearchInputCopy>("ctrl-c", SEARCH_CONTEXT),
-        bind::<SearchInputCopy>("cmd-c", SEARCH_CONTEXT),
-        bind::<SearchInputCut>("ctrl-x", SEARCH_CONTEXT),
-        bind::<SearchInputCut>("cmd-x", SEARCH_CONTEXT),
-        bind::<SearchInputPaste>("ctrl-v", SEARCH_CONTEXT),
-        bind::<SearchInputPaste>("cmd-v", SEARCH_CONTEXT),
-        bind::<PanelClose>("escape", SETTINGS_CONTEXT),
-        bind::<SettingsInputBackspace>("backspace", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputDelete>("delete", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputLeft>("left", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputRight>("right", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputHome>("home", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputEnd>("end", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputSelectAll>("ctrl-a", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputSelectAll>("cmd-a", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputSelectLeft>("shift-left", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputSelectRight>("shift-right", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputSelectHome>("shift-home", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputSelectEnd>("shift-end", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputCopy>("ctrl-c", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputCopy>("cmd-c", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputCut>("ctrl-x", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputCut>("cmd-x", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputPaste>("ctrl-v", SETTINGS_INPUT_CONTEXT),
-        bind::<SettingsInputPaste>("cmd-v", SETTINGS_INPUT_CONTEXT),
-        bind::<PickerConfirm>("enter", TOC_CONTEXT),
-        bind::<PickerCancel>("escape", TOC_CONTEXT),
-        bind::<PickerSelectNext>("down", TOC_CONTEXT),
-        bind::<PickerSelectPrev>("up", TOC_CONTEXT),
-        bind::<PickerBackspace>("backspace", TOC_CONTEXT),
-        bind::<PickerDelete>("delete", TOC_CONTEXT),
-        bind::<PickerLeft>("left", TOC_CONTEXT),
-        bind::<PickerRight>("right", TOC_CONTEXT),
-        bind::<PickerHome>("home", TOC_CONTEXT),
-        bind::<PickerEnd>("end", TOC_CONTEXT),
-        bind::<PickerSelectAll>("ctrl-a", TOC_CONTEXT),
-        bind::<PickerSelectAll>("cmd-a", TOC_CONTEXT),
-        bind::<PickerSelectLeft>("shift-left", TOC_CONTEXT),
-        bind::<PickerSelectRight>("shift-right", TOC_CONTEXT),
-        bind::<PickerSelectHome>("shift-home", TOC_CONTEXT),
-        bind::<PickerSelectEnd>("shift-end", TOC_CONTEXT),
-        bind::<PickerCopy>("ctrl-c", TOC_CONTEXT),
-        bind::<PickerCopy>("cmd-c", TOC_CONTEXT),
-        bind::<PickerCut>("ctrl-x", TOC_CONTEXT),
-        bind::<PickerCut>("cmd-x", TOC_CONTEXT),
-        bind::<PickerPaste>("ctrl-v", TOC_CONTEXT),
-        bind::<PickerPaste>("cmd-v", TOC_CONTEXT),
-        bind::<PickerConfirm>("enter", NOTES_CONTEXT),
-        bind::<PickerCancel>("escape", NOTES_CONTEXT),
-        bind::<PickerSelectNext>("down", NOTES_CONTEXT),
-        bind::<PickerSelectPrev>("up", NOTES_CONTEXT),
-        bind::<PickerBackspace>("backspace", NOTES_CONTEXT),
-        bind::<PickerDelete>("delete", NOTES_CONTEXT),
-        bind::<PickerRemove>("shift-delete", NOTES_CONTEXT),
-        bind::<PickerLeft>("left", NOTES_CONTEXT),
-        bind::<PickerRight>("right", NOTES_CONTEXT),
-        bind::<PickerHome>("home", NOTES_CONTEXT),
-        bind::<PickerEnd>("end", NOTES_CONTEXT),
-        bind::<PickerSelectAll>("ctrl-a", NOTES_CONTEXT),
-        bind::<PickerSelectAll>("cmd-a", NOTES_CONTEXT),
-        bind::<PickerSelectLeft>("shift-left", NOTES_CONTEXT),
-        bind::<PickerSelectRight>("shift-right", NOTES_CONTEXT),
-        bind::<PickerSelectHome>("shift-home", NOTES_CONTEXT),
-        bind::<PickerSelectEnd>("shift-end", NOTES_CONTEXT),
-        bind::<PickerCopy>("ctrl-c", NOTES_CONTEXT),
-        bind::<PickerCopy>("cmd-c", NOTES_CONTEXT),
-        bind::<PickerCut>("ctrl-x", NOTES_CONTEXT),
-        bind::<PickerCut>("cmd-x", NOTES_CONTEXT),
-        bind::<PickerPaste>("ctrl-v", NOTES_CONTEXT),
-        bind::<PickerPaste>("cmd-v", NOTES_CONTEXT),
-        bind::<PickerConfirm>("enter", HISTORY_CONTEXT),
-        bind::<PickerCancel>("escape", HISTORY_CONTEXT),
-        bind::<PickerSelectNext>("down", HISTORY_CONTEXT),
-        bind::<PickerSelectPrev>("up", HISTORY_CONTEXT),
-        bind::<PickerBackspace>("backspace", HISTORY_CONTEXT),
-        bind::<PickerDelete>("delete", HISTORY_CONTEXT),
-        bind::<PickerLeft>("left", HISTORY_CONTEXT),
-        bind::<PickerRight>("right", HISTORY_CONTEXT),
-        bind::<PickerHome>("home", HISTORY_CONTEXT),
-        bind::<PickerEnd>("end", HISTORY_CONTEXT),
-        bind::<PickerSelectAll>("ctrl-a", HISTORY_CONTEXT),
-        bind::<PickerSelectAll>("cmd-a", HISTORY_CONTEXT),
-        bind::<PickerSelectLeft>("shift-left", HISTORY_CONTEXT),
-        bind::<PickerSelectRight>("shift-right", HISTORY_CONTEXT),
-        bind::<PickerSelectHome>("shift-home", HISTORY_CONTEXT),
-        bind::<PickerSelectEnd>("shift-end", HISTORY_CONTEXT),
-        bind::<PickerCopy>("ctrl-c", HISTORY_CONTEXT),
-        bind::<PickerCopy>("cmd-c", HISTORY_CONTEXT),
-        bind::<PickerCut>("ctrl-x", HISTORY_CONTEXT),
-        bind::<PickerCut>("cmd-x", HISTORY_CONTEXT),
-        bind::<PickerPaste>("ctrl-v", HISTORY_CONTEXT),
-        bind::<PickerPaste>("cmd-v", HISTORY_CONTEXT),
-        bind::<PickerConfirm>("enter", BOOKMARKS_CONTEXT),
-        bind::<PickerCancel>("escape", BOOKMARKS_CONTEXT),
-        bind::<PickerSelectNext>("down", BOOKMARKS_CONTEXT),
-        bind::<PickerSelectPrev>("up", BOOKMARKS_CONTEXT),
-        bind::<PickerBackspace>("backspace", BOOKMARKS_CONTEXT),
-        bind::<PickerDelete>("delete", BOOKMARKS_CONTEXT),
-        bind::<PickerRemove>("shift-delete", BOOKMARKS_CONTEXT),
-        bind::<PickerLeft>("left", BOOKMARKS_CONTEXT),
-        bind::<PickerRight>("right", BOOKMARKS_CONTEXT),
-        bind::<PickerHome>("home", BOOKMARKS_CONTEXT),
-        bind::<PickerEnd>("end", BOOKMARKS_CONTEXT),
-        bind::<PickerSelectAll>("ctrl-a", BOOKMARKS_CONTEXT),
-        bind::<PickerSelectAll>("cmd-a", BOOKMARKS_CONTEXT),
-        bind::<PickerSelectLeft>("shift-left", BOOKMARKS_CONTEXT),
-        bind::<PickerSelectRight>("shift-right", BOOKMARKS_CONTEXT),
-        bind::<PickerSelectHome>("shift-home", BOOKMARKS_CONTEXT),
-        bind::<PickerSelectEnd>("shift-end", BOOKMARKS_CONTEXT),
-        bind::<PickerCopy>("ctrl-c", BOOKMARKS_CONTEXT),
-        bind::<PickerCopy>("cmd-c", BOOKMARKS_CONTEXT),
-        bind::<PickerCut>("ctrl-x", BOOKMARKS_CONTEXT),
-        bind::<PickerCut>("cmd-x", BOOKMARKS_CONTEXT),
-        bind::<PickerPaste>("ctrl-v", BOOKMARKS_CONTEXT),
-        bind::<PickerPaste>("cmd-v", BOOKMARKS_CONTEXT),
-        bind::<PickerConfirm>("enter", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerCancel>("escape", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerBackspace>("backspace", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerDelete>("delete", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerLeft>("left", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerRight>("right", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerHome>("home", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerEnd>("end", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerSelectAll>("ctrl-a", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerSelectAll>("cmd-a", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerSelectLeft>("shift-left", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerSelectRight>("shift-right", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerSelectHome>("shift-home", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerSelectEnd>("shift-end", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerCopy>("ctrl-c", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerCopy>("cmd-c", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerCut>("ctrl-x", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerCut>("cmd-x", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerPaste>("ctrl-v", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerPaste>("cmd-v", BOOKMARK_PROMPT_CONTEXT),
-        bind::<PickerConfirm>("enter", GO_TO_PAGE_CONTEXT),
-        bind::<PickerCancel>("escape", GO_TO_PAGE_CONTEXT),
-        bind::<PickerBackspace>("backspace", GO_TO_PAGE_CONTEXT),
-        bind::<PickerDelete>("delete", GO_TO_PAGE_CONTEXT),
-        bind::<PickerLeft>("left", GO_TO_PAGE_CONTEXT),
-        bind::<PickerRight>("right", GO_TO_PAGE_CONTEXT),
-        bind::<PickerHome>("home", GO_TO_PAGE_CONTEXT),
-        bind::<PickerEnd>("end", GO_TO_PAGE_CONTEXT),
-        bind::<PickerSelectAll>("ctrl-a", GO_TO_PAGE_CONTEXT),
-        bind::<PickerSelectAll>("cmd-a", GO_TO_PAGE_CONTEXT),
-        bind::<PickerSelectLeft>("shift-left", GO_TO_PAGE_CONTEXT),
-        bind::<PickerSelectRight>("shift-right", GO_TO_PAGE_CONTEXT),
-        bind::<PickerSelectHome>("shift-home", GO_TO_PAGE_CONTEXT),
-        bind::<PickerSelectEnd>("shift-end", GO_TO_PAGE_CONTEXT),
-        bind::<PickerCopy>("ctrl-c", GO_TO_PAGE_CONTEXT),
-        bind::<PickerCopy>("cmd-c", GO_TO_PAGE_CONTEXT),
-        bind::<PickerCut>("ctrl-x", GO_TO_PAGE_CONTEXT),
-        bind::<PickerCut>("cmd-x", GO_TO_PAGE_CONTEXT),
-        bind::<PickerPaste>("ctrl-v", GO_TO_PAGE_CONTEXT),
-        bind::<PickerPaste>("cmd-v", GO_TO_PAGE_CONTEXT),
-        bind::<NoteSave>("ctrl-enter", NOTE_EDITOR_CONTEXT),
-        bind::<NoteSave>("cmd-enter", NOTE_EDITOR_CONTEXT),
-        bind::<NoteCancel>("escape", NOTE_EDITOR_CONTEXT),
-        bind::<NoteNewline>("enter", NOTE_EDITOR_CONTEXT),
-        bind::<NoteBackspace>("backspace", NOTE_EDITOR_CONTEXT),
-        bind::<NoteDelete>("delete", NOTE_EDITOR_CONTEXT),
-        bind::<NoteLeft>("left", NOTE_EDITOR_CONTEXT),
-        bind::<NoteRight>("right", NOTE_EDITOR_CONTEXT),
-        bind::<NoteUp>("up", NOTE_EDITOR_CONTEXT),
-        bind::<NoteDown>("down", NOTE_EDITOR_CONTEXT),
-        bind::<NoteHome>("home", NOTE_EDITOR_CONTEXT),
-        bind::<NoteEnd>("end", NOTE_EDITOR_CONTEXT),
-        bind::<NoteSelectAll>("ctrl-a", NOTE_EDITOR_CONTEXT),
-        bind::<NoteSelectAll>("cmd-a", NOTE_EDITOR_CONTEXT),
-        bind::<NoteSelectLeft>("shift-left", NOTE_EDITOR_CONTEXT),
-        bind::<NoteSelectRight>("shift-right", NOTE_EDITOR_CONTEXT),
-        bind::<NoteSelectUp>("shift-up", NOTE_EDITOR_CONTEXT),
-        bind::<NoteSelectDown>("shift-down", NOTE_EDITOR_CONTEXT),
-        bind::<NoteSelectHome>("shift-home", NOTE_EDITOR_CONTEXT),
-        bind::<NoteSelectEnd>("shift-end", NOTE_EDITOR_CONTEXT),
-        bind::<NoteCopy>("ctrl-c", NOTE_EDITOR_CONTEXT),
-        bind::<NoteCopy>("cmd-c", NOTE_EDITOR_CONTEXT),
-        bind::<NoteCut>("ctrl-x", NOTE_EDITOR_CONTEXT),
-        bind::<NoteCut>("cmd-x", NOTE_EDITOR_CONTEXT),
-        bind::<NotePaste>("ctrl-v", NOTE_EDITOR_CONTEXT),
-        bind::<NotePaste>("cmd-v", NOTE_EDITOR_CONTEXT),
-        bind::<AiPanelSubmit>("ctrl-enter", AI_PANEL_CONTEXT),
-        bind::<AiPanelSubmit>("cmd-enter", AI_PANEL_CONTEXT),
-        bind::<AiPanelClose>("escape", AI_PANEL_CONTEXT),
-        bind::<AiPanelNewline>("enter", AI_PANEL_CONTEXT),
-        bind::<AiPanelNewline>("shift-enter", AI_PANEL_CONTEXT),
-        bind::<AiPanelBackspace>("backspace", AI_PANEL_CONTEXT),
-        bind::<AiPanelDelete>("delete", AI_PANEL_CONTEXT),
-        bind::<AiPanelLeft>("left", AI_PANEL_CONTEXT),
-        bind::<AiPanelRight>("right", AI_PANEL_CONTEXT),
-        bind::<AiPanelUp>("up", AI_PANEL_CONTEXT),
-        bind::<AiPanelDown>("down", AI_PANEL_CONTEXT),
-        bind::<AiPanelHome>("home", AI_PANEL_CONTEXT),
-        bind::<AiPanelEnd>("end", AI_PANEL_CONTEXT),
-        bind::<AiPanelSelectAll>("ctrl-a", AI_PANEL_CONTEXT),
-        bind::<AiPanelSelectAll>("cmd-a", AI_PANEL_CONTEXT),
-        bind::<AiPanelSelectLeft>("shift-left", AI_PANEL_CONTEXT),
-        bind::<AiPanelSelectRight>("shift-right", AI_PANEL_CONTEXT),
-        bind::<AiPanelSelectUp>("shift-up", AI_PANEL_CONTEXT),
-        bind::<AiPanelSelectDown>("shift-down", AI_PANEL_CONTEXT),
-        bind::<AiPanelSelectHome>("shift-home", AI_PANEL_CONTEXT),
-        bind::<AiPanelSelectEnd>("shift-end", AI_PANEL_CONTEXT),
-        bind::<AiPanelCopy>("ctrl-c", AI_PANEL_CONTEXT),
-        bind::<AiPanelCopy>("cmd-c", AI_PANEL_CONTEXT),
-        bind::<AiPanelCut>("ctrl-x", AI_PANEL_CONTEXT),
-        bind::<AiPanelCut>("cmd-x", AI_PANEL_CONTEXT),
-        bind::<AiPanelPaste>("ctrl-v", AI_PANEL_CONTEXT),
-        bind::<AiPanelPaste>("cmd-v", AI_PANEL_CONTEXT),
-        bind::<AiPanelSubmit>("enter", QUICK_ASK_CONTEXT),
-        bind::<AiPanelSubmit>("ctrl-enter", QUICK_ASK_CONTEXT),
-        bind::<AiPanelSubmit>("cmd-enter", QUICK_ASK_CONTEXT),
-        bind::<AiPanelClose>("escape", QUICK_ASK_CONTEXT),
-        bind::<OpenQuickAsk>("tab", QUICK_ASK_CONTEXT),
-        bind::<AiPanelNewline>("shift-enter", QUICK_ASK_CONTEXT),
-        bind::<AiPanelBackspace>("backspace", QUICK_ASK_CONTEXT),
-        bind::<AiPanelDelete>("delete", QUICK_ASK_CONTEXT),
-        bind::<AiPanelLeft>("left", QUICK_ASK_CONTEXT),
-        bind::<AiPanelRight>("right", QUICK_ASK_CONTEXT),
-        bind::<AiPanelUp>("up", QUICK_ASK_CONTEXT),
-        bind::<AiPanelDown>("down", QUICK_ASK_CONTEXT),
-        bind::<AiPanelHome>("home", QUICK_ASK_CONTEXT),
-        bind::<AiPanelEnd>("end", QUICK_ASK_CONTEXT),
-        bind::<AiPanelSelectAll>("ctrl-a", QUICK_ASK_CONTEXT),
-        bind::<AiPanelSelectAll>("cmd-a", QUICK_ASK_CONTEXT),
-        bind::<AiPanelSelectLeft>("shift-left", QUICK_ASK_CONTEXT),
-        bind::<AiPanelSelectRight>("shift-right", QUICK_ASK_CONTEXT),
-        bind::<AiPanelSelectUp>("shift-up", QUICK_ASK_CONTEXT),
-        bind::<AiPanelSelectDown>("shift-down", QUICK_ASK_CONTEXT),
-        bind::<AiPanelSelectHome>("shift-home", QUICK_ASK_CONTEXT),
-        bind::<AiPanelSelectEnd>("shift-end", QUICK_ASK_CONTEXT),
-        bind::<AiPanelCopy>("ctrl-c", QUICK_ASK_CONTEXT),
-        bind::<AiPanelCopy>("cmd-c", QUICK_ASK_CONTEXT),
-        bind::<AiPanelCut>("ctrl-x", QUICK_ASK_CONTEXT),
-        bind::<AiPanelCut>("cmd-x", QUICK_ASK_CONTEXT),
-        bind::<AiPanelPaste>("ctrl-v", QUICK_ASK_CONTEXT),
-        bind::<AiPanelPaste>("cmd-v", QUICK_ASK_CONTEXT),
-    ]);
-
-    bindings
-}
-
-fn bind<A>(keystrokes: &str, context: &'static str) -> KeyBinding
-where
-    A: Action + Default + 'static,
-{
-    KeyBinding::new(keystrokes, A::default(), Some(context))
-}
-
-fn bindings_for_override(cx: &mut App, binding: &KeyBindingOverride) -> Vec<KeyBinding> {
-    let action_name = binding.action.trim();
-    let keystrokes = binding.keystrokes.trim();
-    if keystrokes.is_empty() {
-        return Vec::new();
-    }
-
-    let mut actions = known_actions(action_name);
-    if actions.is_empty() {
-        match cx.build_action(action_name, None) {
-            Ok(action) => actions.push((action, None)),
-            Err(error) => {
-                eprintln!("failed to build action for keybinding `{action_name}`: {error}");
-                return Vec::new();
-            }
-        }
-    }
-
-    actions
-        .into_iter()
-        .filter_map(|(action, context)| {
-            binding_for_action(cx, action_name, keystrokes, action, context)
+pub fn editable_bindings(
+    preset: KeymapPreset,
+    overrides: &[KeyBindingOverride],
+) -> Vec<EditableKeyBinding> {
+    command_specs()
+        .iter()
+        .map(|spec| EditableKeyBinding {
+            action: spec.action,
+            label: spec.label,
+            category: spec.category,
+            keystrokes: effective_keystrokes(spec, preset, overrides),
+            default_keystrokes: default_keystrokes(spec, preset),
         })
         .collect()
 }
 
-fn binding_for_action(
-    cx: &mut App,
-    action_name: &str,
-    keystrokes: &str,
-    action: Box<dyn Action>,
-    context: Option<&'static str>,
-) -> Option<KeyBinding> {
-    let context = match context {
-        Some(context) => match KeyBindingContextPredicate::parse(context) {
-            Ok(predicate) => Some(Rc::new(predicate)),
-            Err(error) => {
-                eprintln!("failed to parse keybinding context `{context}`: {error:#}");
-                return None;
-            }
-        },
-        None => None,
-    };
-
-    match KeyBinding::load(
-        keystrokes,
-        action,
-        context,
-        false,
-        None,
-        cx.keyboard_mapper().as_ref(),
-    ) {
-        Ok(binding) => Some(binding),
-        Err(error) => {
-            eprintln!("failed to parse keybinding `{action_name}` `{keystrokes}`: {error}");
-            None
-        }
-    }
+pub fn editable_categories() -> &'static [KeyBindingCategory] {
+    &[
+        KeyBindingCategory::Workspace,
+        KeyBindingCategory::PdfView,
+        KeyBindingCategory::PageOverview,
+        KeyBindingCategory::SearchResults,
+    ]
 }
 
-fn known_actions(action_name: &str) -> Vec<(Box<dyn Action>, Option<&'static str>)> {
-    let action_name = action_name.trim();
-    let exact: Vec<_> = action_specs()
-        .iter()
-        .filter_map(|spec| {
-            let action = (spec.build)();
-            (action.name() == action_name).then_some((action, spec.context))
-        })
-        .collect();
-    if !exact.is_empty() {
-        return exact;
-    }
-
-    let normalized = normalize_action_key(action_name);
-    action_specs()
-        .iter()
-        .filter(|spec| {
-            spec.aliases
-                .iter()
-                .any(|alias| normalize_action_key(alias) == normalized)
-        })
-        .map(|spec| ((spec.build)(), spec.context))
-        .collect()
-}
-
-fn normalize_action_key(value: &str) -> String {
+pub fn normalize_action_key(value: &str) -> String {
     let mut normalized = String::new();
     let mut previous_separator = true;
 
@@ -635,6 +198,12 @@ fn normalize_action_key(value: &str) -> String {
                 normalized.push(ch.to_ascii_lowercase());
                 previous_separator = false;
             }
+            ':' => {
+                if !previous_separator {
+                    normalized.push('-');
+                    previous_separator = true;
+                }
+            }
             ch => {
                 normalized.push(ch.to_ascii_lowercase());
                 previous_separator = false;
@@ -645,6 +214,343 @@ fn normalize_action_key(value: &str) -> String {
     normalized.trim_matches('-').to_string()
 }
 
+pub fn expand_platform_keystroke(keystrokes: &str) -> String {
+    keystrokes
+        .split_whitespace()
+        .map(|chord| {
+            chord
+                .split('-')
+                .map(|part| {
+                    if part.eq_ignore_ascii_case("primary") {
+                        platform_primary_modifier()
+                    } else {
+                        part
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("-")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn remove_keybinding_overrides(
+    overrides: &mut Vec<KeyBindingOverride>,
+    action: &str,
+    category: KeyBindingCategory,
+) {
+    let normalized = normalize_action_key(action);
+    overrides.retain(|binding| {
+        if normalize_action_key(&binding.action) != normalized {
+            return true;
+        }
+        match binding.context.as_deref() {
+            Some(context) => KeyBindingCategory::from_id(context) != Some(category),
+            None => false,
+        }
+    });
+}
+
+pub fn set_keybinding_overrides(
+    settings: &mut Settings,
+    action: String,
+    category: KeyBindingCategory,
+    keystrokes: Vec<String>,
+) {
+    remove_keybinding_overrides(&mut settings.keybinding_overrides, &action, category);
+    if keystrokes.is_empty() {
+        settings.keybinding_overrides.push(KeyBindingOverride {
+            action,
+            keystrokes: String::new(),
+            context: Some(category.id().to_string()),
+        });
+    } else {
+        for keystrokes in keystrokes {
+            settings.keybinding_overrides.push(KeyBindingOverride {
+                action: action.clone(),
+                keystrokes,
+                context: Some(category.id().to_string()),
+            });
+        }
+    }
+}
+
+pub fn reset_keybinding_overrides(
+    settings: &mut Settings,
+    action: &str,
+    category: KeyBindingCategory,
+) {
+    remove_keybinding_overrides(&mut settings.keybinding_overrides, action, category);
+}
+
+#[cfg(target_os = "macos")]
+fn platform_primary_modifier() -> &'static str {
+    "cmd"
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_primary_modifier() -> &'static str {
+    "ctrl"
+}
+
+fn context_without_overlays(base: &str) -> String {
+    let mut predicate = base.to_string();
+    for context in OVERLAY_CONTEXTS {
+        predicate.push_str(" && !");
+        predicate.push_str(context);
+    }
+    predicate
+}
+
+fn raw_default_keystrokes(spec: &CommandSpec, preset: KeymapPreset) -> &'static [&'static str] {
+    match preset {
+        KeymapPreset::Modern => spec.modern,
+        KeymapPreset::Vim => spec.vim,
+    }
+}
+
+fn default_keystrokes(spec: &CommandSpec, preset: KeymapPreset) -> Vec<String> {
+    raw_default_keystrokes(spec, preset)
+        .iter()
+        .filter_map(|value| expand_platform_default_keystroke(value))
+        .collect()
+}
+
+fn expand_platform_default_keystroke(keystrokes: &str) -> Option<String> {
+    if let Some(keystrokes) = keystrokes.strip_prefix("mac:") {
+        cfg!(target_os = "macos").then(|| expand_platform_keystroke(keystrokes))
+    } else if let Some(keystrokes) = keystrokes.strip_prefix("nonmac:") {
+        (!cfg!(target_os = "macos")).then(|| expand_platform_keystroke(keystrokes))
+    } else {
+        Some(expand_platform_keystroke(keystrokes))
+    }
+}
+
+fn effective_keystrokes(
+    spec: &CommandSpec,
+    preset: KeymapPreset,
+    overrides: &[KeyBindingOverride],
+) -> Vec<String> {
+    let matches = overrides
+        .iter()
+        .filter(|binding| override_applies_to_spec(binding, spec))
+        .collect::<Vec<_>>();
+
+    if matches.is_empty() {
+        return default_keystrokes(spec, preset);
+    }
+
+    matches
+        .into_iter()
+        .filter_map(|binding| {
+            let keystrokes = binding.keystrokes.trim();
+            (!keystrokes.is_empty()).then(|| expand_platform_keystroke(keystrokes))
+        })
+        .collect()
+}
+
+fn override_applies_to_spec(binding: &KeyBindingOverride, spec: &CommandSpec) -> bool {
+    if !action_matches_spec(&binding.action, spec) {
+        return false;
+    }
+
+    match binding
+        .context
+        .as_deref()
+        .and_then(KeyBindingCategory::from_id)
+    {
+        Some(category) => category == spec.category,
+        None => spec.legacy_default,
+    }
+}
+
+fn action_matches_spec(action_name: &str, spec: &CommandSpec) -> bool {
+    let action_name = action_name.trim();
+    let action = (spec.build)();
+    if action.name() == action_name {
+        return true;
+    }
+
+    let normalized = normalize_action_key(action_name);
+    spec.aliases
+        .iter()
+        .chain(std::iter::once(&spec.action))
+        .any(|alias| normalize_action_key(alias) == normalized)
+}
+
+pub fn validate_keybinding(
+    cx: &mut App,
+    action_name: &str,
+    category: KeyBindingCategory,
+    keystrokes: &str,
+) -> Result<(), String> {
+    let Some(spec) = command_specs()
+        .iter()
+        .find(|spec| spec.category == category && action_matches_spec(action_name, spec))
+    else {
+        return Ok(());
+    };
+
+    let context = KeyBindingContextPredicate::parse(&category.predicate())
+        .map(Rc::new)
+        .map_err(|error| format!("{error:#}"))?;
+    let keystrokes = expand_platform_keystroke(keystrokes);
+
+    KeyBinding::load(
+        &keystrokes,
+        (spec.build)(),
+        Some(context),
+        false,
+        None,
+        cx.keyboard_mapper().as_ref(),
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+fn bindings_for_unknown_override(cx: &mut App, binding: &KeyBindingOverride) -> Vec<KeyBinding> {
+    let action_name = binding.action.trim();
+    let keystrokes = binding.keystrokes.trim();
+    if action_name.is_empty() || keystrokes.is_empty() {
+        return Vec::new();
+    }
+
+    let action = match cx.build_action(action_name, None) {
+        Ok(action) => action,
+        Err(error) => {
+            eprintln!("failed to build action for keybinding `{action_name}`: {error}");
+            return Vec::new();
+        }
+    };
+
+    let context = binding
+        .context
+        .as_deref()
+        .and_then(KeyBindingCategory::from_id)
+        .map(KeyBindingCategory::predicate);
+
+    binding_for_action(cx, action_name, keystrokes, action, context.as_deref())
+        .into_iter()
+        .collect()
+}
+
+fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
+    add_many::<input::Backspace>(cx, bindings, &["backspace"], "TextInput");
+    add_many::<input::Delete>(cx, bindings, &["delete"], "TextInput");
+    add_many::<input::Left>(cx, bindings, &["left"], "TextInput");
+    add_many::<input::Right>(cx, bindings, &["right"], "TextInput");
+    add_many::<input::Home>(cx, bindings, &["home"], "TextInput");
+    add_many::<input::End>(cx, bindings, &["end"], "TextInput");
+    add_many::<input::SelectAll>(cx, bindings, &["primary-a"], "TextInput");
+    add_many::<input::SelectLeft>(cx, bindings, &["shift-left"], "TextInput");
+    add_many::<input::SelectRight>(cx, bindings, &["shift-right"], "TextInput");
+    add_many::<input::SelectHome>(cx, bindings, &["shift-home"], "TextInput");
+    add_many::<input::SelectEnd>(cx, bindings, &["shift-end"], "TextInput");
+    add_many::<input::Copy>(cx, bindings, &["primary-c"], "TextInput");
+    add_many::<input::Cut>(cx, bindings, &["primary-x"], "TextInput");
+    add_many::<input::Paste>(cx, bindings, &["primary-v"], "TextInput");
+
+    for context in ["NoteEditor", "AiPanel", "QuickAsk"] {
+        add_many::<input::Up>(cx, bindings, &["up"], context);
+        add_many::<input::Down>(cx, bindings, &["down"], context);
+        add_many::<input::SelectUp>(cx, bindings, &["shift-up"], context);
+        add_many::<input::SelectDown>(cx, bindings, &["shift-down"], context);
+    }
+    add_many::<input::Newline>(cx, bindings, &["enter"], "NoteEditor");
+    add_many::<input::Newline>(cx, bindings, &["enter", "shift-enter"], "AiPanel");
+    add_many::<input::Newline>(cx, bindings, &["shift-enter"], "QuickAsk");
+
+    add_many::<menu::Confirm>(cx, bindings, &["enter"], "Menu");
+    add_many::<menu::Cancel>(cx, bindings, &["escape"], "Menu");
+    add_many::<menu::SelectNext>(cx, bindings, &["down"], "Menu");
+    add_many::<menu::SelectPrev>(cx, bindings, &["up"], "Menu");
+    add_many::<menu::Remove>(cx, bindings, &["shift-delete"], "Menu");
+
+    add_many::<SearchInputConfirm>(cx, bindings, &["enter"], "Search");
+    add_many::<SearchInputPrevious>(cx, bindings, &["shift-enter"], "Search");
+    add_many::<SearchInputCancel>(cx, bindings, &["escape"], "Search");
+    add_many::<NoteSave>(cx, bindings, &["primary-enter"], "NoteEditor");
+    add_many::<NoteCancel>(cx, bindings, &["escape"], "NoteEditor");
+    add_many::<AiPanelSubmit>(cx, bindings, &["primary-enter"], "AiPanel");
+    add_many::<AiPanelSubmit>(cx, bindings, &["enter", "primary-enter"], "QuickAsk");
+    add_many::<AiPanelClose>(cx, bindings, &["escape"], "AiPanel");
+    add_many::<AiPanelClose>(cx, bindings, &["escape"], "QuickAsk");
+    add_many::<OpenQuickAsk>(cx, bindings, &["tab"], "QuickAsk");
+    add_many::<PanelClose>(cx, bindings, &["escape"], "SettingsPanel");
+}
+
+fn add_many<A>(cx: &mut App, bindings: &mut Vec<KeyBinding>, keys: &[&str], context: &str)
+where
+    A: Action + Default + 'static,
+{
+    for keystrokes in keys {
+        add_binding::<A>(cx, bindings, keystrokes, context);
+    }
+}
+
+fn add_binding<A>(cx: &mut App, bindings: &mut Vec<KeyBinding>, keystrokes: &str, context: &str)
+where
+    A: Action + Default + 'static,
+{
+    add_boxed_binding(
+        cx,
+        bindings,
+        A::default().name(),
+        keystrokes,
+        Box::new(A::default()),
+        Some(context),
+    );
+}
+
+fn add_boxed_binding(
+    cx: &mut App,
+    bindings: &mut Vec<KeyBinding>,
+    action_name: &str,
+    keystrokes: &str,
+    action: Box<dyn Action>,
+    context: Option<&str>,
+) {
+    if let Some(binding) = binding_for_action(cx, action_name, keystrokes, action, context) {
+        bindings.push(binding);
+    }
+}
+
+fn binding_for_action(
+    cx: &mut App,
+    action_name: &str,
+    keystrokes: &str,
+    action: Box<dyn Action>,
+    context: Option<&str>,
+) -> Option<KeyBinding> {
+    let context = match context {
+        Some(context) => match KeyBindingContextPredicate::parse(context) {
+            Ok(predicate) => Some(Rc::new(predicate)),
+            Err(error) => {
+                eprintln!("failed to parse keybinding context `{context}`: {error:#}");
+                return None;
+            }
+        },
+        None => None,
+    };
+
+    let keystrokes = expand_platform_keystroke(keystrokes);
+
+    match KeyBinding::load(
+        &keystrokes,
+        action,
+        context,
+        false,
+        None,
+        cx.keyboard_mapper().as_ref(),
+    ) {
+        Ok(binding) => Some(binding),
+        Err(error) => {
+            eprintln!("failed to parse keybinding `{action_name}` `{keystrokes}`: {error}");
+            None
+        }
+    }
+}
+
 fn boxed<A>() -> Box<dyn Action>
 where
     A: Action + Default + 'static,
@@ -652,1024 +558,787 @@ where
     Box::new(A::default())
 }
 
-fn action_specs() -> &'static [ActionSpec] {
-    &[
-        ActionSpec {
-            aliases: &["copy-selection", "copy"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<CopySelection>,
-        },
-        ActionSpec {
-            aliases: &["select-all"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<SelectAll>,
-        },
-        ActionSpec {
-            aliases: &["zoom-in"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<ZoomIn>,
-        },
-        ActionSpec {
-            aliases: &["zoom-out"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<ZoomOut>,
-        },
-        ActionSpec {
-            aliases: &["reset-zoom"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<ResetZoom>,
-        },
-        ActionSpec {
-            aliases: &["reload", "reload-document"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<Reload>,
-        },
-        ActionSpec {
-            aliases: &["search"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<Search>,
-        },
-        ActionSpec {
-            aliases: &[
-                "next-search-result",
-                "search-next",
-                "search-next-result",
-                "select-next-match",
-                "search::SelectNextMatch",
-            ],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<NextSearchResult>,
-        },
-        ActionSpec {
-            aliases: &[
-                "prev-search-result",
-                "previous-search-result",
-                "search-prev",
-                "search-previous",
-                "search-previous-result",
-                "select-prev-match",
-                "select-previous-match",
-                "search::SelectPrevMatch",
-                "search::SelectPreviousMatch",
-            ],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<PrevSearchResult>,
-        },
-        ActionSpec {
-            aliases: &["next-page"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<NextPage>,
-        },
-        ActionSpec {
-            aliases: &["previous-page", "prev-page"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<PreviousPage>,
-        },
-        ActionSpec {
-            aliases: &["next-half-page"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<NextHalfPage>,
-        },
-        ActionSpec {
-            aliases: &["previous-half-page", "prev-half-page"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<PreviousHalfPage>,
-        },
-        ActionSpec {
-            aliases: &["scroll-line-down", "scroll-down"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<ScrollLineDown>,
-        },
-        ActionSpec {
-            aliases: &["scroll-line-up", "scroll-up"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<ScrollLineUp>,
-        },
-        ActionSpec {
-            aliases: &[
-                "go-to-beginning",
-                "go-to-start",
-                "go-to-top",
-                "go-to-the-beginning",
-                "start-of-document",
-            ],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<GoToBeginning>,
-        },
-        ActionSpec {
-            aliases: &[
-                "go-to-end",
-                "go-to-bottom",
-                "go-to-the-end",
-                "end-of-document",
-            ],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<GoToEnd>,
-        },
-        ActionSpec {
-            aliases: &["jump-backward", "jump-back"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<JumpBackward>,
-        },
-        ActionSpec {
-            aliases: &["jump-forward"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<JumpForward>,
-        },
-        ActionSpec {
-            aliases: &["toc", "goto-toc", "goto-table-of-contents"],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
-            build: boxed::<Toc>,
-        },
-        ActionSpec {
-            aliases: &[
-                "toggle-toc",
-                "toggle-table-of-contents",
-                "table-of-contents",
-            ],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
-            build: boxed::<ToggleToc>,
-        },
-        ActionSpec {
-            aliases: &["open-notes", "notes"],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
-            build: boxed::<OpenNotes>,
-        },
-        ActionSpec {
-            aliases: &["toggle-notes", "toggle-notes-sidebar"],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
-            build: boxed::<ToggleNotes>,
-        },
-        ActionSpec {
-            aliases: &[
-                "toggle-thumbnails",
-                "toggle-thumbnail-sidebar",
-                "thumbnail-sidebar",
-                "page-thumbnails",
-            ],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
-            build: boxed::<ToggleThumbnailSidebar>,
-        },
-        ActionSpec {
-            aliases: &["toggle-grid-overview", "grid-overview", "page-overview"],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
-            build: boxed::<ToggleGridOverview>,
-        },
-        ActionSpec {
-            aliases: &[
-                "grid-overview-confirm",
-                "grid-overview-open",
-                "open-grid-overview-page",
-            ],
-            context: Some(GRID_OVERVIEW_CONTEXT),
-            build: boxed::<GridOverviewConfirm>,
-        },
-        ActionSpec {
-            aliases: &["grid-cursor-up", "grid-overview-cursor-up"],
-            context: Some(GRID_OVERVIEW_CONTEXT),
-            build: boxed::<GridCursorUp>,
-        },
-        ActionSpec {
-            aliases: &["grid-cursor-down", "grid-overview-cursor-down"],
-            context: Some(GRID_OVERVIEW_CONTEXT),
-            build: boxed::<GridCursorDown>,
-        },
-        ActionSpec {
-            aliases: &["grid-cursor-left", "grid-overview-cursor-left"],
-            context: Some(GRID_OVERVIEW_CONTEXT),
-            build: boxed::<GridCursorLeft>,
-        },
-        ActionSpec {
-            aliases: &["grid-cursor-right", "grid-overview-cursor-right"],
-            context: Some(GRID_OVERVIEW_CONTEXT),
-            build: boxed::<GridCursorRight>,
-        },
-        ActionSpec {
-            aliases: &["toggle-command-palette", "command-palette"],
-            context: Some(COMMAND_PALETTE_CONTEXT),
-            build: boxed::<ToggleCommandPalette>,
-        },
-        ActionSpec {
-            aliases: &["toggle-full-screen", "toggle-fullscreen", "fullscreen"],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
-            build: boxed::<ToggleFullScreen>,
-        },
-        ActionSpec {
-            aliases: &["toggle-transparency", "transparency"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<ToggleTransparency>,
-        },
-        ActionSpec {
-            aliases: &["open-settings", "settings"],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
-            build: boxed::<OpenSettings>,
-        },
-        ActionSpec {
-            aliases: &["toggle-ai-panel", "ai-panel", "ai", "assistant"],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
-            build: boxed::<ToggleAiPanel>,
-        },
-        ActionSpec {
-            aliases: &["open-quick-ask", "quick-ask"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<OpenQuickAsk>,
-        },
-        ActionSpec {
-            aliases: &["go-to-page", "goto-page", "open-go-to-page"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<OpenGoToPage>,
-        },
-        ActionSpec {
-            aliases: &["open-history", "history", "recent-files"],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
-            build: boxed::<OpenHistory>,
-        },
-        ActionSpec {
-            aliases: &["open-bookmarks", "bookmarks"],
-            context: Some(PDF_NO_SEARCH_CONTEXT),
-            build: boxed::<OpenBookmarks>,
-        },
-        ActionSpec {
-            aliases: &["open-file", "open-pdf"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<OpenFile>,
-        },
-        ActionSpec {
-            aliases: &["open-new-tab", "new-tab"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<OpenNewTab>,
-        },
-        ActionSpec {
-            aliases: &["close-tab"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<CloseTab>,
-        },
-        ActionSpec {
-            aliases: &["split-left", "pane-split-left"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<SplitLeft>,
-        },
-        ActionSpec {
-            aliases: &["split-right", "pane-split-right"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<SplitRight>,
-        },
-        ActionSpec {
-            aliases: &["split-up", "pane-split-up"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<SplitUp>,
-        },
-        ActionSpec {
-            aliases: &["split-down", "pane-split-down"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<SplitDown>,
-        },
-        ActionSpec {
-            aliases: &["split-vertical", "vsplit"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<SplitVertical>,
-        },
-        ActionSpec {
-            aliases: &["split-horizontal", "hsplit"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<SplitHorizontal>,
-        },
-        ActionSpec {
-            aliases: &["activate-pane-left", "pane-left"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<ActivatePaneLeft>,
-        },
-        ActionSpec {
-            aliases: &["activate-pane-right", "pane-right"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<ActivatePaneRight>,
-        },
-        ActionSpec {
-            aliases: &["activate-pane-up", "pane-up"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<ActivatePaneUp>,
-        },
-        ActionSpec {
-            aliases: &["activate-pane-down", "pane-down"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<ActivatePaneDown>,
-        },
-        ActionSpec {
-            aliases: &["activate-next-pane", "next-pane"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<ActivateNextPane>,
-        },
-        ActionSpec {
-            aliases: &["activate-previous-pane", "previous-pane", "prev-pane"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<ActivatePreviousPane>,
-        },
-        ActionSpec {
-            aliases: &["swap-pane-left"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<SwapPaneLeft>,
-        },
-        ActionSpec {
-            aliases: &["swap-pane-right"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<SwapPaneRight>,
-        },
-        ActionSpec {
-            aliases: &["swap-pane-up"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<SwapPaneUp>,
-        },
-        ActionSpec {
-            aliases: &["swap-pane-down"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<SwapPaneDown>,
-        },
-        ActionSpec {
-            aliases: &["move-pane-left"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<MovePaneLeft>,
-        },
-        ActionSpec {
-            aliases: &["move-pane-right"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<MovePaneRight>,
-        },
-        ActionSpec {
-            aliases: &["move-pane-up"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<MovePaneUp>,
-        },
-        ActionSpec {
-            aliases: &["move-pane-down"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<MovePaneDown>,
-        },
-        ActionSpec {
-            aliases: &["resize-pane-left"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<ResizePaneLeft>,
-        },
-        ActionSpec {
-            aliases: &["resize-pane-right"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<ResizePaneRight>,
-        },
-        ActionSpec {
-            aliases: &["resize-pane-up"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<ResizePaneUp>,
-        },
-        ActionSpec {
-            aliases: &["resize-pane-down"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<ResizePaneDown>,
-        },
-        ActionSpec {
-            aliases: &["close-other-panes", "only-pane"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<CloseOtherPanes>,
-        },
-        ActionSpec {
-            aliases: &["reset-pane-sizes", "equalize-panes"],
-            context: Some(WORKSPACE_CONTEXT),
-            build: boxed::<ResetPaneSizes>,
-        },
-        ActionSpec {
-            aliases: &["add-bookmark", "bookmark-page"],
-            context: Some(PDF_CONTEXT),
-            build: boxed::<AddBookmark>,
-        },
-        ActionSpec {
-            aliases: &["note-save", "save-note"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteSave>,
-        },
-        ActionSpec {
-            aliases: &["note-cancel", "cancel-note"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteCancel>,
-        },
-        ActionSpec {
-            aliases: &["note-newline"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteNewline>,
-        },
-        ActionSpec {
-            aliases: &["note-backspace"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteBackspace>,
-        },
-        ActionSpec {
-            aliases: &["note-delete"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteDelete>,
-        },
-        ActionSpec {
-            aliases: &["note-left"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteLeft>,
-        },
-        ActionSpec {
-            aliases: &["note-right"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteRight>,
-        },
-        ActionSpec {
-            aliases: &["note-up"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteUp>,
-        },
-        ActionSpec {
-            aliases: &["note-down"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteDown>,
-        },
-        ActionSpec {
-            aliases: &["note-home"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteHome>,
-        },
-        ActionSpec {
-            aliases: &["note-end"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteEnd>,
-        },
-        ActionSpec {
-            aliases: &["note-select-all"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteSelectAll>,
-        },
-        ActionSpec {
-            aliases: &["note-select-left"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteSelectLeft>,
-        },
-        ActionSpec {
-            aliases: &["note-select-right"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteSelectRight>,
-        },
-        ActionSpec {
-            aliases: &["note-select-up"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteSelectUp>,
-        },
-        ActionSpec {
-            aliases: &["note-select-down"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteSelectDown>,
-        },
-        ActionSpec {
-            aliases: &["note-select-home"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteSelectHome>,
-        },
-        ActionSpec {
-            aliases: &["note-select-end"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteSelectEnd>,
-        },
-        ActionSpec {
-            aliases: &["note-copy", "copy"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteCopy>,
-        },
-        ActionSpec {
-            aliases: &["note-cut", "cut"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NoteCut>,
-        },
-        ActionSpec {
-            aliases: &["note-paste"],
-            context: Some(NOTE_EDITOR_CONTEXT),
-            build: boxed::<NotePaste>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-submit", "ai-submit", "send-ai-message"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelSubmit>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-close", "close-ai-panel"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelClose>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-newline", "ai-newline"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelNewline>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-backspace", "ai-backspace"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelBackspace>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-delete", "ai-delete"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelDelete>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-left", "ai-left"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelLeft>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-right", "ai-right"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelRight>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-up", "ai-up"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelUp>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-down", "ai-down"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelDown>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-home", "ai-home"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelHome>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-end", "ai-end"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelEnd>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-select-all", "ai-select-all"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelSelectAll>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-select-left", "ai-select-left"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelSelectLeft>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-select-right", "ai-select-right"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelSelectRight>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-select-up", "ai-select-up"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelSelectUp>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-select-down", "ai-select-down"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelSelectDown>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-select-home", "ai-select-home"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelSelectHome>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-select-end", "ai-select-end"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelSelectEnd>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-copy", "ai-copy", "copy"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelCopy>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-cut", "ai-cut", "cut"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelCut>,
-        },
-        ActionSpec {
-            aliases: &["ai-panel-paste", "ai-paste"],
-            context: Some(AI_PANEL_CONTEXT),
-            build: boxed::<AiPanelPaste>,
-        },
-        ActionSpec {
-            aliases: &["palette-confirm"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerConfirm>,
-        },
-        ActionSpec {
-            aliases: &["palette-cancel"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerCancel>,
-        },
-        ActionSpec {
-            aliases: &["palette-select-next"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerSelectNext>,
-        },
-        ActionSpec {
-            aliases: &["palette-select-prev", "palette-select-previous"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerSelectPrev>,
-        },
-        ActionSpec {
-            aliases: &["palette-backspace"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerBackspace>,
-        },
-        ActionSpec {
-            aliases: &["palette-delete"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerDelete>,
-        },
-        ActionSpec {
-            aliases: &["palette-left"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerLeft>,
-        },
-        ActionSpec {
-            aliases: &["palette-right"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerRight>,
-        },
-        ActionSpec {
-            aliases: &["palette-home"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerHome>,
-        },
-        ActionSpec {
-            aliases: &["palette-end"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerEnd>,
-        },
-        ActionSpec {
-            aliases: &["palette-select-all"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerSelectAll>,
-        },
-        ActionSpec {
-            aliases: &["palette-select-left"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerSelectLeft>,
-        },
-        ActionSpec {
-            aliases: &["palette-select-right"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerSelectRight>,
-        },
-        ActionSpec {
-            aliases: &["palette-select-home"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerSelectHome>,
-        },
-        ActionSpec {
-            aliases: &["palette-select-end"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerSelectEnd>,
-        },
-        ActionSpec {
-            aliases: &["palette-copy", "copy"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerCopy>,
-        },
-        ActionSpec {
-            aliases: &["palette-cut", "cut"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerCut>,
-        },
-        ActionSpec {
-            aliases: &["palette-paste"],
-            context: Some(PALETTE_CONTEXT),
-            build: boxed::<PickerPaste>,
-        },
-        ActionSpec {
-            aliases: &["search-input-confirm"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputConfirm>,
-        },
-        ActionSpec {
-            aliases: &["search-input-cancel"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputCancel>,
-        },
-        ActionSpec {
-            aliases: &["search-input-previous", "search-input-prev"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputPrevious>,
-        },
-        ActionSpec {
-            aliases: &["search-input-backspace"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputBackspace>,
-        },
-        ActionSpec {
-            aliases: &["search-input-delete"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputDelete>,
-        },
-        ActionSpec {
-            aliases: &["search-input-left"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputLeft>,
-        },
-        ActionSpec {
-            aliases: &["search-input-right"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputRight>,
-        },
-        ActionSpec {
-            aliases: &["search-input-home"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputHome>,
-        },
-        ActionSpec {
-            aliases: &["search-input-end"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputEnd>,
-        },
-        ActionSpec {
-            aliases: &["search-input-select-all"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputSelectAll>,
-        },
-        ActionSpec {
-            aliases: &["search-input-select-left"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputSelectLeft>,
-        },
-        ActionSpec {
-            aliases: &["search-input-select-right"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputSelectRight>,
-        },
-        ActionSpec {
-            aliases: &["search-input-select-home"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputSelectHome>,
-        },
-        ActionSpec {
-            aliases: &["search-input-select-end"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputSelectEnd>,
-        },
-        ActionSpec {
-            aliases: &["search-input-copy", "copy"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputCopy>,
-        },
-        ActionSpec {
-            aliases: &["search-input-cut", "cut"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputCut>,
-        },
-        ActionSpec {
-            aliases: &["search-input-paste"],
-            context: Some(SEARCH_CONTEXT),
-            build: boxed::<SearchInputPaste>,
-        },
-        ActionSpec {
-            aliases: &["toc-confirm"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerConfirm>,
-        },
-        ActionSpec {
-            aliases: &["toc-cancel"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerCancel>,
-        },
-        ActionSpec {
-            aliases: &["toc-select-next"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerSelectNext>,
-        },
-        ActionSpec {
-            aliases: &["toc-select-prev", "toc-select-previous"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerSelectPrev>,
-        },
-        ActionSpec {
-            aliases: &["toc-backspace"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerBackspace>,
-        },
-        ActionSpec {
-            aliases: &["toc-delete"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerDelete>,
-        },
-        ActionSpec {
-            aliases: &["toc-left"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerLeft>,
-        },
-        ActionSpec {
-            aliases: &["toc-right"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerRight>,
-        },
-        ActionSpec {
-            aliases: &["toc-home"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerHome>,
-        },
-        ActionSpec {
-            aliases: &["toc-end"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerEnd>,
-        },
-        ActionSpec {
-            aliases: &["toc-select-all"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerSelectAll>,
-        },
-        ActionSpec {
-            aliases: &["toc-select-left"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerSelectLeft>,
-        },
-        ActionSpec {
-            aliases: &["toc-select-right"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerSelectRight>,
-        },
-        ActionSpec {
-            aliases: &["toc-select-home"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerSelectHome>,
-        },
-        ActionSpec {
-            aliases: &["toc-select-end"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerSelectEnd>,
-        },
-        ActionSpec {
-            aliases: &["toc-copy", "copy"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerCopy>,
-        },
-        ActionSpec {
-            aliases: &["toc-cut", "cut"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerCut>,
-        },
-        ActionSpec {
-            aliases: &["toc-paste"],
-            context: Some(TOC_CONTEXT),
-            build: boxed::<PickerPaste>,
-        },
-        ActionSpec {
-            aliases: &["notes-select-left"],
-            context: Some(NOTES_CONTEXT),
-            build: boxed::<PickerSelectLeft>,
-        },
-        ActionSpec {
-            aliases: &["notes-select-right"],
-            context: Some(NOTES_CONTEXT),
-            build: boxed::<PickerSelectRight>,
-        },
-        ActionSpec {
-            aliases: &["notes-select-home"],
-            context: Some(NOTES_CONTEXT),
-            build: boxed::<PickerSelectHome>,
-        },
-        ActionSpec {
-            aliases: &["notes-select-end"],
-            context: Some(NOTES_CONTEXT),
-            build: boxed::<PickerSelectEnd>,
-        },
-        ActionSpec {
-            aliases: &["notes-copy", "copy"],
-            context: Some(NOTES_CONTEXT),
-            build: boxed::<PickerCopy>,
-        },
-        ActionSpec {
-            aliases: &["notes-cut", "cut"],
-            context: Some(NOTES_CONTEXT),
-            build: boxed::<PickerCut>,
-        },
-        ActionSpec {
-            aliases: &["history-select-left"],
-            context: Some(HISTORY_CONTEXT),
-            build: boxed::<PickerSelectLeft>,
-        },
-        ActionSpec {
-            aliases: &["history-select-right"],
-            context: Some(HISTORY_CONTEXT),
-            build: boxed::<PickerSelectRight>,
-        },
-        ActionSpec {
-            aliases: &["history-select-home"],
-            context: Some(HISTORY_CONTEXT),
-            build: boxed::<PickerSelectHome>,
-        },
-        ActionSpec {
-            aliases: &["history-select-end"],
-            context: Some(HISTORY_CONTEXT),
-            build: boxed::<PickerSelectEnd>,
-        },
-        ActionSpec {
-            aliases: &["history-copy", "copy"],
-            context: Some(HISTORY_CONTEXT),
-            build: boxed::<PickerCopy>,
-        },
-        ActionSpec {
-            aliases: &["history-cut", "cut"],
-            context: Some(HISTORY_CONTEXT),
-            build: boxed::<PickerCut>,
-        },
-        ActionSpec {
-            aliases: &["bookmarks-select-left"],
-            context: Some(BOOKMARKS_CONTEXT),
-            build: boxed::<PickerSelectLeft>,
-        },
-        ActionSpec {
-            aliases: &["bookmarks-select-right"],
-            context: Some(BOOKMARKS_CONTEXT),
-            build: boxed::<PickerSelectRight>,
-        },
-        ActionSpec {
-            aliases: &["bookmarks-select-home"],
-            context: Some(BOOKMARKS_CONTEXT),
-            build: boxed::<PickerSelectHome>,
-        },
-        ActionSpec {
-            aliases: &["bookmarks-select-end"],
-            context: Some(BOOKMARKS_CONTEXT),
-            build: boxed::<PickerSelectEnd>,
-        },
-        ActionSpec {
-            aliases: &["bookmarks-copy", "copy"],
-            context: Some(BOOKMARKS_CONTEXT),
-            build: boxed::<PickerCopy>,
-        },
-        ActionSpec {
-            aliases: &["bookmarks-cut", "cut"],
-            context: Some(BOOKMARKS_CONTEXT),
-            build: boxed::<PickerCut>,
-        },
-        ActionSpec {
-            aliases: &["bookmark-prompt-select-left"],
-            context: Some(BOOKMARK_PROMPT_CONTEXT),
-            build: boxed::<PickerSelectLeft>,
-        },
-        ActionSpec {
-            aliases: &["bookmark-prompt-select-right"],
-            context: Some(BOOKMARK_PROMPT_CONTEXT),
-            build: boxed::<PickerSelectRight>,
-        },
-        ActionSpec {
-            aliases: &["bookmark-prompt-select-home"],
-            context: Some(BOOKMARK_PROMPT_CONTEXT),
-            build: boxed::<PickerSelectHome>,
-        },
-        ActionSpec {
-            aliases: &["bookmark-prompt-select-end"],
-            context: Some(BOOKMARK_PROMPT_CONTEXT),
-            build: boxed::<PickerSelectEnd>,
-        },
-        ActionSpec {
-            aliases: &["bookmark-prompt-copy", "copy"],
-            context: Some(BOOKMARK_PROMPT_CONTEXT),
-            build: boxed::<PickerCopy>,
-        },
-        ActionSpec {
-            aliases: &["bookmark-prompt-cut", "cut"],
-            context: Some(BOOKMARK_PROMPT_CONTEXT),
-            build: boxed::<PickerCut>,
-        },
-        ActionSpec {
-            aliases: &["settings-input-select-left"],
-            context: Some(SETTINGS_INPUT_CONTEXT),
-            build: boxed::<SettingsInputSelectLeft>,
-        },
-        ActionSpec {
-            aliases: &["settings-input-select-right"],
-            context: Some(SETTINGS_INPUT_CONTEXT),
-            build: boxed::<SettingsInputSelectRight>,
-        },
-        ActionSpec {
-            aliases: &["settings-input-select-home"],
-            context: Some(SETTINGS_INPUT_CONTEXT),
-            build: boxed::<SettingsInputSelectHome>,
-        },
-        ActionSpec {
-            aliases: &["settings-input-select-end"],
-            context: Some(SETTINGS_INPUT_CONTEXT),
-            build: boxed::<SettingsInputSelectEnd>,
-        },
-        ActionSpec {
-            aliases: &["settings-input-copy", "copy"],
-            context: Some(SETTINGS_INPUT_CONTEXT),
-            build: boxed::<SettingsInputCopy>,
-        },
-        ActionSpec {
-            aliases: &["settings-input-cut", "cut"],
-            context: Some(SETTINGS_INPUT_CONTEXT),
-            build: boxed::<SettingsInputCut>,
-        },
-        ActionSpec {
-            aliases: &["panel-close", "settings-panel-close"],
-            context: Some(SETTINGS_CONTEXT),
-            build: boxed::<PanelClose>,
-        },
-    ]
+fn command_specs() -> &'static [CommandSpec] {
+    static SPECS: OnceLock<Vec<CommandSpec>> = OnceLock::new();
+
+    SPECS
+        .get_or_init(|| {
+            vec![
+                spec::<ToggleCommandPalette>(
+                    "toggle-command-palette",
+                    "Toggle Command Palette",
+                    KeyBindingCategory::Workspace,
+                    &["primary-shift-p"],
+                    &["primary-shift-p"],
+                    &["command-palette"],
+                    true,
+                ),
+                spec::<OpenFile>(
+                    "open-file",
+                    "Open File",
+                    KeyBindingCategory::Workspace,
+                    &["primary-o"],
+                    &["primary-o"],
+                    &["open-pdf"],
+                    true,
+                ),
+                spec::<OpenNewTab>(
+                    "open-new-tab",
+                    "Open New Tab",
+                    KeyBindingCategory::Workspace,
+                    &["primary-t"],
+                    &["primary-t"],
+                    &["new-tab"],
+                    true,
+                ),
+                spec::<CloseTab>(
+                    "close-tab",
+                    "Close Tab",
+                    KeyBindingCategory::Workspace,
+                    &["primary-w"],
+                    &["primary-w"],
+                    &[],
+                    true,
+                ),
+                spec::<OpenSettings>(
+                    "open-settings",
+                    "Open Settings",
+                    KeyBindingCategory::Workspace,
+                    &["primary-,"],
+                    &["primary-,"],
+                    &["settings"],
+                    true,
+                ),
+                spec::<OpenKeybindings>(
+                    "open-keybindings",
+                    "Open Keybindings",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &[],
+                    &["open-keymap", "keybindings", "keymap"],
+                    true,
+                ),
+                spec::<ToggleFullScreen>(
+                    "toggle-full-screen",
+                    "Toggle Full Screen",
+                    KeyBindingCategory::Workspace,
+                    &["f11"],
+                    &["f11"],
+                    &["toggle-fullscreen", "fullscreen"],
+                    true,
+                ),
+                spec::<ToggleTransparency>(
+                    "toggle-transparency",
+                    "Toggle Transparency",
+                    KeyBindingCategory::Workspace,
+                    &["primary-shift-t"],
+                    &["primary-shift-t"],
+                    &["transparency"],
+                    true,
+                ),
+                spec::<ToggleAiPanel>(
+                    "toggle-ai-panel",
+                    "Toggle AI Panel",
+                    KeyBindingCategory::Workspace,
+                    &["primary-shift-a"],
+                    &["primary-shift-a"],
+                    &["ai-panel", "ai", "assistant"],
+                    true,
+                ),
+                spec::<OpenHistory>(
+                    "open-history",
+                    "Open History",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-h"],
+                    &["ctrl-h"],
+                    &["history", "recent-files"],
+                    true,
+                ),
+                spec::<OpenBookmarks>(
+                    "open-bookmarks",
+                    "Open Bookmarks",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-b"],
+                    &["'"],
+                    &["bookmarks"],
+                    true,
+                ),
+                spec::<ToggleThumbnailSidebar>(
+                    "toggle-thumbnails",
+                    "Toggle Page Thumbnails",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-shift-g"],
+                    &["ctrl-shift-g"],
+                    &["toggle-thumbnail-sidebar", "page-thumbnails"],
+                    true,
+                ),
+                spec::<ToggleToc>(
+                    "toggle-toc",
+                    "Toggle Table of Contents",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &[],
+                    &["toggle-table-of-contents", "table-of-contents"],
+                    true,
+                ),
+                spec::<OpenNotes>(
+                    "open-notes",
+                    "Open Notes",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &[],
+                    &["notes"],
+                    true,
+                ),
+                spec::<ToggleNotes>(
+                    "toggle-notes",
+                    "Toggle Notes Sidebar",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &[],
+                    &["toggle-notes-sidebar"],
+                    true,
+                ),
+                spec::<SplitRight>(
+                    "split-right",
+                    "Split Right",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-\\", "ctrl-k right"],
+                    &[],
+                    &["pane-split-right"],
+                    true,
+                ),
+                spec::<SplitLeft>(
+                    "split-left",
+                    "Split Left",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-k left"],
+                    &[],
+                    &["pane-split-left"],
+                    true,
+                ),
+                spec::<SplitUp>(
+                    "split-up",
+                    "Split Up",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-k up"],
+                    &[],
+                    &["pane-split-up"],
+                    true,
+                ),
+                spec::<SplitDown>(
+                    "split-down",
+                    "Split Down",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-k down"],
+                    &[],
+                    &["pane-split-down"],
+                    true,
+                ),
+                spec::<SplitVertical>(
+                    "split-vertical",
+                    "Split Vertically",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w v", "ctrl-w ctrl-v"],
+                    &["vsplit"],
+                    true,
+                ),
+                spec::<SplitHorizontal>(
+                    "split-horizontal",
+                    "Split Horizontally",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w s", "ctrl-w ctrl-s", "ctrl-w shift-s"],
+                    &["hsplit"],
+                    true,
+                ),
+                spec::<ActivatePaneLeft>(
+                    "activate-pane-left",
+                    "Focus Pane Left",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-k ctrl-left"],
+                    &["ctrl-w left", "ctrl-w h", "ctrl-w ctrl-h"],
+                    &["pane-left"],
+                    true,
+                ),
+                spec::<ActivatePaneRight>(
+                    "activate-pane-right",
+                    "Focus Pane Right",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-k ctrl-right"],
+                    &["ctrl-w right", "ctrl-w l", "ctrl-w ctrl-l"],
+                    &["pane-right"],
+                    true,
+                ),
+                spec::<ActivatePaneUp>(
+                    "activate-pane-up",
+                    "Focus Pane Up",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-k ctrl-up"],
+                    &["ctrl-w up", "ctrl-w k", "ctrl-w ctrl-k"],
+                    &["pane-up"],
+                    true,
+                ),
+                spec::<ActivatePaneDown>(
+                    "activate-pane-down",
+                    "Focus Pane Down",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-k ctrl-down"],
+                    &["ctrl-w down", "ctrl-w j", "ctrl-w ctrl-j"],
+                    &["pane-down"],
+                    true,
+                ),
+                spec::<ActivateNextPane>(
+                    "activate-next-pane",
+                    "Focus Next Pane",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w w", "ctrl-w ctrl-w"],
+                    &["next-pane"],
+                    true,
+                ),
+                spec::<ActivatePreviousPane>(
+                    "activate-previous-pane",
+                    "Focus Previous Pane",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w p", "ctrl-w ctrl-p"],
+                    &["previous-pane", "prev-pane"],
+                    true,
+                ),
+                spec::<SwapPaneLeft>(
+                    "swap-pane-left",
+                    "Swap Pane Left",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-k shift-left"],
+                    &["ctrl-w shift-left"],
+                    &[],
+                    true,
+                ),
+                spec::<SwapPaneRight>(
+                    "swap-pane-right",
+                    "Swap Pane Right",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-k shift-right"],
+                    &["ctrl-w shift-right"],
+                    &[],
+                    true,
+                ),
+                spec::<SwapPaneUp>(
+                    "swap-pane-up",
+                    "Swap Pane Up",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-k shift-up"],
+                    &["ctrl-w shift-up"],
+                    &[],
+                    true,
+                ),
+                spec::<SwapPaneDown>(
+                    "swap-pane-down",
+                    "Swap Pane Down",
+                    KeyBindingCategory::Workspace,
+                    &["ctrl-k shift-down"],
+                    &["ctrl-w shift-down"],
+                    &[],
+                    true,
+                ),
+                spec::<MovePaneLeft>(
+                    "move-pane-left",
+                    "Move Pane Left",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w shift-h"],
+                    &[],
+                    true,
+                ),
+                spec::<MovePaneRight>(
+                    "move-pane-right",
+                    "Move Pane Right",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w shift-l"],
+                    &[],
+                    true,
+                ),
+                spec::<MovePaneUp>(
+                    "move-pane-up",
+                    "Move Pane Up",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w shift-k"],
+                    &[],
+                    true,
+                ),
+                spec::<MovePaneDown>(
+                    "move-pane-down",
+                    "Move Pane Down",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w shift-j"],
+                    &[],
+                    true,
+                ),
+                spec::<ResizePaneLeft>(
+                    "resize-pane-left",
+                    "Resize Pane Left",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w <"],
+                    &[],
+                    true,
+                ),
+                spec::<ResizePaneRight>(
+                    "resize-pane-right",
+                    "Resize Pane Right",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w >"],
+                    &[],
+                    true,
+                ),
+                spec::<ResizePaneUp>(
+                    "resize-pane-up",
+                    "Resize Pane Up",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w +"],
+                    &[],
+                    true,
+                ),
+                spec::<ResizePaneDown>(
+                    "resize-pane-down",
+                    "Resize Pane Down",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w -"],
+                    &[],
+                    true,
+                ),
+                spec::<ResetPaneSizes>(
+                    "reset-pane-sizes",
+                    "Reset Pane Sizes",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w ="],
+                    &["equalize-panes"],
+                    true,
+                ),
+                spec::<CloseOtherPanes>(
+                    "close-other-panes",
+                    "Close Other Panes",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &["ctrl-w o", "ctrl-w ctrl-o"],
+                    &["only-pane"],
+                    true,
+                ),
+                spec::<CopySelection>(
+                    "copy-selection",
+                    "Copy Selection",
+                    KeyBindingCategory::PdfView,
+                    &["primary-c"],
+                    &["primary-c"],
+                    &["copy"],
+                    true,
+                ),
+                spec::<SelectAll>(
+                    "select-all",
+                    "Select All",
+                    KeyBindingCategory::PdfView,
+                    &["primary-a"],
+                    &["primary-a"],
+                    &[],
+                    true,
+                ),
+                spec::<ZoomIn>(
+                    "zoom-in",
+                    "Zoom In",
+                    KeyBindingCategory::PdfView,
+                    &["+", "shift-="],
+                    &["+", "shift-="],
+                    &[],
+                    true,
+                ),
+                spec::<ZoomOut>(
+                    "zoom-out",
+                    "Zoom Out",
+                    KeyBindingCategory::PdfView,
+                    &["-"],
+                    &["-"],
+                    &[],
+                    true,
+                ),
+                spec::<ResetZoom>(
+                    "reset-zoom",
+                    "Reset Zoom",
+                    KeyBindingCategory::PdfView,
+                    &["="],
+                    &["="],
+                    &[],
+                    true,
+                ),
+                spec::<Reload>(
+                    "reload",
+                    "Reload Document",
+                    KeyBindingCategory::PdfView,
+                    &["f5", "ctrl-r"],
+                    &["f5", "r"],
+                    &["reload-document"],
+                    true,
+                ),
+                spec::<Search>(
+                    "search",
+                    "Search",
+                    KeyBindingCategory::PdfView,
+                    &["primary-f", "/"],
+                    &["/"],
+                    &[],
+                    true,
+                ),
+                spec::<NextSearchResult>(
+                    "next-search-result",
+                    "Next Search Result",
+                    KeyBindingCategory::PdfView,
+                    &["f3", "nonmac:ctrl-alt-g", "mac:cmd-g"],
+                    &["n"],
+                    &[
+                        "search-next",
+                        "search-next-result",
+                        "select-next-match",
+                        "search::SelectNextMatch",
+                    ],
+                    true,
+                ),
+                spec::<PrevSearchResult>(
+                    "prev-search-result",
+                    "Previous Search Result",
+                    KeyBindingCategory::PdfView,
+                    &["shift-f3", "nonmac:ctrl-alt-shift-g", "mac:cmd-shift-g"],
+                    &["shift-n"],
+                    &[
+                        "previous-search-result",
+                        "search-prev",
+                        "search-previous",
+                        "search-previous-result",
+                        "select-prev-match",
+                        "select-previous-match",
+                        "search::SelectPrevMatch",
+                        "search::SelectPreviousMatch",
+                    ],
+                    true,
+                ),
+                spec::<NextSearchResult>(
+                    "next-search-result",
+                    "Next Search Result",
+                    KeyBindingCategory::SearchResults,
+                    &["primary-g"],
+                    &["ctrl-g"],
+                    &["search-next", "search-next-result"],
+                    false,
+                ),
+                spec::<PrevSearchResult>(
+                    "prev-search-result",
+                    "Previous Search Result",
+                    KeyBindingCategory::SearchResults,
+                    &["primary-shift-g"],
+                    &["ctrl-shift-g"],
+                    &["search-prev", "search-previous"],
+                    false,
+                ),
+                spec::<NextPage>(
+                    "next-page",
+                    "Next Page",
+                    KeyBindingCategory::PdfView,
+                    &["pagedown"],
+                    &["ctrl-f"],
+                    &[],
+                    true,
+                ),
+                spec::<PreviousPage>(
+                    "previous-page",
+                    "Previous Page",
+                    KeyBindingCategory::PdfView,
+                    &["pageup"],
+                    &["ctrl-b"],
+                    &["prev-page"],
+                    true,
+                ),
+                spec::<NextHalfPage>(
+                    "next-half-page",
+                    "Next Half Page",
+                    KeyBindingCategory::PdfView,
+                    &["shift-pagedown"],
+                    &["ctrl-d"],
+                    &[],
+                    true,
+                ),
+                spec::<PreviousHalfPage>(
+                    "previous-half-page",
+                    "Previous Half Page",
+                    KeyBindingCategory::PdfView,
+                    &["shift-pageup"],
+                    &["ctrl-u"],
+                    &["prev-half-page"],
+                    true,
+                ),
+                spec::<ScrollLineDown>(
+                    "scroll-line-down",
+                    "Scroll Line Down",
+                    KeyBindingCategory::PdfView,
+                    &[],
+                    &["j"],
+                    &["scroll-down"],
+                    true,
+                ),
+                spec::<ScrollLineUp>(
+                    "scroll-line-up",
+                    "Scroll Line Up",
+                    KeyBindingCategory::PdfView,
+                    &[],
+                    &["k"],
+                    &["scroll-up"],
+                    true,
+                ),
+                spec::<GoToBeginning>(
+                    "go-to-beginning",
+                    "Go to Beginning",
+                    KeyBindingCategory::PdfView,
+                    &["home", "ctrl-home", "alt-<"],
+                    &["home", "ctrl-home", "alt-<", "g g"],
+                    &[
+                        "go-to-start",
+                        "go-to-top",
+                        "go-to-the-beginning",
+                        "start-of-document",
+                    ],
+                    true,
+                ),
+                spec::<GoToEnd>(
+                    "go-to-end",
+                    "Go to End",
+                    KeyBindingCategory::PdfView,
+                    &["end", "ctrl-end", "alt->"],
+                    &["end", "ctrl-end", "alt->", "shift-g"],
+                    &["go-to-bottom", "go-to-the-end", "end-of-document"],
+                    true,
+                ),
+                spec::<JumpBackward>(
+                    "jump-backward",
+                    "Jump Backward",
+                    KeyBindingCategory::PdfView,
+                    &[],
+                    &["ctrl-o"],
+                    &["jump-back"],
+                    true,
+                ),
+                spec::<JumpForward>(
+                    "jump-forward",
+                    "Jump Forward",
+                    KeyBindingCategory::PdfView,
+                    &[],
+                    &["ctrl-i"],
+                    &[],
+                    true,
+                ),
+                spec::<Toc>(
+                    "toc",
+                    "Open Table of Contents",
+                    KeyBindingCategory::PdfView,
+                    &[],
+                    &[],
+                    &["goto-toc", "goto-table-of-contents"],
+                    true,
+                ),
+                spec::<OpenQuickAsk>(
+                    "open-quick-ask",
+                    "Open Quick Ask",
+                    KeyBindingCategory::PdfView,
+                    &["tab"],
+                    &["tab"],
+                    &["quick-ask"],
+                    true,
+                ),
+                spec::<OpenGoToPage>(
+                    "go-to-page",
+                    "Go to Page",
+                    KeyBindingCategory::PdfView,
+                    &[],
+                    &[":"],
+                    &["goto-page", "open-go-to-page"],
+                    true,
+                ),
+                spec::<AddBookmark>(
+                    "add-bookmark",
+                    "Add Bookmark",
+                    KeyBindingCategory::PdfView,
+                    &["ctrl-d"],
+                    &["m"],
+                    &["bookmark-page"],
+                    true,
+                ),
+                spec::<ToggleGridOverview>(
+                    "toggle-grid-overview",
+                    "Toggle Page Overview",
+                    KeyBindingCategory::PdfView,
+                    &["ctrl-g"],
+                    &["ctrl-g"],
+                    &["grid-overview", "page-overview"],
+                    true,
+                ),
+                spec::<ZoomIn>(
+                    "zoom-in",
+                    "Zoom In",
+                    KeyBindingCategory::PageOverview,
+                    &["+", "shift-="],
+                    &["+", "shift-="],
+                    &[],
+                    false,
+                ),
+                spec::<ZoomOut>(
+                    "zoom-out",
+                    "Zoom Out",
+                    KeyBindingCategory::PageOverview,
+                    &["-"],
+                    &["-"],
+                    &[],
+                    false,
+                ),
+                spec::<NextPage>(
+                    "next-page",
+                    "Next Page",
+                    KeyBindingCategory::PageOverview,
+                    &["pagedown"],
+                    &["ctrl-f"],
+                    &[],
+                    false,
+                ),
+                spec::<PreviousPage>(
+                    "previous-page",
+                    "Previous Page",
+                    KeyBindingCategory::PageOverview,
+                    &["pageup"],
+                    &["ctrl-b"],
+                    &["prev-page"],
+                    false,
+                ),
+                spec::<NextHalfPage>(
+                    "next-half-page",
+                    "Next Half Page",
+                    KeyBindingCategory::PageOverview,
+                    &["shift-pagedown"],
+                    &["ctrl-d"],
+                    &[],
+                    false,
+                ),
+                spec::<PreviousHalfPage>(
+                    "previous-half-page",
+                    "Previous Half Page",
+                    KeyBindingCategory::PageOverview,
+                    &["shift-pageup"],
+                    &["ctrl-u"],
+                    &["prev-half-page"],
+                    false,
+                ),
+                spec::<GoToBeginning>(
+                    "go-to-beginning",
+                    "Go to Beginning",
+                    KeyBindingCategory::PageOverview,
+                    &["home", "ctrl-home", "alt-<"],
+                    &["home", "ctrl-home", "alt-<", "g g"],
+                    &["go-to-start", "go-to-top"],
+                    false,
+                ),
+                spec::<GoToEnd>(
+                    "go-to-end",
+                    "Go to End",
+                    KeyBindingCategory::PageOverview,
+                    &["end", "ctrl-end", "alt->"],
+                    &["end", "ctrl-end", "alt->", "shift-g"],
+                    &["go-to-bottom"],
+                    false,
+                ),
+                spec::<GridCursorUp>(
+                    "grid-cursor-up",
+                    "Move Up",
+                    KeyBindingCategory::PageOverview,
+                    &["up"],
+                    &["up"],
+                    &["grid-overview-cursor-up"],
+                    true,
+                ),
+                spec::<GridCursorDown>(
+                    "grid-cursor-down",
+                    "Move Down",
+                    KeyBindingCategory::PageOverview,
+                    &["down"],
+                    &["down"],
+                    &["grid-overview-cursor-down"],
+                    true,
+                ),
+                spec::<GridCursorLeft>(
+                    "grid-cursor-left",
+                    "Move Left",
+                    KeyBindingCategory::PageOverview,
+                    &["left"],
+                    &["left"],
+                    &["grid-overview-cursor-left"],
+                    true,
+                ),
+                spec::<GridCursorRight>(
+                    "grid-cursor-right",
+                    "Move Right",
+                    KeyBindingCategory::PageOverview,
+                    &["right"],
+                    &["right"],
+                    &["grid-overview-cursor-right"],
+                    true,
+                ),
+                spec::<GridOverviewConfirm>(
+                    "grid-overview-confirm",
+                    "Open Selected Page",
+                    KeyBindingCategory::PageOverview,
+                    &["enter"],
+                    &["enter"],
+                    &["grid-overview-open", "open-grid-overview-page"],
+                    true,
+                ),
+                spec::<ToggleGridOverview>(
+                    "toggle-grid-overview",
+                    "Close Page Overview",
+                    KeyBindingCategory::PageOverview,
+                    &["ctrl-g", "escape"],
+                    &["ctrl-g", "escape"],
+                    &["grid-overview", "page-overview"],
+                    false,
+                ),
+            ]
+        })
+        .as_slice()
+}
+
+fn spec<A>(
+    action: &'static str,
+    label: &'static str,
+    category: KeyBindingCategory,
+    modern: &'static [&'static str],
+    vim: &'static [&'static str],
+    aliases: &'static [&'static str],
+    legacy_default: bool,
+) -> CommandSpec
+where
+    A: Action + Default + 'static,
+{
+    CommandSpec {
+        action,
+        label,
+        aliases,
+        category,
+        modern,
+        vim,
+        legacy_default,
+        build: boxed::<A>,
+    }
 }
 
 #[cfg(test)]
@@ -1683,10 +1352,13 @@ mod tests {
         let expected = A::default().name().to_string();
 
         for alias in aliases {
-            let actions = known_actions(alias);
-            assert_eq!(actions.len(), 1, "alias `{alias}` should resolve once");
-            assert_eq!(actions[0].0.name(), expected);
-            assert_eq!(actions[0].1, Some(PDF_CONTEXT));
+            let specs = command_specs()
+                .iter()
+                .filter(|spec| action_matches_spec(alias, spec) && spec.legacy_default)
+                .collect::<Vec<_>>();
+            assert_eq!(specs.len(), 1, "alias `{alias}` should resolve once");
+            assert_eq!((specs[0].build)().name(), expected);
+            assert_eq!(specs[0].category, KeyBindingCategory::PdfView);
         }
     }
 
@@ -1711,5 +1383,75 @@ mod tests {
             "search::SelectPrevMatch",
             "search::SelectPreviousMatch",
         ]);
+    }
+
+    #[test]
+    fn categories_hide_raw_predicates() {
+        assert_eq!(KeyBindingCategory::PdfView.label(), "PDF View");
+        let predicate = KeyBindingCategory::PdfView.predicate();
+        assert!(predicate.starts_with("PdfView && !GridOverview"));
+        assert!(predicate.contains("!Search"));
+    }
+
+    #[test]
+    fn primary_modifier_expands_for_current_platform() {
+        let expected = if cfg!(target_os = "macos") {
+            "cmd-shift-p cmd-o"
+        } else {
+            "ctrl-shift-p ctrl-o"
+        };
+
+        assert_eq!(
+            expand_platform_keystroke("primary-shift-p primary-o"),
+            expected
+        );
+    }
+
+    #[test]
+    fn action_can_have_multiple_categories() {
+        let rows = editable_bindings(KeymapPreset::Vim, &[])
+            .into_iter()
+            .filter(|row| row.action == "next-search-result")
+            .collect::<Vec<_>>();
+        assert!(
+            rows.iter()
+                .any(|row| row.category == KeyBindingCategory::PdfView)
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.category == KeyBindingCategory::SearchResults)
+        );
+    }
+
+    #[test]
+    fn source_reflects_user_override_versus_default() {
+        let preset = KeymapPreset::Modern;
+        let defaults = editable_bindings(preset, &[]);
+        let sample = defaults
+            .iter()
+            .find(|row| !row.default_keystrokes.is_empty())
+            .expect("expected at least one bound command");
+
+        // Without an override the effective keystrokes equal the defaults (Source = Default).
+        assert_eq!(sample.keystrokes, sample.default_keystrokes);
+
+        let overrides = vec![KeyBindingOverride {
+            action: sample.action.to_string(),
+            keystrokes: "test-override".to_string(),
+            context: Some(sample.category.id().to_string()),
+        }];
+
+        let overridden = editable_bindings(preset, &overrides)
+            .into_iter()
+            .find(|row| row.action == sample.action && row.category == sample.category)
+            .expect("overridden binding should still be listed");
+
+        // With an override the effective keystrokes diverge from the defaults (Source = User).
+        assert_ne!(overridden.keystrokes, overridden.default_keystrokes);
+        assert_eq!(
+            overridden.keystrokes,
+            vec!["test-override".to_string()]
+        );
+        assert_eq!(overridden.default_keystrokes, sample.default_keystrokes);
     }
 }

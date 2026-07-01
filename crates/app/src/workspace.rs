@@ -16,7 +16,9 @@ use crate::{
         DraggedTab, DraggedTabPayload, Pane, PaneDropTarget, PaneEvent, PaneGroup, SplitDirection,
         SplitDown, SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical,
     },
-    pdf_view::{CloseTab, OpenFile, OpenNewTab, OpenSettings, ToggleCommandPalette},
+    pdf_view::{
+        CloseTab, OpenFile, OpenKeybindings, OpenNewTab, OpenSettings, ToggleCommandPalette,
+    },
     picker::{Picker, PickerEvent},
     settings::{SettingsStore, setup_ui_font, ui_rems},
     settings_window::open_settings_window,
@@ -227,6 +229,11 @@ impl Workspace {
     fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_pane = self.active_pane.clone();
         active_pane.update(cx, |pane, cx| pane.open_new_tab(window, cx));
+    }
+
+    pub(crate) fn open_keymap_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active_pane = self.active_pane.clone();
+        active_pane.update(cx, |pane, cx| pane.open_keymap_tab(window, cx));
     }
 
     fn open_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1196,6 +1203,9 @@ impl Render for Workspace {
                 this.toggle_command_palette(window, cx);
             }))
             .on_action(|_: &OpenSettings, _, cx| open_settings_window(cx))
+            .on_action(cx.listener(|this, _: &OpenKeybindings, window, cx| {
+                this.open_keymap_tab(window, cx);
+            }))
             .child(self.render_toolbar(theme, cx))
             .child(
                 div()

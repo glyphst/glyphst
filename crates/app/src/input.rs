@@ -1,0 +1,24 @@
+gpui::actions!(
+    input,
+    [
+        Backspace,
+        Delete,
+        Left,
+        Right,
+        Up,
+        Down,
+        Home,
+        End,
+        SelectAll,
+        SelectLeft,
+        SelectRight,
+        SelectUp,
+        SelectDown,
+        SelectHome,
+        SelectEnd,
+        Copy,
+        Cut,
+        Paste,
+        Newline
+    ]
+);

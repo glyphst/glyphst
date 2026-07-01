@@ -2,6 +2,8 @@ use std::{ops::Range, time::Duration};
 
 use crate::{
     icons::{Icon, IconButton, IconName},
+    input,
+    pdf_view::{NextSearchResult, PrevSearchResult},
     settings::{SettingsStore, ui_rems},
     style::{CONTROL_ICON_SIZE, RADIUS_MD, SEARCH_BAR_HEIGHT, TextSize, elevated_shadow},
 };
@@ -15,25 +17,7 @@ use gpui::{
 
 gpui::actions!(
     search,
-    [
-        SearchInputConfirm,
-        SearchInputCancel,
-        SearchInputPrevious,
-        SearchInputBackspace,
-        SearchInputDelete,
-        SearchInputLeft,
-        SearchInputRight,
-        SearchInputHome,
-        SearchInputEnd,
-        SearchInputSelectAll,
-        SearchInputSelectLeft,
-        SearchInputSelectRight,
-        SearchInputSelectHome,
-        SearchInputSelectEnd,
-        SearchInputCopy,
-        SearchInputCut,
-        SearchInputPaste
-    ]
+    [SearchInputConfirm, SearchInputCancel, SearchInputPrevious]
 );
 
 const DRAG_SELECT_THRESHOLD: f32 = 2.0;
@@ -173,11 +157,19 @@ impl SearchBar {
         self.activate(true, cx);
     }
 
+    fn next_result(&mut self, _: &NextSearchResult, _: &mut Window, cx: &mut Context<Self>) {
+        self.activate(false, cx);
+    }
+
+    fn prev_result(&mut self, _: &PrevSearchResult, _: &mut Window, cx: &mut Context<Self>) {
+        self.activate(true, cx);
+    }
+
     fn cancel(&mut self, _: &SearchInputCancel, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss(window, cx);
     }
 
-    fn left(&mut self, _: &SearchInputLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn left(&mut self, _: &input::Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);
         } else {
@@ -185,7 +177,7 @@ impl SearchBar {
         }
     }
 
-    fn right(&mut self, _: &SearchInputRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn right(&mut self, _: &input::Right, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.next_boundary(self.selected_range.end), cx);
         } else {
@@ -193,60 +185,60 @@ impl SearchBar {
         }
     }
 
-    fn select_all(&mut self, _: &SearchInputSelectAll, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_all(&mut self, _: &input::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
 
-    fn select_left(&mut self, _: &SearchInputSelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_left(&mut self, _: &input::SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_right(&mut self, _: &SearchInputSelectRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_right(&mut self, _: &input::SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_home(&mut self, _: &SearchInputSelectHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_home(&mut self, _: &input::SelectHome, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(0, cx);
     }
 
-    fn select_end(&mut self, _: &SearchInputSelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_end(&mut self, _: &input::SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.content.len(), cx);
     }
 
-    fn copy(&mut self, _: &SearchInputCopy, _: &mut Window, cx: &mut Context<Self>) {
+    fn copy(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
         self.copy_selected_text(cx);
     }
 
-    fn cut(&mut self, _: &SearchInputCut, window: &mut Window, cx: &mut Context<Self>) {
+    fn cut(&mut self, _: &input::Cut, window: &mut Window, cx: &mut Context<Self>) {
         if self.copy_selected_text(cx) {
             self.replace_text_in_range(None, "", window, cx);
         }
     }
 
-    fn home(&mut self, _: &SearchInputHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn home(&mut self, _: &input::Home, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
     }
 
-    fn end(&mut self, _: &SearchInputEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn end(&mut self, _: &input::End, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
     }
 
-    fn backspace(&mut self, _: &SearchInputBackspace, window: &mut Window, cx: &mut Context<Self>) {
+    fn backspace(&mut self, _: &input::Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn delete(&mut self, _: &SearchInputDelete, window: &mut Window, cx: &mut Context<Self>) {
+    fn delete(&mut self, _: &input::Delete, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor_offset()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn paste(&mut self, _: &SearchInputPaste, window: &mut Window, cx: &mut Context<Self>) {
+    fn paste(&mut self, _: &input::Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace(['\n', '\r'], " ");
             self.replace_text_in_range(None, &text, window, cx);
@@ -581,7 +573,7 @@ impl Render for SearchBar {
         let ignore_case = self.ignore_case;
 
         div()
-            .key_context("Search")
+            .key_context("Search TextInput")
             .track_focus(&self.focus_handle)
             .flex()
             .flex_row()
@@ -603,6 +595,8 @@ impl Render for SearchBar {
             })
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::previous))
+            .on_action(cx.listener(Self::next_result))
+            .on_action(cx.listener(Self::prev_result))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))

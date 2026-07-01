@@ -1,6 +1,6 @@
 use crate::{
     ai_client::{AiModelInfo, list_ai_models, test_ai_connection},
-    keybindings,
+    input, keybindings,
     scrollbar::{WithScrollbar as _, uniform_list_scrollbar_for},
     settings::{
         AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, FontSettings, KeymapPreset,
@@ -20,26 +20,7 @@ use gpui::{
 };
 use std::{ops::Range, path::Path};
 
-gpui::actions!(
-    settings_panel,
-    [
-        PanelClose,
-        SettingsInputLeft,
-        SettingsInputRight,
-        SettingsInputHome,
-        SettingsInputEnd,
-        SettingsInputBackspace,
-        SettingsInputDelete,
-        SettingsInputSelectAll,
-        SettingsInputSelectLeft,
-        SettingsInputSelectRight,
-        SettingsInputSelectHome,
-        SettingsInputSelectEnd,
-        SettingsInputCopy,
-        SettingsInputCut,
-        SettingsInputPaste
-    ]
-);
+gpui::actions!(settings_panel, [PanelClose]);
 
 // ---- inline text input used in the AI settings tab ----
 
@@ -85,7 +66,7 @@ impl SettingsTextInput {
         }
     }
 
-    fn set_content(&mut self, content: SharedString, cx: &mut Context<Self>) {
+    pub fn set_content(&mut self, content: SharedString, cx: &mut Context<Self>) {
         let len = content.len();
         self.content = content;
         self.selected_range = len..len;
@@ -94,7 +75,7 @@ impl SettingsTextInput {
         cx.notify();
     }
 
-    fn left(&mut self, _: &SettingsInputLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn left(&mut self, _: &input::Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);
         } else {
@@ -102,7 +83,7 @@ impl SettingsTextInput {
         }
     }
 
-    fn right(&mut self, _: &SettingsInputRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn right(&mut self, _: &input::Right, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.next_boundary(self.selected_range.end), cx);
         } else {
@@ -110,70 +91,60 @@ impl SettingsTextInput {
         }
     }
 
-    fn home(&mut self, _: &SettingsInputHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn home(&mut self, _: &input::Home, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
     }
 
-    fn end(&mut self, _: &SettingsInputEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn end(&mut self, _: &input::End, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
     }
 
-    fn backspace(
-        &mut self,
-        _: &SettingsInputBackspace,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn backspace(&mut self, _: &input::Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn delete(&mut self, _: &SettingsInputDelete, window: &mut Window, cx: &mut Context<Self>) {
+    fn delete(&mut self, _: &input::Delete, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor_offset()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn select_all(&mut self, _: &SettingsInputSelectAll, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_all(&mut self, _: &input::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
 
-    fn select_left(&mut self, _: &SettingsInputSelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_left(&mut self, _: &input::SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_right(
-        &mut self,
-        _: &SettingsInputSelectRight,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_right(&mut self, _: &input::SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_home(&mut self, _: &SettingsInputSelectHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_home(&mut self, _: &input::SelectHome, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(0, cx);
     }
 
-    fn select_end(&mut self, _: &SettingsInputSelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_end(&mut self, _: &input::SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.content.len(), cx);
     }
 
-    fn copy(&mut self, _: &SettingsInputCopy, _: &mut Window, cx: &mut Context<Self>) {
+    fn copy(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
         self.copy_selected_text(cx);
     }
 
-    fn cut(&mut self, _: &SettingsInputCut, window: &mut Window, cx: &mut Context<Self>) {
+    fn cut(&mut self, _: &input::Cut, window: &mut Window, cx: &mut Context<Self>) {
         if self.copy_selected_text(cx) {
             self.replace_text_in_range(None, "", window, cx);
         }
     }
 
-    fn paste(&mut self, _: &SettingsInputPaste, window: &mut Window, cx: &mut Context<Self>) {
+    fn paste(&mut self, _: &input::Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace(['\n', '\r'], " ");
             self.replace_text_in_range(None, &text, window, cx);
@@ -508,7 +479,7 @@ impl Render for SettingsTextInput {
         let focused = self.focus_handle.is_focused(window);
 
         div()
-            .key_context("SettingsInput")
+            .key_context("SettingsInput TextInput")
             .track_focus(&self.focus_handle)
             .flex()
             .flex_1()
@@ -795,12 +766,23 @@ pub enum PanelEvent {
 }
 
 pub fn open_settings_window(cx: &mut App) {
+    open_settings_window_with_section(None, cx);
+}
+
+fn open_settings_window_with_section(section: Option<SettingsSection>, cx: &mut App) {
     if let Some(existing_window) = cx
         .windows()
         .into_iter()
         .find_map(|window| window.downcast::<SettingsWindow>())
     {
-        if let Err(error) = existing_window.update(cx, |_, window, _| window.activate_window()) {
+        if let Err(error) = existing_window.update(cx, move |settings, window, cx| {
+            if let Some(section) = section {
+                settings.active_tab = section.tab();
+                settings.active_section = section;
+                cx.notify();
+            }
+            window.activate_window();
+        }) {
             eprintln!("failed to activate settings window: {error:#}");
         }
         return;
@@ -822,9 +804,16 @@ pub fn open_settings_window(cx: &mut App) {
             window_min_size: Some(size(px(720.0), px(420.0))),
             ..Default::default()
         },
-        |window, cx| {
+        move |window, cx| {
             window.set_app_id("glyphst");
-            cx.new(SettingsWindow::new)
+            cx.new(|cx| {
+                let mut settings = SettingsWindow::new(cx);
+                if let Some(section) = section {
+                    settings.active_tab = section.tab();
+                    settings.active_section = section;
+                }
+                settings
+            })
         },
     ) {
         eprintln!("failed to open settings window: {error:#}");
@@ -834,6 +823,7 @@ pub fn open_settings_window(cx: &mut App) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     General,
+    Keymap,
     Appearance,
     AiGeneral,
     AiProviders,
@@ -843,6 +833,7 @@ impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Keymap => "Keymap",
             Self::Appearance => "Appearance",
             Self::AiGeneral => "General",
             Self::AiProviders => "Model Providers",
@@ -868,13 +859,13 @@ enum SettingsSection {
     AiProviders,
 }
 
-const GENERAL_SECTIONS: [SettingsSection; 5] = [
+const GENERAL_SECTIONS: [SettingsSection; 4] = [
     SettingsSection::GeneralZoom,
     SettingsSection::GeneralScroll,
-    SettingsSection::GeneralKeymap,
     SettingsSection::GeneralWindow,
     SettingsSection::GeneralTabs,
 ];
+const KEYMAP_SECTIONS: [SettingsSection; 1] = [SettingsSection::GeneralKeymap];
 const APPEARANCE_SECTIONS: [SettingsSection; 3] = [
     SettingsSection::AppearanceTheme,
     SettingsSection::AppearanceFonts,
@@ -886,11 +877,10 @@ const AI_PROVIDER_SECTIONS: [SettingsSection; 1] = [SettingsSection::AiProviders
 impl SettingsSection {
     fn tab(self) -> SettingsTab {
         match self {
-            Self::GeneralZoom
-            | Self::GeneralScroll
-            | Self::GeneralKeymap
-            | Self::GeneralWindow
-            | Self::GeneralTabs => SettingsTab::General,
+            Self::GeneralZoom | Self::GeneralScroll | Self::GeneralWindow | Self::GeneralTabs => {
+                SettingsTab::General
+            }
+            Self::GeneralKeymap => SettingsTab::Keymap,
             Self::AppearanceTheme | Self::AppearanceFonts | Self::AppearanceOverrides => {
                 SettingsTab::Appearance
             }
@@ -917,6 +907,7 @@ impl SettingsSection {
     fn for_tab(tab: SettingsTab) -> &'static [Self] {
         match tab {
             SettingsTab::General => &GENERAL_SECTIONS,
+            SettingsTab::Keymap => &KEYMAP_SECTIONS,
             SettingsTab::Appearance => &APPEARANCE_SECTIONS,
             SettingsTab::AiGeneral => &AI_GENERAL_SECTIONS,
             SettingsTab::AiProviders => &AI_PROVIDER_SECTIONS,
@@ -1499,10 +1490,12 @@ impl SettingsWindow {
     }
 
     fn settings_nav(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut entries = Vec::new();
-        entries.push(self.nav_root_entry(SettingsTab::General, theme, cx));
-        entries.push(self.nav_root_entry(SettingsTab::Appearance, theme, cx));
-        entries.push(self.nav_ai_parent_entry(theme, cx));
+        let mut entries = vec![
+            self.nav_root_entry(SettingsTab::General, theme, cx),
+            self.nav_root_entry(SettingsTab::Keymap, theme, cx),
+            self.nav_root_entry(SettingsTab::Appearance, theme, cx),
+            self.nav_ai_parent_entry(theme, cx),
+        ];
         if self.ai_expanded {
             entries.push(self.nav_ai_children(theme, cx));
         }
@@ -2108,6 +2101,34 @@ impl SettingsWindow {
             .child(preset.label())
     }
 
+    fn keybinding_button(
+        &self,
+        label: &'static str,
+        theme: Theme,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .h(px(28.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .justify_center()
+            .border_1()
+            .border_color(rgb(theme.border_variant))
+            .bg(rgb(theme.surface_background))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    on_click(this, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
     fn font_picker_entries(&self, selected_family: &str, query: &str) -> Vec<String> {
         let query = query.trim().to_ascii_lowercase();
         let mut fonts = self.font_picker.fonts.clone();
@@ -2688,6 +2709,72 @@ impl SettingsWindow {
             .child(label)
     }
 
+    fn keymap_section(
+        &self,
+        settings: &Settings,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(Self::section_title("Keymap", theme))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(44.0))
+                    .child(div().text_color(rgb(theme.text)).child("Base preset"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(self.keymap_option(
+                                KeymapPreset::Modern,
+                                settings.keymap_preset,
+                                theme,
+                                cx,
+                            ))
+                            .child(self.keymap_option(
+                                KeymapPreset::Vim,
+                                settings.keymap_preset,
+                                theme,
+                                cx,
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(44.0))
+                    .child(div().text_color(rgb(theme.text)).child("Keymap editor"))
+                    .child(self.keybinding_button(
+                        "Open Keymap",
+                        theme,
+                        |_, _, cx| crate::open_keymap_in_active_workspace(cx),
+                        cx,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn keymap_tab(
+        &self,
+        settings: &Settings,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        vec![self.keymap_section(settings, theme, cx)]
+    }
+
     fn general_tab(
         &self,
         settings: &Settings,
@@ -2731,40 +2818,6 @@ impl SettingsWindow {
                     theme,
                     cx,
                 ))
-                .into_any_element(),
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(Self::section_title("Keymap", theme))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .h(px(44.0))
-                        .child(div().text_color(rgb(theme.text)).child("Base preset"))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(self.keymap_option(
-                                    KeymapPreset::Modern,
-                                    settings.keymap_preset,
-                                    theme,
-                                    cx,
-                                ))
-                                .child(self.keymap_option(
-                                    KeymapPreset::Vim,
-                                    settings.keymap_preset,
-                                    theme,
-                                    cx,
-                                )),
-                        ),
-                )
                 .into_any_element(),
             div()
                 .flex()
@@ -4095,6 +4148,7 @@ impl Render for SettingsWindow {
         };
         let content = match self.active_tab {
             SettingsTab::General => self.general_tab(&settings, resolved, cx),
+            SettingsTab::Keymap => self.keymap_tab(&settings, resolved, cx),
             SettingsTab::Appearance => self.appearance_tab(&settings, resolved, themes, cx),
             SettingsTab::AiGeneral => self.ai_general_tab(&settings, resolved, cx),
             SettingsTab::AiProviders => self.ai_providers_tab(&settings, resolved, cx),
@@ -4142,6 +4196,7 @@ impl Render for SettingsWindow {
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
+            .relative()
             .size_full()
             .overflow_hidden()
             .bg(rgb(resolved.surface_background))

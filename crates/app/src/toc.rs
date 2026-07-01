@@ -45,7 +45,7 @@ impl TocPaletteDelegate {
 
 impl PickerDelegate for TocPaletteDelegate {
     fn key_context(&self) -> &'static str {
-        "Toc"
+        "Toc Menu TextInput"
     }
 
     fn placeholder(&self) -> SharedString {

@@ -34,7 +34,7 @@ fn parse_page_number(input: &str, page_count: usize) -> Option<usize> {
 
 impl PickerDelegate for GoToPagePromptDelegate {
     fn key_context(&self) -> &'static str {
-        "GoToPage"
+        "GoToPage Menu TextInput"
     }
 
     fn placeholder(&self) -> SharedString {

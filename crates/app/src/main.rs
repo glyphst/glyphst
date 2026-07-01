@@ -20,9 +20,13 @@ mod fonts;
 mod go_to_page;
 mod history;
 mod icons;
+mod input;
 mod instance;
 mod keybindings;
+mod keymap_editor;
+mod keystroke_input;
 mod library;
+mod menu;
 mod new_tab;
 mod note_editor;
 mod notes;
@@ -155,6 +159,19 @@ fn active_workspace_window(cx: &App) -> Option<WindowHandle<Workspace>> {
                 .into_iter()
                 .find_map(|window| window.downcast::<Workspace>())
         })
+}
+
+pub(crate) fn open_keymap_in_active_workspace(cx: &mut App) {
+    let Some(workspace_window) = active_workspace_window(cx) else {
+        return;
+    };
+
+    if let Err(error) = workspace_window.update(cx, |workspace, window, cx| {
+        workspace.open_keymap_tab(window, cx);
+        window.activate_window();
+    }) {
+        eprintln!("failed to open keymap editor: {error:#}");
+    }
 }
 
 pub(crate) fn open_workspace_window(path: Option<PathBuf>, cx: &mut App) -> Result<()> {

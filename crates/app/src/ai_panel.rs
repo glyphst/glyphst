@@ -7,6 +7,7 @@ use crate::{
         mentioned_kinds, session_title_for_prompt, stream_completion, thinking_level_description,
         title_from_response,
     },
+    input,
     library::{AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp},
     pdf_view::PdfView,
     scrollbar::WithScrollbar as _,
@@ -24,32 +25,7 @@ use gpui::{
     deferred, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
 
-gpui::actions!(
-    ai_panel,
-    [
-        AiPanelClose,
-        AiPanelSubmit,
-        AiPanelNewline,
-        AiPanelBackspace,
-        AiPanelDelete,
-        AiPanelLeft,
-        AiPanelRight,
-        AiPanelUp,
-        AiPanelDown,
-        AiPanelHome,
-        AiPanelEnd,
-        AiPanelSelectAll,
-        AiPanelSelectLeft,
-        AiPanelSelectRight,
-        AiPanelSelectUp,
-        AiPanelSelectDown,
-        AiPanelSelectHome,
-        AiPanelSelectEnd,
-        AiPanelCopy,
-        AiPanelCut,
-        AiPanelPaste
-    ]
-);
+gpui::actions!(ai_panel, [AiPanelClose, AiPanelSubmit]);
 
 pub const AI_PANEL_WIDTH: f32 = 360.0;
 const COMPLETION_MENU_WIDTH: f32 = 248.0;
@@ -274,14 +250,14 @@ impl AiPanel {
         self.send_message(cx);
     }
 
-    fn newline(&mut self, _: &AiPanelNewline, window: &mut Window, cx: &mut Context<Self>) {
+    fn newline(&mut self, _: &input::Newline, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode == AiPanelMode::Sidebar && self.confirm_mention_completion(cx) {
             return;
         }
         self.replace_text_in_range(None, "\n", window, cx);
     }
 
-    fn backspace(&mut self, _: &AiPanelBackspace, window: &mut Window, cx: &mut Context<Self>) {
+    fn backspace(&mut self, _: &input::Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.model_menu_open {
             let mut query = self.model_search_query.to_string();
             query.pop();
@@ -295,7 +271,7 @@ impl AiPanel {
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn delete(&mut self, _: &AiPanelDelete, window: &mut Window, cx: &mut Context<Self>) {
+    fn delete(&mut self, _: &input::Delete, window: &mut Window, cx: &mut Context<Self>) {
         if self.model_menu_open {
             self.model_search_query = SharedString::default();
             cx.notify();
@@ -307,7 +283,7 @@ impl AiPanel {
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn left(&mut self, _: &AiPanelLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn left(&mut self, _: &input::Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);
         } else {
@@ -315,7 +291,7 @@ impl AiPanel {
         }
     }
 
-    fn right(&mut self, _: &AiPanelRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn right(&mut self, _: &input::Right, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.next_boundary(self.selected_range.end), cx);
         } else {
@@ -323,68 +299,68 @@ impl AiPanel {
         }
     }
 
-    fn up(&mut self, _: &AiPanelUp, window: &mut Window, cx: &mut Context<Self>) {
+    fn up(&mut self, _: &input::Up, window: &mut Window, cx: &mut Context<Self>) {
         if self.select_previous_mention_completion(cx) {
             return;
         }
         self.move_vertically(-1, false, window, cx);
     }
 
-    fn down(&mut self, _: &AiPanelDown, window: &mut Window, cx: &mut Context<Self>) {
+    fn down(&mut self, _: &input::Down, window: &mut Window, cx: &mut Context<Self>) {
         if self.select_next_mention_completion(cx) {
             return;
         }
         self.move_vertically(1, false, window, cx);
     }
 
-    fn home(&mut self, _: &AiPanelHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn home(&mut self, _: &input::Home, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.line_start_offset(), cx);
     }
 
-    fn end(&mut self, _: &AiPanelEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn end(&mut self, _: &input::End, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.line_end_offset(), cx);
     }
 
-    fn select_all(&mut self, _: &AiPanelSelectAll, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_all(&mut self, _: &input::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
 
-    fn select_left(&mut self, _: &AiPanelSelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_left(&mut self, _: &input::SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_right(&mut self, _: &AiPanelSelectRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_right(&mut self, _: &input::SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_up(&mut self, _: &AiPanelSelectUp, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_up(&mut self, _: &input::SelectUp, window: &mut Window, cx: &mut Context<Self>) {
         self.move_vertically(-1, true, window, cx);
     }
 
-    fn select_down(&mut self, _: &AiPanelSelectDown, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_down(&mut self, _: &input::SelectDown, window: &mut Window, cx: &mut Context<Self>) {
         self.move_vertically(1, true, window, cx);
     }
 
-    fn select_home(&mut self, _: &AiPanelSelectHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_home(&mut self, _: &input::SelectHome, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.line_start_offset(), cx);
     }
 
-    fn select_end(&mut self, _: &AiPanelSelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_end(&mut self, _: &input::SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.line_end_offset(), cx);
     }
 
-    fn copy(&mut self, _: &AiPanelCopy, _: &mut Window, cx: &mut Context<Self>) {
+    fn copy(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
         self.copy_selected_text(cx);
     }
 
-    fn cut(&mut self, _: &AiPanelCut, window: &mut Window, cx: &mut Context<Self>) {
+    fn cut(&mut self, _: &input::Cut, window: &mut Window, cx: &mut Context<Self>) {
         if self.copy_selected_text(cx) {
             self.replace_text_in_range(None, "", window, cx);
         }
     }
 
-    fn paste(&mut self, _: &AiPanelPaste, window: &mut Window, cx: &mut Context<Self>) {
+    fn paste(&mut self, _: &input::Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace("\r\n", "\n").replace('\r', "\n");
             self.replace_text_in_range(None, &text, window, cx);
@@ -1274,7 +1250,7 @@ impl AiPanel {
         let show_answer = loading || !answer.is_empty();
 
         div()
-            .key_context("QuickAsk")
+            .key_context("QuickAsk TextInput")
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
@@ -2315,7 +2291,7 @@ impl Render for AiPanel {
         }
 
         div()
-            .key_context("AiPanel")
+            .key_context("AiPanel TextInput")
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()

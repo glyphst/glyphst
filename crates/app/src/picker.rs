@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use crate::input;
+use crate::menu;
 use crate::scrollbar::uniform_list_scrollbar_for;
 use crate::settings::SettingsStore;
 use crate::style::{INPUT_ROW_HEIGHT, RADIUS_LG, RADIUS_MD, TextSize, modal_shadow};
@@ -12,31 +14,6 @@ use gpui::{
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UniformListScrollHandle, Window, div,
     fill, point, prelude::*, px, relative, rgb, rgba, size, uniform_list,
 };
-
-gpui::actions!(
-    picker,
-    [
-        PickerConfirm,
-        PickerCancel,
-        PickerSelectNext,
-        PickerSelectPrev,
-        PickerBackspace,
-        PickerDelete,
-        PickerLeft,
-        PickerRight,
-        PickerHome,
-        PickerEnd,
-        PickerSelectAll,
-        PickerSelectLeft,
-        PickerSelectRight,
-        PickerSelectHome,
-        PickerSelectEnd,
-        PickerCopy,
-        PickerCut,
-        PickerPaste,
-        PickerRemove
-    ]
-);
 
 const DRAG_SELECT_THRESHOLD: f32 = 2.0;
 const LIST_VERTICAL_PADDING: f32 = 4.0;
@@ -199,15 +176,15 @@ impl<D: PickerDelegate> Picker<D> {
         cx.emit(PickerEvent::Dismissed);
     }
 
-    fn confirm(&mut self, _: &PickerConfirm, window: &mut Window, cx: &mut Context<Self>) {
+    fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm_selected(window, cx);
     }
 
-    fn cancel(&mut self, _: &PickerCancel, window: &mut Window, cx: &mut Context<Self>) {
+    fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss(window, cx);
     }
 
-    fn select_next(&mut self, _: &PickerSelectNext, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_next(&mut self, _: &menu::SelectNext, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_ix + 1 < self.match_count() {
             self.selected_ix += 1;
             self.center_selected();
@@ -215,7 +192,7 @@ impl<D: PickerDelegate> Picker<D> {
         }
     }
 
-    fn select_prev(&mut self, _: &PickerSelectPrev, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_prev(&mut self, _: &menu::SelectPrev, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_ix > 0 {
             self.selected_ix -= 1;
             self.center_selected();
@@ -223,7 +200,7 @@ impl<D: PickerDelegate> Picker<D> {
         }
     }
 
-    fn left(&mut self, _: &PickerLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn left(&mut self, _: &input::Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);
         } else {
@@ -231,7 +208,7 @@ impl<D: PickerDelegate> Picker<D> {
         }
     }
 
-    fn right(&mut self, _: &PickerRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn right(&mut self, _: &input::Right, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.next_boundary(self.selected_range.end), cx);
         } else {
@@ -239,67 +216,67 @@ impl<D: PickerDelegate> Picker<D> {
         }
     }
 
-    fn select_all(&mut self, _: &PickerSelectAll, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_all(&mut self, _: &input::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
 
-    fn select_left(&mut self, _: &PickerSelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_left(&mut self, _: &input::SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_right(&mut self, _: &PickerSelectRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_right(&mut self, _: &input::SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_home(&mut self, _: &PickerSelectHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_home(&mut self, _: &input::SelectHome, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(0, cx);
     }
 
-    fn select_end(&mut self, _: &PickerSelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_end(&mut self, _: &input::SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.content.len(), cx);
     }
 
-    fn copy(&mut self, _: &PickerCopy, _: &mut Window, cx: &mut Context<Self>) {
+    fn copy(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
         self.copy_selected_text(cx);
     }
 
-    fn cut(&mut self, _: &PickerCut, window: &mut Window, cx: &mut Context<Self>) {
+    fn cut(&mut self, _: &input::Cut, window: &mut Window, cx: &mut Context<Self>) {
         if self.copy_selected_text(cx) {
             self.replace_text_in_range(None, "", window, cx);
         }
     }
 
-    fn home(&mut self, _: &PickerHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn home(&mut self, _: &input::Home, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
     }
 
-    fn end(&mut self, _: &PickerEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn end(&mut self, _: &input::End, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
     }
 
-    fn backspace(&mut self, _: &PickerBackspace, window: &mut Window, cx: &mut Context<Self>) {
+    fn backspace(&mut self, _: &input::Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn delete(&mut self, _: &PickerDelete, window: &mut Window, cx: &mut Context<Self>) {
+    fn delete(&mut self, _: &input::Delete, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor_offset()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn paste(&mut self, _: &PickerPaste, window: &mut Window, cx: &mut Context<Self>) {
+    fn paste(&mut self, _: &input::Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace(['\n', '\r'], " ");
             self.replace_text_in_range(None, &text, window, cx);
         }
     }
 
-    fn remove_selected(&mut self, _: &PickerRemove, _: &mut Window, cx: &mut Context<Self>) {
+    fn remove_selected(&mut self, _: &menu::Remove, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_ix < self.match_count() {
             self.delegate.remove_match(self.selected_ix, cx);
             self.update_matches();

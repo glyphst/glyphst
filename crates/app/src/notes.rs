@@ -95,7 +95,7 @@ impl NotesPaletteDelegate {
 
 impl PickerDelegate for NotesPaletteDelegate {
     fn key_context(&self) -> &'static str {
-        "Notes"
+        "Notes Menu TextInput"
     }
 
     fn placeholder(&self) -> SharedString {

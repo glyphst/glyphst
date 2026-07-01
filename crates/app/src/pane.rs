@@ -19,6 +19,7 @@ use smallvec::SmallVec;
 
 use crate::{
     icons::{Icon, IconName},
+    keymap_editor::KeymapEditor,
     library::{DocumentPosition, LibraryStore, normalize_path},
     new_tab::{NewTab, NewTabEvent},
     pdf_view::{PdfAnnotations, PdfOpenOptions, PdfView, PdfViewEvent},
@@ -52,9 +53,11 @@ gpui::actions!(
 );
 
 #[derive(Clone)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum Tab {
     NewTab(Entity<NewTab>),
     Document(Entity<PdfView>),
+    Keymap(Entity<KeymapEditor>),
 }
 
 #[derive(Clone)]
@@ -180,7 +183,7 @@ impl Pane {
     pub(crate) fn active_document_label(&self, cx: &App) -> Option<SharedString> {
         match self.tabs.get(self.active_tab) {
             Some(Tab::Document(pdf_view)) => Some(pdf_view.read(cx).file_name()),
-            Some(Tab::NewTab(_)) | None => None,
+            Some(Tab::NewTab(_)) | Some(Tab::Keymap(_)) | None => None,
         }
     }
 
@@ -193,14 +196,14 @@ impl Pane {
                     pdf_view.current_document_position(),
                 ))
             }
-            Some(Tab::NewTab(_)) | None => None,
+            Some(Tab::NewTab(_)) | Some(Tab::Keymap(_)) | None => None,
         }
     }
 
     pub(crate) fn active_pdf_view(&self) -> Option<Entity<PdfView>> {
         match self.tabs.get(self.active_tab) {
             Some(Tab::Document(pdf_view)) => Some(pdf_view.clone()),
-            Some(Tab::NewTab(_)) | None => None,
+            Some(Tab::NewTab(_)) | Some(Tab::Keymap(_)) | None => None,
         }
     }
 
@@ -219,7 +222,7 @@ impl Pane {
         let path = normalize_path(path);
         self.tabs.iter().position(|tab| match tab {
             Tab::Document(pdf_view) => pdf_view.read(cx).path() == path.as_path(),
-            Tab::NewTab(_) => false,
+            Tab::NewTab(_) | Tab::Keymap(_) => false,
         })
     }
 
@@ -289,6 +292,24 @@ impl Pane {
     pub(crate) fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.flush_active_tab(cx);
         let tab = self.create_new_tab(window, cx);
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn open_keymap_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab_ix) = self
+            .tabs
+            .iter()
+            .position(|tab| matches!(tab, Tab::Keymap(_)))
+        {
+            self.activate_tab(tab_ix, window, cx);
+            return;
+        }
+
+        self.flush_active_tab(cx);
+        let tab = self.create_keymap_tab(cx);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.focus_handle.focus(window, cx);
@@ -400,6 +421,11 @@ impl Pane {
         let new_tab = cx.new(|cx| NewTab::new(focus_handle, cx));
         self.subscribe_to_new_tab(&new_tab, window, cx);
         Tab::NewTab(new_tab)
+    }
+
+    fn create_keymap_tab(&self, cx: &mut Context<Self>) -> Tab {
+        let focus_handle = self.focus_handle.clone();
+        Tab::Keymap(cx.new(|cx| KeymapEditor::new(focus_handle, cx)))
     }
 
     fn create_document_tab(
@@ -595,6 +621,7 @@ impl Pane {
     fn tab_label(&self, tab_ix: usize, cx: &App) -> SharedString {
         match self.tabs.get(tab_ix) {
             Some(Tab::Document(pdf_view)) => pdf_view.read(cx).file_name(),
+            Some(Tab::Keymap(_)) => "Keymap".into(),
             Some(Tab::NewTab(_)) | None => "New Tab".into(),
         }
     }
@@ -609,6 +636,7 @@ impl Pane {
                 })
             }
             Some(Tab::NewTab(_)) => Some(DraggedTabPayload::NewTab),
+            Some(Tab::Keymap(_)) => None,
             None => None,
         }
     }
@@ -617,6 +645,7 @@ impl Pane {
         match tab {
             Tab::NewTab(new_tab) => new_tab.entity_id(),
             Tab::Document(pdf_view) => pdf_view.entity_id(),
+            Tab::Keymap(keymap_editor) => keymap_editor.entity_id(),
         }
     }
 
@@ -624,6 +653,7 @@ impl Pane {
         match self.tabs.get(self.active_tab) {
             Some(Tab::Document(pdf_view)) => pdf_view.clone().into_any_element(),
             Some(Tab::NewTab(new_tab)) => new_tab.clone().into_any_element(),
+            Some(Tab::Keymap(keymap_editor)) => keymap_editor.clone().into_any_element(),
             None => div().into_any_element(),
         }
     }
@@ -638,9 +668,7 @@ impl Pane {
     ) -> AnyElement {
         let selected = tab_ix == self.active_tab;
         let label = self.tab_label(tab_ix, cx);
-        let Some(payload) = self.dragged_tab_payload(tab_ix, cx) else {
-            return div().into_any_element();
-        };
+        let payload = self.dragged_tab_payload(tab_ix, cx);
         let tab_id = self
             .tabs
             .get(tab_ix)
@@ -672,34 +700,37 @@ impl Pane {
             }))
             .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
-            .on_drag(
-                DraggedTab {
-                    source_window,
-                    source_pane: source_pane.clone(),
-                    ix: tab_ix,
-                    tab_id,
-                    payload,
-                    label: label.clone(),
-                    theme,
-                },
-                |tab, _, _, cx| cx.new(|_| tab.clone()),
-            )
-            .drag_over::<DraggedTab>(move |style, dragged_tab, _, _| {
-                let style = style.bg(rgb(theme.element_hover));
-                if dragged_tab.source_pane != source_pane || tab_ix < dragged_tab.ix {
-                    style.border_l(px(2.0)).border_color(rgb(theme.accent))
-                } else if tab_ix > dragged_tab.ix {
-                    style.border_r(px(2.0)).border_color(rgb(theme.accent))
-                } else {
-                    style
-                }
+            .when_some(payload, |this, payload| {
+                let drag_source_pane = source_pane.clone();
+                this.on_drag(
+                    DraggedTab {
+                        source_window,
+                        source_pane: source_pane.clone(),
+                        ix: tab_ix,
+                        tab_id,
+                        payload,
+                        label: label.clone(),
+                        theme,
+                    },
+                    |tab, _, _, cx| cx.new(|_| tab.clone()),
+                )
+                .drag_over::<DraggedTab>(move |style, dragged_tab, _, _| {
+                    let style = style.bg(rgb(theme.element_hover));
+                    if dragged_tab.source_pane != drag_source_pane || tab_ix < dragged_tab.ix {
+                        style.border_l(px(2.0)).border_color(rgb(theme.accent))
+                    } else if tab_ix > dragged_tab.ix {
+                        style.border_r(px(2.0)).border_color(rgb(theme.accent))
+                    } else {
+                        style
+                    }
+                })
+                .on_drop(cx.listener(move |_, dragged_tab: &DraggedTab, _, cx| {
+                    cx.emit(PaneEvent::TabDrop {
+                        dragged_tab: Box::new(dragged_tab.clone()),
+                        target: PaneDropTarget::Tab(tab_ix),
+                    });
+                }))
             })
-            .on_drop(cx.listener(move |_, dragged_tab: &DraggedTab, _, cx| {
-                cx.emit(PaneEvent::TabDrop {
-                    dragged_tab: Box::new(dragged_tab.clone()),
-                    target: PaneDropTarget::Tab(tab_ix),
-                });
-            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {

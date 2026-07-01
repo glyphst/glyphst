@@ -83,6 +83,7 @@ gpui::actions!(
         ToggleFullScreen,
         ToggleTransparency,
         OpenSettings,
+        OpenKeybindings,
         ToggleAiPanel,
         OpenHistory,
         OpenBookmarks,
