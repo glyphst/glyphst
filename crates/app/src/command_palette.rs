@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use crate::{
     picker::{Picker, PickerDelegate, fuzzy_match},
-    settings::ui_rems,
+    style::TextSize,
     theme::Theme,
 };
 use gpui::{
@@ -160,7 +160,7 @@ impl PickerDelegate for CommandPaletteDelegate {
             .items_center()
             .justify_between()
             .w_full()
-            .text_size(ui_rems(11.0))
+            .text_size(TextSize::XSmall.rems())
             .child(
                 div()
                     .flex_1()

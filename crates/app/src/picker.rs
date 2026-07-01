@@ -1,15 +1,16 @@
 use std::ops::Range;
 
 use crate::scrollbar::uniform_list_scrollbar_for;
-use crate::settings::{SettingsStore, ui_rems};
+use crate::settings::SettingsStore;
+use crate::style::{INPUT_ROW_HEIGHT, RADIUS_LG, RADIUS_MD, TextSize, modal_shadow};
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, App, Bounds, BoxShadow, ClipboardItem, Context, CursorStyle, Element, ElementId,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollStrategy,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UniformListScrollHandle, Window, div,
-    fill, hsla, point, prelude::*, px, relative, rgb, rgba, size, uniform_list,
+    fill, point, prelude::*, px, relative, rgb, rgba, size, uniform_list,
 };
 
 gpui::actions!(
@@ -37,11 +38,8 @@ gpui::actions!(
     ]
 );
 
-const INPUT_HEIGHT: f32 = 40.0;
 const DRAG_SELECT_THRESHOLD: f32 = 2.0;
 const LIST_VERTICAL_PADDING: f32 = 4.0;
-const MODAL_RADIUS: f32 = 8.0;
-const ROW_RADIUS: f32 = 6.0;
 
 pub enum PickerEvent {
     Dismissed,
@@ -625,12 +623,13 @@ impl<D: PickerDelegate> Render for Picker<D> {
             .flex()
             .flex_col()
             .w(px(self.delegate.width()))
-            .rounded(px(MODAL_RADIUS))
+            .rounded(px(RADIUS_LG))
             .border_1()
             .border_color(rgb(theme.border_variant))
             .shadow(modal_shadow(theme))
             .overflow_hidden()
             .bg(rgb(theme.surface_background))
+            .text_size(TextSize::Default.rems())
             .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -658,7 +657,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                 div()
                     .flex()
                     .items_center()
-                    .h(px(INPUT_HEIGHT))
+                    .h(px(INPUT_ROW_HEIGHT))
                     .px_3()
                     .border_b(px(1.0))
                     .border_color(rgb(theme.border_variant))
@@ -712,7 +711,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                                                             .w_full()
                                                             .h(px(row_height))
                                                             .px_1()
-                                                            .text_size(ui_rems(13.0))
+                                                            .text_size(TextSize::Default.rems())
                                                             .cursor_pointer()
                                                             .on_mouse_down(
                                                                 MouseButton::Left,
@@ -733,7 +732,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                                                                     .items_center()
                                                                     .justify_between()
                                                                     .size_full()
-                                                                    .rounded(px(ROW_RADIUS))
+                                                                    .rounded(px(RADIUS_MD))
                                                                     .px_2()
                                                                     .bg(if selected {
                                                                         rgb(theme.element_selected)
@@ -970,39 +969,6 @@ impl<D: PickerDelegate> Element for PickerTextElement<D> {
             });
         }
     }
-}
-
-fn modal_shadow(theme: Theme) -> Vec<BoxShadow> {
-    let is_light = is_light_surface(theme);
-
-    vec![
-        BoxShadow::new(
-            px(0.0),
-            px(2.0),
-            hsla(0.0, 0.0, 0.0, if is_light { 0.06 } else { 0.12 }),
-        )
-        .blur_radius(px(3.0)),
-        BoxShadow::new(
-            px(0.0),
-            px(3.0),
-            hsla(0.0, 0.0, 0.0, if is_light { 0.06 } else { 0.08 }),
-        )
-        .blur_radius(px(6.0)),
-        BoxShadow::new(px(0.0), px(6.0), hsla(0.0, 0.0, 0.0, 0.04)).blur_radius(px(12.0)),
-        BoxShadow::new(
-            px(0.0),
-            px(1.0),
-            hsla(0.0, 0.0, 0.0, if is_light { 0.04 } else { 0.12 }),
-        ),
-    ]
-}
-
-fn is_light_surface(theme: Theme) -> bool {
-    let color = theme.surface_background;
-    let r = ((color >> 16) & 0xff) as f32 / 255.0;
-    let g = ((color >> 8) & 0xff) as f32 / 255.0;
-    let b = (color & 0xff) as f32 / 255.0;
-    0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5
 }
 
 pub fn offset_from_utf16_in_text(text: &str, offset: usize) -> usize {

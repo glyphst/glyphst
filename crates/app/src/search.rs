@@ -1,6 +1,10 @@
 use std::{ops::Range, time::Duration};
 
-use crate::settings::{SettingsStore, ui_rems};
+use crate::{
+    icons::{Icon, IconButton, IconName},
+    settings::{SettingsStore, ui_rems},
+    style::{CONTROL_ICON_SIZE, RADIUS_MD, SEARCH_BAR_HEIGHT, TextSize, elevated_shadow},
+};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
@@ -583,13 +587,16 @@ impl Render for SearchBar {
             .flex_row()
             .items_center()
             .w(px(360.0))
-            .h(px(36.0))
-            .pl_3()
+            .h(px(SEARCH_BAR_HEIGHT))
+            .pl_2()
             .pr_1()
+            .rounded(px(RADIUS_MD))
             .border_1()
-            .border_color(rgb(theme.border))
+            .border_color(rgb(theme.border_variant))
+            .shadow(elevated_shadow(theme))
+            .overflow_hidden()
             .bg(rgb(theme.surface_background))
-            .text_size(ui_rems(13.0))
+            .text_size(TextSize::Default.rems())
             .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -611,6 +618,11 @@ impl Render for SearchBar {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
+            .child(div().flex_none().mr_2().child(Icon::new(
+                IconName::Search,
+                ui_rems(CONTROL_ICON_SIZE),
+                rgb(theme.text_muted),
+            )))
             .child(
                 div()
                     .flex()
@@ -633,6 +645,7 @@ impl Render for SearchBar {
                         .flex_none()
                         .ml_2()
                         .w(px(58.0))
+                        .text_size(TextSize::Small.rems())
                         .text_align(gpui::TextAlign::Right)
                         .text_color(rgb(counter_color))
                         .child(counter),
@@ -648,95 +661,64 @@ impl Render for SearchBar {
                     .bg(rgb(theme.border_variant)),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .text_color(rgb(if ignore_case {
-                        theme.surface_background
-                    } else {
-                        theme.text_muted
-                    }))
-                    .when(ignore_case, |this| this.bg(rgb(theme.accent)))
-                    .hover(move |style| {
-                        style.bg(rgb(if ignore_case {
-                            theme.accent
-                        } else {
-                            theme.element_hover
-                        }))
-                    })
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.toggle_ignore_case(cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child("Aa"),
+                IconButton::new(
+                    IconName::CaseSensitive,
+                    rgb(theme.text_muted),
+                    rgb(theme.element_hover),
+                )
+                .icon_size(ui_rems(CONTROL_ICON_SIZE))
+                .toggle_state(ignore_case)
+                .toggled_icon_color(rgb(theme.surface_background))
+                .toggled_background(rgb(theme.accent))
+                .into_div()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.toggle_ignore_case(cx);
+                        cx.stop_propagation();
+                    }),
+                ),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .text_color(rgb(theme.text_muted))
-                    .hover(move |style| style.bg(rgb(theme.element_hover)))
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.activate(true, cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child("↑"),
+                IconButton::new(
+                    IconName::ChevronUp,
+                    rgb(theme.text_muted),
+                    rgb(theme.element_hover),
+                )
+                .into_div()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.activate(true, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .text_color(rgb(theme.text_muted))
-                    .hover(move |style| style.bg(rgb(theme.element_hover)))
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.activate(false, cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child("↓"),
+                IconButton::new(
+                    IconName::ChevronDown,
+                    rgb(theme.text_muted),
+                    rgb(theme.element_hover),
+                )
+                .into_div()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.activate(false, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .text_color(rgb(theme.text_muted))
-                    .hover(move |style| style.bg(rgb(theme.element_hover)))
-                    .cursor_pointer()
+                IconButton::new(IconName::X, rgb(theme.text_muted), rgb(theme.element_hover))
+                    .into_div()
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
                             this.dismiss(window, cx);
                             cx.stop_propagation();
                         }),
-                    )
-                    .child("✕"),
+                    ),
             )
     }
 }

@@ -20,6 +20,7 @@ use crate::{
     picker::{Picker, PickerEvent},
     settings::{SettingsStore, setup_ui_font, ui_rems},
     settings_window::open_settings_window,
+    style::RADIUS_SM,
     theme::Theme,
 };
 
@@ -739,7 +740,7 @@ impl Workspace {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(4.0))
+            .rounded(px(RADIUS_SM))
             .text_color(rgb(if active { theme.text } else { theme.text_muted }))
             .when(active, |this| this.bg(rgb(theme.element_hover)))
             .hover(move |style| {
@@ -783,7 +784,7 @@ impl Workspace {
             .gap_1()
             .items_center()
             .justify_center()
-            .rounded(px(4.0))
+            .rounded(px(RADIUS_SM))
             .text_size(ui_rems(TOOLBAR_MENU_TEXT_SIZE))
             .text_color(rgb(if active { theme.text } else { theme.text_muted }))
             .when(active, |this| this.bg(rgb(theme.element_hover)))

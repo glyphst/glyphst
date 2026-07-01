@@ -34,6 +34,7 @@ mod search;
 mod settings;
 mod settings_window;
 mod smooth_scroll;
+mod style;
 mod theme;
 mod toc;
 mod workspace;
