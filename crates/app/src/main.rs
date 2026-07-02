@@ -26,6 +26,7 @@ mod keybindings;
 mod keymap_editor;
 mod keystroke_input;
 mod library;
+mod markdown;
 mod menu;
 mod new_tab;
 mod note_editor;

@@ -9,6 +9,7 @@ use crate::{
     },
     input,
     library::{AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp},
+    markdown::render_markdown,
     pdf_view::PdfView,
     scrollbar::WithScrollbar as _,
     settings::{AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore, ui_rems},
@@ -19,10 +20,10 @@ use futures::{StreamExt, channel::mpsc};
 use gpui::{
     Anchor, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollHandle,
-    SharedString, Style, Task, TextRun, UTF16Selection, WeakEntity, Window, WrappedLine, anchored,
-    deferred, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
+    FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render,
+    ScrollHandle, SharedString, Style, Task, TextRun, TextStyle, UTF16Selection, WeakEntity, Window,
+    WrappedLine, anchored, deferred, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
 
 gpui::actions!(ai_panel, [AiPanelClose, AiPanelSubmit]);
@@ -1208,9 +1209,17 @@ impl AiPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let entity = cx.entity();
-        let (theme, quick_ask) = {
+        let (theme, quick_ask, base_text_style) = {
             let store = cx.global::<SettingsStore>();
-            (store.resolved_theme, store.settings.ai.quick_ask)
+            let font = &store.settings.font;
+            let base_text_style = TextStyle {
+                font_family: font.ui_font_family.clone().into(),
+                font_size: px(store.settings.ai.quick_ask.text_size).into(),
+                color: rgb(store.resolved_theme.text).into(),
+                font_weight: FontWeight(font.ui_font_weight),
+                ..Default::default()
+            };
+            (store.resolved_theme, store.settings.ai.quick_ask, base_text_style)
         };
         let loading = self.loading;
         let attached_mentions = mentioned_kinds(&self.content);
@@ -1330,7 +1339,11 @@ impl AiPanel {
                                     this.child(Self::render_loading_indicator(theme))
                                 })
                                 .when(!answer.is_empty(), |this| {
-                                    this.child(render_text_lines(&answer))
+                                    this.child(render_markdown(
+                                        &answer,
+                                        theme,
+                                        base_text_style.clone(),
+                                    ))
                                 }),
                         )
                         .vertical_scrollbar_for(&self.scroll_handle, window, cx),
@@ -1445,6 +1458,7 @@ impl AiPanel {
         message: ChatMessage,
         theme: crate::theme::Theme,
         panel_width: f32,
+        base_text_style: TextStyle,
     ) -> impl IntoElement {
         let is_user = message.role == Role::User;
         let label = if is_user { "You" } else { "Assistant" };
@@ -1489,7 +1503,9 @@ impl AiPanel {
                             .when(is_loading, |this| {
                                 this.child(Self::render_loading_indicator(theme))
                             })
-                            .when(!is_loading, |this| this.child(render_text_lines(&content))),
+                            .when(!is_loading, |this| {
+                                this.child(render_markdown(&content, theme, base_text_style))
+                            }),
                     ),
             )
     }
@@ -2206,9 +2222,17 @@ impl Render for AiPanel {
         }
 
         let entity = cx.entity();
-        let (theme, ai_settings) = {
+        let (theme, ai_settings, base_text_style) = {
             let store = cx.global::<SettingsStore>();
-            (store.resolved_theme, store.settings.ai.clone())
+            let font = &store.settings.font;
+            let base_text_style = TextStyle {
+                font_family: font.ui_font_family.clone().into(),
+                font_size: ui_rems(13.0).into(),
+                color: rgb(store.resolved_theme.text).into(),
+                font_weight: FontWeight(font.ui_font_weight),
+                ..Default::default()
+            };
+            (store.resolved_theme, store.settings.ai.clone(), base_text_style)
         };
         let can_send = !self.loading && !self.content.trim().is_empty();
         let resolved_main = ai_settings.resolved_main();
@@ -2287,7 +2311,12 @@ impl Render for AiPanel {
             .p_3()
             .w(px((panel_width - 1.0).max(0.0)));
         for message in self.messages.clone() {
-            messages = messages.child(Self::render_message(message, theme, panel_width));
+            messages = messages.child(Self::render_message(
+                message,
+                theme,
+                panel_width,
+                base_text_style.clone(),
+            ));
         }
 
         div()
@@ -3031,21 +3060,6 @@ fn input_text_runs(
             Some(run)
         })
         .collect()
-}
-
-fn render_text_lines(content: &str) -> impl IntoElement {
-    let mut lines = div().flex().flex_col().gap_1();
-    for line in content.lines() {
-        lines = lines.child(if line.is_empty() {
-            " ".to_string()
-        } else {
-            line.to_string()
-        });
-    }
-    if content.ends_with('\n') {
-        lines = lines.child(" ".to_string());
-    }
-    lines
 }
 
 fn line_starts(text: &str) -> impl Iterator<Item = usize> + '_ {
