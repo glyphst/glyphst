@@ -9,6 +9,8 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 use crate::library::HighlightColor;
 
 pub const DEFAULT_THEME_ID: &str = "one-light";
+pub const DEFAULT_LIGHT_THEME_ID: &str = "one-light";
+pub const DEFAULT_DARK_THEME_ID: &str = "one-dark";
 pub const DEFAULT_PAGE_GAP: f32 = 4.0;
 
 const MIN_PAGE_GAP: f32 = 0.0;
@@ -59,6 +61,197 @@ impl ThemeAppearance {
             "dark" => Some(Self::Dark),
             "light" => Some(Self::Light),
             _ => None,
+        }
+    }
+}
+
+/// The mode used to select a theme.
+///
+/// `Light` and `Dark` will select their respective themes.
+///
+/// `System` will select the theme based on the system's appearance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThemeAppearanceMode {
+    Light,
+    Dark,
+    #[default]
+    System,
+}
+
+impl ThemeAppearanceMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+            Self::System => "system",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            "system" => Some(Self::System),
+            _ => None,
+        }
+    }
+}
+
+pub fn appearance_to_mode(appearance: ThemeAppearance) -> ThemeAppearanceMode {
+    match appearance {
+        ThemeAppearance::Light => ThemeAppearanceMode::Light,
+        ThemeAppearance::Dark => ThemeAppearanceMode::Dark,
+    }
+}
+
+/// Represents the selection of a theme, which can be either static or dynamic.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ThemeSelection {
+    /// A static theme selection, represented by a single theme name.
+    Static(String),
+    /// A dynamic theme selection, which can change based on the mode.
+    Dynamic {
+        mode: ThemeAppearanceMode,
+        light: String,
+        dark: String,
+    },
+}
+
+impl Default for ThemeSelection {
+    fn default() -> Self {
+        Self::Static(DEFAULT_THEME_ID.to_string())
+    }
+}
+
+impl ThemeSelection {
+    /// Returns the theme name for the selected mode.
+    pub fn name(&self, system_appearance: ThemeAppearance) -> &str {
+        match self {
+            Self::Static(theme) => theme,
+            Self::Dynamic { mode, light, dark } => match mode {
+                ThemeAppearanceMode::Light => light,
+                ThemeAppearanceMode::Dark => dark,
+                ThemeAppearanceMode::System => match system_appearance {
+                    ThemeAppearance::Light => light,
+                    ThemeAppearance::Dark => dark,
+                },
+            },
+        }
+    }
+
+    /// Returns the mode for the theme selection.
+    pub fn mode(&self) -> Option<ThemeAppearanceMode> {
+        match self {
+            Self::Static(_) => None,
+            Self::Dynamic { mode, .. } => Some(*mode),
+        }
+    }
+
+    /// Sets the mode for the theme.
+    ///
+    /// If the current selection is `Static`, this migrates it to `Dynamic`
+    /// with `mode: System` and the default light/dark themes.
+    /// If the current selection is `Dynamic`, this updates the mode field.
+    pub fn set_mode(&mut self, mode: ThemeAppearanceMode) {
+        match self {
+            Self::Static(_) => {
+                *self = Self::Dynamic {
+                    mode: ThemeAppearanceMode::System,
+                    light: DEFAULT_LIGHT_THEME_ID.to_string(),
+                    dark: DEFAULT_DARK_THEME_ID.to_string(),
+                };
+            }
+            Self::Dynamic {
+                mode: mode_to_update,
+                ..
+            } => *mode_to_update = mode,
+        }
+    }
+
+    /// Sets the theme for the given appearance to the theme with the specified name.
+    pub fn set_theme(
+        &mut self,
+        name: String,
+        appearance: ThemeAppearance,
+        system_appearance: ThemeAppearance,
+    ) {
+        match self {
+            Self::Static(current) => *current = name,
+            Self::Dynamic { mode, light, dark } => {
+                match appearance {
+                    ThemeAppearance::Light => *light = name,
+                    ThemeAppearance::Dark => *dark = name,
+                }
+
+                let should_update_mode =
+                    !(*mode == ThemeAppearanceMode::System && appearance == system_appearance);
+
+                if should_update_mode {
+                    *mode = appearance_to_mode(appearance);
+                }
+            }
+        }
+    }
+
+    pub fn sanitize(&mut self) {
+        match self {
+            Self::Static(name) => {
+                if name.trim().is_empty() {
+                    *name = DEFAULT_THEME_ID.to_string();
+                }
+            }
+            Self::Dynamic { light, dark, .. } => {
+                if light.trim().is_empty() {
+                    *light = DEFAULT_LIGHT_THEME_ID.to_string();
+                }
+                if dark.trim().is_empty() {
+                    *dark = DEFAULT_DARK_THEME_ID.to_string();
+                }
+            }
+        }
+    }
+
+    pub fn from_kdl_node(node: &KdlNode) -> Self {
+        if let Some(children) = node.children() {
+            let mode = children
+                .get_arg("mode")
+                .and_then(KdlValue::as_string)
+                .and_then(ThemeAppearanceMode::from_str)
+                .unwrap_or_default();
+            let light = children
+                .get_arg("light")
+                .and_then(KdlValue::as_string)
+                .unwrap_or(DEFAULT_LIGHT_THEME_ID)
+                .to_string();
+            let dark = children
+                .get_arg("dark")
+                .and_then(KdlValue::as_string)
+                .unwrap_or(DEFAULT_DARK_THEME_ID)
+                .to_string();
+            Self::Dynamic { mode, light, dark }
+        } else {
+            let name = node
+                .get(0)
+                .and_then(KdlValue::as_string)
+                .unwrap_or(DEFAULT_THEME_ID)
+                .to_string();
+            Self::Static(name)
+        }
+    }
+
+    pub fn write_to_document(self, document: &mut KdlDocument) {
+        match self {
+            Self::Static(name) => {
+                push_value_node(document, "theme", name);
+            }
+            Self::Dynamic { mode, light, dark } => {
+                let mut theme_node = KdlNode::new("theme");
+                let children = theme_node.ensure_children();
+                push_value_node(children, "mode", mode.as_str());
+                push_value_node(children, "light", light);
+                push_value_node(children, "dark", dark);
+                document.nodes_mut().push(theme_node);
+            }
         }
     }
 }
@@ -554,6 +747,14 @@ impl ThemeRegistry {
 
     pub fn contains(&self, theme_id: &str) -> bool {
         self.theme(theme_id).is_some()
+    }
+
+    pub fn appearance(&self, theme_id: &str) -> ThemeAppearance {
+        self.themes
+            .iter()
+            .find(|entry| entry.id == theme_id)
+            .map(|entry| entry.appearance)
+            .unwrap_or(ThemeAppearance::Dark)
     }
 
     pub fn metadata(&self) -> Vec<ThemeMetadata> {

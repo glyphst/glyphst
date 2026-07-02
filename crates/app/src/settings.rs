@@ -9,7 +9,8 @@ use gpui::{App, Font, FontFallbacks, FontWeight, Global, Window, WindowBackgroun
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use crate::theme::{
-    DEFAULT_THEME_ID, PartialTheme, Theme, ThemeRegistry, push_value_node, value_to_f32,
+    DEFAULT_DARK_THEME_ID, DEFAULT_LIGHT_THEME_ID, DEFAULT_THEME_ID, PartialTheme, Theme,
+    ThemeAppearance, ThemeRegistry, ThemeSelection, push_value_node, value_to_f32,
 };
 
 pub const DEFAULT_ZOOM: f32 = 1.0;
@@ -1266,7 +1267,7 @@ impl AiSettings {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub behavior: BehaviorSettings,
     pub font: FontSettings,
@@ -1275,24 +1276,8 @@ pub struct Settings {
     pub ai: AiSettings,
     pub keymap_preset: KeymapPreset,
     pub keybinding_overrides: Vec<KeyBindingOverride>,
-    pub theme_name: String,
+    pub theme: ThemeSelection,
     pub overrides: PartialTheme,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            behavior: BehaviorSettings::default(),
-            font: FontSettings::default(),
-            window: WindowSettings::default(),
-            tab_bar_visibility: TabBarVisibility::default(),
-            ai: AiSettings::default(),
-            keymap_preset: KeymapPreset::default(),
-            keybinding_overrides: Vec::new(),
-            theme_name: DEFAULT_THEME_ID.to_string(),
-            overrides: PartialTheme::default(),
-        }
-    }
 }
 
 impl Settings {
@@ -1302,9 +1287,7 @@ impl Settings {
         self.window.sanitize();
         self.ai.sanitize();
         self.overrides.sanitize();
-        if self.theme_name.trim().is_empty() {
-            self.theme_name = DEFAULT_THEME_ID.to_string();
-        }
+        self.theme.sanitize();
         self.keybinding_overrides.retain_mut(|binding| {
             binding.action = binding.action.trim().to_string();
             binding.keystrokes = binding.keystrokes.trim().to_string();
@@ -1321,8 +1304,8 @@ impl Settings {
     fn from_document(document: &KdlDocument) -> Self {
         let mut settings = Self::default();
 
-        if let Some(theme_name) = document.get_arg("theme").and_then(KdlValue::as_string) {
-            settings.theme_name = theme_name.to_string();
+        if let Some(theme_node) = document.get("theme") {
+            settings.theme = ThemeSelection::from_kdl_node(theme_node);
         }
 
         if let Some(preset) = document
@@ -1565,7 +1548,7 @@ impl Settings {
         );
         document.nodes_mut().push(panes);
 
-        push_value_node(&mut document, "theme", self.theme_name.clone());
+        self.theme.clone().write_to_document(&mut document);
         push_value_node(&mut document, "keymap", self.keymap_preset.as_str());
 
         let mut font = KdlNode::new("font");
@@ -1687,9 +1670,12 @@ pub struct SettingsStore {
     pub settings: Settings,
     pub registry: ThemeRegistry,
     pub resolved_theme: Theme,
+    pub system_appearance: ThemeAppearance,
     pub user_managed: bool,
     pub config_path: PathBuf,
     pub state_path: PathBuf,
+    pub last_dynamic_light: Option<String>,
+    pub last_dynamic_dark: Option<String>,
 }
 
 impl Global for SettingsStore {}
@@ -1717,33 +1703,68 @@ impl SettingsStore {
                 }
             })
             .unwrap_or_default();
-        if !registry.contains(&settings.theme_name) {
-            settings.theme_name = DEFAULT_THEME_ID.to_string();
-        }
-        let resolved_theme = registry.resolve(&settings.theme_name, settings.overrides);
+        let system_appearance = ThemeAppearance::Light;
+        validate_theme_selection(&mut settings, &registry, system_appearance);
+        let resolved_theme = registry.resolve(
+            settings.theme.name(system_appearance),
+            settings.overrides,
+        );
 
         Self {
             settings,
             registry,
             resolved_theme,
+            system_appearance,
             user_managed,
             config_path,
             state_path,
+            last_dynamic_light: None,
+            last_dynamic_dark: None,
         }
     }
 
     pub fn set_settings(&mut self, settings: Settings) -> Result<()> {
         self.settings = settings;
         self.settings.sanitize();
-        self.resolved_theme = self
-            .registry
-            .resolve(&self.settings.theme_name, self.settings.overrides);
+        validate_theme_selection(&mut self.settings, &self.registry, self.system_appearance);
+        self.resolved_theme = self.registry.resolve(
+            self.settings.theme.name(self.system_appearance),
+            self.settings.overrides,
+        );
 
         if !self.user_managed {
             write_kdl(&self.state_path, self.export())?;
         }
 
         Ok(())
+    }
+
+    pub fn set_system_appearance(&mut self, appearance: ThemeAppearance) {
+        if self.system_appearance == appearance {
+            return;
+        }
+        self.system_appearance = appearance;
+        self.resolved_theme = self.registry.resolve(
+            self.settings.theme.name(appearance),
+            self.settings.overrides,
+        );
+    }
+
+    pub fn save(&mut self) -> Result<()> {
+        if self.user_managed {
+            write_kdl(&self.config_path, self.export())?;
+        }
+        Ok(())
+    }
+
+    pub fn override_settings(&mut self, settings: Settings) {
+        self.settings = settings;
+        self.settings.sanitize();
+        validate_theme_selection(&mut self.settings, &self.registry, self.system_appearance);
+        self.resolved_theme = self.registry.resolve(
+            self.settings.theme.name(self.system_appearance),
+            self.settings.overrides,
+        );
     }
 
     pub fn export(&self) -> String {
@@ -1753,6 +1774,29 @@ impl SettingsStore {
     pub fn export_to(&self, path: &Path) -> Result<()> {
         write_kdl(path, self.export())
     }
+}
+
+fn validate_theme_selection(
+    settings: &mut Settings,
+    registry: &ThemeRegistry,
+    system_appearance: ThemeAppearance,
+) {
+    match &mut settings.theme {
+        ThemeSelection::Static(name) => {
+            if !registry.contains(name) {
+                *name = DEFAULT_THEME_ID.to_string();
+            }
+        }
+        ThemeSelection::Dynamic { light, dark, .. } => {
+            if !registry.contains(light) {
+                *light = DEFAULT_LIGHT_THEME_ID.to_string();
+            }
+            if !registry.contains(dark) {
+                *dark = DEFAULT_DARK_THEME_ID.to_string();
+            }
+        }
+    }
+    let _ = system_appearance;
 }
 
 pub fn parse_settings(text: &str) -> Result<Settings> {
@@ -1804,6 +1848,7 @@ fn write_kdl(path: &Path, contents: String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::ThemeAppearanceMode;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1836,7 +1881,7 @@ theme-overrides {
             settings.window.background,
             WindowBackgroundMode::Transparent
         );
-        assert_eq!(settings.theme_name, "one-dark");
+        assert_eq!(settings.theme, ThemeSelection::Static("one-dark".to_string()));
         assert_eq!(settings.overrides.background, Some(0x101010));
         assert_eq!(settings.overrides.selection_highlight, None);
     }
@@ -1866,7 +1911,7 @@ window {
                 smooth_scrolling: false,
                 dim_inactive_panes: true,
             },
-            theme_name: "one-dark".to_string(),
+            theme: ThemeSelection::Static("one-dark".to_string()),
             overrides: PartialTheme {
                 background: Some(0x181818),
                 selection_highlight: Some(0x61afef66),
@@ -2244,7 +2289,7 @@ ai {
     fn theme_resolution_layers_selected_theme_and_overrides() {
         let registry = ThemeRegistry::load(Path::new("/path/that/does/not/exist"));
         let settings = Settings {
-            theme_name: "one-dark".to_string(),
+            theme: ThemeSelection::Static("one-dark".to_string()),
             overrides: PartialTheme {
                 background: Some(0x101010),
                 page_gap: Some(48.0),
@@ -2253,7 +2298,10 @@ ai {
             ..Settings::default()
         };
 
-        let theme = registry.resolve(&settings.theme_name, settings.overrides);
+        let theme = registry.resolve(
+            settings.theme.name(ThemeAppearance::Light),
+            settings.overrides,
+        );
 
         assert_eq!(theme.accent, 0x74ade8);
         assert_eq!(theme.background, 0x101010);
@@ -2366,7 +2414,7 @@ page-gap 36
                 smooth_scrolling: false,
                 dim_inactive_panes: true,
             },
-            theme_name: DEFAULT_THEME_ID.to_string(),
+            theme: ThemeSelection::Static(DEFAULT_THEME_ID.to_string()),
             overrides: PartialTheme {
                 background: Some(0x181818),
                 selection_highlight: Some(0x61afef66),
@@ -2391,6 +2439,100 @@ page-gap 36
         fs::remove_dir_all(root).ok();
     }
 
+    #[test]
+    fn parses_dynamic_theme_selection() {
+        let settings = parse_settings(
+            r##"
+theme {
+    mode "system"
+    light "one-light"
+    dark "one-dark"
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings.theme,
+            ThemeSelection::Dynamic {
+                mode: ThemeAppearanceMode::System,
+                light: "one-light".to_string(),
+                dark: "one-dark".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn dynamic_theme_selection_round_trips() {
+        let settings = Settings {
+            theme: ThemeSelection::Dynamic {
+                mode: ThemeAppearanceMode::Dark,
+                light: "one-light".to_string(),
+                dark: "one-dark".to_string(),
+            },
+            ..Settings::default()
+        };
+
+        let exported = settings.to_kdl_string();
+        assert_eq!(parse_settings(&exported).unwrap(), settings);
+    }
+
+    #[test]
+    fn set_mode_migrates_static_to_dynamic() {
+        let mut selection = ThemeSelection::Static("one-light".to_string());
+        selection.set_mode(ThemeAppearanceMode::Dark);
+
+        assert_eq!(
+            selection,
+            ThemeSelection::Dynamic {
+                mode: ThemeAppearanceMode::System,
+                light: "one-light".to_string(),
+                dark: "one-dark".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn set_mode_updates_dynamic_mode() {
+        let mut selection = ThemeSelection::Dynamic {
+            mode: ThemeAppearanceMode::System,
+            light: "one-light".to_string(),
+            dark: "one-dark".to_string(),
+        };
+        selection.set_mode(ThemeAppearanceMode::Light);
+
+        assert_eq!(
+            selection,
+            ThemeSelection::Dynamic {
+                mode: ThemeAppearanceMode::Light,
+                light: "one-light".to_string(),
+                dark: "one-dark".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn theme_selection_name_returns_correct_theme() {
+        let dynamic = ThemeSelection::Dynamic {
+            mode: ThemeAppearanceMode::System,
+            light: "one-light".to_string(),
+            dark: "one-dark".to_string(),
+        };
+
+        assert_eq!(
+            dynamic.name(ThemeAppearance::Light),
+            "one-light"
+        );
+        assert_eq!(dynamic.name(ThemeAppearance::Dark), "one-dark");
+
+        let light_mode = ThemeSelection::Dynamic {
+            mode: ThemeAppearanceMode::Light,
+            light: "one-light".to_string(),
+            dark: "one-dark".to_string(),
+        };
+        assert_eq!(light_mode.name(ThemeAppearance::Dark), "one-light");
+    }
+
     fn test_store(
         settings: Settings,
         user_managed: bool,
@@ -2398,14 +2540,21 @@ page-gap 36
         state_path: PathBuf,
     ) -> SettingsStore {
         let registry = ThemeRegistry::load(Path::new("/path/that/does/not/exist"));
-        let resolved_theme = registry.resolve(&settings.theme_name, settings.overrides);
+        let system_appearance = ThemeAppearance::Light;
+        let resolved_theme = registry.resolve(
+            settings.theme.name(system_appearance),
+            settings.overrides,
+        );
         SettingsStore {
             settings,
             registry,
             resolved_theme,
+            system_appearance,
             user_managed,
             config_path,
             state_path,
+            last_dynamic_light: None,
+            last_dynamic_dark: None,
         }
     }
 

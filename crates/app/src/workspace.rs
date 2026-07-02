@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use gpui::{
     AnyElement, Context, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement, MouseButton,
-    MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString, Window, div, point, prelude::*,
-    px, rgb, rgba,
+    MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString, Window, WindowAppearance, div,
+    point, prelude::*, px, rgb, rgba,
 };
 
 use crate::{
@@ -23,7 +23,8 @@ use crate::{
     settings::{SettingsStore, setup_ui_font, ui_rems},
     settings_window::open_settings_window,
     style::RADIUS_SM,
-    theme::Theme,
+    theme::{Theme, ThemeAppearance, ThemeAppearanceMode},
+    theme_selector::{ThemeSelector, ThemeSelectorDelegate},
 };
 
 gpui::actions!(
@@ -49,6 +50,8 @@ gpui::actions!(
         ResizePaneDown,
         CloseOtherPanes,
         ResetPaneSizes,
+        ToggleMode,
+        ToggleThemeSelector,
     ]
 );
 
@@ -77,6 +80,8 @@ pub(crate) struct Workspace {
     focus_handle: FocusHandle,
     command_palette: Option<Entity<CommandPalette>>,
     command_palette_previous_focus_handle: Option<FocusHandle>,
+    theme_selector: Option<Entity<ThemeSelector>>,
+    theme_selector_previous_focus_handle: Option<FocusHandle>,
     toolbar_menu_open: bool,
     toolbar_open_menu: Option<ToolbarMenu>,
     dragged_tab_outside_window: Option<DraggedTab>,
@@ -96,6 +101,8 @@ impl Workspace {
             focus_handle,
             command_palette: None,
             command_palette_previous_focus_handle: None,
+            theme_selector: None,
+            theme_selector_previous_focus_handle: None,
             toolbar_menu_open: false,
             toolbar_open_menu: None,
             dragged_tab_outside_window: None,
@@ -105,6 +112,13 @@ impl Workspace {
         workspace.focus_active_pane(window, cx);
         cx.observe_global::<SettingsStore>(|_, cx| cx.notify())
             .detach();
+
+        let system_appearance = match window.appearance() {
+            WindowAppearance::Light | WindowAppearance::VibrantLight => ThemeAppearance::Light,
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => ThemeAppearance::Dark,
+        };
+        cx.global_mut::<SettingsStore>().set_system_appearance(system_appearance);
+
         workspace
     }
 
@@ -465,6 +479,28 @@ impl Workspace {
         cx.notify();
     }
 
+    fn toggle_theme_mode(&mut self, _: &ToggleMode, _window: &mut Window, cx: &mut Context<Self>) {
+        let store = cx.global::<SettingsStore>();
+        let current_mode = store.settings.theme.mode();
+        let next_mode = match current_mode {
+            Some(ThemeAppearanceMode::Light) => ThemeAppearanceMode::Dark,
+            Some(ThemeAppearanceMode::Dark) => ThemeAppearanceMode::Light,
+            Some(ThemeAppearanceMode::System) | None => {
+                let active_name = store.settings.theme.name(store.system_appearance);
+                match store.registry.appearance(active_name) {
+                    ThemeAppearance::Light => ThemeAppearanceMode::Dark,
+                    ThemeAppearance::Dark => ThemeAppearanceMode::Light,
+                }
+            }
+        };
+
+        let mut settings = store.settings.clone();
+        settings.theme.set_mode(next_mode);
+        let _ = cx.global_mut::<SettingsStore>().set_settings(settings);
+        let _ = cx.global_mut::<SettingsStore>().save();
+        cx.refresh_windows();
+    }
+
     fn render_body(
         &self,
         theme: Theme,
@@ -709,6 +745,69 @@ impl Workspace {
     fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.command_palette.take().is_some() {
             if let Some(previous_focus_handle) = self.command_palette_previous_focus_handle.take() {
+                previous_focus_handle.focus(window, cx);
+            } else {
+                self.focus_active_pane(window, cx);
+            }
+            cx.notify();
+        }
+    }
+
+    fn toggle_theme_selector(
+        &mut self,
+        _: &ToggleThemeSelector,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.theme_selector.is_some() {
+            self.close_theme_selector(window, cx);
+            return;
+        }
+
+        let previous_focus_handle = window
+            .focused(cx)
+            .unwrap_or_else(|| self.active_pane.read(cx).focus_handle());
+
+        let (themes, selection, system_appearance, selected_ix) = {
+            let store = cx.global::<SettingsStore>();
+            let themes = store.registry.metadata();
+            let selection = store.settings.theme.clone();
+            let system_appearance = store.system_appearance;
+            let active_name = selection.name(system_appearance);
+            let selected_ix = themes.iter().position(|meta| meta.id == active_name).unwrap_or(0);
+            (themes, selection, system_appearance, selected_ix)
+        };
+        let delegate = ThemeSelectorDelegate::new(themes, selection, system_appearance);
+
+        let picker_previous_focus_handle = previous_focus_handle.clone();
+        let selector = cx.new(|cx| {
+            Picker::new_with_selected_ix(
+                picker_previous_focus_handle,
+                delegate,
+                selected_ix,
+                cx,
+            )
+        });
+
+        cx.subscribe_in(&selector, window, |this, _, _: &PickerEvent, window, cx| {
+            this.close_theme_selector(window, cx);
+        })
+        .detach();
+
+        let focus_handle = selector.focus_handle(cx);
+        window.defer(cx, move |window, cx| {
+            focus_handle.focus(window, cx);
+        });
+        self.theme_selector_previous_focus_handle = Some(previous_focus_handle);
+        self.theme_selector = Some(selector);
+        cx.notify();
+    }
+
+    fn close_theme_selector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.theme_selector.take().is_some() {
+            if let Some(previous_focus_handle) =
+                self.theme_selector_previous_focus_handle.take()
+            {
                 previous_focus_handle.focus(window, cx);
             } else {
                 self.focus_active_pane(window, cx);
@@ -1199,6 +1298,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ResetPaneSizes, _, cx| {
                 this.reset_pane_sizes(cx);
             }))
+            .on_action(cx.listener(Self::toggle_theme_mode))
+            .on_action(cx.listener(Self::toggle_theme_selector))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
@@ -1223,6 +1324,14 @@ impl Render for Workspace {
                 this.child(Self::render_top_aligned_overlay(
                     palette,
                     |this, window, cx| this.close_command_palette(window, cx),
+                    theme,
+                    cx,
+                ))
+            })
+            .when_some(self.theme_selector.clone(), |this, selector| {
+                this.child(Self::render_top_aligned_overlay(
+                    selector,
+                    |this, window, cx| this.close_theme_selector(window, cx),
                     theme,
                     cx,
                 ))

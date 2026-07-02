@@ -22,7 +22,8 @@ use crate::{
         ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight, ActivatePaneUp,
         ActivatePreviousPane, CloseOtherPanes, MovePaneDown, MovePaneLeft, MovePaneRight,
         MovePaneUp, ResetPaneSizes, ResizePaneDown, ResizePaneLeft, ResizePaneRight, ResizePaneUp,
-        SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp,
+        SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleMode,
+        ToggleThemeSelector,
     },
 };
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
@@ -41,6 +42,7 @@ const OVERLAY_CONTEXTS: &[&str] = &[
     "NoteEditor",
     "AiPanel",
     "SettingsPanel",
+    "ThemeSelector",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -634,6 +636,24 @@ fn command_specs() -> &'static [CommandSpec] {
                     &["primary-shift-t"],
                     &["primary-shift-t"],
                     &["transparency"],
+                    true,
+                ),
+                spec::<ToggleMode>(
+                    "toggle-theme",
+                    "Toggle Theme",
+                    KeyBindingCategory::Workspace,
+                    &["primary-k primary-shift-t"],
+                    &["primary-k primary-shift-t"],
+                    &["toggle-theme-mode", "toggle-theme"],
+                    true,
+                ),
+                spec::<ToggleThemeSelector>(
+                    "toggle-theme-selector",
+                    "Toggle Theme Selector",
+                    KeyBindingCategory::Workspace,
+                    &["primary-k primary-t"],
+                    &["primary-k primary-t"],
+                    &["theme-selector", "select-theme"],
                     true,
                 ),
                 spec::<ToggleAiPanel>(

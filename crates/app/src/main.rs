@@ -34,12 +34,14 @@ mod pane;
 mod pdf_view;
 mod picker;
 mod scrollbar;
+mod searchable_dropdown;
 mod search;
 mod settings;
 mod settings_window;
 mod smooth_scroll;
 mod style;
 mod theme;
+mod theme_selector;
 mod toc;
 mod workspace;
 

@@ -2,12 +2,16 @@ use crate::{
     ai_client::{AiModelInfo, list_ai_models, test_ai_connection},
     input, keybindings,
     scrollbar::{WithScrollbar as _, uniform_list_scrollbar_for},
+    searchable_dropdown::{SearchableDropdown, SearchableDropdownEvent, SearchableItem},
     settings::{
         AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, FontSettings, KeymapPreset,
         ModelRef, ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility,
         WindowBackgroundMode, setup_ui_font, ui_rems,
     },
-    theme::{PartialTheme, Theme, ThemeMetadata, format_rgb_hex, format_rgba_hex},
+    theme::{
+        PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode, ThemeMetadata,
+        ThemeSelection, format_rgb_hex, format_rgba_hex,
+    },
 };
 use gpui::{
     Anchor, AnyElement, App, AppContext, Bounds, ClipboardItem, Context, CursorStyle, Element,
@@ -1023,6 +1027,9 @@ pub struct SettingsWindow {
     main_model_search: Entity<SettingsTextInput>,
     title_model_search: Entity<SettingsTextInput>,
     fetch_model_search: Entity<SettingsTextInput>,
+    static_theme_dropdown: Entity<SearchableDropdown>,
+    light_theme_dropdown: Entity<SearchableDropdown>,
+    dark_theme_dropdown: Entity<SearchableDropdown>,
 }
 
 impl SettingsWindow {
@@ -1152,8 +1159,120 @@ impl SettingsWindow {
         })
         .detach();
 
-        cx.observe_global::<SettingsStore>(|_, cx| cx.notify())
-            .detach();
+        // Theme dropdowns for the appearance tab
+        let (static_selected, light_selected, dark_selected, all_theme_items, light_theme_items, dark_theme_items) = {
+            let store = cx.global::<SettingsStore>();
+            let system_appearance = store.system_appearance;
+            let (static_sel, light_sel, dark_sel) = match &store.settings.theme {
+                ThemeSelection::Static(name) => {
+                    (name.clone(), name.clone(), name.clone())
+                }
+                ThemeSelection::Dynamic { light, dark, .. } => {
+                    (store.settings.theme.name(system_appearance).to_string(), light.clone(), dark.clone())
+                }
+            };
+            let all_items: Vec<SearchableItem> = store
+                .registry
+                .metadata()
+                .into_iter()
+                .map(|m| SearchableItem { value: m.id, label: m.name })
+                .collect();
+            let light_items: Vec<SearchableItem> = store
+                .registry
+                .metadata()
+                .into_iter()
+                .filter(|m| m.appearance == ThemeAppearance::Light)
+                .map(|m| SearchableItem { value: m.id, label: m.name })
+                .collect();
+            let dark_items: Vec<SearchableItem> = store
+                .registry
+                .metadata()
+                .into_iter()
+                .filter(|m| m.appearance == ThemeAppearance::Dark)
+                .map(|m| SearchableItem { value: m.id, label: m.name })
+                .collect();
+            (static_sel, light_sel, dark_sel, all_items, light_items, dark_items)
+        };
+        let static_theme_dropdown = cx.new(|cx| {
+            SearchableDropdown::new(
+                all_theme_items,
+                static_selected,
+                "Search themes…",
+                cx,
+            )
+        });
+        let light_theme_dropdown = cx.new(|cx| {
+            SearchableDropdown::new(
+                light_theme_items,
+                light_selected,
+                "Search light themes…",
+                cx,
+            )
+        });
+        let dark_theme_dropdown = cx.new(|cx| {
+            SearchableDropdown::new(
+                dark_theme_items,
+                dark_selected,
+                "Search dark themes…",
+                cx,
+            )
+        });
+        cx.subscribe(&static_theme_dropdown, |this, _, event, cx| {
+            let SearchableDropdownEvent::Selected(value) = event;
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            settings.theme = ThemeSelection::Static(value.clone());
+            this.persist_settings(settings, cx);
+        })
+        .detach();
+        cx.subscribe(&light_theme_dropdown, |this, _, event, cx| {
+            let SearchableDropdownEvent::Selected(value) = event;
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            if let ThemeSelection::Dynamic { light, .. } = &mut settings.theme {
+                *light = value.clone();
+                this.persist_settings(settings, cx);
+            }
+        })
+        .detach();
+        cx.subscribe(&dark_theme_dropdown, |this, _, event, cx| {
+            let SearchableDropdownEvent::Selected(value) = event;
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            if let ThemeSelection::Dynamic { dark, .. } = &mut settings.theme {
+                *dark = value.clone();
+                this.persist_settings(settings, cx);
+            }
+        })
+        .detach();
+
+        cx.observe_global::<SettingsStore>(|this, cx| {
+            let (theme, system_appearance) = {
+                let store = cx.global::<SettingsStore>();
+                (store.settings.theme.clone(), store.system_appearance)
+            };
+            match &theme {
+                ThemeSelection::Static(name) => {
+                    this.static_theme_dropdown.update(cx, |d, cx| {
+                        d.set_selected_value(name.clone());
+                        cx.notify();
+                    });
+                }
+                ThemeSelection::Dynamic { light, dark, .. } => {
+                    this.light_theme_dropdown.update(cx, |d, cx| {
+                        d.set_selected_value(light.clone());
+                        cx.notify();
+                    });
+                    this.dark_theme_dropdown.update(cx, |d, cx| {
+                        d.set_selected_value(dark.clone());
+                        cx.notify();
+                    });
+                    this.static_theme_dropdown.update(cx, |d, cx| {
+                        d.set_selected_value(theme.name(system_appearance).to_string());
+                        cx.notify();
+                    });
+                }
+            }
+            cx.notify();
+        })
+        .detach();
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -1177,6 +1296,9 @@ impl SettingsWindow {
             main_model_search,
             title_model_search,
             fetch_model_search,
+            static_theme_dropdown,
+            light_theme_dropdown,
+            dark_theme_dropdown,
         }
     }
 
@@ -1930,23 +2052,22 @@ impl SettingsWindow {
             )
     }
 
-    fn theme_option(
+    fn theme_mode_option(
         &self,
-        metadata: ThemeMetadata,
-        selected_id: &str,
+        label: &'static str,
+        is_dynamic: bool,
+        current_is_dynamic: bool,
+        system_appearance: ThemeAppearance,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let selected = metadata.id == selected_id;
-        let id = metadata.id.clone();
+        let selected = is_dynamic == current_is_dynamic;
 
         div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .h(px(38.0))
+            .h(px(30.0))
             .px_3()
+            .flex()
+            .items_center()
             .border_1()
             .border_color(if selected {
                 rgb(theme.accent)
@@ -1963,17 +2084,112 @@ impl SettingsWindow {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
-                    let id = id.clone();
-                    this.change_settings(move |settings| settings.theme_name = id, window, cx);
+                    let (new_theme, save_dynamic) = {
+                        let store = cx.global::<SettingsStore>();
+                        match &store.settings.theme {
+                            ThemeSelection::Static(name) if is_dynamic => {
+                                let (light, dark) = match (
+                                    &store.last_dynamic_light,
+                                    &store.last_dynamic_dark,
+                                ) {
+                                    (Some(l), Some(d)) => (l.clone(), d.clone()),
+                                    _ => (name.clone(), name.clone()),
+                                };
+                                (
+                                    Some(ThemeSelection::Dynamic {
+                                        mode: ThemeAppearanceMode::System,
+                                        light,
+                                        dark,
+                                    }),
+                                    None,
+                                )
+                            }
+                            ThemeSelection::Dynamic { mode, light, dark }
+                                if !is_dynamic =>
+                            {
+                                let active = match mode {
+                                    ThemeAppearanceMode::Light => light.clone(),
+                                    ThemeAppearanceMode::Dark => dark.clone(),
+                                    ThemeAppearanceMode::System => {
+                                        match system_appearance {
+                                            ThemeAppearance::Light => light.clone(),
+                                            ThemeAppearance::Dark => dark.clone(),
+                                        }
+                                    }
+                                };
+                                (
+                                    Some(ThemeSelection::Static(active)),
+                                    Some((light.clone(), dark.clone())),
+                                )
+                            }
+                            _ => (None, None),
+                        }
+                    };
+                    if let Some((light, dark)) = save_dynamic {
+                        let store = cx.global_mut::<SettingsStore>();
+                        store.last_dynamic_light = Some(light);
+                        store.last_dynamic_dark = Some(dark);
+                    }
+                    if let Some(new_theme) = new_theme {
+                        this.change_settings(
+                            move |settings| settings.theme = new_theme,
+                            window,
+                            cx,
+                        );
+                    }
                     cx.stop_propagation();
                 }),
             )
-            .child(div().text_color(rgb(theme.text)).child(metadata.name))
-            .child(
-                div()
-                    .text_color(rgb(theme.text_muted))
-                    .child(metadata.appearance.as_str()),
+            .child(label)
+    }
+
+    fn appearance_mode_option(
+        &self,
+        label: &'static str,
+        mode: ThemeAppearanceMode,
+        selected_mode: ThemeAppearanceMode,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = mode == selected_mode;
+
+        div()
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(if selected {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.border_variant)
+            })
+            .bg(if selected {
+                rgb(theme.element_selected)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.change_settings(
+                        move |settings| {
+                            if let ThemeSelection::Dynamic {
+                                mode: mode_field, ..
+                            } = &mut settings.theme
+                            {
+                                *mode_field = mode;
+                            }
+                        },
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
             )
+            .child(label)
     }
 
     fn background_option(
@@ -3641,26 +3857,142 @@ impl SettingsWindow {
         &self,
         settings: &Settings,
         resolved: Theme,
-        themes: Vec<ThemeMetadata>,
+        _themes: Vec<ThemeMetadata>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let page_gap = resolved.page_gap;
-        let theme_options = themes
-            .into_iter()
-            .map(|metadata| {
-                self.theme_option(metadata, &settings.theme_name, resolved, cx)
-                    .into_any_element()
-            })
-            .collect::<Vec<_>>();
+        let system_appearance = cx.global::<SettingsStore>().system_appearance;
+        let current_is_dynamic = matches!(settings.theme, ThemeSelection::Dynamic { .. });
 
-        vec![
+        let theme_section = if current_is_dynamic {
+            let current_mode = match &settings.theme {
+                ThemeSelection::Dynamic { mode, .. } => *mode,
+                _ => unreachable!(),
+            };
+
             div()
                 .flex()
                 .flex_col()
                 .gap_1()
                 .child(Self::section_title("Theme", resolved))
-                .child(div().flex().flex_col().gap_2().children(theme_options))
-                .into_any_element(),
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .h(px(44.0))
+                        .child(div().text_color(rgb(resolved.text)).child("Theme Mode"))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(self.theme_mode_option(
+                                    "Single Theme",
+                                    false,
+                                    current_is_dynamic,
+                                    system_appearance,
+                                    resolved,
+                                    cx,
+                                ))
+                                .child(self.theme_mode_option(
+                                    "Light/Dark",
+                                    true,
+                                    current_is_dynamic,
+                                    system_appearance,
+                                    resolved,
+                                    cx,
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .h(px(44.0))
+                        .child(div().text_color(rgb(resolved.text)).child("Mode"))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(self.appearance_mode_option(
+                                    "Light",
+                                    ThemeAppearanceMode::Light,
+                                    current_mode,
+                                    resolved,
+                                    cx,
+                                ))
+                                .child(self.appearance_mode_option(
+                                    "Dark",
+                                    ThemeAppearanceMode::Dark,
+                                    current_mode,
+                                    resolved,
+                                    cx,
+                                ))
+                                .child(self.appearance_mode_option(
+                                    "System",
+                                    ThemeAppearanceMode::System,
+                                    current_mode,
+                                    resolved,
+                                    cx,
+                                )),
+                        ),
+                )
+                .child(Self::section_title("Light Theme", resolved))
+                .child(self.light_theme_dropdown.clone())
+                .child(Self::section_title("Dark Theme", resolved))
+                .child(self.dark_theme_dropdown.clone())
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(Self::section_title("Theme", resolved))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .h(px(44.0))
+                        .child(div().text_color(rgb(resolved.text)).child("Theme Mode"))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(self.theme_mode_option(
+                                    "Single Theme",
+                                    false,
+                                    current_is_dynamic,
+                                    system_appearance,
+                                    resolved,
+                                    cx,
+                                ))
+                                .child(self.theme_mode_option(
+                                    "Light/Dark",
+                                    true,
+                                    current_is_dynamic,
+                                    system_appearance,
+                                    resolved,
+                                    cx,
+                                )),
+                        ),
+                )
+                .child(self.static_theme_dropdown.clone())
+                .into_any_element()
+        };
+
+        vec![
+            theme_section,
             div()
                 .flex()
                 .flex_col()

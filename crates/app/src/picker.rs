@@ -54,6 +54,8 @@ pub trait PickerDelegate: Sized + 'static {
     ) {
     }
     fn remove_match(&mut self, _: usize, _: &mut Context<Picker<Self>>) {}
+    fn selection_changed(&mut self, _match_ix: usize, _cx: &mut Context<Picker<Self>>) {}
+    fn dismissed(&mut self, _cx: &mut Context<Picker<Self>>) {}
 }
 
 pub struct Picker<D: PickerDelegate> {
@@ -156,6 +158,7 @@ impl<D: PickerDelegate> Picker<D> {
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.delegate.dismissed(cx);
         self.previous_focus_handle.focus(window, cx);
         cx.emit(PickerEvent::Dismissed);
     }
@@ -173,6 +176,7 @@ impl<D: PickerDelegate> Picker<D> {
         self.previous_focus_handle.focus(window, cx);
         self.delegate
             .confirm(self.selected_ix, &self.previous_focus_handle, window, cx);
+        self.delegate.dismissed(cx);
         cx.emit(PickerEvent::Dismissed);
     }
 
@@ -188,6 +192,7 @@ impl<D: PickerDelegate> Picker<D> {
         if self.selected_ix + 1 < self.match_count() {
             self.selected_ix += 1;
             self.center_selected();
+            self.delegate.selection_changed(self.selected_ix, cx);
             cx.notify();
         }
     }
@@ -196,6 +201,7 @@ impl<D: PickerDelegate> Picker<D> {
         if self.selected_ix > 0 {
             self.selected_ix -= 1;
             self.center_selected();
+            self.delegate.selection_changed(self.selected_ix, cx);
             cx.notify();
         }
     }
