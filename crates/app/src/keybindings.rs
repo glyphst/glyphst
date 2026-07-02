@@ -2,7 +2,7 @@ use std::{rc::Rc, sync::OnceLock};
 
 use crate::{
     ai_panel::{AiPanelClose, AiPanelSubmit},
-    input, menu,
+    input, markdown, menu,
     note_editor::{NoteCancel, NoteSave},
     pane::{SplitDown, SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical},
     pdf_view::{
@@ -22,8 +22,7 @@ use crate::{
         ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight, ActivatePaneUp,
         ActivatePreviousPane, CloseOtherPanes, MovePaneDown, MovePaneLeft, MovePaneRight,
         MovePaneUp, ResetPaneSizes, ResizePaneDown, ResizePaneLeft, ResizePaneRight, ResizePaneUp,
-        SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleMode,
-        ToggleThemeSelector,
+        SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleMode, ToggleThemeSelector,
     },
 };
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
@@ -449,6 +448,7 @@ fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
     add_many::<input::SelectHome>(cx, bindings, &["shift-home"], "TextInput");
     add_many::<input::SelectEnd>(cx, bindings, &["shift-end"], "TextInput");
     add_many::<input::Copy>(cx, bindings, &["primary-c"], "TextInput");
+    add_many::<markdown::Copy>(cx, bindings, &["primary-c"], "Markdown");
     add_many::<input::Cut>(cx, bindings, &["primary-x"], "TextInput");
     add_many::<input::Paste>(cx, bindings, &["primary-v"], "TextInput");
 
@@ -1468,10 +1468,7 @@ mod tests {
 
         // With an override the effective keystrokes diverge from the defaults (Source = User).
         assert_ne!(overridden.keystrokes, overridden.default_keystrokes);
-        assert_eq!(
-            overridden.keystrokes,
-            vec!["test-override".to_string()]
-        );
+        assert_eq!(overridden.keystrokes, vec!["test-override".to_string()]);
         assert_eq!(overridden.default_keystrokes, sample.default_keystrokes);
     }
 }

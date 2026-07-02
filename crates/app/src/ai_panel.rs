@@ -9,7 +9,7 @@ use crate::{
     },
     input,
     library::{AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp},
-    markdown::render_markdown,
+    markdown::{Markdown, MarkdownElement, MarkdownStyle},
     pdf_view::PdfView,
     scrollbar::WithScrollbar as _,
     settings::{AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore, ui_rems},
@@ -22,8 +22,9 @@ use gpui::{
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render,
-    ScrollHandle, SharedString, Style, Task, TextRun, TextStyle, UTF16Selection, WeakEntity, Window,
-    WrappedLine, anchored, deferred, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
+    ScrollHandle, SharedString, Style, Task, TextRun, TextStyle, UTF16Selection, WeakEntity,
+    Window, WrappedLine, anchored, deferred, div, fill, point, prelude::*, px, relative, rgb, rgba,
+    size,
 };
 
 gpui::actions!(ai_panel, [AiPanelClose, AiPanelSubmit]);
@@ -103,6 +104,7 @@ pub struct AiPanel {
     model_menu_scroll: ScrollHandle,
     thinking_menu_open: bool,
     thinking_menu_anchor: Option<GpuiPoint<Pixels>>,
+    markdown_views: Vec<Entity<Markdown>>,
 }
 
 struct LaidOutLine {
@@ -219,6 +221,7 @@ impl AiPanel {
             model_menu_scroll: ScrollHandle::new(),
             thinking_menu_open: false,
             thinking_menu_anchor: None,
+            markdown_views: Vec::new(),
         }
     }
 
@@ -259,6 +262,9 @@ impl AiPanel {
     }
 
     fn backspace(&mut self, _: &input::Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         if self.model_menu_open {
             let mut query = self.model_search_query.to_string();
             query.pop();
@@ -273,6 +279,9 @@ impl AiPanel {
     }
 
     fn delete(&mut self, _: &input::Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         if self.model_menu_open {
             self.model_search_query = SharedString::default();
             cx.notify();
@@ -284,7 +293,10 @@ impl AiPanel {
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn left(&mut self, _: &input::Left, _: &mut Window, cx: &mut Context<Self>) {
+    fn left(&mut self, _: &input::Left, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);
         } else {
@@ -292,7 +304,10 @@ impl AiPanel {
         }
     }
 
-    fn right(&mut self, _: &input::Right, _: &mut Window, cx: &mut Context<Self>) {
+    fn right(&mut self, _: &input::Right, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.move_to(self.next_boundary(self.selected_range.end), cx);
         } else {
@@ -301,6 +316,9 @@ impl AiPanel {
     }
 
     fn up(&mut self, _: &input::Up, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         if self.select_previous_mention_completion(cx) {
             return;
         }
@@ -308,60 +326,104 @@ impl AiPanel {
     }
 
     fn down(&mut self, _: &input::Down, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         if self.select_next_mention_completion(cx) {
             return;
         }
         self.move_vertically(1, false, window, cx);
     }
 
-    fn home(&mut self, _: &input::Home, _: &mut Window, cx: &mut Context<Self>) {
+    fn home(&mut self, _: &input::Home, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         self.move_to(self.line_start_offset(), cx);
     }
 
-    fn end(&mut self, _: &input::End, _: &mut Window, cx: &mut Context<Self>) {
+    fn end(&mut self, _: &input::End, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         self.move_to(self.line_end_offset(), cx);
     }
 
-    fn select_all(&mut self, _: &input::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_all(&mut self, _: &input::SelectAll, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
 
-    fn select_left(&mut self, _: &input::SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_left(&mut self, _: &input::SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_right(&mut self, _: &input::SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_right(
+        &mut self,
+        _: &input::SelectRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
     fn select_up(&mut self, _: &input::SelectUp, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         self.move_vertically(-1, true, window, cx);
     }
 
     fn select_down(&mut self, _: &input::SelectDown, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         self.move_vertically(1, true, window, cx);
     }
 
-    fn select_home(&mut self, _: &input::SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_home(&mut self, _: &input::SelectHome, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         self.select_to(self.line_start_offset(), cx);
     }
 
-    fn select_end(&mut self, _: &input::SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_end(&mut self, _: &input::SelectEnd, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         self.select_to(self.line_end_offset(), cx);
     }
 
-    fn copy(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
+    fn copy(&mut self, _: &input::Copy, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         self.copy_selected_text(cx);
     }
 
     fn cut(&mut self, _: &input::Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         if self.copy_selected_text(cx) {
             self.replace_text_in_range(None, "", window, cx);
         }
     }
 
     fn paste(&mut self, _: &input::Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace("\r\n", "\n").replace('\r', "\n");
             self.replace_text_in_range(None, &text, window, cx);
@@ -384,6 +446,7 @@ impl AiPanel {
         let document = self.document_context(cx);
         if self.mode == AiPanelMode::QuickAsk {
             self.messages.clear();
+            self.markdown_views.clear();
         } else if self.messages.is_empty() {
             self.session_title = session_title_for_prompt(&prompt);
         }
@@ -399,8 +462,13 @@ impl AiPanel {
         self.mention_completion = None;
         self.last_cursor_pos = None;
         self.close_composer_menus();
+        let user_prompt = prompt.clone();
         self.messages.push(ChatMessage::user(prompt, contexts));
+        self.markdown_views
+            .push(cx.new(|cx| Markdown::new(user_prompt.into(), cx)));
         self.messages.push(ChatMessage::assistant(String::new()));
+        self.markdown_views
+            .push(cx.new(|cx| Markdown::new(SharedString::default(), cx)));
         self.loading = true;
         if self.mode == AiPanelMode::Sidebar {
             self.save_current_session(cx);
@@ -445,6 +513,7 @@ impl AiPanel {
                 if let Some(message) = self.messages.last_mut() {
                     message.push_text(&delta);
                 }
+                self.sync_last_markdown(cx);
             }
             AiStreamEvent::Error(error) => {
                 self.loading = false;
@@ -455,6 +524,7 @@ impl AiPanel {
                     message.push_text("Error: ");
                     message.push_text(&error);
                 }
+                self.sync_last_markdown(cx);
                 self.pending_stream = None;
                 if self.mode == AiPanelMode::Sidebar {
                     self.save_current_session(cx);
@@ -462,12 +532,20 @@ impl AiPanel {
             }
             AiStreamEvent::Done => {
                 self.loading = false;
+                self.sync_last_markdown(cx);
                 self.pending_stream = None;
                 if self.mode == AiPanelMode::Sidebar {
                     self.maybe_generate_title(cx);
                     self.save_current_session(cx);
                 }
             }
+        }
+    }
+
+    fn sync_last_markdown(&mut self, cx: &mut Context<Self>) {
+        if let (Some(message), Some(md)) = (self.messages.last(), self.markdown_views.last()) {
+            let text = message.display_text();
+            md.update(cx, |md, cx| md.set_source(text.into(), cx));
         }
     }
 
@@ -797,6 +875,7 @@ impl AiPanel {
         self.session_created = 0;
         self.session_updated = 0;
         self.messages.clear();
+        self.markdown_views.clear();
         self.content = SharedString::default();
         self.selected_range = 0..0;
         self.selection_reversed = false;
@@ -840,6 +919,14 @@ impl AiPanel {
                     AiSessionRole::Assistant => Role::Assistant,
                 };
                 ChatMessage::from_persisted(role, message.content, message.request_content)
+            })
+            .collect();
+        self.markdown_views = self
+            .messages
+            .iter()
+            .map(|message| {
+                let source = message.display_text();
+                cx.new(|cx| Markdown::new(source.into(), cx))
             })
             .collect();
         self.content = SharedString::default();
@@ -1219,7 +1306,11 @@ impl AiPanel {
                 font_weight: FontWeight(font.ui_font_weight),
                 ..Default::default()
             };
-            (store.resolved_theme, store.settings.ai.quick_ask, base_text_style)
+            (
+                store.resolved_theme,
+                store.settings.ai.quick_ask,
+                base_text_style,
+            )
         };
         let loading = self.loading;
         let attached_mentions = mentioned_kinds(&self.content);
@@ -1256,6 +1347,11 @@ impl AiPanel {
             .find(|message| message.role == Role::Assistant)
             .map(ChatMessage::display_text)
             .unwrap_or_default();
+        let answer_md = self
+            .messages
+            .iter()
+            .rposition(|m| m.role == Role::Assistant)
+            .and_then(|ix| self.markdown_views.get(ix).cloned());
         let show_answer = loading || !answer.is_empty();
 
         div()
@@ -1307,6 +1403,7 @@ impl AiPanel {
                     .child(
                         div()
                             .relative()
+                            .key_context("TextInput")
                             .min_h(px(32.0))
                             .px_3()
                             .py_2()
@@ -1339,11 +1436,15 @@ impl AiPanel {
                                     this.child(Self::render_loading_indicator(theme))
                                 })
                                 .when(!answer.is_empty(), |this| {
-                                    this.child(render_markdown(
-                                        &answer,
-                                        theme,
-                                        base_text_style.clone(),
-                                    ))
+                                    this.when_some(answer_md, |this, md| {
+                                        this.child(MarkdownElement::new(
+                                            md,
+                                            MarkdownStyle::from_theme(
+                                                theme,
+                                                base_text_style.clone(),
+                                            ),
+                                        ))
+                                    })
                                 }),
                         )
                         .vertical_scrollbar_for(&self.scroll_handle, window, cx),
@@ -1456,6 +1557,7 @@ impl AiPanel {
 
     fn render_message(
         message: ChatMessage,
+        markdown: Entity<Markdown>,
         theme: crate::theme::Theme,
         panel_width: f32,
         base_text_style: TextStyle,
@@ -1504,7 +1606,10 @@ impl AiPanel {
                                 this.child(Self::render_loading_indicator(theme))
                             })
                             .when(!is_loading, |this| {
-                                this.child(render_markdown(&content, theme, base_text_style))
+                                this.child(MarkdownElement::new(
+                                    markdown,
+                                    MarkdownStyle::from_theme(theme, base_text_style),
+                                ))
                             }),
                     ),
             )
@@ -2232,7 +2337,11 @@ impl Render for AiPanel {
                 font_weight: FontWeight(font.ui_font_weight),
                 ..Default::default()
             };
-            (store.resolved_theme, store.settings.ai.clone(), base_text_style)
+            (
+                store.resolved_theme,
+                store.settings.ai.clone(),
+                base_text_style,
+            )
         };
         let can_send = !self.loading && !self.content.trim().is_empty();
         let resolved_main = ai_settings.resolved_main();
@@ -2310,9 +2419,15 @@ impl Render for AiPanel {
             .gap_3()
             .p_3()
             .w(px((panel_width - 1.0).max(0.0)));
-        for message in self.messages.clone() {
+        for (message, markdown) in self
+            .messages
+            .iter()
+            .zip(self.markdown_views.iter())
+            .map(|(m, md)| (m.clone(), md.clone()))
+        {
             messages = messages.child(Self::render_message(
                 message,
+                markdown,
                 theme,
                 panel_width,
                 base_text_style.clone(),
@@ -2503,6 +2618,7 @@ impl Render for AiPanel {
                         .child(
                             div()
                                 .relative()
+                                .key_context("TextInput")
                                 .when(empty_chat, |this| this.flex_1().min_h_0())
                                 .rounded(px(6.0))
                                 .border_1()
