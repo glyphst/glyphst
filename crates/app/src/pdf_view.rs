@@ -81,6 +81,7 @@ gpui::actions!(
         ToggleThumbnailSidebar,
         ToggleCommandPalette,
         ToggleFullScreen,
+        TogglePresentationMode,
         ToggleTransparency,
         OpenSettings,
         OpenKeybindings,
@@ -755,6 +756,7 @@ pub struct PdfView {
     grid_overview_selecting: bool,
     grid_overview_selection: BTreeSet<usize>,
     grid_overview_actions_position: Option<GpuiPoint<Pixels>>,
+    presentation_page: Option<usize>,
     jump_back: Vec<JumpPosition>,
     jump_forward: Vec<JumpPosition>,
     position_from_search: bool,
@@ -972,6 +974,7 @@ impl PdfView {
             grid_overview_selecting: false,
             grid_overview_selection: BTreeSet::new(),
             grid_overview_actions_position: None,
+            presentation_page: None,
             jump_back: Vec::new(),
             jump_forward: Vec::new(),
             position_from_search: false,
@@ -1427,6 +1430,9 @@ impl PdfView {
         self.page_image_bounds = (0..self.pages.len()).map(|_| None).collect();
         self.loading = false;
         self.loading_error = None;
+        if let Some(page_idx) = self.presentation_page.as_mut() {
+            *page_idx = (*page_idx).min(self.pages.len().saturating_sub(1));
+        }
 
         if let Some(position) = self.pending_initial_position.take() {
             self.restore_position(position);
@@ -2029,6 +2035,106 @@ impl PdfView {
             .collect()
     }
 
+    fn assemble_paint_data(&mut self, pages: Vec<PaintPage>) -> PaintData {
+        let (highlight_overlays, selected_highlight_borders) = self.highlight_overlays();
+        let note_underlines = self.note_underlines();
+        let selection_highlights = self.selection_highlights();
+        let (search_highlights, active_search_highlights) = self.search_highlights();
+        let link_highlights = self.link_highlights();
+        let now = Instant::now();
+        self.diff_flashes
+            .retain(|flash| now.saturating_duration_since(flash.started_at) < DIFF_FLASH_DURATION);
+        let diff_flash_overlays = self.diff_flash_overlays(now);
+
+        PaintData {
+            pages,
+            diff_flash_overlays,
+            highlight_overlays,
+            selected_highlight_borders,
+            note_underlines,
+            link_highlights,
+            selection_highlights,
+            search_highlights,
+            active_search_highlights,
+        }
+    }
+
+    fn presentation_scale_for_page(&self, page_idx: usize) -> f32 {
+        let Some(page) = self.pages.get(page_idx) else {
+            return self.effective_scale();
+        };
+
+        let width_scale = self.viewport_width / page.width.max(1.0);
+        let height_scale = self.viewport_height / page.height.max(1.0);
+        width_scale.min(height_scale).max(0.001)
+    }
+
+    fn presentation_image_bounds_for_page(
+        &self,
+        page_idx: usize,
+        bounds: Bounds<Pixels>,
+        scale: f32,
+    ) -> Bounds<Pixels> {
+        let page = &self.pages[page_idx];
+        let image_width = px(page.width * scale);
+        let image_height = px(page.height * scale);
+        let origin = point(
+            bounds.origin.x + (bounds.size.width - image_width) / 2.0,
+            bounds.origin.y + (bounds.size.height - image_height) / 2.0,
+        );
+
+        Bounds::new(origin, size(image_width, image_height))
+    }
+
+    fn presentation_paint_data(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        scale_factor: f32,
+        cx: &mut Context<Self>,
+    ) -> PaintData {
+        let page_idx = self
+            .presentation_page
+            .unwrap_or_else(|| self.page_index_for_scroll_y(self.scroll_y_doc))
+            .min(self.last_page_index());
+        self.presentation_page = Some(page_idx);
+        self.page_image_bounds.clear();
+        self.page_image_bounds
+            .resize_with(self.pages.len(), || None);
+
+        let scale = self.presentation_scale_for_page(page_idx);
+        let image_bounds = self.presentation_image_bounds_for_page(page_idx, bounds, scale);
+        let image_bounds = Self::pixel_aligned_image_bounds(image_bounds, scale_factor);
+        let key = self.render_key(page_idx, image_bounds, scale_factor);
+        self.page_image_bounds[page_idx] = Some(image_bounds);
+
+        let doc_id = self.doc_id;
+        cx.global_mut::<RenderCache>()
+            .set_protected_pages([(doc_id, page_idx)]);
+
+        for adjacent_page in [
+            page_idx.checked_sub(1),
+            (page_idx + 1 < self.pages.len()).then_some(page_idx + 1),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let scale = self.presentation_scale_for_page(adjacent_page);
+            let image_bounds =
+                self.presentation_image_bounds_for_page(adjacent_page, bounds, scale);
+            let image_bounds = Self::pixel_aligned_image_bounds(image_bounds, scale_factor);
+            let key = self.render_key(adjacent_page, image_bounds, scale_factor);
+            if key.pixel_count() <= MAX_PREFETCH_RENDER_PIXELS {
+                self.request_render(key, cx);
+            }
+        }
+
+        let image = self.cached_or_request_render(key, cx);
+        self.assemble_paint_data(vec![PaintPage {
+            bounds: image_bounds,
+            image,
+        }])
+    }
+
     fn paint_data(
         &mut self,
         bounds: Bounds<Pixels>,
@@ -2039,6 +2145,9 @@ impl PdfView {
         self.viewport_width = viewport_width;
         self.viewport_height = bounds.size.height.as_f32().max(1.0);
         self.base_scale = viewport_width / self.max_page_width.max(1.0);
+        if self.is_presentation_mode() {
+            return Ok(self.presentation_paint_data(bounds, scale_factor, cx));
+        }
         self.clamp_scroll();
 
         self.page_image_bounds.clear();
@@ -2107,27 +2216,7 @@ impl PdfView {
             });
         }
 
-        let (highlight_overlays, selected_highlight_borders) = self.highlight_overlays();
-        let note_underlines = self.note_underlines();
-        let selection_highlights = self.selection_highlights();
-        let (search_highlights, active_search_highlights) = self.search_highlights();
-        let link_highlights = self.link_highlights();
-        let now = Instant::now();
-        self.diff_flashes
-            .retain(|flash| now.saturating_duration_since(flash.started_at) < DIFF_FLASH_DURATION);
-        let diff_flash_overlays = self.diff_flash_overlays(now);
-
-        Ok(PaintData {
-            pages,
-            diff_flash_overlays,
-            highlight_overlays,
-            selected_highlight_borders,
-            note_underlines,
-            link_highlights,
-            selection_highlights,
-            search_highlights,
-            active_search_highlights,
-        })
+        Ok(self.assemble_paint_data(pages))
     }
 
     fn image_bounds_for_page(
@@ -2352,6 +2441,15 @@ impl PdfView {
     }
 
     pub(crate) fn current_document_position(&self) -> DocumentPosition {
+        if let Some(page_idx) = self.presentation_page_index() {
+            return DocumentPosition {
+                scroll_x_doc: 0.0,
+                scroll_y_doc: self.page_scroll_y_doc(page_idx),
+                zoom: self.zoom,
+                page: page_idx + 1,
+            };
+        }
+
         DocumentPosition {
             scroll_x_doc: self.target_scroll_x_doc,
             scroll_y_doc: self.target_scroll_y_doc,
@@ -2417,6 +2515,13 @@ impl PdfView {
     }
 
     fn current_jump_position(&self) -> JumpPosition {
+        if let Some(page_idx) = self.presentation_page_index() {
+            return JumpPosition {
+                scroll_x_doc: 0.0,
+                scroll_y_doc: self.page_scroll_y_doc(page_idx),
+            };
+        }
+
         JumpPosition {
             scroll_x_doc: self.scroll_x_doc,
             scroll_y_doc: self.scroll_y_doc,
@@ -2459,7 +2564,11 @@ impl PdfView {
 
         let current_position = self.current_jump_position();
         Self::push_jump_position(&mut self.jump_forward, current_position);
-        self.set_scroll_doc(position.scroll_x_doc, position.scroll_y_doc, cx);
+        if self.is_presentation_mode() {
+            self.set_presentation_page(self.page_index_for_doc_y(position.scroll_y_doc), cx);
+        } else {
+            self.set_scroll_doc(position.scroll_x_doc, position.scroll_y_doc, cx);
+        }
         self.mark_manual_navigation();
     }
 
@@ -2470,7 +2579,11 @@ impl PdfView {
 
         let current_position = self.current_jump_position();
         Self::push_jump_position(&mut self.jump_back, current_position);
-        self.set_scroll_doc(position.scroll_x_doc, position.scroll_y_doc, cx);
+        if self.is_presentation_mode() {
+            self.set_presentation_page(self.page_index_for_doc_y(position.scroll_y_doc), cx);
+        } else {
+            self.set_scroll_doc(position.scroll_x_doc, position.scroll_y_doc, cx);
+        }
         self.mark_manual_navigation();
     }
 
@@ -4447,6 +4560,9 @@ impl PdfView {
             self.set_grid_overview_zoom(self.grid_overview_zoom * zoom_step, cx);
             return;
         }
+        if self.is_presentation_mode() {
+            return;
+        }
 
         self.set_zoom(self.zoom * zoom_step, cx);
     }
@@ -4457,11 +4573,18 @@ impl PdfView {
             self.set_grid_overview_zoom(self.grid_overview_zoom / zoom_step, cx);
             return;
         }
+        if self.is_presentation_mode() {
+            return;
+        }
 
         self.set_zoom(self.zoom / zoom_step, cx);
     }
 
     fn reset_zoom(&mut self, cx: &mut Context<Self>) {
+        if self.is_presentation_mode() {
+            return;
+        }
+
         let default_zoom = cx.global::<SettingsStore>().settings.behavior.default_zoom;
         self.set_zoom(default_zoom, cx);
     }
@@ -4493,7 +4616,40 @@ impl PdfView {
         current
     }
 
+    fn page_index_for_doc_y(&self, doc_y: f32) -> usize {
+        let mut current = 0;
+        for (idx, page) in self.pages.iter().enumerate() {
+            if doc_y >= page.offset_y {
+                current = idx;
+            } else {
+                break;
+            }
+        }
+
+        current
+    }
+
+    pub(crate) fn is_presentation_mode(&self) -> bool {
+        self.presentation_page.is_some()
+    }
+
+    fn presentation_page_index(&self) -> Option<usize> {
+        self.presentation_page
+            .map(|page_idx| page_idx.min(self.last_page_index()))
+    }
+
+    fn page_scroll_y_doc(&self, page_idx: usize) -> f32 {
+        self.pages
+            .get(page_idx.min(self.last_page_index()))
+            .map(|page| page.offset_y)
+            .unwrap_or(0.0)
+    }
+
     fn current_page_index(&self) -> usize {
+        if let Some(page_idx) = self.presentation_page_index() {
+            return page_idx;
+        }
+
         self.page_index_for_scroll_y(self.scroll_y_doc)
     }
 
@@ -4509,8 +4665,43 @@ impl PdfView {
         self.pages.len().saturating_sub(1)
     }
 
+    fn set_presentation_page(&mut self, page_idx: usize, cx: &mut Context<Self>) -> bool {
+        let page_idx = page_idx.min(self.last_page_index());
+        if self.presentation_page == Some(page_idx) {
+            return false;
+        }
+
+        self.presentation_page = Some(page_idx);
+        self.hovered_link = None;
+        self.hovered_note = None;
+        self.hovered_note_position = None;
+        self.pending_link = None;
+        self.schedule_position_save(cx);
+        cx.notify();
+        true
+    }
+
+    fn navigate_presentation_by_direction(&mut self, direction: f32, cx: &mut Context<Self>) {
+        if direction > 0.0 {
+            if self.set_presentation_page(self.current_page_index() + 1, cx) {
+                self.mark_manual_navigation();
+            }
+        } else if direction < 0.0
+            && self.set_presentation_page(self.current_page_index().saturating_sub(1), cx)
+        {
+            self.mark_manual_navigation();
+        }
+    }
+
     fn navigate_to_page_start(&mut self, page_idx: usize, cx: &mut Context<Self>) {
         let target_page = page_idx.min(self.last_page_index());
+        if self.is_presentation_mode() {
+            if self.set_presentation_page(target_page, cx) {
+                self.mark_manual_navigation();
+            }
+            return;
+        }
+
         let target = self
             .pages
             .get(target_page)
@@ -4640,6 +4831,12 @@ impl PdfView {
             self.scroll_grid_overview_to_top(cx);
             return;
         }
+        if self.is_presentation_mode() {
+            if self.set_presentation_page(0, cx) {
+                self.mark_manual_navigation();
+            }
+            return;
+        }
 
         if self.set_scroll_doc_target(self.target_scroll_x_doc, 0.0, cx) {
             self.mark_manual_navigation();
@@ -4649,6 +4846,12 @@ impl PdfView {
     fn go_to_end(&mut self, cx: &mut Context<Self>) {
         if self.grid_overview_open {
             self.scroll_grid_overview_to_bottom(cx);
+            return;
+        }
+        if self.is_presentation_mode() {
+            if self.set_presentation_page(self.last_page_index(), cx) {
+                self.mark_manual_navigation();
+            }
             return;
         }
 
@@ -4676,6 +4879,11 @@ impl PdfView {
     }
 
     fn scroll_half_page(&mut self, direction: f32, cx: &mut Context<Self>) {
+        if self.is_presentation_mode() {
+            self.navigate_presentation_by_direction(direction, cx);
+            return;
+        }
+
         let delta = self.viewport_height / (2.0 * self.effective_scale());
         if self.set_scroll_doc_target(
             self.target_scroll_x_doc,
@@ -4687,6 +4895,11 @@ impl PdfView {
     }
 
     fn scroll_line(&mut self, direction: f32, cx: &mut Context<Self>) {
+        if self.is_presentation_mode() {
+            self.navigate_presentation_by_direction(direction, cx);
+            return;
+        }
+
         let delta = SCROLL_LINE_STEP_PX / self.effective_scale();
         if self.set_scroll_doc_target(
             self.target_scroll_x_doc,
@@ -4715,7 +4928,7 @@ impl PdfView {
                 .powf(zoom_delta * CTRL_SCROLL_ZOOM_STEP_MULTIPLIER);
             if self.grid_overview_open {
                 self.set_grid_overview_zoom(self.grid_overview_zoom * factor, cx);
-            } else {
+            } else if !self.is_presentation_mode() {
                 self.set_zoom(self.zoom * factor, cx);
             }
         } else {
@@ -4727,6 +4940,10 @@ impl PdfView {
                 ),
             };
             if delta_x == 0.0 && delta_y == 0.0 {
+                return;
+            }
+            if self.is_presentation_mode() {
+                self.navigate_presentation_by_direction(-delta_y, cx);
                 return;
             }
 
@@ -4815,6 +5032,35 @@ impl PdfView {
     fn toggle_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.transparency_enabled = !self.transparency_enabled;
         self.apply_transparency(window, cx);
+    }
+
+    fn toggle_presentation_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(page_idx) = self.presentation_page.take() {
+            let scroll_y_doc = self.page_scroll_y_doc(page_idx);
+            self.set_scroll_doc(self.scroll_x_doc, scroll_y_doc, cx);
+            self.mark_manual_navigation();
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+            return;
+        }
+
+        let page_idx = self.current_page_index().min(self.last_page_index());
+        self.close_all_overlays(window, cx);
+        self.close_context_menu(cx);
+        self.close_grid_overview_actions(cx);
+        self.close_thumbnail_sidebar_actions(cx);
+        self.set_grid_overview_open(false, cx);
+        self.panning = None;
+        self.dragging = false;
+        self.pending_link = None;
+        self.pending_selection_anchor = None;
+        self.hovered_link = None;
+        self.hovered_note = None;
+        self.hovered_note_position = None;
+        self.presentation_page = Some(page_idx);
+        self.focus_handle.focus(window, cx);
+        self.schedule_position_save(cx);
+        cx.notify();
     }
 
     fn toggle_ai_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5221,6 +5467,15 @@ impl PdfView {
         let Some(page) = self.pages.get(page_idx) else {
             return;
         };
+
+        if self.is_presentation_mode() {
+            let current_position = self.current_jump_position();
+            Self::push_jump_position(&mut self.jump_back, current_position);
+            self.jump_forward.clear();
+            self.position_from_search = false;
+            self.set_presentation_page(page_idx, cx);
+            return;
+        }
 
         let scroll_y_doc = target_top
             .map(|top| page.offset_y + top - page.bounds.y0)
@@ -7465,7 +7720,7 @@ impl PdfView {
     }
 
     pub(crate) fn has_global_chrome(&self) -> bool {
-        !self.loading && self.loading_error.is_none()
+        !self.is_presentation_mode() && !self.loading && self.loading_error.is_none()
     }
 
     pub(crate) fn render_workspace_body_with_chrome(
@@ -7891,14 +8146,16 @@ impl Render for PdfView {
         if !self.diff_flashes.is_empty() {
             window.request_animation_frame();
         }
-        if let Some(offset) = self.document_scroll.take_pending_offset() {
-            let scale = self.effective_scale().max(0.001);
-            let target = (-offset.y.as_f32() / scale).clamp(0.0, self.max_scroll_y_doc());
-            if self.set_scroll_doc(self.scroll_x_doc, target, cx) {
-                self.mark_manual_navigation();
+        if !self.is_presentation_mode() {
+            if let Some(offset) = self.document_scroll.take_pending_offset() {
+                let scale = self.effective_scale().max(0.001);
+                let target = (-offset.y.as_f32() / scale).clamp(0.0, self.max_scroll_y_doc());
+                if self.set_scroll_doc(self.scroll_x_doc, target, cx) {
+                    self.mark_manual_navigation();
+                }
             }
+            self.step_scroll_animation(window, cx);
         }
-        self.step_scroll_animation(window, cx);
         let context_menu_highlight_color = if self.grid_overview_open {
             None
         } else {
@@ -8062,6 +8319,9 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
                 window.toggle_fullscreen();
+            }))
+            .on_action(cx.listener(|this, _: &TogglePresentationMode, window, cx| {
+                this.toggle_presentation_mode(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleTransparency, window, cx| {
                 this.toggle_transparency(window, cx);
@@ -8404,7 +8664,9 @@ impl Render for PdfView {
                                 )
                                 .size_full(),
                             )
-                            .vertical_scrollbar_for(&self.document_scroll, window, cx),
+                            .when(!self.is_presentation_mode(), |this| {
+                                this.vertical_scrollbar_for(&self.document_scroll, window, cx)
+                            }),
                     ),
             )
             .when(self.grid_overview_open, |this| {

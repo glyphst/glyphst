@@ -117,7 +117,8 @@ impl Workspace {
             WindowAppearance::Light | WindowAppearance::VibrantLight => ThemeAppearance::Light,
             WindowAppearance::Dark | WindowAppearance::VibrantDark => ThemeAppearance::Dark,
         };
-        cx.global_mut::<SettingsStore>().set_system_appearance(system_appearance);
+        cx.global_mut::<SettingsStore>()
+            .set_system_appearance(system_appearance);
 
         workspace
     }
@@ -508,10 +509,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let active_pdf_view = self.active_pane.read(cx).active_pdf_view();
+        if let Some(active_pdf_view) = active_pdf_view.clone()
+            && active_pdf_view.read(cx).is_presentation_mode()
+        {
+            return active_pdf_view.into_any_element();
+        }
+
         let center =
             self.pane_group
                 .render(&self.active_pane, theme, dim_inactive_panes, window, cx);
-        let active_pdf_view = self.active_pane.read(cx).active_pdf_view();
 
         if let Some(active_pdf_view) = active_pdf_view {
             let has_global_chrome = active_pdf_view.read(cx).has_global_chrome();
@@ -774,19 +781,17 @@ impl Workspace {
             let selection = store.settings.theme.clone();
             let system_appearance = store.system_appearance;
             let active_name = selection.name(system_appearance);
-            let selected_ix = themes.iter().position(|meta| meta.id == active_name).unwrap_or(0);
+            let selected_ix = themes
+                .iter()
+                .position(|meta| meta.id == active_name)
+                .unwrap_or(0);
             (themes, selection, system_appearance, selected_ix)
         };
         let delegate = ThemeSelectorDelegate::new(themes, selection, system_appearance);
 
         let picker_previous_focus_handle = previous_focus_handle.clone();
         let selector = cx.new(|cx| {
-            Picker::new_with_selected_ix(
-                picker_previous_focus_handle,
-                delegate,
-                selected_ix,
-                cx,
-            )
+            Picker::new_with_selected_ix(picker_previous_focus_handle, delegate, selected_ix, cx)
         });
 
         cx.subscribe_in(&selector, window, |this, _, _: &PickerEvent, window, cx| {
@@ -805,9 +810,7 @@ impl Workspace {
 
     fn close_theme_selector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.theme_selector.take().is_some() {
-            if let Some(previous_focus_handle) =
-                self.theme_selector_previous_focus_handle.take()
-            {
+            if let Some(previous_focus_handle) = self.theme_selector_previous_focus_handle.take() {
                 previous_focus_handle.focus(window, cx);
             } else {
                 self.focus_active_pane(window, cx);
@@ -1184,6 +1187,11 @@ impl Render for Workspace {
                 store.settings.behavior.dim_inactive_panes,
             )
         };
+        let active_pdf_is_presentation = self
+            .active_pane
+            .read(cx)
+            .active_pdf_view()
+            .is_some_and(|pdf_view| pdf_view.read(cx).is_presentation_mode());
 
         div()
             .id("workspace")
@@ -1307,7 +1315,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenKeybindings, window, cx| {
                 this.open_keymap_tab(window, cx);
             }))
-            .child(self.render_toolbar(theme, cx))
+            .when(!active_pdf_is_presentation, |this| {
+                this.child(self.render_toolbar(theme, cx))
+            })
             .child(
                 div()
                     .flex_1()
@@ -1317,8 +1327,10 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(self.render_body(theme, dim_inactive_panes, window, cx)),
             )
-            .when_some(self.toolbar_open_menu, |this, menu| {
-                this.child(self.render_toolbar_dropdown(menu, theme, cx))
+            .when(!active_pdf_is_presentation, |this| {
+                this.when_some(self.toolbar_open_menu, |this, menu| {
+                    this.child(self.render_toolbar_dropdown(menu, theme, cx))
+                })
             })
             .when_some(self.command_palette.clone(), |this, palette| {
                 this.child(Self::render_top_aligned_overlay(
