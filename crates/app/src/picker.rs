@@ -5,17 +5,15 @@ use crate::menu;
 use crate::scrollbar::uniform_list_scrollbar_for;
 use crate::settings::SettingsStore;
 use crate::style::{INPUT_ROW_HEIGHT, RADIUS_LG, RADIUS_MD, TextSize, modal_shadow};
+use crate::text_input::SingleLineTextElement;
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollStrategy,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UniformListScrollHandle, Window, div,
-    fill, point, prelude::*, px, relative, rgb, rgba, size, uniform_list,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
+    Point as GpuiPoint, Render, ScrollStrategy, ShapedLine, SharedString, UTF16Selection,
+    UniformListScrollHandle, Window, div, point, prelude::*, px, rgb, rgba, uniform_list,
 };
 
-const DRAG_SELECT_THRESHOLD: f32 = 2.0;
 const LIST_VERTICAL_PADDING: f32 = 4.0;
 
 pub enum PickerEvent {
@@ -67,6 +65,7 @@ pub struct Picker<D: PickerDelegate> {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    scroll_offset: Pixels,
     drag_origin: Option<GpuiPoint<Pixels>>,
     selected_ix: usize,
     list_scroll_handle: UniformListScrollHandle,
@@ -119,6 +118,7 @@ impl<D: PickerDelegate> Picker<D> {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            scroll_offset: px(0.0),
             drag_origin: None,
             selected_ix,
             list_scroll_handle: UniformListScrollHandle::new(),
@@ -316,25 +316,6 @@ impl<D: PickerDelegate> Picker<D> {
         self.cancel_selection(cx);
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if !event.dragging() {
-            self.drag_origin = None;
-            return;
-        }
-
-        let should_select = if let Some(origin) = self.drag_origin.as_ref() {
-            (event.position.x - origin.x).as_f32().abs() > DRAG_SELECT_THRESHOLD
-                || (event.position.y - origin.y).as_f32().abs() > DRAG_SELECT_THRESHOLD
-        } else {
-            false
-        };
-
-        if should_select {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
-            cx.stop_propagation();
-        }
-    }
-
     fn cancel_selection(&mut self, cx: &mut Context<Self>) {
         self.drag_origin = None;
         if !self.selected_range.is_empty() {
@@ -367,14 +348,12 @@ impl<D: PickerDelegate> Picker<D> {
             return 0;
         };
 
-        if position.y < bounds.top() {
-            return 0;
-        }
-        if position.y > bounds.bottom() {
-            return self.content.len();
-        }
-
-        line.closest_index_for_x(position.x - bounds.left())
+        crate::text_input::index_for_mouse_position_with_scroll(
+            line,
+            *bounds,
+            position,
+            self.scroll_offset,
+        )
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -560,11 +539,11 @@ impl<D: PickerDelegate> EntityInputHandler for Picker<D> {
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(range.start),
+                bounds.left() + last_layout.x_for_index(range.start) - self.scroll_offset,
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(range.end),
+                bounds.left() + last_layout.x_for_index(range.end) - self.scroll_offset,
                 bounds.bottom(),
             ),
         ))
@@ -578,8 +557,7 @@ impl<D: PickerDelegate> EntityInputHandler for Picker<D> {
     ) -> Option<usize> {
         let bounds = self.last_bounds?;
         let line = self.last_layout.as_ref()?;
-        let line_point = bounds.localize(&point)?;
-        let utf8_index = line.index_for_x(point.x - line_point.x)?;
+        let utf8_index = line.index_for_x(point.x - bounds.left() + self.scroll_offset)?;
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -589,6 +567,58 @@ impl<D: PickerDelegate> EventEmitter<PickerEvent> for Picker<D> {}
 impl<D: PickerDelegate> Focusable for Picker<D> {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+impl<D: PickerDelegate> crate::text_input::SingleLineInput for Picker<D> {
+    fn content(&self) -> &SharedString {
+        &self.content
+    }
+
+    fn placeholder(&self) -> SharedString {
+        self.delegate.placeholder()
+    }
+
+    fn mask(&self) -> bool {
+        false
+    }
+
+    fn selected_range(&self) -> &Range<usize> {
+        &self.selected_range
+    }
+
+    fn marked_range(&self) -> Option<&Range<usize>> {
+        self.marked_range.as_ref()
+    }
+
+    fn cursor_offset(&self) -> usize {
+        Self::cursor_offset(self)
+    }
+
+    fn scroll_offset(&self) -> Pixels {
+        self.scroll_offset
+    }
+
+    fn set_render_state(&mut self, layout: ShapedLine, bounds: Bounds<Pixels>, scroll: Pixels) {
+        self.last_layout = Some(layout);
+        self.last_bounds = Some(bounds);
+        self.scroll_offset = scroll;
+    }
+
+    fn set_scroll_offset(&mut self, scroll: Pixels) {
+        self.scroll_offset = scroll;
+    }
+
+    fn is_dragging(&self) -> bool {
+        self.drag_origin.is_some()
+    }
+
+    fn extend_selection_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.select_to(offset, cx);
+    }
+
+    fn end_drag(&mut self) {
+        self.drag_origin = None;
     }
 }
 
@@ -649,8 +679,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
-                    .on_mouse_move(cx.listener(Self::on_mouse_move))
-                    .child(PickerTextElement { picker: entity }),
+                    .child(SingleLineTextElement::new(entity)),
             )
             .child(
                 div()
@@ -755,202 +784,6 @@ impl<D: PickerDelegate> Render for Picker<D> {
                         )
                     }),
             )
-    }
-}
-
-struct PickerTextElement<D: PickerDelegate> {
-    picker: Entity<Picker<D>>,
-}
-
-struct PrepaintState {
-    line: Option<ShapedLine>,
-    cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
-}
-
-impl<D: PickerDelegate> IntoElement for PickerTextElement<D> {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl<D: PickerDelegate> Element for PickerTextElement<D> {
-    type RequestLayoutState = ();
-    type PrepaintState = PrepaintState;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.size.width = relative(1.0).into();
-        style.size.height = window.line_height().into();
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        let input = self.picker.read(cx);
-        let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
-        let style = window.text_style();
-        let theme = cx.global::<SettingsStore>().resolved_theme;
-        let (display_text, text_color) = if content.is_empty() {
-            (
-                input.delegate.placeholder(),
-                rgba(theme.placeholder_text).into(),
-            )
-        } else {
-            (content, style.color)
-        };
-
-        let run = TextRun {
-            len: display_text.len(),
-            font: style.font(),
-            color: text_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let runs = if !input.content.is_empty() {
-            if let Some(marked_range) = input.marked_range.as_ref() {
-                vec![
-                    TextRun {
-                        len: marked_range.start,
-                        ..run.clone()
-                    },
-                    TextRun {
-                        len: marked_range.end - marked_range.start,
-                        underline: Some(gpui::UnderlineStyle {
-                            color: Some(run.color),
-                            thickness: px(1.0),
-                            wavy: false,
-                        }),
-                        ..run.clone()
-                    },
-                    TextRun {
-                        len: display_text.len() - marked_range.end,
-                        ..run
-                    },
-                ]
-                .into_iter()
-                .filter(|run| run.len > 0)
-                .collect()
-            } else {
-                vec![run]
-            }
-        } else {
-            vec![run]
-        };
-
-        let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window
-            .text_system()
-            .shape_line(display_text, font_size, &runs, None);
-
-        let cursor_pos = line.x_for_index(cursor);
-        let (selection, cursor) = if selected_range.is_empty() {
-            (
-                None,
-                Some(fill(
-                    Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
-                        size(px(2.0), bounds.bottom() - bounds.top()),
-                    ),
-                    rgb(theme.accent),
-                )),
-            )
-        } else {
-            (
-                Some(fill(
-                    Bounds::from_corners(
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.start),
-                            bounds.top(),
-                        ),
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.end),
-                            bounds.bottom(),
-                        ),
-                    ),
-                    rgba(theme.selection_highlight),
-                )),
-                None,
-            )
-        };
-
-        PrepaintState {
-            line: Some(line),
-            cursor,
-            selection,
-        }
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let focus_handle = self.picker.read(cx).focus_handle.clone();
-        window.handle_input(
-            &focus_handle,
-            ElementInputHandler::new(bounds, self.picker.clone()),
-            cx,
-        );
-
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
-        }
-
-        if let Some(line) = prepaint.line.take() {
-            if let Err(error) = line.paint(
-                bounds.origin,
-                window.line_height(),
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            ) {
-                eprintln!("failed to paint picker input: {error:#}");
-            }
-
-            if focus_handle.is_focused(window)
-                && let Some(cursor) = prepaint.cursor.take()
-            {
-                window.paint_quad(cursor);
-            }
-
-            self.picker.update(cx, |input, _| {
-                input.last_layout = Some(line);
-                input.last_bounds = Some(bounds);
-            });
-        }
     }
 }
 

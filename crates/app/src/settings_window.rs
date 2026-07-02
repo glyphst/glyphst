@@ -9,20 +9,20 @@ use crate::{
         WindowBackgroundMode, setup_ui_font, ui_rems,
     },
     theme::{
-        PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode, ThemeMetadata,
-        ThemeSelection, format_rgb_hex, format_rgba_hex,
+        PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode, ThemeMetadata, ThemeSelection,
+        format_rgb_hex, format_rgba_hex,
     },
 };
 use gpui::{
-    Anchor, AnyElement, App, AppContext, Bounds, ClipboardItem, Context, CursorStyle, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render,
-    ScrollHandle, SharedString, Style, Task, TextRun, TitlebarOptions, UTF16Selection,
-    UniformListScrollHandle, Window, WindowBounds, WindowOptions, anchored, deferred, div, fill,
-    point, prelude::*, px, relative, rgb, rgba, size, uniform_list,
+    Anchor, AnyElement, App, AppContext, Bounds, ClipboardItem, Context, CursorStyle, ElementId,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton,
+    MouseDownEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render, ScrollHandle, SharedString,
+    Task, TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window, WindowBounds,
+    WindowOptions, anchored, deferred, div, point, prelude::*, px, rgb, rgba, size, uniform_list,
 };
 use std::{ops::Range, path::Path};
+
+use crate::text_input::{MASK_GLYPH, SingleLineInput, SingleLineTextElement};
 
 gpui::actions!(settings_panel, [PanelClose]);
 
@@ -42,11 +42,9 @@ pub struct SettingsTextInput {
     marked_range: Option<Range<usize>>,
     last_layout: Option<gpui::ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    scroll_offset: Pixels,
     drag_origin: Option<GpuiPoint<Pixels>>,
 }
-
-const MASK_GLYPH: &str = "•";
-const DRAG_SELECT_THRESHOLD: f32 = 2.0;
 
 impl SettingsTextInput {
     pub fn new(
@@ -66,6 +64,7 @@ impl SettingsTextInput {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            scroll_offset: px(0.0),
             drag_origin: None,
         }
     }
@@ -186,25 +185,6 @@ impl SettingsTextInput {
         self.cancel_selection(cx);
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if !event.dragging() {
-            self.drag_origin = None;
-            return;
-        }
-
-        let should_select = if let Some(origin) = self.drag_origin.as_ref() {
-            (event.position.x - origin.x).as_f32().abs() > DRAG_SELECT_THRESHOLD
-                || (event.position.y - origin.y).as_f32().abs() > DRAG_SELECT_THRESHOLD
-        } else {
-            false
-        };
-
-        if should_select {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
-            cx.stop_propagation();
-        }
-    }
-
     fn cancel_selection(&mut self, cx: &mut Context<Self>) {
         self.drag_origin = None;
         if !self.selected_range.is_empty() {
@@ -235,13 +215,13 @@ impl SettingsTextInput {
         else {
             return 0;
         };
-        if position.y < bounds.top() {
-            return 0;
-        }
-        if position.y > bounds.bottom() {
-            return self.content.len();
-        }
-        self.content_offset_for_display_offset(line.closest_index_for_x(position.x - bounds.left()))
+        let display_index = crate::text_input::index_for_mouse_position_with_scroll(
+            line,
+            *bounds,
+            position,
+            self.scroll_offset,
+        );
+        self.content_offset_for_display_offset(display_index)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -448,9 +428,16 @@ impl EntityInputHandler for SettingsTextInput {
     ) -> Option<Bounds<Pixels>> {
         let line = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
+        let display_range = self.display_range(&range);
         Some(Bounds::from_corners(
-            point(bounds.left() + line.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + line.x_for_index(range.end), bounds.bottom()),
+            point(
+                bounds.left() + line.x_for_index(display_range.start) - self.scroll_offset,
+                bounds.top(),
+            ),
+            point(
+                bounds.left() + line.x_for_index(display_range.end) - self.scroll_offset,
+                bounds.bottom(),
+            ),
         ))
     }
 
@@ -463,8 +450,9 @@ impl EntityInputHandler for SettingsTextInput {
         let bounds = self.last_bounds?;
         let line = self.last_layout.as_ref()?;
         let _local = bounds.localize(&pt)?;
-        let utf8_index = line.index_for_x(pt.x - bounds.left())?;
-        Some(self.offset_to_utf16(utf8_index))
+        let display_index = line.index_for_x(pt.x - bounds.left() + self.scroll_offset)?;
+        let content_index = self.content_offset_for_display_offset(display_index);
+        Some(self.offset_to_utf16(content_index))
     }
 }
 
@@ -473,6 +461,75 @@ impl EventEmitter<SettingsInputEvent> for SettingsTextInput {}
 impl Focusable for SettingsTextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+impl SingleLineInput for SettingsTextInput {
+    fn content(&self) -> &SharedString {
+        &self.content
+    }
+
+    fn placeholder(&self) -> SharedString {
+        self.placeholder.clone()
+    }
+
+    fn mask(&self) -> bool {
+        self.mask
+    }
+
+    fn selected_range(&self) -> &Range<usize> {
+        &self.selected_range
+    }
+
+    fn marked_range(&self) -> Option<&Range<usize>> {
+        self.marked_range.as_ref()
+    }
+
+    fn cursor_offset(&self) -> usize {
+        Self::cursor_offset(self)
+    }
+
+    fn scroll_offset(&self) -> Pixels {
+        self.scroll_offset
+    }
+
+    fn display_offset(&self, offset: usize) -> usize {
+        Self::display_offset(self, offset)
+    }
+
+    fn display_range(&self, range: &Range<usize>) -> Range<usize> {
+        Self::display_range(self, range)
+    }
+
+    fn set_render_state(
+        &mut self,
+        layout: gpui::ShapedLine,
+        bounds: Bounds<Pixels>,
+        scroll: Pixels,
+    ) {
+        self.last_layout = Some(layout);
+        self.last_bounds = Some(bounds);
+        self.scroll_offset = scroll;
+    }
+
+    fn set_scroll_offset(&mut self, scroll: Pixels) {
+        self.scroll_offset = scroll;
+    }
+
+    fn is_dragging(&self) -> bool {
+        self.drag_origin.is_some()
+    }
+
+    fn content_offset_for_display_offset(&self, offset: usize) -> usize {
+        Self::content_offset_for_display_offset(self, offset)
+    }
+
+    fn extend_selection_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.select_to(offset, cx);
+    }
+
+    fn end_drag(&mut self) {
+        self.drag_origin = None;
     }
 }
 
@@ -517,211 +574,7 @@ impl Render for SettingsTextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .child(SettingsInputElement { input: entity })
-    }
-}
-
-struct SettingsInputElement {
-    input: Entity<SettingsTextInput>,
-}
-
-struct SettingsInputPrepaint {
-    line: Option<gpui::ShapedLine>,
-    cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
-}
-
-impl IntoElement for SettingsInputElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-impl Element for SettingsInputElement {
-    type RequestLayoutState = ();
-    type PrepaintState = SettingsInputPrepaint;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        let mut style = Style::default();
-        style.size.width = relative(1.0).into();
-        style.size.height = window.line_height().into();
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) -> SettingsInputPrepaint {
-        let input = self.input.read(cx);
-        let theme = cx.global::<SettingsStore>().resolved_theme;
-        let style = window.text_style();
-
-        let display_text: SharedString = if input.mask && !input.content.is_empty() {
-            MASK_GLYPH.repeat(input.content.chars().count()).into()
-        } else {
-            input.content.clone()
-        };
-
-        let (display_text, text_color) = if display_text.is_empty() {
-            (
-                input.placeholder.clone(),
-                rgba(theme.placeholder_text).into(),
-            )
-        } else {
-            (display_text, style.color)
-        };
-
-        let run = TextRun {
-            len: display_text.len(),
-            font: style.font(),
-            color: text_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-
-        let runs = if !input.content.is_empty() {
-            if let Some(marked_range) = input.marked_range.as_ref() {
-                let marked_range = input.display_range(marked_range);
-                vec![
-                    TextRun {
-                        len: marked_range.start,
-                        ..run.clone()
-                    },
-                    TextRun {
-                        len: marked_range.end - marked_range.start,
-                        underline: Some(gpui::UnderlineStyle {
-                            color: Some(run.color),
-                            thickness: px(1.0),
-                            wavy: false,
-                        }),
-                        ..run.clone()
-                    },
-                    TextRun {
-                        len: display_text.len() - marked_range.end,
-                        ..run
-                    },
-                ]
-                .into_iter()
-                .filter(|r| r.len > 0)
-                .collect()
-            } else {
-                vec![run]
-            }
-        } else {
-            vec![run]
-        };
-
-        let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window
-            .text_system()
-            .shape_line(display_text, font_size, &runs, None);
-
-        let cursor = input.cursor_offset();
-        let display_cursor = input.display_offset(cursor);
-        let cursor_pos = line.x_for_index(display_cursor);
-        let selected_range = &input.selected_range;
-
-        let (selection, cursor_quad) = if selected_range.is_empty() {
-            let quad = fill(
-                Bounds::new(
-                    point(bounds.left() + cursor_pos, bounds.top()),
-                    size(px(2.0), bounds.bottom() - bounds.top()),
-                ),
-                rgb(theme.accent),
-            );
-            (None, Some(quad))
-        } else {
-            let selected_range = input.display_range(selected_range);
-            let quad = fill(
-                Bounds::from_corners(
-                    point(
-                        bounds.left() + line.x_for_index(selected_range.start),
-                        bounds.top(),
-                    ),
-                    point(
-                        bounds.left() + line.x_for_index(selected_range.end),
-                        bounds.bottom(),
-                    ),
-                ),
-                rgba(theme.selection_highlight),
-            );
-            (Some(quad), None)
-        };
-
-        SettingsInputPrepaint {
-            line: Some(line),
-            cursor: cursor_quad,
-            selection,
-        }
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        prepaint: &mut SettingsInputPrepaint,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let focus_handle = self.input.read(cx).focus_handle.clone();
-        window.handle_input(
-            &focus_handle,
-            ElementInputHandler::new(bounds, self.input.clone()),
-            cx,
-        );
-
-        if let Some(sel) = prepaint.selection.take() {
-            window.paint_quad(sel);
-        }
-
-        if let Some(line) = prepaint.line.take() {
-            if let Err(e) = line.paint(
-                bounds.origin,
-                window.line_height(),
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            ) {
-                eprintln!("settings input paint error: {e:#}");
-            }
-
-            if focus_handle.is_focused(window)
-                && let Some(cursor) = prepaint.cursor.take()
-            {
-                window.paint_quad(cursor);
-            }
-
-            self.input.update(cx, |input, _| {
-                input.last_layout = Some(line);
-                input.last_bounds = Some(bounds);
-            });
-        }
+            .child(SingleLineTextElement::new(entity))
     }
 }
 
@@ -1160,46 +1013,64 @@ impl SettingsWindow {
         .detach();
 
         // Theme dropdowns for the appearance tab
-        let (static_selected, light_selected, dark_selected, all_theme_items, light_theme_items, dark_theme_items) = {
+        let (
+            static_selected,
+            light_selected,
+            dark_selected,
+            all_theme_items,
+            light_theme_items,
+            dark_theme_items,
+        ) = {
             let store = cx.global::<SettingsStore>();
             let system_appearance = store.system_appearance;
             let (static_sel, light_sel, dark_sel) = match &store.settings.theme {
-                ThemeSelection::Static(name) => {
-                    (name.clone(), name.clone(), name.clone())
-                }
-                ThemeSelection::Dynamic { light, dark, .. } => {
-                    (store.settings.theme.name(system_appearance).to_string(), light.clone(), dark.clone())
-                }
+                ThemeSelection::Static(name) => (name.clone(), name.clone(), name.clone()),
+                ThemeSelection::Dynamic { light, dark, .. } => (
+                    store.settings.theme.name(system_appearance).to_string(),
+                    light.clone(),
+                    dark.clone(),
+                ),
             };
             let all_items: Vec<SearchableItem> = store
                 .registry
                 .metadata()
                 .into_iter()
-                .map(|m| SearchableItem { value: m.id, label: m.name })
+                .map(|m| SearchableItem {
+                    value: m.id,
+                    label: m.name,
+                })
                 .collect();
             let light_items: Vec<SearchableItem> = store
                 .registry
                 .metadata()
                 .into_iter()
                 .filter(|m| m.appearance == ThemeAppearance::Light)
-                .map(|m| SearchableItem { value: m.id, label: m.name })
+                .map(|m| SearchableItem {
+                    value: m.id,
+                    label: m.name,
+                })
                 .collect();
             let dark_items: Vec<SearchableItem> = store
                 .registry
                 .metadata()
                 .into_iter()
                 .filter(|m| m.appearance == ThemeAppearance::Dark)
-                .map(|m| SearchableItem { value: m.id, label: m.name })
+                .map(|m| SearchableItem {
+                    value: m.id,
+                    label: m.name,
+                })
                 .collect();
-            (static_sel, light_sel, dark_sel, all_items, light_items, dark_items)
+            (
+                static_sel,
+                light_sel,
+                dark_sel,
+                all_items,
+                light_items,
+                dark_items,
+            )
         };
         let static_theme_dropdown = cx.new(|cx| {
-            SearchableDropdown::new(
-                all_theme_items,
-                static_selected,
-                "Search themes…",
-                cx,
-            )
+            SearchableDropdown::new(all_theme_items, static_selected, "Search themes…", cx)
         });
         let light_theme_dropdown = cx.new(|cx| {
             SearchableDropdown::new(
@@ -1210,12 +1081,7 @@ impl SettingsWindow {
             )
         });
         let dark_theme_dropdown = cx.new(|cx| {
-            SearchableDropdown::new(
-                dark_theme_items,
-                dark_selected,
-                "Search dark themes…",
-                cx,
-            )
+            SearchableDropdown::new(dark_theme_items, dark_selected, "Search dark themes…", cx)
         });
         cx.subscribe(&static_theme_dropdown, |this, _, event, cx| {
             let SearchableDropdownEvent::Selected(value) = event;
@@ -2088,13 +1954,11 @@ impl SettingsWindow {
                         let store = cx.global::<SettingsStore>();
                         match &store.settings.theme {
                             ThemeSelection::Static(name) if is_dynamic => {
-                                let (light, dark) = match (
-                                    &store.last_dynamic_light,
-                                    &store.last_dynamic_dark,
-                                ) {
-                                    (Some(l), Some(d)) => (l.clone(), d.clone()),
-                                    _ => (name.clone(), name.clone()),
-                                };
+                                let (light, dark) =
+                                    match (&store.last_dynamic_light, &store.last_dynamic_dark) {
+                                        (Some(l), Some(d)) => (l.clone(), d.clone()),
+                                        _ => (name.clone(), name.clone()),
+                                    };
                                 (
                                     Some(ThemeSelection::Dynamic {
                                         mode: ThemeAppearanceMode::System,
@@ -2104,18 +1968,14 @@ impl SettingsWindow {
                                     None,
                                 )
                             }
-                            ThemeSelection::Dynamic { mode, light, dark }
-                                if !is_dynamic =>
-                            {
+                            ThemeSelection::Dynamic { mode, light, dark } if !is_dynamic => {
                                 let active = match mode {
                                     ThemeAppearanceMode::Light => light.clone(),
                                     ThemeAppearanceMode::Dark => dark.clone(),
-                                    ThemeAppearanceMode::System => {
-                                        match system_appearance {
-                                            ThemeAppearance::Light => light.clone(),
-                                            ThemeAppearance::Dark => dark.clone(),
-                                        }
-                                    }
+                                    ThemeAppearanceMode::System => match system_appearance {
+                                        ThemeAppearance::Light => light.clone(),
+                                        ThemeAppearance::Dark => dark.clone(),
+                                    },
                                 };
                                 (
                                     Some(ThemeSelection::Static(active)),

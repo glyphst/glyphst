@@ -6,21 +6,19 @@ use crate::{
     pdf_view::{NextSearchResult, PrevSearchResult},
     settings::{SettingsStore, ui_rems},
     style::{CONTROL_ICON_SIZE, RADIUS_MD, SEARCH_BAR_HEIGHT, TextSize, elevated_shadow},
+    text_input::SingleLineTextElement,
 };
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, SharedString, Style, Task,
-    TextRun, UTF16Selection, Window, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
+    App, Bounds, ClipboardItem, Context, CursorStyle, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
+    Point as GpuiPoint, Render, SharedString, Task, UTF16Selection, Window, div, point, prelude::*,
+    px, rgb,
 };
 
 gpui::actions!(
     search,
     [SearchInputConfirm, SearchInputCancel, SearchInputPrevious]
 );
-
-const DRAG_SELECT_THRESHOLD: f32 = 2.0;
 
 pub enum SearchEvent {
     Activate {
@@ -47,6 +45,7 @@ pub struct SearchBar {
     marked_range: Option<Range<usize>>,
     last_layout: Option<gpui::ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    scroll_offset: Pixels,
     drag_origin: Option<GpuiPoint<Pixels>>,
     applied_query: SharedString,
     active_match: Option<usize>,
@@ -80,6 +79,7 @@ impl SearchBar {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            scroll_offset: px(0.0),
             drag_origin: None,
             active_match,
             match_count,
@@ -271,25 +271,6 @@ impl SearchBar {
         self.cancel_selection(cx);
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if !event.dragging() {
-            self.drag_origin = None;
-            return;
-        }
-
-        let should_select = if let Some(origin) = self.drag_origin.as_ref() {
-            (event.position.x - origin.x).as_f32().abs() > DRAG_SELECT_THRESHOLD
-                || (event.position.y - origin.y).as_f32().abs() > DRAG_SELECT_THRESHOLD
-        } else {
-            false
-        };
-
-        if should_select {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
-            cx.stop_propagation();
-        }
-    }
-
     fn cancel_selection(&mut self, cx: &mut Context<Self>) {
         self.drag_origin = None;
         if !self.selected_range.is_empty() {
@@ -322,14 +303,12 @@ impl SearchBar {
             return 0;
         };
 
-        if position.y < bounds.top() {
-            return 0;
-        }
-        if position.y > bounds.bottom() {
-            return self.content.len();
-        }
-
-        line.closest_index_for_x(position.x - bounds.left())
+        crate::text_input::index_for_mouse_position_with_scroll(
+            line,
+            *bounds,
+            position,
+            self.scroll_offset,
+        )
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -526,11 +505,11 @@ impl EntityInputHandler for SearchBar {
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(range.start),
+                bounds.left() + last_layout.x_for_index(range.start) - self.scroll_offset,
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(range.end),
+                bounds.left() + last_layout.x_for_index(range.end) - self.scroll_offset,
                 bounds.bottom(),
             ),
         ))
@@ -544,8 +523,7 @@ impl EntityInputHandler for SearchBar {
     ) -> Option<usize> {
         let bounds = self.last_bounds?;
         let line = self.last_layout.as_ref()?;
-        let line_point = bounds.localize(&point)?;
-        let utf8_index = line.index_for_x(point.x - line_point.x)?;
+        let utf8_index = line.index_for_x(point.x - bounds.left() + self.scroll_offset)?;
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -555,6 +533,63 @@ impl EventEmitter<SearchEvent> for SearchBar {}
 impl Focusable for SearchBar {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+impl crate::text_input::SingleLineInput for SearchBar {
+    fn content(&self) -> &SharedString {
+        &self.content
+    }
+
+    fn placeholder(&self) -> SharedString {
+        self.placeholder.clone()
+    }
+
+    fn mask(&self) -> bool {
+        false
+    }
+
+    fn selected_range(&self) -> &Range<usize> {
+        &self.selected_range
+    }
+
+    fn marked_range(&self) -> Option<&Range<usize>> {
+        self.marked_range.as_ref()
+    }
+
+    fn cursor_offset(&self) -> usize {
+        Self::cursor_offset(self)
+    }
+
+    fn scroll_offset(&self) -> Pixels {
+        self.scroll_offset
+    }
+
+    fn set_render_state(
+        &mut self,
+        layout: gpui::ShapedLine,
+        bounds: Bounds<Pixels>,
+        scroll: Pixels,
+    ) {
+        self.last_layout = Some(layout);
+        self.last_bounds = Some(bounds);
+        self.scroll_offset = scroll;
+    }
+
+    fn set_scroll_offset(&mut self, scroll: Pixels) {
+        self.scroll_offset = scroll;
+    }
+
+    fn is_dragging(&self) -> bool {
+        self.drag_origin.is_some()
+    }
+
+    fn extend_selection_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.select_to(offset, cx);
+    }
+
+    fn end_drag(&mut self) {
+        self.drag_origin = None;
     }
 }
 
@@ -630,8 +665,7 @@ impl Render for SearchBar {
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
-                    .on_mouse_move(cx.listener(Self::on_mouse_move))
-                    .child(SearchTextElement { search: entity }),
+                    .child(SingleLineTextElement::new(entity)),
             )
             .when(!counter.is_empty(), |this| {
                 this.child(
@@ -714,202 +748,6 @@ impl Render for SearchBar {
                         }),
                     ),
             )
-    }
-}
-
-struct SearchTextElement {
-    search: Entity<SearchBar>,
-}
-
-struct PrepaintState {
-    line: Option<gpui::ShapedLine>,
-    cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
-}
-
-impl IntoElement for SearchTextElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl Element for SearchTextElement {
-    type RequestLayoutState = ();
-    type PrepaintState = PrepaintState;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.size.width = relative(1.0).into();
-        style.size.height = window.line_height().into();
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        let input = self.search.read(cx);
-        let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
-        let style = window.text_style();
-        let theme = cx.global::<SettingsStore>().resolved_theme;
-        let (display_text, text_color) = if content.is_empty() {
-            (
-                input.placeholder.clone(),
-                rgba(theme.placeholder_text).into(),
-            )
-        } else {
-            (content, style.color)
-        };
-
-        let run = TextRun {
-            len: display_text.len(),
-            font: style.font(),
-            color: text_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let runs = if !input.content.is_empty() {
-            if let Some(marked_range) = input.marked_range.as_ref() {
-                vec![
-                    TextRun {
-                        len: marked_range.start,
-                        ..run.clone()
-                    },
-                    TextRun {
-                        len: marked_range.end - marked_range.start,
-                        underline: Some(gpui::UnderlineStyle {
-                            color: Some(run.color),
-                            thickness: px(1.0),
-                            wavy: false,
-                        }),
-                        ..run.clone()
-                    },
-                    TextRun {
-                        len: display_text.len() - marked_range.end,
-                        ..run
-                    },
-                ]
-                .into_iter()
-                .filter(|run| run.len > 0)
-                .collect()
-            } else {
-                vec![run]
-            }
-        } else {
-            vec![run]
-        };
-
-        let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window
-            .text_system()
-            .shape_line(display_text, font_size, &runs, None);
-
-        let cursor_pos = line.x_for_index(cursor);
-        let (selection, cursor) = if selected_range.is_empty() {
-            (
-                None,
-                Some(fill(
-                    Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
-                        size(px(2.0), bounds.bottom() - bounds.top()),
-                    ),
-                    rgb(theme.accent),
-                )),
-            )
-        } else {
-            (
-                Some(fill(
-                    Bounds::from_corners(
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.start),
-                            bounds.top(),
-                        ),
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.end),
-                            bounds.bottom(),
-                        ),
-                    ),
-                    rgba(theme.selection_highlight),
-                )),
-                None,
-            )
-        };
-
-        PrepaintState {
-            line: Some(line),
-            cursor,
-            selection,
-        }
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let focus_handle = self.search.read(cx).focus_handle.clone();
-        window.handle_input(
-            &focus_handle,
-            ElementInputHandler::new(bounds, self.search.clone()),
-            cx,
-        );
-
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
-        }
-
-        if let Some(line) = prepaint.line.take() {
-            if let Err(error) = line.paint(
-                bounds.origin,
-                window.line_height(),
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            ) {
-                eprintln!("failed to paint search input: {error:#}");
-            }
-
-            if focus_handle.is_focused(window)
-                && let Some(cursor) = prepaint.cursor.take()
-            {
-                window.paint_quad(cursor);
-            }
-
-            self.search.update(cx, |input, _| {
-                input.last_layout = Some(line);
-                input.last_bounds = Some(bounds);
-            });
-        }
     }
 }
 
