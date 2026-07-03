@@ -7,9 +7,9 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
-    AnyElement, Context, Corners, EventEmitter, FocusHandle, IntoElement, MouseButton, Render,
-    RenderImage, SharedString, UniformListScrollHandle, Window, canvas, div, fill, prelude::*, px,
-    rgb, rgba, uniform_list,
+    AnyElement, Context, Corners, EventEmitter, FocusHandle, IntoElement, MouseButton, Pixels,
+    Render, RenderImage, SharedString, UniformListScrollHandle, Window, canvas, div, fill, point,
+    prelude::*, px, rgb, rgba, uniform_list,
 };
 use image::{Frame, RgbaImage};
 use mupdf::{Colorspace, Device, DisplayList, Matrix, Pixmap, Rect};
@@ -17,7 +17,8 @@ use smallvec::smallvec;
 
 use crate::{
     library::{HistoryEntry, LibraryStore},
-    scrollbar::uniform_list_scrollbar_for,
+    pdf_view::{NextHalfPage, PreviousHalfPage, ScrollLineDown, ScrollLineUp},
+    scrollbar::{ScrollableHandle, uniform_list_scrollbar_for},
     settings::{SettingsStore, ui_rems},
     theme::Theme,
 };
@@ -32,6 +33,7 @@ const GRID_GAP: f32 = 18.0;
 const GRID_PADDING_X: f32 = 24.0;
 const VIEWPORT_WIDTH_EPSILON: f32 = 0.5;
 const DEFAULT_COLS: usize = 3;
+const NEW_TAB_ROW_HEIGHT: f32 = CARD_HEIGHT + GRID_GAP;
 
 #[derive(Clone)]
 struct ThumbnailImage {
@@ -172,6 +174,18 @@ impl NewTab {
         }
 
         self.cols = cols;
+        cx.notify();
+    }
+
+    fn scroll_by(&mut self, delta_y: Pixels, cx: &mut Context<Self>) {
+        let max_offset = self.scroll.max_offset().y;
+        if max_offset <= px(0.) {
+            return;
+        }
+
+        let current = self.scroll.offset();
+        let new_y = (current.y - delta_y).clamp(-max_offset, px(0.));
+        self.scroll.set_offset(point(current.x, new_y));
         cx.notify();
     }
 
@@ -439,6 +453,18 @@ impl Render for NewTab {
             .size_full()
             .key_context("NewTab")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &ScrollLineDown, _, cx| {
+                this.scroll_by(px(NEW_TAB_ROW_HEIGHT), cx);
+            }))
+            .on_action(cx.listener(|this, _: &ScrollLineUp, _, cx| {
+                this.scroll_by(-px(NEW_TAB_ROW_HEIGHT), cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextHalfPage, _, cx| {
+                this.scroll_by(this.scroll.viewport().size.height * 0.5, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousHalfPage, _, cx| {
+                this.scroll_by(-(this.scroll.viewport().size.height * 0.5), cx);
+            }))
             .flex()
             .flex_col()
             .bg(rgb(theme.tab_active_background))

@@ -49,6 +49,7 @@ pub enum KeyBindingCategory {
     Workspace,
     PdfView,
     PageOverview,
+    NewTab,
     SearchResults,
 }
 
@@ -58,6 +59,7 @@ impl KeyBindingCategory {
             Self::Workspace => "workspace",
             Self::PdfView => "pdf_view",
             Self::PageOverview => "page_overview",
+            Self::NewTab => "new_tab",
             Self::SearchResults => "search_results",
         }
     }
@@ -67,6 +69,7 @@ impl KeyBindingCategory {
             Self::Workspace => "Workspace",
             Self::PdfView => "PDF View",
             Self::PageOverview => "Page Overview",
+            Self::NewTab => "New Tab",
             Self::SearchResults => "Search Results",
         }
     }
@@ -78,6 +81,7 @@ impl KeyBindingCategory {
             }
             Self::PdfView => "Reading commands for the active PDF.",
             Self::PageOverview => "Commands used while the page overview grid is open.",
+            Self::NewTab => "Commands used while the new tab view is focused.",
             Self::SearchResults => "Commands used while the search box is focused.",
         }
     }
@@ -87,6 +91,7 @@ impl KeyBindingCategory {
             "workspace" | "global" => Some(Self::Workspace),
             "pdf_view" | "pdf" | "main_pdf_view" => Some(Self::PdfView),
             "page_overview" | "grid_overview" | "overview" => Some(Self::PageOverview),
+            "new_tab" | "newtab" => Some(Self::NewTab),
             "search_results" | "search" => Some(Self::SearchResults),
             _ => None,
         }
@@ -97,6 +102,7 @@ impl KeyBindingCategory {
             Self::Workspace => context_without_overlays("Workspace"),
             Self::PdfView => context_without_overlays("PdfView"),
             Self::PageOverview => "GridOverview && !SettingsPanel".to_string(),
+            Self::NewTab => context_without_overlays("NewTab"),
             Self::SearchResults => "Search".to_string(),
         }
     }
@@ -176,6 +182,7 @@ pub fn editable_categories() -> &'static [KeyBindingCategory] {
         KeyBindingCategory::Workspace,
         KeyBindingCategory::PdfView,
         KeyBindingCategory::PageOverview,
+        KeyBindingCategory::NewTab,
         KeyBindingCategory::SearchResults,
     ]
 }
@@ -1339,6 +1346,42 @@ fn command_specs() -> &'static [CommandSpec] {
                     &["ctrl-g", "escape"],
                     &["ctrl-g", "escape"],
                     &["grid-overview", "page-overview"],
+                    false,
+                ),
+                spec::<ScrollLineDown>(
+                    "scroll-line-down",
+                    "Scroll Line Down",
+                    KeyBindingCategory::NewTab,
+                    &["down"],
+                    &["j", "down"],
+                    &["scroll-down", "move-down", "move-visual-mark-down"],
+                    false,
+                ),
+                spec::<ScrollLineUp>(
+                    "scroll-line-up",
+                    "Scroll Line Up",
+                    KeyBindingCategory::NewTab,
+                    &["up"],
+                    &["k", "up"],
+                    &["scroll-up", "move-up", "move-visual-mark-up"],
+                    false,
+                ),
+                spec::<NextHalfPage>(
+                    "next-half-page",
+                    "Next Half Page",
+                    KeyBindingCategory::NewTab,
+                    &["shift-pagedown"],
+                    &["ctrl-d"],
+                    &[],
+                    false,
+                ),
+                spec::<PreviousHalfPage>(
+                    "previous-half-page",
+                    "Previous Half Page",
+                    KeyBindingCategory::NewTab,
+                    &["shift-pageup"],
+                    &["ctrl-u"],
+                    &["prev-half-page"],
                     false,
                 ),
             ]
