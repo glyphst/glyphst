@@ -38,11 +38,11 @@ impl PickerDelegate for GoToPagePromptDelegate {
     }
 
     fn placeholder(&self) -> SharedString {
-        "Go to page…".into()
+        crate::fl!("go-to-page-placeholder").into()
     }
 
     fn empty_message(&self) -> SharedString {
-        format!("Enter a page from 1 to {}", self.page_count).into()
+        crate::fl!("go-to-page-empty", page_count = (self.page_count as i64)).into()
     }
 
     fn width(&self) -> f32 {

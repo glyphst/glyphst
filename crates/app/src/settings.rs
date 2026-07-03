@@ -245,6 +245,41 @@ impl TabBarVisibility {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AppLanguage {
+    #[default]
+    System,
+    English,
+    SimplifiedChinese,
+}
+
+impl AppLanguage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::English => "en",
+            Self::SimplifiedChinese => "zh-CN",
+        }
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            Self::System => crate::fl!("language-system"),
+            Self::English => crate::fl!("language-english"),
+            Self::SimplifiedChinese => crate::fl!("language-simplified-chinese"),
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "system" | "auto" => Some(Self::System),
+            "en" | "en-US" | "en-us" => Some(Self::English),
+            "zh-CN" | "zh-cn" | "zh-Hans" | "zh-hans" => Some(Self::SimplifiedChinese),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KeymapPreset {
     #[default]
     Modern,
@@ -259,10 +294,10 @@ impl KeymapPreset {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Modern => "Modern",
-            Self::Vim => "Vim",
+            Self::Modern => crate::fl!("keymap-preset-modern"),
+            Self::Vim => crate::fl!("keymap-preset-vim"),
         }
     }
 
@@ -325,15 +360,15 @@ impl AiThinkingLevel {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Off => "Off",
-            Self::Minimal => "Minimal",
-            Self::Low => "Low",
-            Self::Medium => "Medium",
-            Self::High => "High",
-            Self::XHigh => "X High",
-            Self::Max => "Max",
+            Self::Off => crate::fl!("thinking-level-off"),
+            Self::Minimal => crate::fl!("thinking-level-minimal"),
+            Self::Low => crate::fl!("thinking-level-low"),
+            Self::Medium => crate::fl!("thinking-level-medium"),
+            Self::High => crate::fl!("thinking-level-high"),
+            Self::XHigh => crate::fl!("thinking-level-x-high"),
+            Self::Max => crate::fl!("thinking-level-max"),
         }
     }
 
@@ -1273,6 +1308,7 @@ pub struct Settings {
     pub font: FontSettings,
     pub window: WindowSettings,
     pub tab_bar_visibility: TabBarVisibility,
+    pub language: AppLanguage,
     pub ai: AiSettings,
     pub keymap_preset: KeymapPreset,
     pub keybinding_overrides: Vec<KeyBindingOverride>,
@@ -1306,6 +1342,14 @@ impl Settings {
 
         if let Some(theme_node) = document.get("theme") {
             settings.theme = ThemeSelection::from_kdl_node(theme_node);
+        }
+
+        if let Some(language) = document
+            .get_arg("language")
+            .and_then(KdlValue::as_string)
+            .and_then(AppLanguage::from_str)
+        {
+            settings.language = language;
         }
 
         if let Some(preset) = document
@@ -1549,6 +1593,7 @@ impl Settings {
         document.nodes_mut().push(panes);
 
         self.theme.clone().write_to_document(&mut document);
+        push_value_node(&mut document, "language", self.language.as_str());
         push_value_node(&mut document, "keymap", self.keymap_preset.as_str());
 
         let mut font = KdlNode::new("font");
@@ -1956,6 +2001,19 @@ keybindings {
             ]
         );
 
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn parses_and_exports_language_settings() {
+        let settings = parse_settings(
+            r##"
+language "zh-CN"
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.language, AppLanguage::SimplifiedChinese);
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 

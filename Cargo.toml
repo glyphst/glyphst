@@ -7,11 +7,11 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", rev = "17c0ebb0f7b8b512d99f396e543e71c1775ff6f6", package = "gpui", default-features = false, features = [
+gpui = { git = "https://github.com/zed-industries/zed", rev = "7ed553b391393ee4e62782e710605778e2200a18", package = "gpui", default-features = false, features = [
     "wayland",
     "x11",
 ] }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "17c0ebb0f7b8b512d99f396e543e71c1775ff6f6", package = "gpui_platform", default-features = false, features = [
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "7ed553b391393ee4e62782e710605778e2200a18", package = "gpui_platform", default-features = false, features = [
     "font-kit",
     "wayland",
     "x11",

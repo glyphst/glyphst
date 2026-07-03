@@ -166,27 +166,27 @@ impl MentionKind {
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> String {
         match self {
-            Self::CurrentPageText => "Current page text",
-            Self::Selection => "Selection",
-            Self::DocumentText => "Whole PDF text",
+            Self::CurrentPageText => crate::fl!("mention-current-page-text"),
+            Self::Selection => crate::fl!("mention-selection"),
+            Self::DocumentText => crate::fl!("mention-document-text"),
         }
     }
 
-    pub(crate) fn description(self) -> &'static str {
+    pub(crate) fn description(self) -> String {
         match self {
-            Self::CurrentPageText => "Attach text from the visible page",
-            Self::Selection => "Attach the selected PDF text",
-            Self::DocumentText => "Attach extracted text from the PDF",
+            Self::CurrentPageText => crate::fl!("mention-current-page-text-description"),
+            Self::Selection => crate::fl!("mention-selection-description"),
+            Self::DocumentText => crate::fl!("mention-document-text-description"),
         }
     }
 
-    pub(crate) fn context_title(self) -> &'static str {
+    pub(crate) fn context_title(self) -> String {
         match self {
-            Self::CurrentPageText => "Current page text",
-            Self::Selection => "Selection",
-            Self::DocumentText => "Whole PDF text",
+            Self::CurrentPageText => crate::fl!("mention-current-page-text"),
+            Self::Selection => crate::fl!("mention-selection"),
+            Self::DocumentText => crate::fl!("mention-document-text"),
         }
     }
 
@@ -198,11 +198,11 @@ impl MentionKind {
         }
     }
 
-    fn empty_context_message(self) -> &'static str {
+    fn empty_context_message(self) -> String {
         match self {
-            Self::CurrentPageText => "No current page text is available.",
-            Self::Selection => "No selected text is currently available.",
-            Self::DocumentText => "No extracted text is available for this PDF.",
+            Self::CurrentPageText => crate::fl!("ai-no-current-page-text"),
+            Self::Selection => crate::fl!("ai-no-selected-text"),
+            Self::DocumentText => crate::fl!("ai-no-document-text"),
         }
     }
 }
@@ -521,15 +521,15 @@ pub(crate) fn system_prompt(
     sections.join("\n\n")
 }
 
-pub(crate) fn thinking_level_description(level: AiThinkingLevel) -> &'static str {
+pub(crate) fn thinking_level_description(level: AiThinkingLevel) -> String {
     match level {
-        AiThinkingLevel::Off => "No extra reasoning",
-        AiThinkingLevel::Minimal => "Minimal reasoning",
-        AiThinkingLevel::Low => "Fast light reasoning",
-        AiThinkingLevel::Medium => "Balanced reasoning",
-        AiThinkingLevel::High => "Deeper reasoning",
-        AiThinkingLevel::XHigh => "Maximum OpenAI reasoning",
-        AiThinkingLevel::Max => "Maximum Anthropic thinking",
+        AiThinkingLevel::Off => crate::fl!("thinking-level-off-description"),
+        AiThinkingLevel::Minimal => crate::fl!("thinking-level-minimal-description"),
+        AiThinkingLevel::Low => crate::fl!("thinking-level-low-description"),
+        AiThinkingLevel::Medium => crate::fl!("thinking-level-medium-description"),
+        AiThinkingLevel::High => crate::fl!("thinking-level-high-description"),
+        AiThinkingLevel::XHigh => crate::fl!("thinking-level-x-high-description"),
+        AiThinkingLevel::Max => crate::fl!("thinking-level-max-description"),
     }
 }
 
@@ -675,7 +675,7 @@ fn context_envelope(contexts: &[&ContextBlock]) -> Option<String> {
         request.push_str(tag);
         request.push_str(&page);
         request.push_str(">\n");
-        request.push_str(context.kind.context_title());
+        request.push_str(&context.kind.context_title());
         request.push_str(":\n");
         request.push_str(&escape_context(&context.text));
         request.push_str("\n</");

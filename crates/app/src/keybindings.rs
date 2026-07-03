@@ -65,25 +65,25 @@ impl KeyBindingCategory {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Workspace => "Workspace",
-            Self::PdfView => "PDF View",
-            Self::PageOverview => "Page Overview",
-            Self::NewTab => "New Tab",
-            Self::SearchResults => "Search Results",
+            Self::Workspace => crate::fl!("keybinding-category-workspace"),
+            Self::PdfView => crate::fl!("keybinding-category-pdf-view"),
+            Self::PageOverview => crate::fl!("keybinding-category-page-overview"),
+            Self::NewTab => crate::fl!("keybinding-category-new-tab"),
+            Self::SearchResults => crate::fl!("keybinding-category-search-results"),
         }
     }
 
-    pub fn description(self) -> &'static str {
+    pub fn description(self) -> String {
         match self {
             Self::Workspace => {
-                "App-wide commands such as files, tabs, panes, settings, and panels."
+                crate::fl!("keybinding-category-workspace-description")
             }
-            Self::PdfView => "Reading commands for the active PDF.",
-            Self::PageOverview => "Commands used while the page overview grid is open.",
-            Self::NewTab => "Commands used while the new tab view is focused.",
-            Self::SearchResults => "Commands used while the search box is focused.",
+            Self::PdfView => crate::fl!("keybinding-category-pdf-view-description"),
+            Self::PageOverview => crate::fl!("keybinding-category-page-overview-description"),
+            Self::NewTab => crate::fl!("keybinding-category-new-tab-description"),
+            Self::SearchResults => crate::fl!("keybinding-category-search-results-description"),
         }
     }
 
@@ -112,7 +112,7 @@ impl KeyBindingCategory {
 #[derive(Clone, Debug)]
 pub struct EditableKeyBinding {
     pub action: &'static str,
-    pub label: &'static str,
+    pub label: String,
     pub category: KeyBindingCategory,
     pub keystrokes: Vec<String>,
     pub default_keystrokes: Vec<String>,
@@ -170,12 +170,32 @@ pub fn editable_bindings(
         .iter()
         .map(|spec| EditableKeyBinding {
             action: spec.action,
-            label: spec.label,
+            label: localized_spec_label(spec),
             category: spec.category,
             keystrokes: effective_keystrokes(spec, preset, overrides),
             default_keystrokes: default_keystrokes(spec, preset),
         })
         .collect()
+}
+
+pub fn localized_action_label(action_name: &str) -> Option<String> {
+    command_specs()
+        .iter()
+        .find(|spec| action_matches_spec(action_name, spec))
+        .map(localized_spec_label)
+}
+
+fn localized_spec_label(spec: &CommandSpec) -> String {
+    let label = crate::localize::tr(&format!(
+        "keybinding-command-{}-{}",
+        spec.category.id().replace('_', "-"),
+        spec.action
+    ));
+    if label.starts_with("No localization for id:") {
+        spec.label.to_string()
+    } else {
+        label
+    }
 }
 
 pub fn editable_categories() -> &'static [KeyBindingCategory] {

@@ -633,7 +633,7 @@ impl AiPanel {
                     let page = pdf_view.current_page();
                     let text = pdf_view
                         .current_page_text()
-                        .unwrap_or_else(|| "No text is available on the current page.".to_string());
+                        .unwrap_or_else(|| crate::fl!("ai-no-current-page-text"));
                     ContextBlock::new(mention, Some(page), text)
                 }
                 MentionKind::Selection => ContextBlock::new(
@@ -641,23 +641,23 @@ impl AiPanel {
                     None,
                     pdf_view
                         .selected_text()
-                        .unwrap_or_else(|| "No selected text is currently available.".to_string()),
+                        .unwrap_or_else(|| crate::fl!("ai-no-selected-text")),
                 ),
                 MentionKind::DocumentText => ContextBlock::new(
                     mention,
                     None,
-                    pdf_view.document_text().unwrap_or_else(|| {
-                        "No extracted text is available for this PDF.".to_string()
-                    }),
+                    pdf_view
+                        .document_text()
+                        .unwrap_or_else(|| crate::fl!("ai-no-document-text")),
                 ),
             })
             .ok();
 
         resolved.unwrap_or_else(|| {
             let message = match mention {
-                MentionKind::CurrentPageText => "No current page text is available.",
-                MentionKind::Selection => "No selected text is currently available.",
-                MentionKind::DocumentText => "No extracted text is available for this PDF.",
+                MentionKind::CurrentPageText => crate::fl!("ai-no-current-page-text"),
+                MentionKind::Selection => crate::fl!("ai-no-selected-text"),
+                MentionKind::DocumentText => crate::fl!("ai-no-document-text"),
             };
             ContextBlock::new(mention, None, message.to_string())
         })
@@ -1669,7 +1669,7 @@ impl AiPanel {
                         cx.stop_propagation();
                     }),
                 )
-                .child("New chat")
+                .child(crate::fl!("ai-new-chat"))
                 .child("+"),
         );
 
@@ -1682,7 +1682,7 @@ impl AiPanel {
                     .h(px(120.0))
                     .text_size(ui_rems(13.0))
                     .text_color(rgb(theme.text_muted))
-                    .child("No previous AI sessions for this PDF"),
+                    .child(crate::fl!("ai-no-previous-sessions")),
             );
         }
 
@@ -2001,7 +2001,7 @@ impl AiPanel {
                         this.child(div().w(px(1.0)).h(px(14.0)).bg(rgb(theme.accent)))
                     })
                     .child(if query_empty {
-                        "Type to search models…".into()
+                        crate::fl!("ai-search-models-placeholder")
                     } else {
                         query
                     })
@@ -2021,7 +2021,7 @@ impl AiPanel {
                         div()
                             .text_size(ui_rems(11.0))
                             .text_color(rgb(theme.text_muted))
-                            .child("Select provider/model"),
+                            .child(crate::fl!("ai-select-provider-model")),
                     ),
             );
 
@@ -2031,7 +2031,7 @@ impl AiPanel {
                     .px_2()
                     .py_2()
                     .text_color(rgb(theme.text_muted))
-                    .child("No matching models"),
+                    .child(crate::fl!("no-matching-models")),
             );
         }
 
@@ -2489,7 +2489,7 @@ impl Render for AiPanel {
                                 div()
                                     .text_size(ui_rems(10.0))
                                     .text_color(rgb(theme.text_muted))
-                                    .child("AI"),
+                                    .child(crate::fl!("ai-title")),
                             )
                             .child(
                                 div()
@@ -2694,7 +2694,7 @@ impl Render for AiPanel {
                                                     }),
                                                 )
                                                 .child("+")
-                                                .child("Attach"),
+                                                .child(crate::fl!("attach")),
                                         )
                                         .child(
                                             div()
@@ -2813,7 +2813,11 @@ impl Render for AiPanel {
                                                 cx.stop_propagation();
                                             }),
                                         )
-                                        .child(if loading { "Sending…" } else { "Send" }),
+                                        .child(if loading {
+                                            crate::fl!("sending")
+                                        } else {
+                                            crate::fl!("send")
+                                        }),
                                 ),
                         ),
                 )
@@ -2976,7 +2980,7 @@ impl Element for AiInputElement {
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let (display_text, text_color) = if content.is_empty() {
             (
-                "Ask about this PDF…".into(),
+                crate::fl!("ai-ask-placeholder").into(),
                 rgba(theme.placeholder_text).into(),
             )
         } else {

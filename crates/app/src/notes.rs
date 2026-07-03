@@ -72,8 +72,8 @@ impl NotePaletteEntry {
         Some(Self {
             id: note.id,
             note_ix,
-            body: compact_text(&note.body, "Untitled note"),
-            text: compact_text(&note.text, "No selected text"),
+            body: compact_text(&note.body, &crate::fl!("untitled-note")),
+            text: compact_text(&note.text, &crate::fl!("no-selected-text")),
             page: rect.page_idx + 1,
             color: note.color,
             page_idx: rect.page_idx,
@@ -99,11 +99,11 @@ impl PickerDelegate for NotesPaletteDelegate {
     }
 
     fn placeholder(&self) -> SharedString {
-        "Go to note…".into()
+        crate::fl!("notes-placeholder").into()
     }
 
     fn empty_message(&self) -> SharedString {
-        "No notes found".into()
+        crate::fl!("notes-empty").into()
     }
 
     fn width(&self) -> f32 {
@@ -245,7 +245,7 @@ impl PickerDelegate for NotesPaletteDelegate {
     }
 }
 
-fn compact_text(text: &str, fallback: &'static str) -> SharedString {
+fn compact_text(text: &str, fallback: &str) -> SharedString {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.is_empty() {
         fallback.into()

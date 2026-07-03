@@ -11,6 +11,8 @@ dirs = "6"
 futures = "0.3"
 gpui.workspace = true
 gpui_platform.workspace = true
+i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system"] }
+i18n-embed-fl = "0.10"
 image = "0.25"
 kdl = "6"
 mupdf = "0.7"

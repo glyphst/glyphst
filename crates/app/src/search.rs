@@ -73,7 +73,7 @@ impl SearchBar {
             previous_focus_handle,
             content,
             applied_query,
-            placeholder: "Search document…".into(),
+            placeholder: crate::fl!("search-document-placeholder").into(),
             selected_range: 0..content_len,
             selection_reversed: false,
             marked_range: None,

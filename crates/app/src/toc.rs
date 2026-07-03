@@ -49,11 +49,11 @@ impl PickerDelegate for TocPaletteDelegate {
     }
 
     fn placeholder(&self) -> SharedString {
-        "Go to table of contents…".into()
+        crate::fl!("toc-placeholder").into()
     }
 
     fn empty_message(&self) -> SharedString {
-        "No table of contents entries found".into()
+        crate::fl!("toc-empty").into()
     }
 
     fn width(&self) -> f32 {

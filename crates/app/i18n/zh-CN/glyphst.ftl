@@ -1,0 +1,336 @@
+app-name = Glyphst
+
+## Common
+
+cancel = 取消
+cancel-selection = 取消选择
+copy = 复制
+current = 当前
+delete = 删除
+edit = 编辑
+escape-key = Esc
+export = 导出
+open-pdf = 打开 PDF
+add = 添加
+remove = 移除
+reset-zoom = 重置缩放
+save = 保存
+select = 选择
+select-all = 全选
+sending = 正在发送…
+send = 发送
+untitled = 未命名
+view = 视图
+zoom-in = 放大
+zoom-out = 缩小
+actions-menu = 操作 ▾
+selected-count = 已选择 { $count } 项
+item-count = { $count } 项
+page-title = 第 { $page } 页
+
+## Pickers
+
+bookmarks-placeholder = 打开书签…
+bookmarks-empty = 未找到书签
+command-palette-placeholder = 执行命令…
+command-palette-empty = 未找到命令
+go-to-page-placeholder = 转到页面…
+go-to-page-empty = 请输入 1 到 { $page_count } 之间的页码
+history-placeholder = 打开最近的 PDF…
+history-empty = 未找到最近的 PDF
+notes-placeholder = 转到笔记…
+notes-empty = 未找到笔记
+notes-title = 笔记
+search-document-placeholder = 搜索文档…
+searchable-dropdown-empty = 无匹配项
+theme-selector-placeholder = 选择主题…
+theme-selector-empty = 未找到主题
+toc-placeholder = 转到目录…
+toc-empty = 未找到目录条目
+table-of-contents-title = 目录
+no-matching-models = 无匹配模型
+
+## PDF view
+
+pdf-context-add-note = 添加笔记
+pdf-context-change-highlight-color = 更改高亮颜色
+pdf-context-copy-image = 复制图像
+pdf-context-edit-note = 编辑笔记
+pdf-context-enter-full-screen = 进入全屏
+pdf-context-exit-full-screen = 退出全屏
+pdf-context-highlight = 高亮
+pdf-context-remove-highlight = 移除高亮
+pdf-context-remove-note = 移除笔记
+pdf-context-save-image = 保存图像
+pdf-context-save-page-as-image = 将页面另存为图像
+pdf-export-as-image = 导出为图像
+pdf-export-as-text = 导出为文本
+pdf-failed-to-load = PDF 加载失败
+pdf-loading = 正在加载 { $name }
+pdf-no-pages-available = 没有可用页面
+pdf-page-overview-title = 页面概览
+pdf-thumbnails-title = 缩略图
+
+## AI
+
+ai-title = AI
+ai-ask-placeholder = 询问此 PDF…
+ai-new-chat = 新建对话
+ai-no-current-page-text = 当前页面没有可用文本。
+ai-no-document-text = 此 PDF 没有可用的提取文本。
+ai-no-previous-sessions = 此 PDF 没有之前的 AI 会话
+ai-no-selected-text = 当前没有选中的文本。
+ai-search-models-placeholder = 输入以搜索模型…
+ai-select-provider-model = 选择提供商/模型
+attach = 附加
+mention-current-page-text = 当前页面文本
+mention-current-page-text-description = 附加可见页面中的文本
+mention-selection = 选区
+mention-selection-description = 附加选中的 PDF 文本
+mention-document-text = 整个 PDF 文本
+mention-document-text-description = 附加从 PDF 提取的文本
+
+## Settings
+
+settings-title = 设置
+settings-window-title = Glyphst 设置
+settings-tab-general = 常规
+settings-tab-keymap = 键位
+settings-tab-appearance = 外观
+settings-tab-model-providers = 模型提供商
+settings-section-general = 常规
+settings-section-language = 语言
+settings-section-zoom = 缩放
+settings-section-scroll = 滚动
+settings-section-keymap = 键位
+settings-section-window = 窗口
+settings-section-tabs = 标签页
+settings-section-theme = 主题
+settings-section-fonts = 字体
+settings-section-overrides = 覆盖项
+settings-section-model-providers = 模型提供商
+settings-search-fonts-placeholder = 搜索字体…
+settings-model-id-placeholder = 模型 ID…
+settings-api-key-placeholder = 粘贴 API 密钥…
+settings-search-model-placeholder = 搜索模型…
+settings-search-themes-placeholder = 搜索主题…
+settings-search-light-themes-placeholder = 搜索浅色主题…
+settings-search-dark-themes-placeholder = 搜索深色主题…
+settings-connection-succeeded = 连接成功。
+settings-connection-failed = 连接失败：{ $error }
+settings-fetching-models = 正在获取模型…
+settings-fetched-models = 已获取 { $count } 个模型。
+settings-fetch-models-failed = 获取模型失败：{ $error }
+settings-testing-connection = 正在测试连接…
+settings-exported-to = 已导出到 { $path }
+settings-reset-fonts = 重置字体
+settings-ui-font-family = UI 字体族
+settings-no-matching-fonts = 无匹配字体
+settings-default = 默认
+settings-api-key = API 密钥
+settings-api-host = API 主机
+settings-language = 语言
+settings-base-preset = 基础预设
+settings-keymap-editor = 键位编辑器
+settings-open-keymap = 打开键位
+settings-background = 背景
+settings-tab-bar = 标签栏
+settings-default-models = 默认模型
+settings-main-model = 主模型
+settings-title-model = 标题模型
+settings-model-list-hint = 这里只显示已启用提供商的模型列表中的模型。
+settings-quick-ai-chat = 快速 AI 对话
+settings-no-enabled-provider-models = 没有已启用提供商的模型
+settings-no-models-added = 尚未添加模型。
+settings-choose-models-to-add = 选择要添加的模型
+settings-no-models-returned = 未返回模型。
+settings-no-matching-models-period = 无匹配模型。
+settings-model-list = 模型列表
+settings-theme-mode = 主题模式
+settings-mode = 模式
+settings-light-theme = 浅色主题
+settings-dark-theme = 深色主题
+settings-font-fallbacks-hint = 用逗号分隔备用字体名称。
+language-system = 跟随系统
+language-english = English
+language-simplified-chinese = 简体中文
+
+## New tab
+
+new-tab-title = 新标签页
+new-tab-empty-title = 无最近 PDF
+new-tab-empty-description = 打开 PDF 后会添加到历史记录。
+new-tab-last-read = 上次阅读：第 { $page } 页
+new-tab-preview-unavailable = 预览不可用
+new-tab-recent-pdfs = 最近的 PDF
+new-tab-rendering-preview = 正在渲染预览…
+
+## Notes
+
+note-title = 笔记
+note-editor-help = Ctrl+Enter 保存 · Esc 取消
+no-selected-text = 未选择文本
+untitled-note = 未命名笔记
+
+## Toolbar
+
+toolbar-menu-glyphst = Glyphst
+toolbar-menu-file = 文件
+toolbar-menu-tab = 标签页
+toolbar-about-glyphst = 关于 Glyphst
+toolbar-check-updates = 检查更新
+toolbar-open-settings = 打开设置
+toolbar-quit-glyphst = 退出 Glyphst
+toolbar-open-file = 打开文件
+toolbar-new-tab = 新建标签页
+toolbar-close-tab = 关闭标签页
+toolbar-split-right = 向右拆分
+toolbar-split-down = 向下拆分
+
+## Keymap
+
+keymap-title = 键位
+keymap-add-keybinding = 添加键位绑定
+keymap-copy-action = 复制操作
+keymap-copy-context = 复制上下文
+keymap-edit-keystroke = 编辑按键
+keymap-empty = 未找到键位绑定
+keymap-error-press-shortcut = 保存前请按下快捷键。
+keymap-header-action = 操作
+keymap-header-context = 上下文
+keymap-header-keystrokes = 按键
+keymap-header-source = 来源
+keymap-reset-to-default = 重置为默认
+keymap-search-placeholder = 搜索键位…
+keymap-source-default = 默认
+keymap-source-user = 用户
+keymap-unbound = 未绑定
+keymap-modal-subtitle = { $action } · { $context }
+keymap-conflicting-bindings = 存在 { $count } 个使用相同按键的绑定。
+keymap-context = 上下文：{ $context }
+keymap-preset-modern = 现代
+keymap-preset-vim = Vim
+
+## Thinking levels
+
+thinking-level-off = 关闭
+thinking-level-minimal = 最低
+thinking-level-low = 低
+thinking-level-medium = 中
+thinking-level-high = 高
+thinking-level-x-high = 超高
+thinking-level-max = 最大
+thinking-level-off-description = 不进行额外推理
+thinking-level-minimal-description = 最少推理
+thinking-level-low-description = 快速轻量推理
+thinking-level-medium-description = 平衡推理
+thinking-level-high-description = 深度推理
+thinking-level-x-high-description = OpenAI 最大推理
+thinking-level-max-description = Anthropic 最大思考
+
+## Keybinding categories
+
+keybinding-category-workspace = 工作区
+keybinding-category-pdf-view = PDF 视图
+keybinding-category-page-overview = 页面概览
+keybinding-category-new-tab = 新标签页
+keybinding-category-search-results = 搜索结果
+keybinding-category-workspace-description = 应用范围命令，例如文件、标签页、窗格、设置和面板。
+keybinding-category-pdf-view-description = 当前 PDF 的阅读命令。
+keybinding-category-page-overview-description = 页面概览网格打开时使用的命令。
+keybinding-category-new-tab-description = 新标签页获得焦点时使用的命令。
+keybinding-category-search-results-description = 搜索框获得焦点时使用的命令。
+
+## Keybinding commands
+
+keybinding-command-workspace-toggle-command-palette = 切换命令面板
+keybinding-command-workspace-open-file = 打开文件
+keybinding-command-workspace-open-new-tab = 打开新标签页
+keybinding-command-workspace-close-tab = 关闭标签页
+keybinding-command-workspace-open-settings = 打开设置
+keybinding-command-workspace-open-keybindings = 打开键位绑定
+keybinding-command-workspace-toggle-full-screen = 切换全屏
+keybinding-command-workspace-toggle-transparency = 切换透明度
+keybinding-command-workspace-toggle-theme = 切换主题
+keybinding-command-workspace-toggle-theme-selector = 切换主题选择器
+keybinding-command-workspace-toggle-ai-panel = 切换 AI 面板
+keybinding-command-workspace-open-history = 打开历史
+keybinding-command-workspace-open-bookmarks = 打开书签
+keybinding-command-workspace-toggle-thumbnails = 切换页面缩略图
+keybinding-command-workspace-toggle-toc = 切换目录
+keybinding-command-workspace-open-notes = 打开笔记
+keybinding-command-workspace-toggle-notes = 切换笔记侧栏
+keybinding-command-workspace-split-right = 向右拆分
+keybinding-command-workspace-split-left = 向左拆分
+keybinding-command-workspace-split-up = 向上拆分
+keybinding-command-workspace-split-down = 向下拆分
+keybinding-command-workspace-split-vertical = 垂直拆分
+keybinding-command-workspace-split-horizontal = 水平拆分
+keybinding-command-workspace-activate-pane-left = 聚焦左侧窗格
+keybinding-command-workspace-activate-pane-right = 聚焦右侧窗格
+keybinding-command-workspace-activate-pane-up = 聚焦上方窗格
+keybinding-command-workspace-activate-pane-down = 聚焦下方窗格
+keybinding-command-workspace-activate-next-pane = 聚焦下一个窗格
+keybinding-command-workspace-activate-previous-pane = 聚焦上一个窗格
+keybinding-command-workspace-swap-pane-left = 与左侧窗格交换
+keybinding-command-workspace-swap-pane-right = 与右侧窗格交换
+keybinding-command-workspace-swap-pane-up = 与上方窗格交换
+keybinding-command-workspace-swap-pane-down = 与下方窗格交换
+keybinding-command-workspace-move-pane-left = 将窗格移到左侧
+keybinding-command-workspace-move-pane-right = 将窗格移到右侧
+keybinding-command-workspace-move-pane-up = 将窗格移到上方
+keybinding-command-workspace-move-pane-down = 将窗格移到下方
+keybinding-command-workspace-resize-pane-left = 向左调整窗格大小
+keybinding-command-workspace-resize-pane-right = 向右调整窗格大小
+keybinding-command-workspace-resize-pane-up = 向上调整窗格大小
+keybinding-command-workspace-resize-pane-down = 向下调整窗格大小
+keybinding-command-workspace-reset-pane-sizes = 重置窗格大小
+keybinding-command-workspace-close-other-panes = 关闭其他窗格
+keybinding-command-pdf-view-copy-selection = 复制选区
+keybinding-command-pdf-view-select-all = 全选
+keybinding-command-pdf-view-zoom-in = 放大
+keybinding-command-pdf-view-zoom-out = 缩小
+keybinding-command-pdf-view-reset-zoom = 重置缩放
+keybinding-command-pdf-view-reload = 重新加载文档
+keybinding-command-pdf-view-toggle-presentation-mode = 切换演示模式
+keybinding-command-pdf-view-search = 搜索
+keybinding-command-pdf-view-next-search-result = 下一个搜索结果
+keybinding-command-pdf-view-prev-search-result = 上一个搜索结果
+keybinding-command-search-results-next-search-result = 下一个搜索结果
+keybinding-command-search-results-prev-search-result = 上一个搜索结果
+keybinding-command-pdf-view-next-page = 下一页
+keybinding-command-pdf-view-previous-page = 上一页
+keybinding-command-pdf-view-next-half-page = 下半页
+keybinding-command-pdf-view-previous-half-page = 上半页
+keybinding-command-pdf-view-scroll-line-down = 向下滚动一行
+keybinding-command-pdf-view-scroll-line-up = 向上滚动一行
+keybinding-command-pdf-view-go-to-beginning = 转到开头
+keybinding-command-pdf-view-go-to-end = 转到末尾
+keybinding-command-pdf-view-jump-backward = 后退
+keybinding-command-pdf-view-jump-forward = 前进
+keybinding-command-pdf-view-toc = 打开目录
+keybinding-command-pdf-view-open-quick-ask = 打开快速提问
+keybinding-command-pdf-view-go-to-page = 转到页面
+keybinding-command-pdf-view-add-bookmark = 添加书签
+keybinding-command-pdf-view-toggle-grid-overview = 切换页面概览
+keybinding-command-page-overview-zoom-in = 放大
+keybinding-command-page-overview-zoom-out = 缩小
+keybinding-command-page-overview-next-page = 下一页
+keybinding-command-page-overview-previous-page = 上一页
+keybinding-command-page-overview-next-half-page = 下半页
+keybinding-command-page-overview-previous-half-page = 上半页
+keybinding-command-page-overview-go-to-beginning = 转到开头
+keybinding-command-page-overview-go-to-end = 转到末尾
+keybinding-command-page-overview-grid-cursor-up = 上移
+keybinding-command-page-overview-grid-cursor-down = 下移
+keybinding-command-page-overview-grid-cursor-left = 左移
+keybinding-command-page-overview-grid-cursor-right = 右移
+keybinding-command-page-overview-grid-overview-confirm = 打开选中页面
+keybinding-command-page-overview-toggle-grid-overview = 关闭页面概览
+keybinding-command-new-tab-scroll-line-down = 向下滚动一行
+keybinding-command-new-tab-scroll-line-up = 向上滚动一行
+keybinding-command-new-tab-next-half-page = 下半页
+keybinding-command-new-tab-previous-half-page = 上半页
+keybinding-command-new-tab-enter-select = 进入选择模式
+keybinding-command-new-tab-cancel-select = 取消选择
+keybinding-command-new-tab-delete-selected = 删除所选项

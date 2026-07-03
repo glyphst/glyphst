@@ -49,8 +49,8 @@ impl HistoryPaletteDelegate {
                         .path
                         .file_name()
                         .and_then(|name| name.to_str())
-                        .unwrap_or("Untitled")
-                        .to_string()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| crate::fl!("untitled"))
                         .into();
                     let directory = entry
                         .path
@@ -78,11 +78,11 @@ impl PickerDelegate for HistoryPaletteDelegate {
     }
 
     fn placeholder(&self) -> SharedString {
-        "Open recent PDF…".into()
+        crate::fl!("history-placeholder").into()
     }
 
     fn empty_message(&self) -> SharedString {
-        "No recent PDFs found".into()
+        crate::fl!("history-empty").into()
     }
 
     fn width(&self) -> f32 {

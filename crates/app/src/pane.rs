@@ -628,8 +628,8 @@ impl Pane {
     fn tab_label(&self, tab_ix: usize, cx: &App) -> SharedString {
         match self.tabs.get(tab_ix) {
             Some(Tab::Document(pdf_view)) => pdf_view.read(cx).file_name(),
-            Some(Tab::Keymap(_)) => "Keymap".into(),
-            Some(Tab::NewTab(_)) | None => "New Tab".into(),
+            Some(Tab::Keymap(_)) => crate::fl!("keymap-title").into(),
+            Some(Tab::NewTab(_)) | None => crate::fl!("new-tab-title").into(),
         }
     }
 

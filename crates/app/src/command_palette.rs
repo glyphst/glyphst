@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 use crate::{
+    keybindings,
     picker::{Picker, PickerDelegate, fuzzy_match},
     style::TextSize,
     theme::Theme,
@@ -36,7 +37,9 @@ impl CommandPaletteDelegate {
         let mut commands = actions
             .into_iter()
             .map(|action| Command {
-                name: humanize_action_name(action.name()).into(),
+                name: keybindings::localized_action_label(action.name())
+                    .unwrap_or_else(|| humanize_action_name(action.name()))
+                    .into(),
                 action,
             })
             .collect::<Vec<_>>();
@@ -76,11 +79,11 @@ impl PickerDelegate for CommandPaletteDelegate {
     }
 
     fn placeholder(&self) -> SharedString {
-        "Execute a command…".into()
+        crate::fl!("command-palette-placeholder").into()
     }
 
     fn empty_message(&self) -> SharedString {
-        "No commands found".into()
+        crate::fl!("command-palette-empty").into()
     }
 
     fn width(&self) -> f32 {

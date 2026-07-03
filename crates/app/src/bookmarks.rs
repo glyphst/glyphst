@@ -60,8 +60,8 @@ impl BookmarkPaletteDelegate {
                     .path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .unwrap_or("Untitled")
-                    .to_string()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| crate::fl!("untitled"))
                     .into();
                 BookmarkPaletteEntry {
                     id: bookmark.id,
@@ -104,11 +104,11 @@ impl PickerDelegate for BookmarkPaletteDelegate {
     }
 
     fn placeholder(&self) -> SharedString {
-        "Open bookmark…".into()
+        crate::fl!("bookmarks-placeholder").into()
     }
 
     fn empty_message(&self) -> SharedString {
-        "No bookmarks found".into()
+        crate::fl!("bookmarks-empty").into()
     }
 
     fn width(&self) -> f32 {
@@ -216,7 +216,7 @@ impl PickerDelegate for BookmarkPaletteDelegate {
                         .px_1()
                         .bg(gpui::rgb(theme.element_selected))
                         .text_color(rgb(theme.accent))
-                        .child("Current"),
+                        .child(crate::fl!("current")),
                 )
             })
             .child(

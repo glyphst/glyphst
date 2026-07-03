@@ -78,8 +78,14 @@ pub struct KeymapEditor {
 
 impl KeymapEditor {
     pub fn new(focus_handle: FocusHandle, cx: &mut Context<Self>) -> Self {
-        let filter_input =
-            cx.new(|cx| SettingsTextInput::new("".into(), "Search keymap…".into(), false, cx));
+        let filter_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                "".into(),
+                crate::fl!("keymap-search-placeholder").into(),
+                false,
+                cx,
+            )
+        });
         cx.subscribe(&filter_input, |this, _, event, cx| {
             let SettingsInputEvent::Changed(value) = event;
             this.query = value.clone();
@@ -141,8 +147,8 @@ impl KeymapEditor {
         let ordering = match self.sort_column {
             SortColumn::Category => Self::category_rank(left.category)
                 .cmp(&Self::category_rank(right.category))
-                .then_with(|| left.label.cmp(right.label)),
-            SortColumn::Action => left.label.cmp(right.label),
+                .then_with(|| left.label.cmp(&right.label)),
+            SortColumn::Action => left.label.cmp(&right.label),
             SortColumn::Keystrokes => left.keystrokes.join(" ").cmp(&right.keystrokes.join(" ")),
         };
 
@@ -262,7 +268,7 @@ impl KeymapEditor {
         if keys.is_empty() {
             self.set_input_error(
                 InputSeverity::Warning,
-                "Press a shortcut before saving.".into(),
+                crate::fl!("keymap-error-press-shortcut").into(),
                 cx,
             );
             return;
@@ -350,7 +356,7 @@ impl KeymapEditor {
 
     fn header_cell(
         &self,
-        label: &'static str,
+        label: String,
         column: Option<SortColumn>,
         width: Option<f32>,
         theme: Theme,
@@ -428,7 +434,11 @@ impl KeymapEditor {
             )
         };
 
-        let source_label = if is_overridden { "User" } else { "Default" };
+        let source_label = if is_overridden {
+            crate::fl!("keymap-source-user")
+        } else {
+            crate::fl!("keymap-source-default")
+        };
 
         let row_action = action.clone();
         let row_label = label.clone();
@@ -529,7 +539,7 @@ impl KeymapEditor {
                             div()
                                 .text_size(ui_rems(12.0))
                                 .text_color(rgb(theme.text_muted))
-                                .child("Unbound")
+                                .child(crate::fl!("keymap-unbound"))
                                 .into_any_element(),
                         ]
                     } else {
@@ -563,7 +573,7 @@ impl KeymapEditor {
 
     fn modal_button(
         &self,
-        label: &'static str,
+        label: String,
         primary: bool,
         theme: Theme,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
@@ -609,7 +619,7 @@ impl KeymapEditor {
     }
 
     fn menu_entry(
-        label: &'static str,
+        label: String,
         icon: IconName,
         theme: Theme,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
@@ -677,7 +687,7 @@ impl KeymapEditor {
                 cx.stop_propagation();
             })
             .child(Self::menu_entry(
-                "Edit",
+                crate::fl!("edit"),
                 IconName::Pencil,
                 theme,
                 move |this, window, cx| {
@@ -694,7 +704,7 @@ impl KeymapEditor {
             ))
             .when(is_overridden, |menu| {
                 menu.child(Self::menu_entry(
-                    "Reset to Default",
+                    crate::fl!("keymap-reset-to-default"),
                     IconName::RotateCcw,
                     theme,
                     move |this, _, cx| {
@@ -705,7 +715,7 @@ impl KeymapEditor {
             })
             .when(!is_unbound, |menu| {
                 menu.child(Self::menu_entry(
-                    "Delete",
+                    crate::fl!("delete"),
                     IconName::Delete,
                     theme,
                     move |this, _, cx| {
@@ -716,7 +726,7 @@ impl KeymapEditor {
             })
             .child(Self::menu_separator(theme))
             .child(Self::menu_entry(
-                "Copy Action",
+                crate::fl!("keymap-copy-action"),
                 IconName::Copy,
                 theme,
                 move |this, _, cx| {
@@ -725,7 +735,7 @@ impl KeymapEditor {
                 cx,
             ))
             .child(Self::menu_entry(
-                "Copy Context",
+                crate::fl!("keymap-copy-context"),
                 IconName::Copy,
                 theme,
                 move |this, _, cx| {
@@ -750,9 +760,9 @@ impl KeymapEditor {
         let matching_count =
             self.matching_bindings_count(settings, editing.category, &editing.action, &keystroke);
         let title = if editing.append {
-            "Add Keybinding"
+            crate::fl!("keymap-add-keybinding")
         } else {
-            "Edit Keystroke"
+            crate::fl!("keymap-edit-keystroke")
         };
 
         let view_keystroke = keystroke.clone();
@@ -767,9 +777,12 @@ impl KeymapEditor {
             .items_center()
             .justify_center()
             .bg(rgba(0x00000066))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.cancel_editing(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.cancel_editing(cx);
+                }),
+            )
             .child(
                 div()
                     .w(rems(34.0))
@@ -803,7 +816,11 @@ impl KeymapEditor {
                                 div()
                                     .text_size(ui_rems(12.0))
                                     .text_color(rgb(theme.text_muted))
-                                    .child(format!("{} · {}", editing.label, editing.category.label())),
+                                    .child(crate::fl!(
+                                        "keymap-modal-subtitle",
+                                        action = editing.label.as_str(),
+                                        context = editing.category.label()
+                                    )),
                             ),
                     )
                     .child(
@@ -815,12 +832,11 @@ impl KeymapEditor {
                                 div()
                                     .text_size(ui_rems(12.0))
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child("Edit Keystroke"),
+                                    .child(crate::fl!("keymap-edit-keystroke")),
                             )
                             .child(editing.input.clone()),
                     )
                     .when(matching_count > 0 && !keystroke.is_empty(), |this| {
-                        let plural = if matching_count == 1 { "binding" } else { "bindings" };
                         this.child(
                             div()
                                 .flex()
@@ -832,7 +848,10 @@ impl KeymapEditor {
                                     div()
                                         .text_size(ui_rems(12.0))
                                         .text_color(rgb(theme.text_muted))
-                                        .child(format!("There {} {matching_count} {plural} with the same keystrokes.", if matching_count == 1 { "is" } else { "are" })),
+                                        .child(crate::fl!(
+                                            "keymap-conflicting-bindings",
+                                            count = (matching_count as i64)
+                                        )),
                                 )
                                 .child(
                                     div()
@@ -849,12 +868,19 @@ impl KeymapEditor {
                                         .text_color(rgb(theme.text_muted))
                                         .hover(|style| style.bg(rgb(theme.element_hover)))
                                         .cursor_pointer()
-                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                                            this.view_matching(view_keystroke.clone(), cx);
-                                            cx.stop_propagation();
-                                        }))
-                                        .child("View")
-                                        .child(Icon::new(IconName::ArrowUpRight, ui_rems(11.0), rgb(theme.text_muted))),
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.view_matching(view_keystroke.clone(), cx);
+                                                cx.stop_propagation();
+                                            }),
+                                        )
+                                        .child(crate::fl!("view"))
+                                        .child(Icon::new(
+                                            IconName::ArrowUpRight,
+                                            ui_rems(11.0),
+                                            rgb(theme.text_muted),
+                                        )),
                                 ),
                         )
                     })
@@ -862,7 +888,10 @@ impl KeymapEditor {
                         div()
                             .text_size(ui_rems(12.0))
                             .text_color(rgb(theme.text_muted))
-                            .child(format!("Context: {}", editing.category.label())),
+                            .child(crate::fl!(
+                                "keymap-context",
+                                context = editing.category.label()
+                            )),
                     )
                     .when_some(editing.error.clone(), |this, error| {
                         let (bg_color, border_color, text_color) = match error.severity {
@@ -903,12 +932,24 @@ impl KeymapEditor {
                             .flex_row()
                             .justify_end()
                             .gap_2()
-                            .child(self.modal_button("Cancel", false, theme, |this, _, cx| {
-                                this.cancel_editing(cx);
-                            }, cx))
-                            .child(self.modal_button("Save", true, theme, |this, _, cx| {
-                                this.save_editing(cx);
-                            }, cx)),
+                            .child(self.modal_button(
+                                crate::fl!("cancel"),
+                                false,
+                                theme,
+                                |this, _, cx| {
+                                    this.cancel_editing(cx);
+                                },
+                                cx,
+                            ))
+                            .child(self.modal_button(
+                                crate::fl!("save"),
+                                true,
+                                theme,
+                                |this, _, cx| {
+                                    this.save_editing(cx);
+                                },
+                                cx,
+                            )),
                     ),
             )
             .into_any_element()
@@ -964,7 +1005,11 @@ impl Render for KeymapEditor {
                     .justify_between()
                     .border_b(px(1.0))
                     .border_color(rgb(theme.border))
-                    .child(div().text_size(ui_rems(18.0)).child("Keymap"))
+                    .child(
+                        div()
+                            .text_size(ui_rems(18.0))
+                            .child(crate::fl!("keymap-title")),
+                    )
                     .child(div().w(px(300.0)).child(self.filter_input.clone())),
             )
             .child(
@@ -977,23 +1022,35 @@ impl Render for KeymapEditor {
                     .border_b(px(1.0))
                     .border_color(rgb(theme.border_variant))
                     .bg(rgb(theme.surface_background))
-                    .child(self.header_cell("", None, Some(ICON_COL), theme, cx))
-                    .child(self.header_cell("Action", Some(SortColumn::Action), None, theme, cx))
+                    .child(self.header_cell(String::new(), None, Some(ICON_COL), theme, cx))
                     .child(self.header_cell(
-                        "Keystrokes",
+                        crate::fl!("keymap-header-action"),
+                        Some(SortColumn::Action),
+                        None,
+                        theme,
+                        cx,
+                    ))
+                    .child(self.header_cell(
+                        crate::fl!("keymap-header-keystrokes"),
                         Some(SortColumn::Keystrokes),
                         None,
                         theme,
                         cx,
                     ))
                     .child(self.header_cell(
-                        "Context",
+                        crate::fl!("keymap-header-context"),
                         Some(SortColumn::Category),
                         Some(CONTEXT_COL),
                         theme,
                         cx,
                     ))
-                    .child(self.header_cell("Source", None, Some(SOURCE_COL), theme, cx)),
+                    .child(self.header_cell(
+                        crate::fl!("keymap-header-source"),
+                        None,
+                        Some(SOURCE_COL),
+                        theme,
+                        cx,
+                    )),
             )
             .child(
                 div()
@@ -1043,7 +1100,7 @@ impl Render for KeymapEditor {
                         .items_center()
                         .justify_center()
                         .text_color(rgb(theme.text_muted))
-                        .child("No keybindings found"),
+                        .child(crate::fl!("keymap-empty")),
                 )
             })
             .when_some(context_menu, |this, menu| {

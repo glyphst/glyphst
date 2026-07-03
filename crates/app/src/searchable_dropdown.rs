@@ -245,7 +245,7 @@ impl SearchableDropdown {
                                     .px_3()
                                     .py_2()
                                     .text_color(rgb(theme.text_muted))
-                                    .child("No matching items"),
+                                    .child(crate::fl!("searchable-dropdown-empty")),
                             )
                         })
                         .when(item_count > 0, |this| {

@@ -870,8 +870,8 @@ impl PdfView {
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("Untitled")
-            .to_string()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| crate::fl!("untitled"))
             .into();
 
         let document = mupdf::Document::open(
@@ -5424,7 +5424,7 @@ impl PdfView {
             .iter()
             .rfind(|entry| entry.navigable && entry.page_idx <= current_page)
             .map(|entry| entry.title.clone())
-            .unwrap_or_else(|| format!("Page {}", self.current_page()).into())
+            .unwrap_or_else(|| crate::fl!("page-title", page = (self.current_page() as i64)).into())
     }
 
     fn toc_palette_entries(&self) -> Vec<TocPaletteEntry> {
@@ -5619,7 +5619,7 @@ impl PdfView {
     }
 
     fn context_menu_entry(
-        label: &'static str,
+        label: String,
         theme: Theme,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -5644,7 +5644,7 @@ impl PdfView {
             .child(label)
     }
 
-    fn context_menu_label(label: &'static str, theme: Theme) -> impl IntoElement {
+    fn context_menu_label(label: String, theme: Theme) -> impl IntoElement {
         div()
             .flex()
             .items_center()
@@ -5656,7 +5656,7 @@ impl PdfView {
     }
 
     fn grid_overview_toolbar_button(
-        label: &'static str,
+        label: String,
         theme: Theme,
         handler: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -5685,7 +5685,7 @@ impl PdfView {
     }
 
     fn grid_overview_action_entry(
-        label: &'static str,
+        label: String,
         theme: Theme,
         handler: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -5727,13 +5727,13 @@ impl PdfView {
             .border_color(rgb(theme.border))
             .bg(rgb(theme.surface_background))
             .child(Self::grid_overview_action_entry(
-                "Export as Text",
+                crate::fl!("pdf-export-as-text"),
                 theme,
                 move |this, cx| this.export_selected_pages_as_text(text_source, cx),
                 cx,
             ))
             .child(Self::grid_overview_action_entry(
-                "Export as Image",
+                crate::fl!("pdf-export-as-image"),
                 theme,
                 move |this, cx| this.export_selected_pages_as_image(image_source, cx),
                 cx,
@@ -5831,7 +5831,7 @@ impl PdfView {
     }
 
     fn render_sidebar_shell(
-        title: &'static str,
+        title: String,
         width: f32,
         header_end: impl IntoElement + 'static,
         content: impl IntoElement + 'static,
@@ -5883,10 +5883,10 @@ impl PdfView {
     fn render_sidebar_count(count: usize, theme: Theme) -> impl IntoElement {
         div()
             .text_color(rgb(theme.text_muted))
-            .child(format!("{} items", count))
+            .child(crate::fl!("item-count", count = (count as i64)))
     }
 
-    fn render_sidebar_empty_message(message: &'static str, theme: Theme) -> impl IntoElement {
+    fn render_sidebar_empty_message(message: String, theme: Theme) -> impl IntoElement {
         div()
             .flex_1()
             .min_h_0()
@@ -5962,9 +5962,9 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let fullscreen_label = if is_fullscreen {
-            "Exit Full Screen"
+            crate::fl!("pdf-context-exit-full-screen")
         } else {
-            "Enter Full Screen"
+            crate::fl!("pdf-context-enter-full-screen")
         };
 
         div()
@@ -5989,13 +5989,13 @@ impl PdfView {
             })
             .when(state.has_note, |menu| {
                 menu.child(Self::context_menu_entry(
-                    "Edit Note",
+                    crate::fl!("pdf-context-edit-note"),
                     theme,
                     |this, window, cx| this.begin_edit_context_note(window, cx),
                     cx,
                 ))
                 .child(Self::context_menu_entry(
-                    "Remove Note",
+                    crate::fl!("pdf-context-remove-note"),
                     theme,
                     |this, _, cx| this.remove_context_note(cx),
                     cx,
@@ -6004,7 +6004,7 @@ impl PdfView {
             })
             .when(!state.has_note && state.has_selection, |menu| {
                 menu.child(Self::context_menu_entry(
-                    "Add Note",
+                    crate::fl!("pdf-context-add-note"),
                     theme,
                     |this, window, cx| this.begin_add_note(window, cx),
                     cx,
@@ -6012,43 +6012,49 @@ impl PdfView {
                 .child(Self::context_menu_separator(theme))
             })
             .when_some(state.highlight_color, |menu, color| {
-                menu.child(Self::context_menu_label("Change Highlight Color", theme))
-                    .child(Self::context_menu_highlight_color_row(
-                        HighlightColorAction::Change,
-                        Some(color),
-                        theme,
-                        cx,
-                    ))
-                    .child(Self::context_menu_entry(
-                        "Remove Highlight",
-                        theme,
-                        |this, _, cx| this.remove_context_highlight(cx),
-                        cx,
-                    ))
-                    .child(Self::context_menu_separator(theme))
+                menu.child(Self::context_menu_label(
+                    crate::fl!("pdf-context-change-highlight-color"),
+                    theme,
+                ))
+                .child(Self::context_menu_highlight_color_row(
+                    HighlightColorAction::Change,
+                    Some(color),
+                    theme,
+                    cx,
+                ))
+                .child(Self::context_menu_entry(
+                    crate::fl!("pdf-context-remove-highlight"),
+                    theme,
+                    |this, _, cx| this.remove_context_highlight(cx),
+                    cx,
+                ))
+                .child(Self::context_menu_separator(theme))
             })
             .when(
                 state.highlight_color.is_none() && state.has_selection,
                 |menu| {
-                    menu.child(Self::context_menu_label("Highlight", theme))
-                        .child(Self::context_menu_highlight_color_row(
-                            HighlightColorAction::Create,
-                            None,
-                            theme,
-                            cx,
-                        ))
-                        .child(Self::context_menu_separator(theme))
+                    menu.child(Self::context_menu_label(
+                        crate::fl!("pdf-context-highlight"),
+                        theme,
+                    ))
+                    .child(Self::context_menu_highlight_color_row(
+                        HighlightColorAction::Create,
+                        None,
+                        theme,
+                        cx,
+                    ))
+                    .child(Self::context_menu_separator(theme))
                 },
             )
             .when(state.has_image, |menu| {
                 menu.child(Self::context_menu_entry(
-                    "Copy Image",
+                    crate::fl!("pdf-context-copy-image"),
                     theme,
                     |this, _, cx| this.copy_image(cx),
                     cx,
                 ))
                 .child(Self::context_menu_entry(
-                    "Save Image",
+                    crate::fl!("pdf-context-save-image"),
                     theme,
                     |this, _, cx| this.save_image(cx),
                     cx,
@@ -6057,7 +6063,7 @@ impl PdfView {
             })
             .when(state.has_page, |menu| {
                 menu.child(Self::context_menu_entry(
-                    "Save Page as Image",
+                    crate::fl!("pdf-context-save-page-as-image"),
                     theme,
                     |this, _, cx| this.save_page_as_image(cx),
                     cx,
@@ -6068,7 +6074,7 @@ impl PdfView {
                 state.highlight_color.is_none() && state.has_selection,
                 |menu| {
                     menu.child(Self::context_menu_entry(
-                        "Copy",
+                        crate::fl!("copy"),
                         theme,
                         |this, _, cx| this.copy_selection(cx),
                         cx,
@@ -6078,7 +6084,7 @@ impl PdfView {
             )
             .when(!state.grid_overview, |menu| {
                 menu.child(Self::context_menu_entry(
-                    "Select All",
+                    crate::fl!("select-all"),
                     theme,
                     |this, _, cx| {
                         this.select_all();
@@ -6089,19 +6095,19 @@ impl PdfView {
                 .child(Self::context_menu_separator(theme))
             })
             .child(Self::context_menu_entry(
-                "Zoom In",
+                crate::fl!("zoom-in"),
                 theme,
                 |this, _, cx| this.zoom_in(cx),
                 cx,
             ))
             .child(Self::context_menu_entry(
-                "Zoom Out",
+                crate::fl!("zoom-out"),
                 theme,
                 |this, _, cx| this.zoom_out(cx),
                 cx,
             ))
             .child(Self::context_menu_entry(
-                "Reset Zoom",
+                crate::fl!("reset-zoom"),
                 theme,
                 |this, _, cx| this.reset_zoom(cx),
                 cx,
@@ -6114,7 +6120,7 @@ impl PdfView {
                 cx,
             ))
             .child(Self::context_menu_entry(
-                "Settings",
+                crate::fl!("settings-title"),
                 theme,
                 |_, _, cx| open_settings_window(cx),
                 cx,
@@ -6582,20 +6588,32 @@ impl PdfView {
         let actions_position = self.thumbnail_sidebar_actions_position;
         let compact_header =
             selecting && self.thumbnail_sidebar_width < THUMBNAIL_SIDEBAR_COMPACT_HEADER_WIDTH;
-        let title = if compact_header { "" } else { "Thumbnails" };
+        let title = if compact_header {
+            String::new()
+        } else {
+            crate::fl!("pdf-thumbnails-title")
+        };
 
         let toolbar_label = if selecting && selected_count > 0 && !compact_header {
-            Some(match selected_count {
-                1 => "1 selected".to_string(),
-                count => format!("{count} selected"),
-            })
+            Some(crate::fl!(
+                "selected-count",
+                count = (selected_count as i64)
+            ))
         } else {
             None
         };
 
         let mut toolbar_actions = div().flex().items_center().gap_2();
-        let actions_label = if compact_header { "⋯" } else { "Actions ▾" };
-        let cancel_label = if compact_header { "×" } else { "Cancel" };
+        let actions_label = if compact_header {
+            "⋯".to_string()
+        } else {
+            crate::fl!("actions-menu")
+        };
+        let cancel_label = if compact_header {
+            "×".to_string()
+        } else {
+            crate::fl!("cancel")
+        };
         if selecting && selected_count > 0 {
             toolbar_actions = toolbar_actions
                 .child(Self::grid_overview_toolbar_button(
@@ -6624,7 +6642,7 @@ impl PdfView {
             ));
         } else {
             toolbar_actions = toolbar_actions.child(Self::grid_overview_toolbar_button(
-                "Select",
+                crate::fl!("select"),
                 theme,
                 |this, _, _, cx| this.enter_thumbnail_sidebar_selection(cx),
                 cx,
@@ -6667,7 +6685,7 @@ impl PdfView {
                     .overflow_hidden()
                     .when(page_count == 0, |this| {
                         this.child(Self::render_sidebar_empty_message(
-                            "No pages available",
+                            crate::fl!("pdf-no-pages-available"),
                             theme,
                         ))
                     })
@@ -7012,7 +7030,11 @@ impl PdfView {
                     .px_3()
                     .border_b(px(1.0))
                     .border_color(rgb(theme.border))
-                    .child(div().text_size(ui_rems(13.0)).child("Page Overview"))
+                    .child(
+                        div()
+                            .text_size(ui_rems(13.0))
+                            .child(crate::fl!("pdf-page-overview-title")),
+                    )
                     .child(
                         {
                             let mut toolbar = div().flex().items_center().gap_2();
@@ -7021,7 +7043,7 @@ impl PdfView {
                             {
                                 toolbar = toolbar
                                     .child(Self::grid_overview_toolbar_button(
-                                        "Actions ▾",
+                                        crate::fl!("actions-menu"),
                                         theme,
                                         |this, event, _, cx| {
                                             this.toggle_grid_overview_actions(
@@ -7032,21 +7054,21 @@ impl PdfView {
                                         cx,
                                     ))
                                     .child(Self::grid_overview_toolbar_button(
-                                        "Cancel Selection",
+                                        crate::fl!("cancel-selection"),
                                         theme,
                                         |this, _, _, cx| this.cancel_grid_overview_selection(cx),
                                         cx,
                                     ));
                             } else if self.grid_overview_selecting {
                                 toolbar = toolbar.child(Self::grid_overview_toolbar_button(
-                                    "Cancel",
+                                    crate::fl!("cancel"),
                                     theme,
                                     |this, _, _, cx| this.cancel_grid_overview_selection(cx),
                                     cx,
                                 ));
                             } else {
                                 toolbar = toolbar.child(Self::grid_overview_toolbar_button(
-                                    "Select",
+                                    crate::fl!("select"),
                                     theme,
                                     |this, _, _, cx| this.enter_grid_overview_selection(cx),
                                     cx,
@@ -7342,7 +7364,7 @@ impl PdfView {
             .flex_col()
             .when(visible_len == 0, |this| {
                 this.child(Self::render_sidebar_empty_message(
-                    "No table of contents entries found",
+                    crate::fl!("toc-empty"),
                     theme,
                 ))
             })
@@ -7483,7 +7505,7 @@ impl PdfView {
             });
 
         Self::render_sidebar_shell(
-            "Table of Contents",
+            crate::fl!("table-of-contents-title"),
             self.toc_sidebar_width,
             Self::render_sidebar_count(self.toc.len(), theme),
             content,
@@ -7513,7 +7535,10 @@ impl PdfView {
             .flex()
             .flex_col()
             .when(visible_len == 0, |this| {
-                this.child(Self::render_sidebar_empty_message("No notes found", theme))
+                this.child(Self::render_sidebar_empty_message(
+                    crate::fl!("notes-empty"),
+                    theme,
+                ))
             })
             .when(visible_len > 0, |this| {
                 this.child(
@@ -7612,7 +7637,7 @@ impl PdfView {
             });
 
         Self::render_sidebar_shell(
-            "Notes",
+            crate::fl!("notes-title"),
             self.notes_sidebar_width,
             Self::render_sidebar_count(visible_len, theme),
             content,
@@ -7677,7 +7702,7 @@ impl PdfView {
                     div()
                         .text_size(ui_rems(15.0))
                         .text_color(rgb(theme.error))
-                        .child("Failed to load PDF"),
+                        .child(crate::fl!("pdf-failed-to-load")),
                 )
                 .child(
                     div()
@@ -7740,7 +7765,7 @@ impl PdfView {
                     div()
                         .text_size(ui_rems(14.0))
                         .text_color(rgb(theme.text_muted))
-                        .child(format!("Loading {}", self.file_name)),
+                        .child(crate::fl!("pdf-loading", name = self.file_name.as_ref())),
                 )
                 .child(
                     div()
@@ -8598,133 +8623,152 @@ impl Render for PdfView {
                                                     .expect("failed to render PDF")
                                             })
                                         },
-                                    move |_, paint_data, window, _| {
-                                        for page in paint_data.pages {
-                                            window.paint_quad(fill(page.bounds, rgb(theme.page)));
+                                        move |_, paint_data, window, _| {
+                                            for page in paint_data.pages {
+                                                window
+                                                    .paint_quad(fill(page.bounds, rgb(theme.page)));
 
-                                            if let Some(image) = page.image {
-                                                let _ = window.paint_image(
-                                                    page.bounds,
-                                                    Corners::default(),
-                                                    image,
-                                                    0,
-                                                    false,
-                                                );
+                                                if let Some(image) = page.image {
+                                                    let _ = window.paint_image(
+                                                        page.bounds,
+                                                        Corners::default(),
+                                                        image,
+                                                        0,
+                                                        false,
+                                                    );
+                                                }
                                             }
-                                        }
 
-                                        for overlay in paint_data.diff_flash_overlays {
-                                            window.paint_quad(fill(
-                                                overlay.bounds,
-                                                rgba(Self::with_alpha(theme.accent, overlay.alpha)),
-                                            ));
-                                        }
-
-                                        for (highlight, color) in paint_data.highlight_overlays {
-                                            window.paint_quad(fill(
-                                                highlight,
-                                                rgba(theme.highlight_color(color)),
-                                            ));
-                                        }
-
-                                        for (note, color) in paint_data.note_underlines {
-                                            let dot = px(3.0);
-                                            let gap = px(3.0);
-                                            let step = dot + gap;
-                                            let y =
-                                                note.origin.y + note.size.height - dot - px(1.0);
-                                            let right = note.origin.x + note.size.width;
-                                            let mut x = note.origin.x;
-                                            while x < right {
-                                                let width =
-                                                    if x + dot > right { right - x } else { dot };
-                                                window.paint_quad(
-                                                    fill(
-                                                        Bounds::new(point(x, y), size(width, dot)),
-                                                        rgba(theme.note_color(color)),
-                                                    )
-                                                    .corner_radii(Corners::all(dot / 2.0)),
-                                                );
-                                                x += step;
+                                            for overlay in paint_data.diff_flash_overlays {
+                                                window.paint_quad(fill(
+                                                    overlay.bounds,
+                                                    rgba(Self::with_alpha(
+                                                        theme.accent,
+                                                        overlay.alpha,
+                                                    )),
+                                                ));
                                             }
-                                        }
 
-                                        for highlight in paint_data.search_highlights {
-                                            window.paint_quad(fill(
-                                                highlight,
-                                                rgba(Self::with_alpha(theme.match_highlight, 0x66)),
-                                            ));
-                                        }
+                                            for (highlight, color) in paint_data.highlight_overlays
+                                            {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    rgba(theme.highlight_color(color)),
+                                                ));
+                                            }
 
-                                        for highlight in paint_data.active_search_highlights {
-                                            window.paint_quad(fill(
-                                                highlight,
-                                                rgba(Self::with_alpha(theme.accent, 0x99)),
-                                            ));
-                                        }
+                                            for (note, color) in paint_data.note_underlines {
+                                                let dot = px(3.0);
+                                                let gap = px(3.0);
+                                                let step = dot + gap;
+                                                let y = note.origin.y + note.size.height
+                                                    - dot
+                                                    - px(1.0);
+                                                let right = note.origin.x + note.size.width;
+                                                let mut x = note.origin.x;
+                                                while x < right {
+                                                    let width = if x + dot > right {
+                                                        right - x
+                                                    } else {
+                                                        dot
+                                                    };
+                                                    window.paint_quad(
+                                                        fill(
+                                                            Bounds::new(
+                                                                point(x, y),
+                                                                size(width, dot),
+                                                            ),
+                                                            rgba(theme.note_color(color)),
+                                                        )
+                                                        .corner_radii(Corners::all(dot / 2.0)),
+                                                    );
+                                                    x += step;
+                                                }
+                                            }
 
-                                        for highlight in paint_data.link_highlights {
-                                            window.paint_quad(fill(
-                                                highlight,
-                                                rgba(Self::with_alpha(theme.accent, 0x33)),
-                                            ));
-                                        }
+                                            for highlight in paint_data.search_highlights {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    rgba(Self::with_alpha(
+                                                        theme.match_highlight,
+                                                        0x66,
+                                                    )),
+                                                ));
+                                            }
 
-                                        for border in paint_data.selected_highlight_borders {
-                                            let color = rgba(Self::with_alpha(theme.accent, 0xdd));
-                                            let thickness = px(1.0);
-                                            window.paint_quad(fill(
-                                                Bounds::new(
-                                                    border.origin,
-                                                    size(border.size.width, thickness),
-                                                ),
-                                                color,
-                                            ));
-                                            window.paint_quad(fill(
-                                                Bounds::new(
-                                                    point(
-                                                        border.origin.x,
-                                                        border.origin.y + border.size.height
-                                                            - thickness,
+                                            for highlight in paint_data.active_search_highlights {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    rgba(Self::with_alpha(theme.accent, 0x99)),
+                                                ));
+                                            }
+
+                                            for highlight in paint_data.link_highlights {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    rgba(Self::with_alpha(theme.accent, 0x33)),
+                                                ));
+                                            }
+
+                                            for border in paint_data.selected_highlight_borders {
+                                                let color =
+                                                    rgba(Self::with_alpha(theme.accent, 0xdd));
+                                                let thickness = px(1.0);
+                                                window.paint_quad(fill(
+                                                    Bounds::new(
+                                                        border.origin,
+                                                        size(border.size.width, thickness),
                                                     ),
-                                                    size(border.size.width, thickness),
-                                                ),
-                                                color,
-                                            ));
-                                            window.paint_quad(fill(
-                                                Bounds::new(
-                                                    border.origin,
-                                                    size(thickness, border.size.height),
-                                                ),
-                                                color,
-                                            ));
-                                            window.paint_quad(fill(
-                                                Bounds::new(
-                                                    point(
-                                                        border.origin.x + border.size.width
-                                                            - thickness,
-                                                        border.origin.y,
+                                                    color,
+                                                ));
+                                                window.paint_quad(fill(
+                                                    Bounds::new(
+                                                        point(
+                                                            border.origin.x,
+                                                            border.origin.y + border.size.height
+                                                                - thickness,
+                                                        ),
+                                                        size(border.size.width, thickness),
                                                     ),
-                                                    size(thickness, border.size.height),
-                                                ),
-                                                color,
-                                            ));
-                                        }
+                                                    color,
+                                                ));
+                                                window.paint_quad(fill(
+                                                    Bounds::new(
+                                                        border.origin,
+                                                        size(thickness, border.size.height),
+                                                    ),
+                                                    color,
+                                                ));
+                                                window.paint_quad(fill(
+                                                    Bounds::new(
+                                                        point(
+                                                            border.origin.x + border.size.width
+                                                                - thickness,
+                                                            border.origin.y,
+                                                        ),
+                                                        size(thickness, border.size.height),
+                                                    ),
+                                                    color,
+                                                ));
+                                            }
 
-                                        for highlight in paint_data.selection_highlights {
-                                            window.paint_quad(fill(
-                                                highlight,
-                                                rgba(theme.selection_highlight),
-                                            ));
-                                        }
-                                    },
+                                            for highlight in paint_data.selection_highlights {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    rgba(theme.selection_highlight),
+                                                ));
+                                            }
+                                        },
+                                    )
+                                    .size_full(),
                                 )
-                                .size_full(),
-                            )
                             })
-                            .when(!self.is_presentation_mode() && !self.grid_overview_open, |this| {
-                                this.vertical_scrollbar_for(&self.document_scroll, window, cx)
-                            }),
+                            .when(
+                                !self.is_presentation_mode() && !self.grid_overview_open,
+                                |this| {
+                                    this.vertical_scrollbar_for(&self.document_scroll, window, cx)
+                                },
+                            ),
                     ),
             )
             .when(self.grid_overview_open, |this| {

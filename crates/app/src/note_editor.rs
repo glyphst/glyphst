@@ -622,7 +622,7 @@ impl Render for NoteEditor {
                     .border_b(px(1.0))
                     .border_color(rgb(theme.border))
                     .text_size(ui_rems(14.0))
-                    .child("Note"),
+                    .child(crate::fl!("note-title")),
             )
             .child(
                 div()
@@ -648,7 +648,7 @@ impl Render for NoteEditor {
                     .text_size(ui_rems(12.0))
                     .text_color(rgb(theme.text_muted))
                     .child(color_palette)
-                    .child("Ctrl+Enter saves · Esc cancels"),
+                    .child(crate::fl!("note-editor-help")),
             )
     }
 }

@@ -4,8 +4,8 @@ use crate::{
     scrollbar::{WithScrollbar as _, uniform_list_scrollbar_for},
     searchable_dropdown::{SearchableDropdown, SearchableDropdownEvent, SearchableItem},
     settings::{
-        AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, FontSettings, KeymapPreset,
-        ModelRef, ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility,
+        AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, AppLanguage, FontSettings,
+        KeymapPreset, ModelRef, ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility,
         WindowBackgroundMode, setup_ui_font, ui_rems,
     },
     theme::{
@@ -652,7 +652,7 @@ fn open_settings_window_with_section(section: Option<SettingsSection>, cx: &mut 
     if let Err(error) = cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("Glyphst Settings".into()),
+                title: Some(crate::fl!("settings-window-title").into()),
                 ..Default::default()
             }),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -687,13 +687,13 @@ enum SettingsTab {
 }
 
 impl SettingsTab {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::General => "General",
-            Self::Keymap => "Keymap",
-            Self::Appearance => "Appearance",
-            Self::AiGeneral => "General",
-            Self::AiProviders => "Model Providers",
+            Self::General => crate::fl!("settings-tab-general"),
+            Self::Keymap => crate::fl!("settings-tab-keymap"),
+            Self::Appearance => crate::fl!("settings-tab-appearance"),
+            Self::AiGeneral => crate::fl!("settings-tab-general"),
+            Self::AiProviders => crate::fl!("settings-tab-model-providers"),
         }
     }
 
@@ -704,6 +704,7 @@ impl SettingsTab {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsSection {
+    GeneralLanguage,
     GeneralZoom,
     GeneralScroll,
     GeneralKeymap,
@@ -716,7 +717,8 @@ enum SettingsSection {
     AiProviders,
 }
 
-const GENERAL_SECTIONS: [SettingsSection; 4] = [
+const GENERAL_SECTIONS: [SettingsSection; 5] = [
+    SettingsSection::GeneralLanguage,
     SettingsSection::GeneralZoom,
     SettingsSection::GeneralScroll,
     SettingsSection::GeneralWindow,
@@ -734,9 +736,11 @@ const AI_PROVIDER_SECTIONS: [SettingsSection; 1] = [SettingsSection::AiProviders
 impl SettingsSection {
     fn tab(self) -> SettingsTab {
         match self {
-            Self::GeneralZoom | Self::GeneralScroll | Self::GeneralWindow | Self::GeneralTabs => {
-                SettingsTab::General
-            }
+            Self::GeneralLanguage
+            | Self::GeneralZoom
+            | Self::GeneralScroll
+            | Self::GeneralWindow
+            | Self::GeneralTabs => SettingsTab::General,
             Self::GeneralKeymap => SettingsTab::Keymap,
             Self::AppearanceTheme | Self::AppearanceFonts | Self::AppearanceOverrides => {
                 SettingsTab::Appearance
@@ -746,18 +750,19 @@ impl SettingsSection {
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::GeneralZoom => "Zoom",
-            Self::GeneralScroll => "Scroll",
-            Self::GeneralKeymap => "Keymap",
-            Self::GeneralWindow => "Window",
-            Self::GeneralTabs => "Tabs",
-            Self::AppearanceTheme => "Theme",
-            Self::AppearanceFonts => "Fonts",
-            Self::AppearanceOverrides => "Overrides",
-            Self::AiGeneral => "General",
-            Self::AiProviders => "Model Providers",
+            Self::GeneralLanguage => crate::fl!("settings-section-language"),
+            Self::GeneralZoom => crate::fl!("settings-section-zoom"),
+            Self::GeneralScroll => crate::fl!("settings-section-scroll"),
+            Self::GeneralKeymap => crate::fl!("settings-section-keymap"),
+            Self::GeneralWindow => crate::fl!("settings-section-window"),
+            Self::GeneralTabs => crate::fl!("settings-section-tabs"),
+            Self::AppearanceTheme => crate::fl!("settings-section-theme"),
+            Self::AppearanceFonts => crate::fl!("settings-section-fonts"),
+            Self::AppearanceOverrides => crate::fl!("settings-section-overrides"),
+            Self::AiGeneral => crate::fl!("settings-section-general"),
+            Self::AiProviders => crate::fl!("settings-section-model-providers"),
         }
     }
 
@@ -917,8 +922,14 @@ impl SettingsWindow {
         };
 
         let font_picker = FontPickerState::new(cx, &font_settings);
-        let font_search_input =
-            cx.new(|cx| SettingsTextInput::new("".into(), "Search fonts…".into(), false, cx));
+        let font_search_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                "".into(),
+                crate::fl!("settings-search-fonts-placeholder").into(),
+                false,
+                cx,
+            )
+        });
         cx.subscribe(&font_search_input, |_, _, _, cx| cx.notify())
             .detach();
 
@@ -937,12 +948,18 @@ impl SettingsWindow {
         })
         .detach();
 
-        let ai_model_input =
-            cx.new(|cx| SettingsTextInput::new("".into(), "model id…".into(), false, cx));
+        let ai_model_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                "".into(),
+                crate::fl!("settings-model-id-placeholder").into(),
+                false,
+                cx,
+            )
+        });
         let ai_key_input = cx.new(|cx| {
             SettingsTextInput::new(
                 config.api_key.clone().into(),
-                "paste API key…".into(),
+                crate::fl!("settings-api-key-placeholder").into(),
                 true,
                 cx,
             )
@@ -967,10 +984,22 @@ impl SettingsWindow {
         })
         .detach();
 
-        let main_model_search =
-            cx.new(|cx| SettingsTextInput::new("".into(), "Search model…".into(), false, cx));
-        let title_model_search =
-            cx.new(|cx| SettingsTextInput::new("".into(), "Search model…".into(), false, cx));
+        let main_model_search = cx.new(|cx| {
+            SettingsTextInput::new(
+                "".into(),
+                crate::fl!("settings-search-model-placeholder").into(),
+                false,
+                cx,
+            )
+        });
+        let title_model_search = cx.new(|cx| {
+            SettingsTextInput::new(
+                "".into(),
+                crate::fl!("settings-search-model-placeholder").into(),
+                false,
+                cx,
+            )
+        });
         cx.subscribe(&main_model_search, |this, _, event, cx| {
             let SettingsInputEvent::Changed(value) = event;
             this.main_model_picker.query = value.clone();
@@ -984,8 +1013,14 @@ impl SettingsWindow {
         })
         .detach();
 
-        let fetch_model_search =
-            cx.new(|cx| SettingsTextInput::new("".into(), "Search model…".into(), false, cx));
+        let fetch_model_search = cx.new(|cx| {
+            SettingsTextInput::new(
+                "".into(),
+                crate::fl!("settings-search-model-placeholder").into(),
+                false,
+                cx,
+            )
+        });
         cx.subscribe(&fetch_model_search, |this, _, event, cx| {
             let SettingsInputEvent::Changed(value) = event;
             this.provider_model_picker.query = value.clone();
@@ -1071,18 +1106,28 @@ impl SettingsWindow {
             )
         };
         let static_theme_dropdown = cx.new(|cx| {
-            SearchableDropdown::new(all_theme_items, static_selected, "Search themes…", cx)
+            SearchableDropdown::new(
+                all_theme_items,
+                static_selected,
+                &crate::fl!("settings-search-themes-placeholder"),
+                cx,
+            )
         });
         let light_theme_dropdown = cx.new(|cx| {
             SearchableDropdown::new(
                 light_theme_items,
                 light_selected,
-                "Search light themes…",
+                &crate::fl!("settings-search-light-themes-placeholder"),
                 cx,
             )
         });
         let dark_theme_dropdown = cx.new(|cx| {
-            SearchableDropdown::new(dark_theme_items, dark_selected, "Search dark themes…", cx)
+            SearchableDropdown::new(
+                dark_theme_items,
+                dark_selected,
+                &crate::fl!("settings-search-dark-themes-placeholder"),
+                cx,
+            )
         });
         cx.subscribe(&static_theme_dropdown, |this, _, event, cx| {
             let SearchableDropdownEvent::Selected(value) = event;
@@ -1144,7 +1189,7 @@ impl SettingsWindow {
         Self {
             focus_handle: cx.focus_handle(),
             active_tab: SettingsTab::General,
-            active_section: SettingsSection::GeneralZoom,
+            active_section: SettingsSection::GeneralLanguage,
             ai_expanded: true,
             content_scroll: ScrollHandle::new(),
             provider_list_scroll: ScrollHandle::new(),
@@ -1180,6 +1225,7 @@ impl SettingsWindow {
             )
         };
         keybindings::apply(cx, keymap_preset, &keybinding_overrides);
+        crate::localize::select_language(cx.global::<SettingsStore>().settings.language);
         cx.refresh_windows();
         self.status = None;
         self.save_error = result.err().map(|e| format!("{e:#}").into());
@@ -1319,7 +1365,7 @@ impl SettingsWindow {
         {
             let picker = &mut self.provider_model_picker;
             picker.loading = true;
-            picker.status = Some("Fetching models…".into());
+            picker.status = Some(crate::fl!("settings-fetching-models").into());
             picker.request = Some(signature.clone());
             picker.open = false;
             picker.anchor = anchor;
@@ -1346,11 +1392,16 @@ impl SettingsWindow {
                     Ok(models) => {
                         let count = models.len();
                         picker.models = models;
-                        picker.status = Some(format!("Fetched {count} models.").into());
+                        picker.status = Some(
+                            crate::fl!("settings-fetched-models", count = (count as i64)).into(),
+                        );
                         picker.open = true;
                     }
                     Err(error) => {
-                        picker.status = Some(format!("Failed to fetch models: {error}").into());
+                        picker.status = Some(
+                            crate::fl!("settings-fetch-models-failed", error = error.as_str())
+                                .into(),
+                        );
                     }
                 }
                 cx.notify();
@@ -1366,7 +1417,7 @@ impl SettingsWindow {
         {
             let picker = &mut self.provider_model_picker;
             picker.loading = true;
-            picker.status = Some("Testing connection…".into());
+            picker.status = Some(crate::fl!("settings-testing-connection").into());
             picker.request = Some(signature.clone());
         }
 
@@ -1383,8 +1434,10 @@ impl SettingsWindow {
                 let picker = &mut this.provider_model_picker;
                 picker.loading = false;
                 picker.status = Some(match result {
-                    Ok(()) => "Connection succeeded.".into(),
-                    Err(error) => format!("Connection failed: {error}").into(),
+                    Ok(()) => crate::fl!("settings-connection-succeeded").into(),
+                    Err(error) => {
+                        crate::fl!("settings-connection-failed", error = error.as_str()).into()
+                    }
                 });
                 cx.notify();
             });
@@ -1399,11 +1452,11 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         self.ai_model_input.update(cx, |input, cx| {
-            input.placeholder = "model id…".into();
+            input.placeholder = crate::fl!("settings-model-id-placeholder").into();
             input.set_content("".into(), cx);
         });
         self.ai_key_input.update(cx, |input, cx| {
-            input.placeholder = "paste API key…".into();
+            input.placeholder = crate::fl!("settings-api-key-placeholder").into();
             input.set_content(config.api_key.clone().into(), cx);
         });
         self.ai_base_url_input.update(cx, |input, cx| {
@@ -1459,7 +1512,13 @@ impl SettingsWindow {
                     Ok(Ok(Some(path))) => match cx.global::<SettingsStore>().export_to(&path) {
                         Ok(()) => {
                             this.save_error = None;
-                            this.status = Some(format!("Exported to {}", path.display()).into());
+                            this.status = Some(
+                                crate::fl!(
+                                    "settings-exported-to",
+                                    path = path.display().to_string()
+                                )
+                                .into(),
+                            );
                         }
                         Err(error) => {
                             this.status = None;
@@ -1617,7 +1676,7 @@ impl SettingsWindow {
                     .text_color(rgb(theme.text_muted))
                     .child(if expanded { "▾" } else { "▸" }),
             )
-            .child("AI")
+            .child(crate::fl!("ai-title"))
             .into_any_element()
     }
 
@@ -1874,7 +1933,7 @@ impl SettingsWindow {
                     cx.stop_propagation();
                 }),
             )
-            .child("Reset fonts")
+            .child(crate::fl!("settings-reset-fonts"))
     }
 
     fn color_row(
@@ -2179,6 +2238,43 @@ impl SettingsWindow {
             .child(label)
     }
 
+    fn language_option(
+        &self,
+        language: AppLanguage,
+        selected_language: AppLanguage,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = language == selected_language;
+
+        div()
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(if selected {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.border_variant)
+            })
+            .bg(if selected {
+                rgb(theme.element_selected)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.change_settings(move |settings| settings.language = language, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(language.label())
+    }
+
     fn keymap_option(
         &self,
         preset: KeymapPreset,
@@ -2222,7 +2318,7 @@ impl SettingsWindow {
 
     fn keybinding_button(
         &self,
-        label: &'static str,
+        label: impl IntoElement,
         theme: Theme,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -2283,7 +2379,7 @@ impl SettingsWindow {
                     .flex_none()
                     .w(px(132.0))
                     .text_color(rgb(theme.text))
-                    .child("UI font family"),
+                    .child(crate::fl!("settings-ui-font-family")),
             )
             .child(self.font_family_control(settings, theme, cx))
     }
@@ -2444,7 +2540,7 @@ impl SettingsWindow {
                         .px_3()
                         .py_2()
                         .text_color(rgb(theme.text_muted))
-                        .child("No matching fonts"),
+                        .child(crate::fl!("settings-no-matching-fonts")),
                 )
             })
             .when(entry_count > 0, |this| {
@@ -2695,9 +2791,9 @@ impl SettingsWindow {
             .when(entry_count == 0, |this| {
                 this.child(div().px_3().py_2().text_color(rgb(theme.text_muted)).child(
                     if query.trim().is_empty() {
-                        "No enabled provider models"
+                        crate::fl!("settings-no-enabled-provider-models")
                     } else {
-                        "No matching models"
+                        crate::fl!("no-matching-models")
                     },
                 ))
             })
@@ -2746,7 +2842,7 @@ impl SettingsWindow {
 
     fn ai_action_button(
         &self,
-        label: &'static str,
+        label: impl IntoElement,
         theme: Theme,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -2817,10 +2913,10 @@ impl SettingsWindow {
                     cx.stop_propagation();
                 }),
             )
-            .child("Default")
+            .child(crate::fl!("settings-default"))
     }
 
-    fn section_title(label: &'static str, theme: Theme) -> impl IntoElement {
+    fn section_title(label: impl IntoElement, theme: Theme) -> impl IntoElement {
         div()
             .pt_2()
             .pb_1()
@@ -2838,7 +2934,10 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .gap_1()
-            .child(Self::section_title("Keymap", theme))
+            .child(Self::section_title(
+                crate::fl!("settings-section-keymap"),
+                theme,
+            ))
             .child(
                 div()
                     .flex()
@@ -2846,7 +2945,11 @@ impl SettingsWindow {
                     .items_center()
                     .justify_between()
                     .h(px(44.0))
-                    .child(div().text_color(rgb(theme.text)).child("Base preset"))
+                    .child(
+                        div()
+                            .text_color(rgb(theme.text))
+                            .child(crate::fl!("settings-base-preset")),
+                    )
                     .child(
                         div()
                             .flex()
@@ -2874,9 +2977,13 @@ impl SettingsWindow {
                     .items_center()
                     .justify_between()
                     .h(px(44.0))
-                    .child(div().text_color(rgb(theme.text)).child("Keymap editor"))
+                    .child(
+                        div()
+                            .text_color(rgb(theme.text))
+                            .child(crate::fl!("settings-keymap-editor")),
+                    )
                     .child(self.keybinding_button(
-                        "Open Keymap",
+                        crate::fl!("settings-open-keymap"),
                         theme,
                         |_, _, cx| crate::open_keymap_in_active_workspace(cx),
                         cx,
@@ -2905,7 +3012,57 @@ impl SettingsWindow {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(Self::section_title("Zoom", theme))
+                .child(Self::section_title(
+                    crate::fl!("settings-section-language"),
+                    theme,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .h(px(44.0))
+                        .child(
+                            div()
+                                .text_color(rgb(theme.text))
+                                .child(crate::fl!("settings-language")),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(self.language_option(
+                                    AppLanguage::System,
+                                    settings.language,
+                                    theme,
+                                    cx,
+                                ))
+                                .child(self.language_option(
+                                    AppLanguage::English,
+                                    settings.language,
+                                    theme,
+                                    cx,
+                                ))
+                                .child(self.language_option(
+                                    AppLanguage::SimplifiedChinese,
+                                    settings.language,
+                                    theme,
+                                    cx,
+                                )),
+                        ),
+                )
+                .into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(Self::section_title(
+                    crate::fl!("settings-section-zoom"),
+                    theme,
+                ))
                 .child(self.number_row(
                     "Default zoom",
                     settings.behavior.default_zoom,
@@ -2927,7 +3084,10 @@ impl SettingsWindow {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(Self::section_title("Scroll", theme))
+                .child(Self::section_title(
+                    crate::fl!("settings-section-scroll"),
+                    theme,
+                ))
                 .child(self.toggle_row(
                     "Smooth scrolling",
                     settings.behavior.smooth_scrolling,
@@ -2942,7 +3102,10 @@ impl SettingsWindow {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(Self::section_title("Window", theme))
+                .child(Self::section_title(
+                    crate::fl!("settings-section-window"),
+                    theme,
+                ))
                 .child(self.number_row(
                     "Opacity",
                     settings.window.opacity,
@@ -2958,7 +3121,11 @@ impl SettingsWindow {
                         .items_center()
                         .justify_between()
                         .h(px(44.0))
-                        .child(div().text_color(rgb(theme.text)).child("Background"))
+                        .child(
+                            div()
+                                .text_color(rgb(theme.text))
+                                .child(crate::fl!("settings-background")),
+                        )
                         .child(
                             div()
                                 .flex()
@@ -2993,7 +3160,10 @@ impl SettingsWindow {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(Self::section_title("Tabs", theme))
+                .child(Self::section_title(
+                    crate::fl!("settings-section-tabs"),
+                    theme,
+                ))
                 .child(
                     div()
                         .flex()
@@ -3001,7 +3171,11 @@ impl SettingsWindow {
                         .items_center()
                         .justify_between()
                         .h(px(44.0))
-                        .child(div().text_color(rgb(theme.text)).child("Tab bar"))
+                        .child(
+                            div()
+                                .text_color(rgb(theme.text))
+                                .child(crate::fl!("settings-tab-bar")),
+                        )
                         .child(
                             div()
                                 .flex()
@@ -3043,7 +3217,7 @@ impl SettingsWindow {
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let input_row = |label: &'static str, child: AnyElement| {
+        let input_row = |label: String, child: AnyElement| {
             div()
                 .flex()
                 .flex_row()
@@ -3066,14 +3240,17 @@ impl SettingsWindow {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(Self::section_title("Default models", theme))
+                .child(Self::section_title(
+                    crate::fl!("settings-default-models"),
+                    theme,
+                ))
                 .child(input_row(
-                    "Main model",
+                    crate::fl!("settings-main-model"),
                     self.model_selector_control(ProviderDropdownTarget::Main, settings, theme, cx)
                         .into_any_element(),
                 ))
                 .child(input_row(
-                    "Title model",
+                    crate::fl!("settings-title-model"),
                     self.model_selector_control(ProviderDropdownTarget::Title, settings, theme, cx)
                         .into_any_element(),
                 ))
@@ -3081,14 +3258,17 @@ impl SettingsWindow {
                     div()
                         .text_size(ui_rems(12.0))
                         .text_color(rgb(theme.text_muted))
-                        .child("Only models from enabled providers' model lists appear here."),
+                        .child(crate::fl!("settings-model-list-hint")),
                 )
                 .into_any_element(),
             div()
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(Self::section_title("Quick AI chat", theme))
+                .child(Self::section_title(
+                    crate::fl!("settings-quick-ai-chat"),
+                    theme,
+                ))
                 .child(self.number_row(
                     "Transparency",
                     settings.ai.quick_ask.transparency,
@@ -3166,7 +3346,7 @@ impl SettingsWindow {
                 div()
                     .text_size(ui_rems(13.0))
                     .text_color(rgb(theme.text))
-                    .child("API Key"),
+                    .child(crate::fl!("settings-api-key")),
             )
             .child(
                 div()
@@ -3218,7 +3398,7 @@ impl SettingsWindow {
                 div()
                     .text_size(ui_rems(13.0))
                     .text_color(rgb(theme.text))
-                    .child("API Host"),
+                    .child(crate::fl!("settings-api-host")),
             )
             .child(
                 div()
@@ -3242,7 +3422,10 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .gap_2()
-            .child(Self::section_title("Model List", theme))
+            .child(Self::section_title(
+                crate::fl!("settings-model-list"),
+                theme,
+            ))
             .child(
                 div()
                     .flex()
@@ -3260,7 +3443,7 @@ impl SettingsWindow {
                         div()
                             .py_2()
                             .text_color(rgb(theme.text_muted))
-                            .child("No models added yet."),
+                            .child(crate::fl!("settings-no-models-added")),
                     )
                 },
             ));
@@ -3452,7 +3635,7 @@ impl SettingsWindow {
                     cx.stop_propagation();
                 }),
             )
-            .child("Remove")
+            .child(crate::fl!("remove"))
     }
 
     fn add_manual_model_button(
@@ -3490,7 +3673,7 @@ impl SettingsWindow {
                     cx.stop_propagation();
                 }),
             )
-            .child("Add")
+            .child(crate::fl!("add"))
     }
 
     fn fetch_models_button(
@@ -3625,7 +3808,7 @@ impl SettingsWindow {
                                     .border_b(px(1.0))
                                     .border_color(rgb(theme.border_variant))
                                     .text_color(rgb(theme.text))
-                                    .child("Choose models to add"),
+                                    .child(crate::fl!("settings-choose-models-to-add")),
                             )
                             .child(
                                 div()
@@ -3640,9 +3823,9 @@ impl SettingsWindow {
                                 this.child(
                                     div().px_3().py_2().text_color(rgb(theme.text_muted)).child(
                                         if total_count == 0 {
-                                            "No models returned."
+                                            crate::fl!("settings-no-models-returned")
                                         } else {
-                                            "No matching models."
+                                            crate::fl!("settings-no-matching-models-period")
                                         },
                                     ),
                                 )
@@ -3703,7 +3886,7 @@ impl SettingsWindow {
                                     .justify_end()
                                     .gap_2()
                                     .child(self.ai_action_button(
-                                        "Cancel",
+                                        crate::fl!("cancel"),
                                         theme,
                                         |this, cx| {
                                             this.provider_model_picker.open = false;
@@ -3825,7 +4008,10 @@ impl SettingsWindow {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(Self::section_title("Theme", resolved))
+                .child(Self::section_title(
+                    crate::fl!("settings-section-theme"),
+                    resolved,
+                ))
                 .child(
                     div()
                         .flex()
@@ -3833,7 +4019,11 @@ impl SettingsWindow {
                         .items_center()
                         .justify_between()
                         .h(px(44.0))
-                        .child(div().text_color(rgb(resolved.text)).child("Theme Mode"))
+                        .child(
+                            div()
+                                .text_color(rgb(resolved.text))
+                                .child(crate::fl!("settings-theme-mode")),
+                        )
                         .child(
                             div()
                                 .flex()
@@ -3865,7 +4055,11 @@ impl SettingsWindow {
                         .items_center()
                         .justify_between()
                         .h(px(44.0))
-                        .child(div().text_color(rgb(resolved.text)).child("Mode"))
+                        .child(
+                            div()
+                                .text_color(rgb(resolved.text))
+                                .child(crate::fl!("settings-mode")),
+                        )
                         .child(
                             div()
                                 .flex()
@@ -3895,8 +4089,14 @@ impl SettingsWindow {
                                 )),
                         ),
                 )
-                .child(Self::section_title("Light Theme", resolved))
-                .child(self.light_theme_dropdown.clone())
+                .child(Self::section_title(
+                    crate::fl!("settings-light-theme"),
+                    resolved,
+                ))
+                .child(Self::section_title(
+                    crate::fl!("settings-dark-theme"),
+                    resolved,
+                ))
                 .child(Self::section_title("Dark Theme", resolved))
                 .child(self.dark_theme_dropdown.clone())
                 .into_any_element()
@@ -3905,7 +4105,10 @@ impl SettingsWindow {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(Self::section_title("Theme", resolved))
+                .child(Self::section_title(
+                    crate::fl!("settings-section-theme"),
+                    resolved,
+                ))
                 .child(
                     div()
                         .flex()
@@ -3913,7 +4116,11 @@ impl SettingsWindow {
                         .items_center()
                         .justify_between()
                         .h(px(44.0))
-                        .child(div().text_color(rgb(resolved.text)).child("Theme Mode"))
+                        .child(
+                            div()
+                                .text_color(rgb(resolved.text))
+                                .child(crate::fl!("settings-theme-mode")),
+                        )
                         .child(
                             div()
                                 .flex()
@@ -3948,7 +4155,10 @@ impl SettingsWindow {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(Self::section_title("Fonts", resolved))
+                .child(Self::section_title(
+                    crate::fl!("settings-section-fonts"),
+                    resolved,
+                ))
                 .child(self.font_family_row(settings, resolved, cx))
                 .child(self.text_input_row(
                     "UI font fallbacks",
@@ -3959,7 +4169,7 @@ impl SettingsWindow {
                     div()
                         .text_size(ui_rems(12.0))
                         .text_color(rgb(resolved.text_muted))
-                        .child("Separate fallback font names with commas."),
+                        .child(crate::fl!("settings-font-fallbacks-hint")),
                 )
                 .child(self.number_row(
                     "UI font size",
@@ -3988,7 +4198,10 @@ impl SettingsWindow {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(Self::section_title("Overrides", resolved))
+                .child(Self::section_title(
+                    crate::fl!("settings-section-overrides"),
+                    resolved,
+                ))
                 .child(self.number_row(
                     "Page gap",
                     page_gap,
@@ -4406,7 +4619,7 @@ impl SettingsWindow {
                     cx.stop_propagation();
                 }),
             )
-            .child("Export")
+            .child(crate::fl!("export"))
     }
 }
 
@@ -4529,8 +4742,16 @@ impl Render for SettingsWindow {
                     .px_4()
                     .border_b(px(1.0))
                     .border_color(rgb(resolved.border))
-                    .child(div().text_size(ui_rems(16.0)).child("Settings"))
-                    .child(div().text_color(rgb(resolved.text_muted)).child("Esc")),
+                    .child(
+                        div()
+                            .text_size(ui_rems(16.0))
+                            .child(crate::fl!("settings-title")),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(resolved.text_muted))
+                            .child(crate::fl!("escape-key")),
+                    ),
             )
             .child(
                 div()

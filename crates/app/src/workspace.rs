@@ -260,7 +260,7 @@ impl Workspace {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Open PDF".into()),
+            prompt: Some(crate::fl!("open-pdf").into()),
         });
 
         cx.spawn(async move |this, cx| match dialog.await {
@@ -879,7 +879,7 @@ impl Workspace {
 
     fn render_toolbar_menu_button(
         &self,
-        label: &'static str,
+        label: String,
         icon: IconName,
         menu: ToolbarMenu,
         width: f32,
@@ -984,7 +984,7 @@ impl Workspace {
         if expanded {
             toolbar = toolbar
                 .child(self.render_toolbar_menu_button(
-                    "Glyphst",
+                    crate::fl!("toolbar-menu-glyphst"),
                     IconName::AppWindow,
                     ToolbarMenu::Glyphst,
                     TOOLBAR_GLYPHST_WIDTH,
@@ -992,7 +992,7 @@ impl Workspace {
                     cx,
                 ))
                 .child(self.render_toolbar_menu_button(
-                    "File",
+                    crate::fl!("toolbar-menu-file"),
                     IconName::File,
                     ToolbarMenu::File,
                     TOOLBAR_FILE_WIDTH,
@@ -1000,7 +1000,7 @@ impl Workspace {
                     cx,
                 ))
                 .child(self.render_toolbar_menu_button(
-                    "Tab",
+                    crate::fl!("toolbar-menu-tab"),
                     IconName::Plus,
                     ToolbarMenu::Tab,
                     TOOLBAR_TAB_WIDTH,
@@ -1036,7 +1036,7 @@ impl Workspace {
     }
 
     fn render_toolbar_menu_item(
-        label: &'static str,
+        label: String,
         theme: Theme,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -1104,25 +1104,25 @@ impl Workspace {
             ToolbarMenu::Glyphst => {
                 dropdown = dropdown
                     .child(Self::render_toolbar_menu_item(
-                        "About Glyphst",
+                        crate::fl!("toolbar-about-glyphst"),
                         theme,
                         |_, _, _| {},
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
-                        "Check for Updates",
+                        crate::fl!("toolbar-check-updates"),
                         theme,
                         |_, _, _| {},
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
-                        "Open Settings",
+                        crate::fl!("toolbar-open-settings"),
                         theme,
                         |_, _, cx| open_settings_window(cx),
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
-                        "Quit Glyphst",
+                        crate::fl!("toolbar-quit-glyphst"),
                         theme,
                         |_, _, cx| cx.quit(),
                         cx,
@@ -1130,7 +1130,7 @@ impl Workspace {
             }
             ToolbarMenu::File => {
                 dropdown = dropdown.child(Self::render_toolbar_menu_item(
-                    "Open File",
+                    crate::fl!("toolbar-open-file"),
                     theme,
                     |this, window, cx| this.open_file(window, cx),
                     cx,
@@ -1139,19 +1139,19 @@ impl Workspace {
             ToolbarMenu::Tab => {
                 dropdown = dropdown
                     .child(Self::render_toolbar_menu_item(
-                        "New Tab",
+                        crate::fl!("toolbar-new-tab"),
                         theme,
                         |this, window, cx| this.open_new_tab(window, cx),
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
-                        "Close Tab",
+                        crate::fl!("toolbar-close-tab"),
                         theme,
                         |this, window, cx| this.close_active_tab(window, cx),
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
-                        "Split Right",
+                        crate::fl!("toolbar-split-right"),
                         theme,
                         |this, window, cx| {
                             this.split_active_pane(SplitDirection::Right, window, cx)
@@ -1159,7 +1159,7 @@ impl Workspace {
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
-                        "Split Down",
+                        crate::fl!("toolbar-split-down"),
                         theme,
                         |this, window, cx| this.split_active_pane(SplitDirection::Down, window, cx),
                         cx,

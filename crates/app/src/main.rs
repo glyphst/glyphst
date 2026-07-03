@@ -29,6 +29,7 @@ mod keybindings;
 mod keymap_editor;
 mod keystroke_input;
 mod library;
+mod localize;
 mod markdown;
 mod menu;
 mod new_tab;
@@ -76,7 +77,9 @@ fn main() {
             if let Err(error) = fonts::load_embedded_fonts(cx) {
                 eprintln!("failed to load embedded fonts: {error:#}");
             }
-            cx.set_global(SettingsStore::load());
+            let settings_store = SettingsStore::load();
+            localize::select_language(settings_store.settings.language);
+            cx.set_global(settings_store);
             cx.set_global(LibraryStore::load());
             cx.set_global(RenderCache::new());
             cx.on_app_quit(|cx| {
@@ -204,7 +207,8 @@ pub(crate) fn open_workspace_window_at(
             titlebar: Some(TitlebarOptions {
                 title: None,
                 appears_transparent: cfg!(target_os = "macos"),
-                traffic_light_position: cfg!(target_os = "macos").then_some(point(px(9.0), px(9.0))),
+                traffic_light_position: cfg!(target_os = "macos")
+                    .then_some(point(px(9.0), px(9.0))),
             }),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_background: window_settings.background_appearance(transparency_enabled),

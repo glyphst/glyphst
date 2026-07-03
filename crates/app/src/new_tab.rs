@@ -275,7 +275,7 @@ impl NewTab {
     }
 
     fn render_toolbar_button(
-        label: &'static str,
+        label: String,
         theme: Theme,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -404,7 +404,7 @@ impl NewTab {
                     .truncate()
                     .text_size(ui_rems(11.0))
                     .text_color(rgb(theme.text_muted))
-                    .child(format!("Last read: p. {page}")),
+                    .child(crate::fl!("new-tab-last-read", page = (page as i64))),
             )
     }
 
@@ -440,7 +440,7 @@ impl NewTab {
                 .bg(rgb(theme.page))
                 .text_size(ui_rems(11.0))
                 .text_color(rgb(theme.text_muted))
-                .child("Rendering preview…")
+                .child(crate::fl!("new-tab-rendering-preview"))
                 .into_any_element(),
             ThumbnailState::Failed => div()
                 .flex()
@@ -453,7 +453,7 @@ impl NewTab {
                 .bg(rgba(((theme.error & 0x00ff_ffff) << 8) | 0x18))
                 .text_size(ui_rems(11.0))
                 .text_color(rgb(theme.text_muted))
-                .child("Preview unavailable")
+                .child(crate::fl!("new-tab-preview-unavailable"))
                 .into_any_element(),
         }
     }
@@ -469,8 +469,8 @@ impl NewTabEntry {
             .path
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("Untitled")
-            .to_string()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| crate::fl!("untitled"))
             .into();
         let directory = entry
             .path
@@ -523,11 +523,15 @@ impl Render for NewTab {
                 .justify_center()
                 .gap_2()
                 .text_color(rgb(theme.text_muted))
-                .child(div().text_size(ui_rems(16.0)).child("No recent PDFs"))
+                .child(
+                    div()
+                        .text_size(ui_rems(16.0))
+                        .child(crate::fl!("new-tab-empty-title")),
+                )
                 .child(
                     div()
                         .text_size(ui_rems(12.0))
-                        .child("Open a PDF to add it to history."),
+                        .child(crate::fl!("new-tab-empty-description")),
                 )
                 .into_any_element()
         } else {
@@ -610,33 +614,37 @@ impl Render for NewTab {
             .px_3()
             .border_b(px(1.0))
             .border_color(rgb(theme.border))
-            .child(div().text_size(ui_rems(13.0)).child("Recent PDFs"))
+            .child(
+                div()
+                    .text_size(ui_rems(13.0))
+                    .child(crate::fl!("new-tab-recent-pdfs")),
+            )
             .child({
                 let mut toolbar = div().flex().items_center().gap_2();
                 if selecting && has_selection {
                     toolbar = toolbar
                         .child(Self::render_toolbar_button(
-                            "Delete",
+                            crate::fl!("delete"),
                             theme,
                             |this, _, cx| this.delete_selected(cx),
                             cx,
                         ))
                         .child(Self::render_toolbar_button(
-                            "Cancel Selection",
+                            crate::fl!("cancel-selection"),
                             theme,
                             |this, _, cx| this.cancel_select(cx),
                             cx,
                         ));
                 } else if selecting {
                     toolbar = toolbar.child(Self::render_toolbar_button(
-                        "Cancel",
+                        crate::fl!("cancel"),
                         theme,
                         |this, _, cx| this.cancel_select(cx),
                         cx,
                     ));
                 } else {
                     toolbar = toolbar.child(Self::render_toolbar_button(
-                        "Select",
+                        crate::fl!("select"),
                         theme,
                         |this, _, cx| this.enter_select(cx),
                         cx,

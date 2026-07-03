@@ -1,4 +1,7 @@
 [advisories]
 ignore = [
-  # "RUSTSEC-0000-0000", # Reason and tracking issue
+  # quick-xml is pulled transitively by GPUI through xcb 1.7.0 and wayland-scanner 0.31.10.
+  # Both crates currently constrain quick-xml below the fixed 0.41.0 release.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
 ]

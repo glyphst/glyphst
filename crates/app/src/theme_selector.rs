@@ -113,11 +113,11 @@ impl PickerDelegate for ThemeSelectorDelegate {
     }
 
     fn placeholder(&self) -> SharedString {
-        "Select Theme…".into()
+        crate::fl!("theme-selector-placeholder").into()
     }
 
     fn empty_message(&self) -> SharedString {
-        "No themes found".into()
+        crate::fl!("theme-selector-empty").into()
     }
 
     fn width(&self) -> f32 {
