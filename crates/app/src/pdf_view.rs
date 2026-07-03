@@ -6440,6 +6440,28 @@ impl PdfView {
         cx.notify();
     }
 
+    /// Compute the available content width for the grid overview by subtracting
+    /// open sidebar widths (including their 1px borders) from the window width.
+    /// This allows column count to be computed synchronously during render,
+    /// eliminating the one-frame delay from the measure-canvas approach.
+    fn available_content_width(&self, window: &Window) -> f32 {
+        let window_width = window.bounds().size.width.as_f32();
+        let mut sidebar_total = 0.0f32;
+        if self.thumbnail_sidebar_open {
+            sidebar_total += self.thumbnail_sidebar_width + 1.0;
+        }
+        if self.toc_sidebar_open {
+            sidebar_total += self.toc_sidebar_width + 1.0;
+        }
+        if self.notes_sidebar_open {
+            sidebar_total += self.notes_sidebar_width + 1.0;
+        }
+        if self.ai_panel.is_some() {
+            sidebar_total += self.ai_panel_width + 1.0;
+        }
+        (window_width - sidebar_total).max(0.0)
+    }
+
     fn grid_overview_thumbnail_max_width(zoom: f32) -> f32 {
         GRID_OVERVIEW_BASE_THUMBNAIL_WIDTH * zoom
     }
@@ -6893,6 +6915,20 @@ impl PdfView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // Compute available width synchronously from window bounds and sidebar
+        // widths, eliminating the one-frame delay of the measure-canvas approach.
+        let available_width = self.available_content_width(window);
+        if available_width.is_finite() && available_width > 0.0 {
+            let new_cols =
+                Self::grid_overview_cols_for_width(available_width, self.grid_overview_zoom);
+            let cols_changed = new_cols != self.grid_overview_cols;
+            self.grid_overview_cols = new_cols;
+            self.grid_overview_viewport_width = available_width;
+            if cols_changed {
+                self.scroll_grid_overview_cursor(ScrollStrategy::Center);
+            }
+        }
+
         let cols = self.grid_overview_cols.max(1);
         let rows = self.pages.len().div_ceil(cols);
         let zoom = self.grid_overview_zoom;
@@ -7028,6 +7064,23 @@ impl PdfView {
                             "grid-overview-list",
                             rows,
                             cx.processor(move |this, visible_range: Range<usize>, _window, cx| {
+                                // Protect visible grid pages from cache eviction so
+                                // thumbnails are not evicted by the pixel-budget LRU.
+                                let protect_cols = this.grid_overview_cols.max(1);
+                                let protect_page_count = this.pages.len();
+                                let protect_doc_id = this.doc_id;
+                                let protected: Vec<(u64, usize)> = visible_range
+                                    .clone()
+                                    .flat_map(|row_ix| {
+                                        let start = row_ix * protect_cols;
+                                        let end =
+                                            ((row_ix + 1) * protect_cols).min(protect_page_count);
+                                        start..end
+                                    })
+                                    .map(|page_idx| (protect_doc_id, page_idx))
+                                    .collect();
+                                cx.global_mut::<RenderCache>().set_protected_pages(protected);
+
                                 let theme = cx.global::<SettingsStore>().resolved_theme;
                                 let current_page =
                                     this.grid_overview_cursor.min(this.last_page_index());
@@ -8533,14 +8586,15 @@ impl Render for PdfView {
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
-                            .child(
-                                canvas(
-                                    move |bounds, window, cx| {
-                                        prepaint_view.update(cx, |this, cx| {
-                                            this.paint_data(bounds, window.scale_factor(), cx)
-                                                .expect("failed to render PDF")
-                                        })
-                                    },
+                            .when(!self.grid_overview_open, |this| {
+                                this.child(
+                                    canvas(
+                                        move |bounds, window, cx| {
+                                            prepaint_view.update(cx, |this, cx| {
+                                                this.paint_data(bounds, window.scale_factor(), cx)
+                                                    .expect("failed to render PDF")
+                                            })
+                                        },
                                     move |_, paint_data, window, _| {
                                         for page in paint_data.pages {
                                             window.paint_quad(fill(page.bounds, rgb(theme.page)));
@@ -8664,7 +8718,8 @@ impl Render for PdfView {
                                 )
                                 .size_full(),
                             )
-                            .when(!self.is_presentation_mode(), |this| {
+                            })
+                            .when(!self.is_presentation_mode() && !self.grid_overview_open, |this| {
                                 this.vertical_scrollbar_for(&self.document_scroll, window, cx)
                             }),
                     ),
