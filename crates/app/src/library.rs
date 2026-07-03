@@ -253,6 +253,19 @@ impl LibraryStore {
             .record_history_at(path, position, current_timestamp());
     }
 
+    pub fn remove_history_entries(&mut self, paths: &[PathBuf]) -> Result<usize> {
+        let before = self.library.history.len();
+        let path_set: HashSet<PathBuf> = paths.iter().map(|p| normalize_path(p)).collect();
+        self.library
+            .history
+            .retain(|entry| !path_set.contains(&entry.path));
+        let removed = before - self.library.history.len();
+        if removed > 0 {
+            self.save()?;
+        }
+        Ok(removed)
+    }
+
     pub fn add_bookmark(
         &mut self,
         path: &Path,

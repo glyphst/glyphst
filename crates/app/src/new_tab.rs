@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
@@ -23,6 +23,8 @@ use crate::{
     theme::Theme,
 };
 
+gpui::actions!(new_tab, [EnterSelect, CancelSelect, DeleteSelected]);
+
 const BOARD_WIDTH: f32 = 900.0;
 const BOARD_HEIGHT: f32 = 700.0;
 const CARD_WIDTH: f32 = 220.0;
@@ -34,6 +36,11 @@ const GRID_PADDING_X: f32 = 24.0;
 const VIEWPORT_WIDTH_EPSILON: f32 = 0.5;
 const DEFAULT_COLS: usize = 3;
 const NEW_TAB_ROW_HEIGHT: f32 = CARD_HEIGHT + GRID_GAP;
+const NEW_TAB_HEADER_HEIGHT: f32 = 40.0;
+
+fn with_alpha(rgb: u32, alpha: u8) -> u32 {
+    ((rgb & 0x00ff_ffff) << 8) | alpha as u32
+}
 
 #[derive(Clone)]
 struct ThumbnailImage {
@@ -68,6 +75,8 @@ pub struct NewTab {
     scroll: UniformListScrollHandle,
     cols: usize,
     viewport_width: f32,
+    selecting: bool,
+    selection: BTreeSet<usize>,
 }
 
 impl NewTab {
@@ -97,6 +106,8 @@ impl NewTab {
             scroll: UniformListScrollHandle::new(),
             cols: DEFAULT_COLS,
             viewport_width: 0.0,
+            selecting: false,
+            selection: BTreeSet::new(),
         };
 
         for path in board
@@ -189,35 +200,177 @@ impl NewTab {
         cx.notify();
     }
 
+    fn enter_select(&mut self, cx: &mut Context<Self>) {
+        self.selecting = true;
+        cx.notify();
+    }
+
+    fn cancel_select(&mut self, cx: &mut Context<Self>) {
+        let changed = self.selecting || !self.selection.is_empty();
+        self.selecting = false;
+        self.selection.clear();
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn toggle_selection(&mut self, entry_ix: usize, cx: &mut Context<Self>) {
+        if !self.selection.insert(entry_ix) {
+            self.selection.remove(&entry_ix);
+        }
+        cx.notify();
+    }
+
+    fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        if self.selection.is_empty() {
+            return;
+        }
+
+        let paths: Vec<PathBuf> = self
+            .selection
+            .iter()
+            .filter_map(|&ix| self.entries.get(ix).map(|entry| entry.path.clone()))
+            .collect();
+
+        if paths.is_empty() {
+            self.selection.clear();
+            cx.notify();
+            return;
+        }
+
+        {
+            let store = cx.global_mut::<LibraryStore>();
+            if let Err(error) = store.remove_history_entries(&paths) {
+                eprintln!("failed to remove history entries: {error:#}");
+            }
+        }
+
+        for path in &paths {
+            self.thumbnails.remove(path);
+        }
+
+        self.refresh_entries(cx);
+        self.selection.clear();
+        cx.notify();
+    }
+
+    fn refresh_entries(&mut self, cx: &mut Context<Self>) {
+        let missing_thumbnail_paths: Vec<PathBuf> = {
+            let store = cx.global::<LibraryStore>();
+            self.entries = store
+                .history_entries()
+                .iter()
+                .map(NewTabEntry::from_history)
+                .collect();
+            self.entries
+                .iter()
+                .map(|entry| entry.path.clone())
+                .filter(|path| !self.thumbnails.contains_key(path))
+                .collect()
+        };
+
+        for path in missing_thumbnail_paths {
+            self.start_thumbnail_render(path, cx);
+        }
+    }
+
+    fn render_toolbar_button(
+        label: &'static str,
+        theme: Theme,
+        handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(px(24.0))
+            .px_2()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgba(0x00000000))
+            .text_size(ui_rems(12.0))
+            .text_color(rgb(theme.text))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    handler(this, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
     fn render_card(
-        path: PathBuf,
-        file_name: SharedString,
-        directory: SharedString,
-        page: usize,
+        entry: &NewTabEntry,
         thumbnail: ThumbnailState,
+        selecting: bool,
+        selected: bool,
+        entry_ix: usize,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let path = entry.path.clone();
+        let file_name = entry.file_name.clone();
+        let directory = entry.directory.clone();
+        let page = entry.page;
+        let border_color = if selected { theme.accent } else { theme.border };
+        let card_bg = if selected {
+            rgba(with_alpha(theme.accent, 0x22))
+        } else {
+            rgb(theme.surface_background)
+        };
+
         div()
             .flex()
             .flex_none()
             .flex_col()
             .items_center()
+            .relative()
             .w(px(CARD_WIDTH))
             .h(px(CARD_HEIGHT))
             .p_3()
             .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
+            .border_color(rgb(border_color))
+            .bg(card_bg)
             .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
-                    this.open_document(path.clone(), cx);
+                    if this.selecting {
+                        this.toggle_selection(entry_ix, cx);
+                    } else {
+                        this.open_document(path.clone(), cx);
+                    }
                     cx.stop_propagation();
                 }),
             )
+            .when(selecting, |card| {
+                card.child(
+                    div()
+                        .absolute()
+                        .top(px(6.0))
+                        .right(px(6.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(22.0))
+                        .h(px(22.0))
+                        .border_1()
+                        .border_color(rgb(if selected { theme.accent } else { theme.border }))
+                        .bg(rgba(with_alpha(theme.surface_background, 0xe8)))
+                        .text_size(ui_rems(13.0))
+                        .text_color(rgb(if selected {
+                            theme.accent
+                        } else {
+                            theme.text_muted
+                        }))
+                        .child(if selected { "☑" } else { "☐" }),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -406,19 +559,17 @@ impl Render for NewTab {
                                     for col_ix in 0..cols {
                                         let entry_ix = row_ix * cols + col_ix;
                                         if let Some(entry) = this.entries.get(entry_ix) {
-                                            let path = entry.path.clone();
-                                            let file_name = entry.file_name.clone();
-                                            let directory = entry.directory.clone();
-                                            let page = entry.page;
                                             let thumbnail = this
                                                 .thumbnails
-                                                .get(&path)
+                                                .get(&entry.path)
                                                 .cloned()
                                                 .unwrap_or(ThumbnailState::Loading);
+                                            let selecting = this.selecting;
+                                            let selected = this.selection.contains(&entry_ix);
 
                                             row = row.child(Self::render_card(
-                                                path, file_name, directory, page, thumbnail, theme,
-                                                cx,
+                                                entry, thumbnail, selecting, selected, entry_ix,
+                                                theme, cx,
                                             ));
                                         } else {
                                             row = row.child(
@@ -447,6 +598,53 @@ impl Render for NewTab {
                 .into_any_element()
         };
 
+        let selecting = self.selecting;
+        let has_selection = !self.selection.is_empty();
+
+        let header = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_between()
+            .h(px(NEW_TAB_HEADER_HEIGHT))
+            .px_3()
+            .border_b(px(1.0))
+            .border_color(rgb(theme.border))
+            .child(div().text_size(ui_rems(13.0)).child("Recent PDFs"))
+            .child({
+                let mut toolbar = div().flex().items_center().gap_2();
+                if selecting && has_selection {
+                    toolbar = toolbar
+                        .child(Self::render_toolbar_button(
+                            "Delete",
+                            theme,
+                            |this, _, cx| this.delete_selected(cx),
+                            cx,
+                        ))
+                        .child(Self::render_toolbar_button(
+                            "Cancel Selection",
+                            theme,
+                            |this, _, cx| this.cancel_select(cx),
+                            cx,
+                        ));
+                } else if selecting {
+                    toolbar = toolbar.child(Self::render_toolbar_button(
+                        "Cancel",
+                        theme,
+                        |this, _, cx| this.cancel_select(cx),
+                        cx,
+                    ));
+                } else {
+                    toolbar = toolbar.child(Self::render_toolbar_button(
+                        "Select",
+                        theme,
+                        |this, _, cx| this.enter_select(cx),
+                        cx,
+                    ));
+                }
+                toolbar
+            });
+
         div()
             .id("new-tab")
             .relative()
@@ -465,12 +663,22 @@ impl Render for NewTab {
             .on_action(cx.listener(|this, _: &PreviousHalfPage, _, cx| {
                 this.scroll_by(-(this.scroll.viewport().size.height * 0.5), cx);
             }))
+            .on_action(cx.listener(|this, _: &EnterSelect, _, cx| {
+                this.enter_select(cx);
+            }))
+            .on_action(cx.listener(|this, _: &CancelSelect, _, cx| {
+                this.cancel_select(cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| {
+                this.delete_selected(cx);
+            }))
             .flex()
             .flex_col()
             .bg(rgb(theme.tab_active_background))
             .text_size(ui_rems(12.0))
             .text_color(rgb(theme.text))
             .child(measure)
+            .child(header)
             .child(content)
     }
 }

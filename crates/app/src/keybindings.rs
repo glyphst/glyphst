@@ -3,6 +3,7 @@ use std::{rc::Rc, sync::OnceLock};
 use crate::{
     ai_panel::{AiPanelClose, AiPanelSubmit},
     input, markdown, menu,
+    new_tab::{CancelSelect, DeleteSelected, EnterSelect},
     note_editor::{NoteCancel, NoteSave},
     pane::{SplitDown, SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical},
     pdf_view::{
@@ -1382,6 +1383,33 @@ fn command_specs() -> &'static [CommandSpec] {
                     &["shift-pageup"],
                     &["ctrl-u"],
                     &["prev-half-page"],
+                    false,
+                ),
+                spec::<EnterSelect>(
+                    "enter-select",
+                    "Enter Selection Mode",
+                    KeyBindingCategory::NewTab,
+                    &[],
+                    &[],
+                    &[],
+                    false,
+                ),
+                spec::<CancelSelect>(
+                    "cancel-select",
+                    "Cancel Selection",
+                    KeyBindingCategory::NewTab,
+                    &["escape"],
+                    &["escape"],
+                    &[],
+                    false,
+                ),
+                spec::<DeleteSelected>(
+                    "delete-selected",
+                    "Delete Selected",
+                    KeyBindingCategory::NewTab,
+                    &["delete"],
+                    &["delete"],
+                    &["backspace"],
                     false,
                 ),
             ]
