@@ -104,6 +104,13 @@ impl KeymapEditor {
         }
     }
 
+    pub fn focus_filter(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.filter_input.read(cx).focus_handle.clone();
+        window.defer(cx, move |window, cx| {
+            handle.focus(window, cx);
+        });
+    }
+
     fn filtered_bindings(&self, settings: &Settings) -> Vec<EditableKeyBinding> {
         let query = self.query.trim().to_ascii_lowercase();
         let mut bindings =

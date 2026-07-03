@@ -305,6 +305,9 @@ impl Pane {
             .position(|tab| matches!(tab, Tab::Keymap(_)))
         {
             self.activate_tab(tab_ix, window, cx);
+            if let Some(Tab::Keymap(editor)) = self.tabs.get(tab_ix) {
+                editor.update(cx, |editor, cx| editor.focus_filter(window, cx));
+            }
             return;
         }
 
@@ -312,7 +315,11 @@ impl Pane {
         let tab = self.create_keymap_tab(cx);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
-        self.focus_handle.focus(window, cx);
+        if let Some(Tab::Keymap(editor)) = self.tabs.get(self.active_tab) {
+            editor.update(cx, |editor, cx| editor.focus_filter(window, cx));
+        } else {
+            self.focus_handle.focus(window, cx);
+        }
         cx.notify();
     }
 
