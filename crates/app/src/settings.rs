@@ -1705,10 +1705,8 @@ impl SettingsStore {
             .unwrap_or_default();
         let system_appearance = ThemeAppearance::Light;
         validate_theme_selection(&mut settings, &registry, system_appearance);
-        let resolved_theme = registry.resolve(
-            settings.theme.name(system_appearance),
-            settings.overrides,
-        );
+        let resolved_theme =
+            registry.resolve(settings.theme.name(system_appearance), settings.overrides);
 
         Self {
             settings,
@@ -1881,7 +1879,10 @@ theme-overrides {
             settings.window.background,
             WindowBackgroundMode::Transparent
         );
-        assert_eq!(settings.theme, ThemeSelection::Static("one-dark".to_string()));
+        assert_eq!(
+            settings.theme,
+            ThemeSelection::Static("one-dark".to_string())
+        );
         assert_eq!(settings.overrides.background, Some(0x101010));
         assert_eq!(settings.overrides.selection_highlight, None);
     }
@@ -2519,10 +2520,7 @@ theme {
             dark: "one-dark".to_string(),
         };
 
-        assert_eq!(
-            dynamic.name(ThemeAppearance::Light),
-            "one-light"
-        );
+        assert_eq!(dynamic.name(ThemeAppearance::Light), "one-light");
         assert_eq!(dynamic.name(ThemeAppearance::Dark), "one-dark");
 
         let light_mode = ThemeSelection::Dynamic {
@@ -2541,10 +2539,8 @@ theme {
     ) -> SettingsStore {
         let registry = ThemeRegistry::load(Path::new("/path/that/does/not/exist"));
         let system_appearance = ThemeAppearance::Light;
-        let resolved_theme = registry.resolve(
-            settings.theme.name(system_appearance),
-            settings.overrides,
-        );
+        let resolved_theme =
+            registry.resolve(settings.theme.name(system_appearance), settings.overrides);
         SettingsStore {
             settings,
             registry,

@@ -183,21 +183,17 @@ impl Render for KeystrokeInput {
             .gap_1()
             .when(recording, |this| {
                 this.child(
-                    IconButton::new(
-                        IconName::Stop,
-                        rgb(theme.error),
-                        rgb(theme.element_hover),
-                    )
-                    .into_div()
-                    .id("keystroke-stop")
-                    .tooltip(text_tooltip("Stop Recording"))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.focus_handle.focus(window, cx);
-                            cx.stop_propagation();
-                        }),
-                    ),
+                    IconButton::new(IconName::Stop, rgb(theme.error), rgb(theme.element_hover))
+                        .into_div()
+                        .id("keystroke-stop")
+                        .tooltip(text_tooltip("Stop Recording"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.focus_handle.focus(window, cx);
+                                cx.stop_propagation();
+                            }),
+                        ),
                 )
                 .child(
                     IconButton::new(

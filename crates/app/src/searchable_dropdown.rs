@@ -1,15 +1,11 @@
 use crate::{
-    menu,
-    picker::fuzzy_match,
-    scrollbar::WithScrollbar as _,
-    settings::SettingsStore,
-    settings_window::SettingsTextInput,
-    theme::Theme,
+    menu, picker::fuzzy_match, scrollbar::WithScrollbar as _, settings::SettingsStore,
+    settings_window::SettingsTextInput, theme::Theme,
 };
 use gpui::{
     Anchor, AnyElement, App, AppContext, Context, Entity, EventEmitter, Focusable, IntoElement,
-    MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollHandle, Window,
-    anchored, deferred, div, prelude::*, point, px, rgb, rgba,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollHandle, Window, anchored, deferred,
+    div, point, prelude::*, px, rgb, rgba,
 };
 use std::ops::Range;
 
@@ -68,7 +64,6 @@ impl SearchableDropdown {
             .map(|item| item.label.as_str())
             .unwrap_or(&self.selected_value)
     }
-
 
     fn open(&mut self, anchor: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
@@ -181,9 +176,7 @@ impl SearchableDropdown {
 
         let rows = filtered
             .iter()
-            .map(|(item_ix, highlights)| {
-                self.render_item(*item_ix, highlights, theme, cx)
-            })
+            .map(|(item_ix, highlights)| self.render_item(*item_ix, highlights, theme, cx))
             .collect::<Vec<_>>();
 
         let anchor = self.anchor;
@@ -213,63 +206,63 @@ impl SearchableDropdown {
                             this.just_closed_by_out_click = true;
                             this.close(cx);
                         }))
-                                .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
-                                    let query = this.search_input.read(cx).content.to_string();
-                                    if let Some((item_ix, _)) =
-                                        this.filtered_items(&query).get(this.selected_index)
-                                    {
-                                        let value = this.items[*item_ix].value.clone();
-                                        this.select_item(value, window, cx);
-                                    }
-                                }))
-                                .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| {
-                                    this.close(cx);
-                                }))
-                                .on_action(cx.listener(move |this, _: &menu::SelectNext, _, cx| {
-                                    if this.selected_index + 1 < item_count {
-                                        this.selected_index += 1;
-                                        cx.notify();
-                                    }
-                                }))
-                                .on_action(cx.listener(move |this, _: &menu::SelectPrev, _, cx| {
-                                    if this.selected_index > 0 {
-                                        this.selected_index -= 1;
-                                        cx.notify();
-                                    }
-                                }))
-                                .child(
-                                    div()
-                                        .px_2()
-                                        .py_2()
-                                        .border_b(px(1.0))
-                                        .border_color(rgb(theme.border_variant))
-                                        .flex()
-                                        .child(search_input),
-                                )
-                                .when(item_count == 0, |this| {
-                                    this.child(
-                                        div()
-                                            .px_3()
-                                            .py_2()
-                                            .text_color(rgb(theme.text_muted))
-                                            .child("No matching items"),
-                                    )
-                                })
-                                .when(item_count > 0, |this| {
-                                    this.child(
-                                        div()
-                                            .id("searchable-dropdown-list")
-                                            .track_scroll(&scroll_handle)
-                                            .max_h(px(DROPDOWN_MAX_HEIGHT))
-                                            .py_1()
-                                            .flex()
-                                            .flex_col()
-                                            .overflow_y_scroll()
-                                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                                            .children(rows)
-                                            .vertical_scrollbar_for(&scroll_handle, window, cx),
-                                    )
-                                }),
+                        .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
+                            let query = this.search_input.read(cx).content.to_string();
+                            if let Some((item_ix, _)) =
+                                this.filtered_items(&query).get(this.selected_index)
+                            {
+                                let value = this.items[*item_ix].value.clone();
+                                this.select_item(value, window, cx);
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| {
+                            this.close(cx);
+                        }))
+                        .on_action(cx.listener(move |this, _: &menu::SelectNext, _, cx| {
+                            if this.selected_index + 1 < item_count {
+                                this.selected_index += 1;
+                                cx.notify();
+                            }
+                        }))
+                        .on_action(cx.listener(move |this, _: &menu::SelectPrev, _, cx| {
+                            if this.selected_index > 0 {
+                                this.selected_index -= 1;
+                                cx.notify();
+                            }
+                        }))
+                        .child(
+                            div()
+                                .px_2()
+                                .py_2()
+                                .border_b(px(1.0))
+                                .border_color(rgb(theme.border_variant))
+                                .flex()
+                                .child(search_input),
+                        )
+                        .when(item_count == 0, |this| {
+                            this.child(
+                                div()
+                                    .px_3()
+                                    .py_2()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("No matching items"),
+                            )
+                        })
+                        .when(item_count > 0, |this| {
+                            this.child(
+                                div()
+                                    .id("searchable-dropdown-list")
+                                    .track_scroll(&scroll_handle)
+                                    .max_h(px(DROPDOWN_MAX_HEIGHT))
+                                    .py_1()
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_y_scroll()
+                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                    .children(rows)
+                                    .vertical_scrollbar_for(&scroll_handle, window, cx),
+                            )
+                        }),
                 ),
         )
         .with_priority(2)
