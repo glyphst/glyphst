@@ -12,6 +12,7 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "17c0ebb0f7b8b512d
     "x11",
 ] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "17c0ebb0f7b8b512d99f396e543e71c1775ff6f6", package = "gpui_platform", default-features = false, features = [
+    "font-kit",
     "wayland",
     "x11",
 ] }
