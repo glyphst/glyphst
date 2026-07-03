@@ -864,6 +864,7 @@ pub struct SettingsWindow {
     active_section: SettingsSection,
     ai_expanded: bool,
     content_scroll: ScrollHandle,
+    provider_list_scroll: ScrollHandle,
     status: Option<SharedString>,
     save_error: Option<SharedString>,
     selected_ai_provider: AiProvider,
@@ -1146,6 +1147,7 @@ impl SettingsWindow {
             active_section: SettingsSection::GeneralZoom,
             ai_expanded: true,
             content_scroll: ScrollHandle::new(),
+            provider_list_scroll: ScrollHandle::new(),
             status: None,
             save_error: None,
             selected_ai_provider: provider,
@@ -1749,6 +1751,47 @@ impl SettingsWindow {
                     )
                     .child(if enabled { "On" } else { "Off" }),
             )
+    }
+
+    /// Compact On/Off toggle switch used in the provider list rows.
+    fn compact_toggle(
+        &self,
+        enabled: bool,
+        update: impl FnOnce(&mut Settings) + Clone + 'static,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .h(px(20.0))
+            .min_w(px(38.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(rgb(theme.border_variant))
+            .bg(if enabled {
+                rgb(theme.element_selected)
+            } else {
+                rgb(theme.surface_background)
+            })
+            .text_color(rgb(if enabled {
+                theme.accent
+            } else {
+                theme.text_muted
+            }))
+            .text_size(ui_rems(11.0))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.change_settings(update.clone(), window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(if enabled { "On" } else { "Off" })
     }
 
     fn text_input_row(
@@ -3070,8 +3113,9 @@ impl SettingsWindow {
         &self,
         settings: &Settings,
         theme: Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    ) -> AnyElement {
         let provider = self.selected_ai_provider;
         let config = settings.ai.provider_config(provider);
         let provider_entries = AiProvider::ALL
@@ -3092,138 +3136,186 @@ impl SettingsWindow {
             .map(|model| self.provider_model_row(provider, model, theme, cx))
             .collect::<Vec<_>>();
 
-        let input_row = |label: &'static str, child: AnyElement| {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .min_h(px(44.0))
-                .gap_3()
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(88.0))
-                        .text_color(rgb(theme.text))
-                        .child(label),
-                )
-                .child(child)
-        };
+        // Provider list column: full height, independent scroll.
+        let provider_list_column = div()
+            .w(px(232.0))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .border_r(px(1.0))
+            .border_color(rgb(theme.border_variant))
+            .child(
+                div()
+                    .id("settings-provider-list")
+                    .track_scroll(&self.provider_list_scroll)
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(provider_entries)
+                    .vertical_scrollbar_for(&self.provider_list_scroll, window, cx),
+            );
 
-        vec![
-            div()
-                .flex()
-                .flex_row()
-                .min_h(px(520.0))
-                .border_1()
-                .border_color(rgb(theme.border_variant))
-                .bg(rgb(theme.surface_background))
-                .child(
+        // API Key field: stacked titled field (label above, control row below).
+        let key_masked = self.ai_key_input.read(cx).mask;
+        let api_key_field = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(ui_rems(13.0))
+                    .text_color(rgb(theme.text))
+                    .child("API Key"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(self.ai_key_input.clone())
+                    .child(
+                        div()
+                            .h(px(28.0))
+                            .min_w(px(40.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .border_1()
+                            .border_color(rgb(theme.border_variant))
+                            .bg(rgb(theme.surface_background))
+                            .text_color(rgb(theme.text_muted))
+                            .text_size(ui_rems(12.0))
+                            .hover(move |style| style.bg(rgb(theme.element_hover)))
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.ai_key_input.update(cx, |input, cx| {
+                                        input.mask = !input.mask;
+                                        cx.notify();
+                                    });
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child(if key_masked { "Show" } else { "Hide" }),
+                    )
+                    .child(self.ai_action_button(
+                        "Test",
+                        theme,
+                        move |this, cx| this.test_connection(provider, cx),
+                        cx,
+                    )),
+            );
+
+        // API Host field: stacked titled field.
+        let api_host_field = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(ui_rems(13.0))
+                    .text_color(rgb(theme.text))
+                    .child("API Host"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(self.ai_base_url_input.clone())
+                    .child(self.base_url_default_button(provider, theme, cx)),
+            )
+            .when_some(self.provider_status(theme), |this, status| {
+                this.child(
                     div()
-                        .w(px(190.0))
-                        .flex_none()
-                        .flex()
-                        .flex_col()
-                        .border_r(px(1.0))
-                        .border_color(rgb(theme.border_variant))
-                        .children(provider_entries),
+                        .text_size(ui_rems(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(status),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .p_4()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .child(
-                                            div()
-                                                .text_size(ui_rems(16.0))
-                                                .text_color(rgb(theme.text))
-                                                .child(provider.label()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(ui_rems(12.0))
-                                                .text_color(rgb(theme.text_muted))
-                                                .child(provider.default_base_url()),
-                                        ),
-                                )
-                                .child(self.toggle_row(
-                                    "Enabled",
-                                    config.enabled,
-                                    move |settings| {
-                                        let config = settings.ai.provider_config_mut(provider);
-                                        config.enabled = !config.enabled;
-                                    },
-                                    theme,
-                                    cx,
-                                )),
-                        )
-                        .child(input_row(
-                            "API key",
-                            self.ai_key_input.clone().into_any_element(),
-                        ))
-                        .child(input_row(
-                            "Base URL",
-                            div()
-                                .flex()
-                                .flex_row()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_2()
-                                .child(self.ai_base_url_input.clone())
-                                .child(self.base_url_default_button(provider, theme, cx))
-                                .into_any_element(),
-                        ))
-                        .when_some(self.provider_status(theme), |this, status| {
-                            this.child(div().flex().justify_end().child(status))
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .gap_2()
-                                .child(self.ai_action_button(
-                                    "Test connection",
-                                    theme,
-                                    move |this, cx| this.test_connection(provider, cx),
-                                    cx,
-                                ))
-                                .child(self.fetch_models_button(provider, theme, cx)),
-                        )
-                        .child(Self::section_title("Model list", theme))
-                        .child(div().flex().flex_col().gap_1().children(model_rows).when(
-                            config.models.is_empty(),
-                            |this| {
-                                this.child(
-                                    div()
-                                        .py_2()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child("No models added yet."),
-                                )
-                            },
-                        ))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap_2()
-                                .child(self.ai_model_input.clone())
-                                .child(self.add_manual_model_button(provider, theme, cx)),
-                        ),
-                )
-                .into_any_element(),
-        ]
+            });
+
+        // Model List section: title + action row + list rows.
+        let model_list_section = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(Self::section_title("Model List", theme))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .items_center()
+                    .child(self.fetch_models_button(provider, theme, cx))
+                    .child(self.ai_model_input.clone())
+                    .child(self.add_manual_model_button(provider, theme, cx)),
+            )
+            .child(div().flex().flex_col().gap_1().children(model_rows).when(
+                config.models.is_empty(),
+                |this| {
+                    this.child(
+                        div()
+                            .py_2()
+                            .text_color(rgb(theme.text_muted))
+                            .child("No models added yet."),
+                    )
+                },
+            ));
+
+        // Details column: header (name only) + scrollable sectioned body.
+        let details_column = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .child(
+                div()
+                    .flex_none()
+                    .px_6()
+                    .pt_4()
+                    .pb_3()
+                    .border_b(px(1.0))
+                    .border_color(rgb(theme.border_variant))
+                    .child(
+                        div()
+                            .text_size(ui_rems(16.0))
+                            .text_color(rgb(theme.text))
+                            .child(provider.label()),
+                    ),
+            )
+            .child(
+                div()
+                    .id("settings-provider-details")
+                    .track_scroll(&self.content_scroll)
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_6()
+                    .py_4()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_5()
+                            .child(api_key_field)
+                            .child(api_host_field)
+                            .child(model_list_section),
+                    )
+                    .vertical_scrollbar_for(&self.content_scroll, window, cx),
+            );
+
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h_0()
+            .child(provider_list_column)
+            .child(details_column)
+            .into_any_element()
     }
 
     fn provider_sidebar_entry(
@@ -3261,16 +3353,15 @@ impl SettingsWindow {
                 }),
             )
             .child(div().truncate().child(provider.label()))
-            .child(
-                div()
-                    .text_size(ui_rems(11.0))
-                    .text_color(rgb(if enabled {
-                        theme.success
-                    } else {
-                        theme.text_muted
-                    }))
-                    .child(if enabled { "On" } else { "Off" }),
-            )
+            .child(self.compact_toggle(
+                enabled,
+                move |settings| {
+                    let config = settings.ai.provider_config_mut(provider);
+                    config.enabled = !config.enabled;
+                },
+                theme,
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -4338,12 +4429,17 @@ impl Render for SettingsWindow {
                 store.registry.metadata(),
             )
         };
+        let ai_providers_view = if self.active_tab == SettingsTab::AiProviders {
+            Some(self.ai_providers_tab(&settings, resolved, window, cx))
+        } else {
+            None
+        };
         let content = match self.active_tab {
             SettingsTab::General => self.general_tab(&settings, resolved, cx),
             SettingsTab::Keymap => self.keymap_tab(&settings, resolved, cx),
             SettingsTab::Appearance => self.appearance_tab(&settings, resolved, themes, cx),
             SettingsTab::AiGeneral => self.ai_general_tab(&settings, resolved, cx),
-            SettingsTab::AiProviders => self.ai_providers_tab(&settings, resolved, cx),
+            SettingsTab::AiProviders => Vec::new(),
         };
         let (main_model_overlay, title_model_overlay) = if self.active_tab == SettingsTab::AiGeneral
         {
@@ -4443,7 +4539,9 @@ impl Render for SettingsWindow {
                     .flex_1()
                     .min_h_0()
                     .child(self.settings_nav(resolved, cx))
-                    .child(
+                    .child(if let Some(view) = ai_providers_view {
+                        view
+                    } else {
                         div()
                             .id("settings-content")
                             .track_scroll(&self.content_scroll)
@@ -4456,8 +4554,9 @@ impl Render for SettingsWindow {
                             .px_4()
                             .py_3()
                             .children(content)
-                            .vertical_scrollbar_for(&self.content_scroll, window, cx),
-                    ),
+                            .vertical_scrollbar_for(&self.content_scroll, window, cx)
+                            .into_any_element()
+                    }),
             )
             .child(
                 div()
