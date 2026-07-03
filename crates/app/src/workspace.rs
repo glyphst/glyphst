@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use gpui::{
     AnyElement, Context, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement, MouseButton,
-    MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString, Window, WindowAppearance, div,
-    point, prelude::*, px, rgb, rgba,
+    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString, Window,
+    WindowAppearance, WindowControlArea, div, point, prelude::*, px, rgb, rgba,
 };
 
 use crate::{
@@ -63,6 +63,7 @@ enum ToolbarMenu {
 }
 
 const TOOLBAR_HEIGHT: f32 = 32.0;
+const TRAFFIC_LIGHT_PADDING: f32 = 71.0;
 const TOOLBAR_MENU_TEXT_SIZE: f32 = 12.0;
 const TOOLBAR_DROPDOWN_TEXT_SIZE: f32 = 13.0;
 const TOOLBAR_DROPDOWN_WIDTH: f32 = 210.0;
@@ -85,6 +86,7 @@ pub(crate) struct Workspace {
     toolbar_menu_open: bool,
     toolbar_open_menu: Option<ToolbarMenu>,
     dragged_tab_outside_window: Option<DraggedTab>,
+    should_move_window: bool,
 }
 
 impl Workspace {
@@ -106,6 +108,7 @@ impl Workspace {
             toolbar_menu_open: false,
             toolbar_open_menu: None,
             dragged_tab_outside_window: None,
+            should_move_window: false,
         };
 
         workspace.subscribe_to_pane(&pane, window, cx);
@@ -925,7 +928,12 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_toolbar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_toolbar(
+        &self,
+        theme: Theme,
+        is_fullscreen: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let expanded = self.toolbar_menu_open || self.active_tab_is_new_tab(cx);
         let mut toolbar = div()
             .flex_none()
@@ -934,18 +942,44 @@ impl Workspace {
             .items_center()
             .gap_1()
             .px_1()
+            .when(cfg!(target_os = "macos") && !is_fullscreen, |this| {
+                this.pl(px(TRAFFIC_LIGHT_PADDING))
+            })
             .border_b(px(1.0))
             .border_color(rgb(theme.border))
             .bg(rgb(theme.tab_bar_background))
             .text_size(ui_rems(TOOLBAR_MENU_TEXT_SIZE))
             .text_color(rgb(theme.text))
+            .window_control_area(WindowControlArea::Drag)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
+                    this.should_move_window = true;
                     this.close_toolbar_menu(cx);
                     cx.stop_propagation();
                 }),
-            );
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.should_move_window = false;
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, window, _| {
+                if this.should_move_window {
+                    this.should_move_window = false;
+                    window.start_window_move();
+                }
+            }))
+            .id("toolbar")
+            .on_click(|event, window, _| {
+                if event.click_count() == 2 {
+                    #[cfg(target_os = "macos")]
+                    window.titlebar_double_click();
+                    #[cfg(not(target_os = "macos"))]
+                    window.zoom_window();
+                }
+            });
 
         if expanded {
             toolbar = toolbar
@@ -1029,15 +1063,14 @@ impl Workspace {
     }
 
     fn toolbar_menu_left(menu: ToolbarMenu) -> gpui::Rems {
+        let base = TOOLBAR_PADDING_X;
+        #[cfg(target_os = "macos")]
+        let base = base + TRAFFIC_LIGHT_PADDING;
         match menu {
-            ToolbarMenu::Glyphst => ui_rems(TOOLBAR_PADDING_X),
-            ToolbarMenu::File => ui_rems(TOOLBAR_PADDING_X + TOOLBAR_GLYPHST_WIDTH + TOOLBAR_GAP),
+            ToolbarMenu::Glyphst => ui_rems(base),
+            ToolbarMenu::File => ui_rems(base + TOOLBAR_GLYPHST_WIDTH + TOOLBAR_GAP),
             ToolbarMenu::Tab => ui_rems(
-                TOOLBAR_PADDING_X
-                    + TOOLBAR_GLYPHST_WIDTH
-                    + TOOLBAR_GAP
-                    + TOOLBAR_FILE_WIDTH
-                    + TOOLBAR_GAP,
+                base + TOOLBAR_GLYPHST_WIDTH + TOOLBAR_GAP + TOOLBAR_FILE_WIDTH + TOOLBAR_GAP,
             ),
         }
     }
@@ -1192,6 +1225,7 @@ impl Render for Workspace {
             .read(cx)
             .active_pdf_view()
             .is_some_and(|pdf_view| pdf_view.read(cx).is_presentation_mode());
+        let is_fullscreen = window.is_fullscreen();
 
         div()
             .id("workspace")
@@ -1316,7 +1350,7 @@ impl Render for Workspace {
                 this.open_keymap_tab(window, cx);
             }))
             .when(!active_pdf_is_presentation, |this| {
-                this.child(self.render_toolbar(theme, cx))
+                this.child(self.render_toolbar(theme, is_fullscreen, cx))
             })
             .child(
                 div()
