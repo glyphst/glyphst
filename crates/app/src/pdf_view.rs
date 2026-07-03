@@ -5159,6 +5159,9 @@ impl PdfView {
 
     fn close_search_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.search_bar.take().is_some() {
+            self.search.query = "".into();
+            self.search.matches.clear();
+            self.search.active = None;
             self.focus_handle.focus(window, cx);
             cx.notify();
         }
