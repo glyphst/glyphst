@@ -8297,6 +8297,8 @@ impl Render for PdfView {
             .when(self.panning.is_some(), |this| this.cursor_grabbing())
             .key_context(if self.grid_overview_open {
                 "GridOverview"
+            } else if self.is_presentation_mode() {
+                "PdfView PresentationMode"
             } else {
                 "PdfView"
             })

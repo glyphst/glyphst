@@ -507,6 +507,7 @@ fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
     add_many::<AiPanelClose>(cx, bindings, &["escape"], "QuickAsk");
     add_many::<OpenQuickAsk>(cx, bindings, &["tab"], "QuickAsk");
     add_many::<PanelClose>(cx, bindings, &["escape"], "SettingsPanel");
+    add_many::<TogglePresentationMode>(cx, bindings, &["escape"], "PresentationMode");
 }
 
 fn add_many<A>(cx: &mut App, bindings: &mut Vec<KeyBinding>, keys: &[&str], context: &str)
