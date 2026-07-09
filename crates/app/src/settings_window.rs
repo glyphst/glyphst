@@ -10,7 +10,7 @@ use crate::{
     },
     theme::{
         PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode, ThemeMetadata, ThemeSelection,
-        format_rgb_hex, format_rgba_hex,
+        format_rgb_hex, format_rgba_hex, parse_hex_color,
     },
 };
 use gpui::{
@@ -609,12 +609,41 @@ const ALPHA_SWATCHES: [u32; 6] = [
     0x00000033, 0x00000066, 0xffffff66, 0x61afef55, 0x3a3f4bcc, 0x45475a99,
 ];
 
+#[derive(Clone, Copy)]
 struct ColorRowConfig {
     label: &'static str,
     current: u32,
     override_value: Option<u32>,
     swatches: &'static [u32],
     with_alpha: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ActiveColorPicker {
+    label: &'static str,
+    anchor: GpuiPoint<Pixels>,
+    current: u32,
+    swatches: &'static [u32],
+    with_alpha: bool,
+    update: fn(&mut PartialTheme, u32),
+}
+
+fn format_color_hex(color: u32, with_alpha: bool) -> String {
+    if with_alpha {
+        format_rgba_hex(color)
+    } else {
+        format_rgb_hex(color)
+    }
+}
+
+fn parse_color_input(value: &str, with_alpha: bool) -> Option<u32> {
+    let hex = value.trim().strip_prefix('#').unwrap_or(value.trim());
+    match (with_alpha, hex.len()) {
+        (false, 6) => parse_hex_color(hex, false),
+        (true, 6) => parse_hex_color(hex, false).map(|color| (color << 8) | 0xff),
+        (true, 8) => parse_hex_color(hex, true),
+        _ => None,
+    }
 }
 
 pub enum PanelEvent {
@@ -878,6 +907,8 @@ pub struct SettingsWindow {
     provider_model_picker: ModelPickerState,
     provider_model_selection: Vec<String>,
     font_picker: FontPickerState,
+    active_color_picker: Option<ActiveColorPicker>,
+    color_picker_input: Entity<SettingsTextInput>,
     font_search_input: Entity<SettingsTextInput>,
     ui_font_fallbacks_input: Entity<SettingsTextInput>,
     ai_model_input: Entity<SettingsTextInput>,
@@ -922,6 +953,21 @@ impl SettingsWindow {
         };
 
         let font_picker = FontPickerState::new(cx, &font_settings);
+        let color_picker_input =
+            cx.new(|cx| SettingsTextInput::new("#000000".into(), "#rrggbb".into(), false, cx));
+        cx.subscribe(&color_picker_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let Some(mut picker) = this.active_color_picker else {
+                return;
+            };
+            let Some(color) = parse_color_input(value.as_ref(), picker.with_alpha) else {
+                return;
+            };
+            picker.current = color;
+            this.active_color_picker = Some(picker);
+            this.persist_theme_color_override(picker.update, color, cx);
+        })
+        .detach();
         let font_search_input = cx.new(|cx| {
             SettingsTextInput::new(
                 "".into(),
@@ -1201,6 +1247,8 @@ impl SettingsWindow {
             provider_model_picker: ModelPickerState::default(),
             provider_model_selection: Vec::new(),
             font_picker,
+            active_color_picker: None,
+            color_picker_input,
             font_search_input,
             ui_font_fallbacks_input,
             ai_model_input,
@@ -1493,6 +1541,61 @@ impl SettingsWindow {
         let mut settings = cx.global::<SettingsStore>().settings.clone();
         update(&mut settings);
         self.persist_settings(settings, cx);
+    }
+
+    fn persist_theme_color_override(
+        &mut self,
+        update: fn(&mut PartialTheme, u32),
+        color: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        update(&mut settings.overrides, color);
+        self.persist_settings(settings, cx);
+    }
+
+    fn open_color_picker(
+        &mut self,
+        config: ColorRowConfig,
+        update: fn(&mut PartialTheme, u32),
+        anchor: GpuiPoint<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_color_picker = Some(ActiveColorPicker {
+            label: config.label,
+            anchor,
+            current: config.current,
+            swatches: config.swatches,
+            with_alpha: config.with_alpha,
+            update,
+        });
+        let value = format_color_hex(config.current, config.with_alpha);
+        self.color_picker_input
+            .update(cx, |input, cx| input.set_content(value.into(), cx));
+        self.color_picker_input
+            .read(cx)
+            .focus_handle
+            .clone()
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn set_active_color_picker_color(
+        &mut self,
+        color: u32,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut picker) = self.active_color_picker else {
+            return;
+        };
+        picker.current = color;
+        self.active_color_picker = Some(picker);
+        let value = format_color_hex(color, picker.with_alpha);
+        self.color_picker_input
+            .update(cx, |input, cx| input.set_content(value.into(), cx));
+        self.persist_theme_color_override(picker.update, color, cx);
     }
 
     fn export(&mut self, _: &mut Window, cx: &mut Context<Self>) {
@@ -1939,85 +2042,196 @@ impl SettingsWindow {
     fn color_row(
         &self,
         config: ColorRowConfig,
-        update: impl Fn(&mut PartialTheme, u32) + Copy + 'static,
-        reset: impl Fn(&mut PartialTheme) + Copy + 'static,
+        update: fn(&mut PartialTheme, u32),
+        reset: fn(&mut PartialTheme),
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let value = if config.with_alpha {
-            format_rgba_hex(config.current)
+        div().flex().flex_col().py_2().child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(div().text_color(rgb(theme.text)).child(config.label))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .when(config.override_value.is_some(), |this| {
+                            this.child(self.small_button(
+                                "Reset",
+                                move |settings| reset(&mut settings.overrides),
+                                theme,
+                                cx,
+                            ))
+                        })
+                        .child(
+                            div()
+                                .h(px(28.0))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .border_1()
+                                .border_color(rgb(theme.border_variant))
+                                .bg(rgb(theme.surface_background))
+                                .hover(move |style| style.bg(rgb(theme.element_hover)))
+                                .cursor_pointer()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                        let anchor = point(
+                                            event.position.x - px(120.0),
+                                            event.position.y + px(18.0),
+                                        );
+                                        this.open_color_picker(config, update, anchor, window, cx);
+                                        cx.stop_propagation();
+                                    }),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(16.0))
+                                        .h(px(16.0))
+                                        .border_1()
+                                        .border_color(rgb(theme.border_variant))
+                                        .bg(if config.with_alpha {
+                                            rgba(config.current)
+                                        } else {
+                                            rgb(config.current)
+                                        }),
+                                )
+                                .child("Pick"),
+                        ),
+                ),
+        )
+    }
+
+    fn color_picker_overlay(&self, theme: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let picker = self.active_color_picker?;
+        let input = self.color_picker_input.clone();
+        let value = input.read(cx).content.to_string();
+        let parsed = parse_color_input(&value, picker.with_alpha);
+        let preview = parsed.unwrap_or(picker.current);
+        let hint = if picker.with_alpha {
+            "Use #rrggbb or #rrggbbaa"
         } else {
-            format_rgb_hex(config.current)
-        };
-        let source = if config.override_value.is_some() {
-            "override"
-        } else {
-            "theme"
+            "Use #rrggbb"
         };
 
-        div()
-            .flex()
-            .flex_col()
-            .py_2()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .mb_2()
-                    .child(div().text_color(rgb(theme.text)).child(config.label))
+        Some(
+            deferred(
+                anchored()
+                    .position(picker.anchor)
+                    .anchor(Anchor::TopLeft)
+                    .snap_to_window_with_margin(px(8.0))
                     .child(
                         div()
-                            .text_color(rgb(theme.text_muted))
-                            .child(format!("{value} · {source}")),
+                            .w(px(320.0))
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .p_3()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(rgb(theme.border_variant))
+                            .bg(rgb(theme.surface_background))
+                            .shadow_sm()
+                            .overflow_hidden()
+                            .occlude()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.active_color_picker = None;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_color(rgb(theme.text))
+                                            .child(format!("Pick {}", picker.label)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(rgb(theme.text_muted))
+                                            .child(format_color_hex(preview, picker.with_alpha)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .w(px(48.0))
+                                            .h(px(48.0))
+                                            .flex_none()
+                                            .border_1()
+                                            .border_color(rgb(theme.border_variant))
+                                            .bg(if picker.with_alpha {
+                                                rgba(preview)
+                                            } else {
+                                                rgb(preview)
+                                            }),
+                                    )
+                                    .child(div().flex_1().flex().child(input)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(ui_rems(11.0))
+                                    .text_color(rgb(if parsed.is_some() {
+                                        theme.text_muted
+                                    } else {
+                                        theme.error
+                                    }))
+                                    .child(if parsed.is_some() {
+                                        hint
+                                    } else {
+                                        "Invalid color"
+                                    }),
+                            )
+                            .child(div().flex().flex_wrap().gap_2().children(
+                                picker.swatches.iter().copied().map(move |color| {
+                                    let selected = color == picker.current;
+                                    div()
+                                        .w(px(28.0))
+                                        .h(px(28.0))
+                                        .border_2()
+                                        .border_color(if selected {
+                                            rgb(theme.text)
+                                        } else {
+                                            rgb(theme.border_variant)
+                                        })
+                                        .bg(if picker.with_alpha {
+                                            rgba(color)
+                                        } else {
+                                            rgb(color)
+                                        })
+                                        .hover(move |style| style.border_color(rgb(theme.text)))
+                                        .cursor_pointer()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.set_active_color_picker_color(
+                                                    color, window, cx,
+                                                );
+                                                cx.stop_propagation();
+                                            }),
+                                        )
+                                }),
+                            )),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .when(config.override_value.is_some(), |this| {
-                        this.child(self.small_button(
-                            "Reset",
-                            move |settings| reset(&mut settings.overrides),
-                            theme,
-                            cx,
-                        ))
-                    })
-                    .children(config.swatches.iter().copied().map(move |color| {
-                        let selected = color == config.current;
-                        div()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .border_2()
-                            .border_color(if selected {
-                                rgb(theme.text)
-                            } else {
-                                rgb(theme.border_variant)
-                            })
-                            .bg(if config.with_alpha {
-                                rgba(color)
-                            } else {
-                                rgb(color)
-                            })
-                            .hover(move |style| style.border_color(rgb(theme.text)))
-                            .cursor_pointer()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    this.change_settings(
-                                        move |settings| update(&mut settings.overrides, color),
-                                        window,
-                                        cx,
-                                    );
-                                    cx.stop_propagation();
-                                }),
-                            )
-                    })),
-            )
+            .into_any_element(),
+        )
     }
 
     fn theme_mode_option(
@@ -4259,6 +4473,71 @@ impl SettingsWindow {
                 ))
                 .child(self.color_row(
                     ColorRowConfig {
+                        label: "Highlight yellow",
+                        current: resolved.highlight_yellow,
+                        override_value: settings.overrides.highlight_yellow,
+                        swatches: &HIGHLIGHT_SWATCHES,
+                        with_alpha: true,
+                    },
+                    |overrides, color| overrides.highlight_yellow = Some(color),
+                    |overrides| overrides.highlight_yellow = None,
+                    resolved,
+                    cx,
+                ))
+                .child(self.color_row(
+                    ColorRowConfig {
+                        label: "Highlight green",
+                        current: resolved.highlight_green,
+                        override_value: settings.overrides.highlight_green,
+                        swatches: &HIGHLIGHT_SWATCHES,
+                        with_alpha: true,
+                    },
+                    |overrides, color| overrides.highlight_green = Some(color),
+                    |overrides| overrides.highlight_green = None,
+                    resolved,
+                    cx,
+                ))
+                .child(self.color_row(
+                    ColorRowConfig {
+                        label: "Highlight blue",
+                        current: resolved.highlight_blue,
+                        override_value: settings.overrides.highlight_blue,
+                        swatches: &HIGHLIGHT_SWATCHES,
+                        with_alpha: true,
+                    },
+                    |overrides, color| overrides.highlight_blue = Some(color),
+                    |overrides| overrides.highlight_blue = None,
+                    resolved,
+                    cx,
+                ))
+                .child(self.color_row(
+                    ColorRowConfig {
+                        label: "Highlight pink",
+                        current: resolved.highlight_pink,
+                        override_value: settings.overrides.highlight_pink,
+                        swatches: &HIGHLIGHT_SWATCHES,
+                        with_alpha: true,
+                    },
+                    |overrides, color| overrides.highlight_pink = Some(color),
+                    |overrides| overrides.highlight_pink = None,
+                    resolved,
+                    cx,
+                ))
+                .child(self.color_row(
+                    ColorRowConfig {
+                        label: "Highlight orange",
+                        current: resolved.highlight_orange,
+                        override_value: settings.overrides.highlight_orange,
+                        swatches: &HIGHLIGHT_SWATCHES,
+                        with_alpha: true,
+                    },
+                    |overrides, color| overrides.highlight_orange = Some(color),
+                    |overrides| overrides.highlight_orange = None,
+                    resolved,
+                    cx,
+                ))
+                .child(self.color_row(
+                    ColorRowConfig {
                         label: "Footer background",
                         current: resolved.footer_background,
                         override_value: settings.overrides.footer_background,
@@ -4691,6 +4970,11 @@ impl Render for SettingsWindow {
         } else {
             None
         };
+        let color_picker_overlay = if self.active_tab == SettingsTab::Appearance {
+            self.color_picker_overlay(resolved, cx)
+        } else {
+            None
+        };
 
         div()
             .key_context("SettingsPanel")
@@ -4721,6 +5005,9 @@ impl Render for SettingsWindow {
                     if this.font_picker.open {
                         this.font_picker.open = false;
                         this.font_picker.anchor = None;
+                        changed = true;
+                    }
+                    if this.active_color_picker.take().is_some() {
                         changed = true;
                     }
                     this.focus_handle.clone().focus(window, cx);
@@ -4808,5 +5095,6 @@ impl Render for SettingsWindow {
             .when_some(title_model_overlay, |this, overlay| this.child(overlay))
             .when_some(provider_model_overlay, |this, overlay| this.child(overlay))
             .when_some(font_picker_overlay, |this, overlay| this.child(overlay))
+            .when_some(color_picker_overlay, |this, overlay| this.child(overlay))
     }
 }
