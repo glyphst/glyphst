@@ -7181,6 +7181,7 @@ impl PdfView {
 
                                                 row = row.child(
                                                     div()
+                                                        .id(("grid-overview-page", page_idx))
                                                         .flex()
                                                         .flex_none()
                                                         .flex_col()

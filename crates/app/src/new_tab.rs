@@ -324,6 +324,7 @@ impl NewTab {
         };
 
         div()
+            .id(("new-tab-card", entry_ix))
             .flex()
             .flex_none()
             .flex_col()
