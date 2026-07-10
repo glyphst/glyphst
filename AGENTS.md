@@ -11,3 +11,4 @@ Relevent projects are cloned in `probe` directory for reference purpose:
 - `catppuccin` (Theme/Color palette)
 - `cherry-studio` (An AI chat application)
 - `lucide` (Icon)
+- `gpui-component` (Third-party GPUI Components)
