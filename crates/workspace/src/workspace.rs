@@ -40,13 +40,12 @@ enum ToolbarMenu {
     Tab,
 }
 
-const TOOLBAR_HEIGHT: f32 = 32.0;
 const TRAFFIC_LIGHT_PADDING: f32 = 71.0;
 const TOOLBAR_MENU_TEXT_SIZE: f32 = 12.0;
 const TOOLBAR_DROPDOWN_TEXT_SIZE: f32 = 13.0;
 const TOOLBAR_DROPDOWN_WIDTH: f32 = 210.0;
 const TOOLBAR_ICON_SIZE: f32 = 16.0;
-const TOOLBAR_BUTTON_HEIGHT: f32 = 24.0;
+const TOOLBAR_BUTTON_HEIGHT: f32 = 22.0;
 const TOOLBAR_PADDING_X: f32 = 4.0;
 const TOOLBAR_GAP: f32 = 4.0;
 const TOOLBAR_GLYPHST_WIDTH: f32 = 84.0;
@@ -1029,6 +1028,26 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn toolbar_height(window: &Window) -> Pixels {
+        #[cfg(target_os = "windows")]
+        {
+            px(32.0)
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            (1.75 * window.rem_size()).max(px(34.0))
+        }
+    }
+
+    fn toolbar_menu_id(menu: ToolbarMenu) -> &'static str {
+        match menu {
+            ToolbarMenu::Glyphst => "toolbar-menu-glyphst",
+            ToolbarMenu::File => "toolbar-menu-file",
+            ToolbarMenu::Tab => "toolbar-menu-tab",
+        }
+    }
+
     fn render_toolbar_menu_button(
         &self,
         label: String,
@@ -1041,6 +1060,8 @@ impl Workspace {
         let active = self.toolbar_open_menu == Some(menu);
 
         div()
+            .id(Self::toolbar_menu_id(menu))
+            .occlude()
             .w(ui_rems(width))
             .h(ui_rems(TOOLBAR_BUTTON_HEIGHT))
             .px_2()
@@ -1057,6 +1078,12 @@ impl Workspace {
                     .bg(rgb(theme.element_hover))
                     .text_color(rgb(theme.text))
             })
+            .on_hover(cx.listener(move |this, hover_enter, _, cx| {
+                if *hover_enter && this.toolbar_menu_open && this.toolbar_open_menu != Some(menu) {
+                    this.toolbar_open_menu = Some(menu);
+                    cx.notify();
+                }
+            }))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1084,12 +1111,14 @@ impl Workspace {
         &self,
         theme: Theme,
         is_fullscreen: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let expanded = self.toolbar_menu_open || self.active_tab_is_new_tab(cx);
+        let toolbar_height = Self::toolbar_height(window);
         let mut toolbar = div()
             .flex_none()
-            .h(ui_rems(TOOLBAR_HEIGHT))
+            .h(toolbar_height)
             .flex()
             .items_center()
             .gap_1()
@@ -1097,8 +1126,6 @@ impl Workspace {
             .when(cfg!(target_os = "macos") && !is_fullscreen, |this| {
                 this.pl(px(TRAFFIC_LIGHT_PADDING))
             })
-            .border_b(px(1.0))
-            .border_color(rgb(theme.border))
             .bg(rgb(theme.tab_bar_background))
             .text_size(ui_rems(TOOLBAR_MENU_TEXT_SIZE))
             .text_color(rgb(theme.text))
@@ -1188,12 +1215,14 @@ impl Workspace {
     }
 
     fn render_toolbar_menu_item(
+        id: &'static str,
         label: String,
         theme: Theme,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
+            .id(id)
             .flex()
             .items_center()
             .h(ui_rems(30.0))
@@ -1231,8 +1260,10 @@ impl Workspace {
         &self,
         menu: ToolbarMenu,
         theme: Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let toolbar_height = Self::toolbar_height(window);
         let mut dropdown = div()
             .occlude()
             .absolute()
@@ -1256,24 +1287,28 @@ impl Workspace {
             ToolbarMenu::Glyphst => {
                 dropdown = dropdown
                     .child(Self::render_toolbar_menu_item(
+                        "toolbar-menu-glyphst-about",
                         crate::fl!("toolbar-about-glyphst"),
                         theme,
                         |_, _, _| {},
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
+                        "toolbar-menu-glyphst-check-updates",
                         crate::fl!("toolbar-check-updates"),
                         theme,
                         |_, _, _| {},
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
+                        "toolbar-menu-glyphst-settings",
                         crate::fl!("toolbar-open-settings"),
                         theme,
                         |this, _, cx| this.open_settings_window(cx),
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
+                        "toolbar-menu-glyphst-quit",
                         crate::fl!("toolbar-quit-glyphst"),
                         theme,
                         |_, _, cx| cx.quit(),
@@ -1282,6 +1317,7 @@ impl Workspace {
             }
             ToolbarMenu::File => {
                 dropdown = dropdown.child(Self::render_toolbar_menu_item(
+                    "toolbar-menu-file-open",
                     crate::fl!("toolbar-open-file"),
                     theme,
                     |this, window, cx| this.open_file(window, cx),
@@ -1291,18 +1327,21 @@ impl Workspace {
             ToolbarMenu::Tab => {
                 dropdown = dropdown
                     .child(Self::render_toolbar_menu_item(
+                        "toolbar-menu-tab-new",
                         crate::fl!("toolbar-new-tab"),
                         theme,
                         |this, window, cx| this.open_new_tab(window, cx),
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
+                        "toolbar-menu-tab-close",
                         crate::fl!("toolbar-close-tab"),
                         theme,
                         |this, window, cx| this.close_active_tab(window, cx),
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
+                        "toolbar-menu-tab-split-right",
                         crate::fl!("toolbar-split-right"),
                         theme,
                         |this, window, cx| {
@@ -1311,6 +1350,7 @@ impl Workspace {
                         cx,
                     ))
                     .child(Self::render_toolbar_menu_item(
+                        "toolbar-menu-tab-split-down",
                         crate::fl!("toolbar-split-down"),
                         theme,
                         |this, window, cx| this.split_active_pane(SplitDirection::Down, window, cx),
@@ -1321,7 +1361,7 @@ impl Workspace {
 
         div()
             .absolute()
-            .top(ui_rems(TOOLBAR_HEIGHT))
+            .top(toolbar_height)
             .left_0()
             .size_full()
             .on_mouse_down(
@@ -1504,7 +1544,7 @@ impl Render for Workspace {
                 this.open_keymap_tab(window, cx);
             }))
             .when(!active_pdf_is_presentation, |this| {
-                this.child(self.render_toolbar(theme, is_fullscreen, cx))
+                this.child(self.render_toolbar(theme, is_fullscreen, window, cx))
             })
             .child(
                 div()
@@ -1517,7 +1557,7 @@ impl Render for Workspace {
             )
             .when(!active_pdf_is_presentation, |this| {
                 this.when_some(self.toolbar_open_menu, |this, menu| {
-                    this.child(self.render_toolbar_dropdown(menu, theme, cx))
+                    this.child(self.render_toolbar_dropdown(menu, theme, window, cx))
                 })
             })
             .when_some(self.command_palette.clone(), |this, palette| {
