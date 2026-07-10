@@ -13,49 +13,14 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-mod ai_chat;
-mod ai_client;
-mod ai_panel;
-mod assets;
-mod bookmarks;
-mod command_palette;
-mod fonts;
-mod go_to_page;
-mod history;
-mod icons;
-mod input;
 mod instance;
-mod keybindings;
-mod keymap_editor;
-mod keystroke_input;
-mod library;
-mod localize;
-mod markdown;
-mod menu;
-mod new_tab;
-mod note_editor;
-mod notes;
-mod pane;
-mod pdf_view;
-mod picker;
-mod scrollbar;
-mod search;
-mod searchable_dropdown;
-mod settings;
-mod settings_window;
-mod smooth_scroll;
-mod style;
-mod text_input;
-mod theme;
-mod theme_selector;
-mod toc;
-mod workspace;
 
-use library::LibraryStore;
-use new_tab::NewTab;
-use pdf_view::RenderCache;
-use settings::SettingsStore;
-use workspace::Workspace;
+use glyphst_keymap::keybindings;
+use glyphst_library::{DocumentPosition, LibraryStore};
+use glyphst_pdf_ui::pdf_view::RenderCache;
+use glyphst_settings::{SettingsStore, localize};
+use glyphst_ui::{assets, fonts};
+use glyphst_workspace::{NewTab, Workspace, WorkspaceCallbacks, WorkspaceWindowRequest};
 
 fn main() {
     let request = instance::parse_args();
@@ -102,8 +67,10 @@ fn main() {
             };
             keybindings::apply(cx, keymap_preset, &keybinding_overrides);
 
-            open_workspace_window(request.path.clone(), cx)
-                .expect("failed to open workspace window");
+            if let Err(error) = open_workspace_window(request.path.clone(), cx) {
+                eprintln!("failed to open workspace window: {error:#}");
+                return;
+            }
 
             cx.activate(true);
 
@@ -171,7 +138,7 @@ fn active_workspace_window(cx: &App) -> Option<WindowHandle<Workspace>> {
         })
 }
 
-pub(crate) fn open_keymap_in_active_workspace(cx: &mut App) {
+fn open_keymap_in_active_workspace(cx: &mut App) {
     let Some(workspace_window) = active_workspace_window(cx) else {
         return;
     };
@@ -184,15 +151,52 @@ pub(crate) fn open_keymap_in_active_workspace(cx: &mut App) {
     }
 }
 
-pub(crate) fn open_workspace_window(path: Option<PathBuf>, cx: &mut App) -> Result<()> {
+fn open_settings_window(cx: &mut App) {
+    glyphst_settings_ui::open_settings_window(open_keymap_in_active_workspace, cx);
+}
+
+fn workspace_callbacks() -> WorkspaceCallbacks {
+    WorkspaceCallbacks {
+        open_workspace_window: open_detached_workspace_window,
+        open_settings_window,
+    }
+}
+
+fn open_workspace_window(path: Option<PathBuf>, cx: &mut App) -> Result<()> {
     open_workspace_window_at(path, None, cx)
 }
 
-pub(crate) fn open_workspace_window_at(
+fn open_workspace_window_at(
     path: Option<PathBuf>,
     bounds: Option<Bounds<Pixels>>,
     cx: &mut App,
 ) -> Result<()> {
+    open_workspace_window_at_position(path, None, bounds, cx).map(|_| ())
+}
+
+fn open_detached_workspace_window(
+    request: WorkspaceWindowRequest,
+    cx: &mut App,
+) -> Result<WindowHandle<Workspace>> {
+    open_workspace_window_inner(None, None, Some(request.bounds), true, cx)
+}
+
+fn open_workspace_window_at_position(
+    path: Option<PathBuf>,
+    initial_position: Option<DocumentPosition>,
+    bounds: Option<Bounds<Pixels>>,
+    cx: &mut App,
+) -> Result<WindowHandle<Workspace>> {
+    open_workspace_window_inner(path, initial_position, bounds, false, cx)
+}
+
+fn open_workspace_window_inner(
+    path: Option<PathBuf>,
+    initial_position: Option<DocumentPosition>,
+    bounds: Option<Bounds<Pixels>>,
+    empty: bool,
+    cx: &mut App,
+) -> Result<WindowHandle<Workspace>> {
     let window_size = if path.is_some() {
         size(px(800.0), px(1000.0))
     } else {
@@ -216,9 +220,19 @@ pub(crate) fn open_workspace_window_at(
         },
         move |window, cx| {
             window.set_app_id("glyphst");
-            cx.new(|cx| Workspace::new(path.clone(), window, cx))
+            cx.new(|cx| {
+                if empty {
+                    Workspace::new_empty(workspace_callbacks(), window, cx)
+                } else {
+                    Workspace::new(
+                        path.clone(),
+                        initial_position,
+                        workspace_callbacks(),
+                        window,
+                        cx,
+                    )
+                }
+            })
         },
-    )?;
-
-    Ok(())
+    )
 }

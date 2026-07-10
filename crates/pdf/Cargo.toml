@@ -1,0 +1,9 @@
+[package]
+name = "glyphst-pdf"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glyphst-core = { path = "../core" }
+mupdf.workspace = true

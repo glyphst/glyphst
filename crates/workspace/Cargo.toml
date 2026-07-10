@@ -1,0 +1,20 @@
+[package]
+name = "glyphst-workspace"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glyphst-actions = { path = "../actions" }
+glyphst-core = { path = "../core" }
+glyphst-keymap = { path = "../keymap" }
+glyphst-library = { path = "../library" }
+glyphst-pdf = { path = "../pdf" }
+glyphst-pdf-ui = { path = "../pdf-ui" }
+glyphst-settings = { path = "../settings" }
+glyphst-settings-ui = { path = "../settings-ui" }
+glyphst-ui = { path = "../ui" }
+gpui.workspace = true
+image.workspace = true
+mupdf.workspace = true
+smallvec.workspace = true

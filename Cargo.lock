@@ -2158,26 +2158,181 @@ name = "glyphst"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arboard",
- "bincode",
  "dirs",
  "futures",
+ "glyphst-core",
+ "glyphst-keymap",
+ "glyphst-library",
+ "glyphst-pdf-ui",
+ "glyphst-settings",
+ "glyphst-settings-ui",
+ "glyphst-ui",
+ "glyphst-workspace",
  "gpui",
  "gpui_platform",
- "i18n-embed",
- "i18n-embed-fl",
- "image",
- "kdl",
- "mupdf",
- "pulldown-cmark",
- "redb",
- "reqwest",
- "rust-embed",
  "serde",
  "serde_json",
- "smallvec",
  "tikv-jemalloc-sys",
  "tikv-jemallocator",
+]
+
+[[package]]
+name = "glyphst-actions"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+]
+
+[[package]]
+name = "glyphst-ai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "glyphst-core",
+ "glyphst-settings",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "glyphst-ai-ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "glyphst-actions",
+ "glyphst-ai",
+ "glyphst-core",
+ "glyphst-library",
+ "glyphst-settings",
+ "glyphst-ui",
+ "gpui",
+]
+
+[[package]]
+name = "glyphst-core"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+]
+
+[[package]]
+name = "glyphst-keymap"
+version = "0.1.0"
+dependencies = [
+ "glyphst-actions",
+ "glyphst-core",
+ "glyphst-settings",
+ "glyphst-ui",
+ "gpui",
+]
+
+[[package]]
+name = "glyphst-library"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "glyphst-core",
+ "gpui",
+ "redb",
+ "serde",
+]
+
+[[package]]
+name = "glyphst-pdf"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glyphst-core",
+ "mupdf",
+]
+
+[[package]]
+name = "glyphst-pdf-ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "dirs",
+ "futures",
+ "glyphst-actions",
+ "glyphst-ai",
+ "glyphst-ai-ui",
+ "glyphst-core",
+ "glyphst-library",
+ "glyphst-pdf",
+ "glyphst-settings",
+ "glyphst-ui",
+ "gpui",
+ "image",
+ "mupdf",
+ "smallvec",
+]
+
+[[package]]
+name = "glyphst-settings"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glyphst-core",
+ "glyphst-library",
+ "gpui",
+ "i18n-embed",
+ "i18n-embed-fl",
+ "kdl",
+ "rust-embed",
+]
+
+[[package]]
+name = "glyphst-settings-ui"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "glyphst-actions",
+ "glyphst-ai",
+ "glyphst-core",
+ "glyphst-keymap",
+ "glyphst-settings",
+ "glyphst-ui",
+ "gpui",
+]
+
+[[package]]
+name = "glyphst-ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glyphst-actions",
+ "glyphst-core",
+ "glyphst-settings",
+ "gpui",
+ "pulldown-cmark",
+ "rust-embed",
+ "smallvec",
+]
+
+[[package]]
+name = "glyphst-workspace"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glyphst-actions",
+ "glyphst-core",
+ "glyphst-keymap",
+ "glyphst-library",
+ "glyphst-pdf",
+ "glyphst-pdf-ui",
+ "glyphst-settings",
+ "glyphst-settings-ui",
+ "glyphst-ui",
+ "gpui",
+ "image",
+ "mupdf",
+ "smallvec",
 ]
 
 [[package]]

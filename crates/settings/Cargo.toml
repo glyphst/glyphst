@@ -1,0 +1,14 @@
+[package]
+name = "glyphst-settings"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glyphst-core = { path = "../core" }
+glyphst-library = { path = "../library" }
+gpui.workspace = true
+i18n-embed.workspace = true
+i18n-embed-fl.workspace = true
+kdl.workspace = true
+rust-embed.workspace = true

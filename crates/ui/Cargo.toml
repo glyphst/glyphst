@@ -1,0 +1,14 @@
+[package]
+name = "glyphst-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glyphst-actions = { path = "../actions" }
+glyphst-core = { path = "../core" }
+glyphst-settings = { path = "../settings" }
+gpui.workspace = true
+pulldown-cmark.workspace = true
+rust-embed.workspace = true
+smallvec.workspace = true

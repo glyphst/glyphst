@@ -1,0 +1,13 @@
+[package]
+name = "glyphst-ai"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+glyphst-core = { path = "../core" }
+glyphst-settings = { path = "../settings" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true

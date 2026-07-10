@@ -1,0 +1,14 @@
+[package]
+name = "glyphst-settings-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dirs.workspace = true
+glyphst-actions = { path = "../actions" }
+glyphst-ai = { path = "../ai" }
+glyphst-core = { path = "../core" }
+glyphst-keymap = { path = "../keymap" }
+glyphst-settings = { path = "../settings" }
+glyphst-ui = { path = "../ui" }
+gpui.workspace = true
