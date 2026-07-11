@@ -2268,6 +2268,7 @@ dependencies = [
  "glyphst-pdf",
  "glyphst-settings",
  "glyphst-translation",
+ "glyphst-translation-ui",
  "glyphst-ui",
  "gpui",
  "image",
@@ -2299,6 +2300,7 @@ dependencies = [
  "glyphst-core",
  "glyphst-keymap",
  "glyphst-settings",
+ "glyphst-translation-ui",
  "glyphst-ui",
  "gpui",
 ]

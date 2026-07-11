@@ -33,6 +33,14 @@ pub trait WithScrollbar: Sized {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::Output;
+
+    fn vertical_scrollbar_for_with_id<T: ScrollableHandle + Clone>(
+        self,
+        scroll_handle: &T,
+        id: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::Output;
 }
 
 impl WithScrollbar for Div {
@@ -55,6 +63,24 @@ impl WithScrollbar for Div {
 
         self.child(state)
     }
+
+    fn vertical_scrollbar_for_with_id<T: ScrollableHandle + Clone>(
+        self,
+        scroll_handle: &T,
+        id: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::Output {
+        let state = scrollbar_state(
+            ScrollbarConfig::new(scroll_handle.clone())
+                .id(id)
+                .notify_content(),
+            window,
+            cx,
+        );
+
+        self.child(state)
+    }
 }
 
 impl WithScrollbar for Stateful<Div> {
@@ -70,6 +96,24 @@ impl WithScrollbar for Stateful<Div> {
         let state = scrollbar_state(
             ScrollbarConfig::new(scroll_handle.clone())
                 .id(core::panic::Location::caller())
+                .notify_content(),
+            window,
+            cx,
+        );
+
+        self.child(state)
+    }
+
+    fn vertical_scrollbar_for_with_id<T: ScrollableHandle + Clone>(
+        self,
+        scroll_handle: &T,
+        id: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::Output {
+        let state = scrollbar_state(
+            ScrollbarConfig::new(scroll_handle.clone())
+                .id(id)
                 .notify_content(),
             window,
             cx,

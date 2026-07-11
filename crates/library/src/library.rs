@@ -30,6 +30,8 @@ const HIGHLIGHTS_V1_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("h
 const NOTES_V1_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("notes_v1");
 const AI_SESSIONS_V1_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v1");
 const UI_STATE_V1_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("ui_state_v1");
+const DOCUMENT_PREFERENCES_V1_TABLE: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("document_preferences_v1");
 const SIDEBAR_WIDTHS_KEY: &str = "sidebar_widths";
 const MAX_AI_SESSIONS: usize = 200;
 
@@ -293,6 +295,33 @@ impl StoredSidebarWidthsV1 {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredDocumentPreferencesV1 {
+    version: u8,
+    path: StoredPathV1,
+    target_language: String,
+}
+
+impl From<&DocumentPreferences> for StoredDocumentPreferencesV1 {
+    fn from(preferences: &DocumentPreferences) -> Self {
+        Self {
+            version: STORAGE_SCHEMA_VERSION,
+            path: StoredPathV1::from_path(&preferences.path),
+            target_language: preferences.target_language.clone(),
+        }
+    }
+}
+
+impl StoredDocumentPreferencesV1 {
+    fn into_domain(self) -> Result<DocumentPreferences> {
+        require_storage_version(self.version)?;
+        Ok(DocumentPreferences {
+            path: self.path.into_path()?,
+            target_language: self.target_language,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentPosition {
     pub scroll_x_doc: f32,
@@ -386,6 +415,12 @@ pub struct SidebarWidths {
     pub ai: f32,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DocumentPreferences {
+    pub path: PathBuf,
+    pub target_language: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Library {
     pub history: Vec<HistoryEntry>,
@@ -394,6 +429,7 @@ pub struct Library {
     pub notes: Vec<Note>,
     pub ai_sessions: Vec<AiSession>,
     pub sidebar_widths: Option<SidebarWidths>,
+    pub document_preferences: Vec<DocumentPreferences>,
     next_bookmark_id: u64,
     next_highlight_id: u64,
     next_note_id: u64,
@@ -467,6 +503,46 @@ impl LibraryStore {
     pub fn set_sidebar_widths(&mut self, widths: SidebarWidths) -> Result<()> {
         self.write_sidebar_widths(widths)?;
         self.library.sidebar_widths = Some(widths);
+        Ok(())
+    }
+
+    pub fn document_target_language(&self, path: &Path) -> Option<String> {
+        let path = normalize_path(path);
+        self.library
+            .document_preferences
+            .iter()
+            .find(|preferences| preferences.path == path)
+            .map(|preferences| preferences.target_language.clone())
+    }
+
+    pub fn set_document_target_language(
+        &mut self,
+        path: &Path,
+        target_language: impl Into<String>,
+    ) -> Result<()> {
+        let path = normalize_path(path);
+        let target_language = target_language.into().trim().to_ascii_lowercase();
+        if target_language.is_empty() {
+            return Err(anyhow!("document target language cannot be empty"));
+        }
+        let preferences = DocumentPreferences {
+            path: path.clone(),
+            target_language,
+        };
+        self.write_document_preferences(&preferences)?;
+        if let Some(existing) = self
+            .library
+            .document_preferences
+            .iter_mut()
+            .find(|existing| existing.path == path)
+        {
+            *existing = preferences;
+        } else {
+            self.library.document_preferences.push(preferences);
+            self.library
+                .document_preferences
+                .sort_by(|left, right| left.path.cmp(&right.path));
+        }
         Ok(())
     }
 
@@ -891,6 +967,21 @@ impl LibraryStore {
         write_txn.commit()?;
         Ok(())
     }
+
+    fn write_document_preferences(&self, preferences: &DocumentPreferences) -> Result<()> {
+        let Some(database) = &self.database else {
+            return Ok(());
+        };
+        let key = history_key(&preferences.path);
+        let encoded = encode(&StoredDocumentPreferencesV1::from(preferences))?;
+        let write_txn = database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V1_TABLE)?;
+            table.insert(key.as_slice(), encoded.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
 }
 
 fn create_private_directory(path: &Path) -> Result<()> {
@@ -1099,6 +1190,16 @@ impl Library {
         self.ai_sessions.dedup_by(|left, right| left.id == right.id);
         self.ai_sessions.truncate(MAX_AI_SESSIONS);
 
+        self.document_preferences.retain_mut(|preferences| {
+            preferences.path = normalize_path(&preferences.path);
+            preferences.target_language = preferences.target_language.trim().to_ascii_lowercase();
+            !preferences.path.as_os_str().is_empty() && !preferences.target_language.is_empty()
+        });
+        self.document_preferences
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        self.document_preferences
+            .dedup_by(|left, right| left.path == right.path);
+
         self.next_bookmark_id = self.next_bookmark_id.max(
             self.bookmarks
                 .iter()
@@ -1185,6 +1286,9 @@ fn ensure_tables(database: &Database) -> Result<()> {
     }
     {
         write_txn.open_table(UI_STATE_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(DOCUMENT_PREFERENCES_V1_TABLE)?;
     }
     write_txn.commit()?;
     Ok(())
@@ -1301,6 +1405,21 @@ fn load_storage_v1(read_txn: &redb::ReadTransaction, library: &mut Library) -> R
             {
                 Ok(widths) => library.sidebar_widths = Some(widths),
                 Err(error) => eprintln!("failed to decode sidebar widths: {error:#}"),
+            }
+        }
+    }
+    {
+        let table = read_txn.open_table(DOCUMENT_PREFERENCES_V1_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredDocumentPreferencesV1>(value.value())
+                .and_then(StoredDocumentPreferencesV1::into_domain)
+            {
+                Ok(mut preferences) => {
+                    preferences.path = normalize_path(&preferences.path);
+                    library.document_preferences.push(preferences);
+                }
+                Err(error) => eprintln!("failed to decode document preferences: {error:#}"),
             }
         }
     }
@@ -1440,6 +1559,14 @@ fn migrate_legacy_storage_v1(database: &Database, library: &Library) -> Result<(
         if let Some(widths) = library.sidebar_widths {
             let encoded = encode(&StoredSidebarWidthsV1::from(widths))?;
             table.insert(SIDEBAR_WIDTHS_KEY, encoded.as_slice())?;
+        }
+    }
+    {
+        let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V1_TABLE)?;
+        for preferences in &library.document_preferences {
+            let key = history_key(&preferences.path);
+            let encoded = encode(&StoredDocumentPreferencesV1::from(preferences))?;
+            table.insert(key.as_slice(), encoded.as_slice())?;
         }
     }
     {
@@ -1729,6 +1856,33 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    #[test]
+    fn persists_document_target_language() {
+        let database_path = temp_library_path("document-language");
+        let document_path = Path::new("/tmp/translated.pdf");
+
+        {
+            let mut store = LibraryStore::open(database_path.clone()).unwrap();
+            store
+                .set_document_target_language(document_path, " Zh-Hans ")
+                .unwrap();
+            assert_eq!(
+                store.document_target_language(document_path).as_deref(),
+                Some("zh-hans")
+            );
+        }
+
+        {
+            let store = LibraryStore::open(database_path.clone()).unwrap();
+            assert_eq!(
+                store.document_target_language(document_path).as_deref(),
+                Some("zh-hans")
+            );
+        }
+
+        let _ = fs::remove_file(database_path);
+    }
+
     #[cfg(unix)]
     #[test]
     fn serializes_non_utf8_paths_without_loss() {
@@ -1749,6 +1903,20 @@ mod tests {
                 .into_domain()
                 .unwrap(),
             entry
+        );
+
+        let preferences = DocumentPreferences {
+            path: entry.path.clone(),
+            target_language: "ja".to_string(),
+        };
+        assert_eq!(
+            decode::<StoredDocumentPreferencesV1>(
+                &encode(&StoredDocumentPreferencesV1::from(&preferences)).unwrap()
+            )
+            .unwrap()
+            .into_domain()
+            .unwrap(),
+            preferences
         );
     }
 

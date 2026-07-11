@@ -12,6 +12,7 @@ use glyphst_settings::{
     },
     ui_rems,
 };
+use glyphst_translation_ui::target_language_items;
 use glyphst_ui::{
     scrollbar::{WithScrollbar as _, uniform_list_scrollbar_for},
     searchable_dropdown::{SearchableDropdown, SearchableDropdownEvent, SearchableItem},
@@ -315,6 +316,7 @@ impl SettingsSection {
 enum ProviderDropdownTarget {
     Main,
     Title,
+    Translation,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -404,6 +406,7 @@ pub struct SettingsWindow {
     selected_translation_provider: TranslationProvider,
     main_model_picker: ModelPickerState,
     title_model_picker: ModelPickerState,
+    translation_model_picker: ModelPickerState,
     provider_model_picker: ModelPickerState,
     provider_model_selection: Vec<String>,
     font_picker: FontPickerState,
@@ -414,14 +417,15 @@ pub struct SettingsWindow {
     ai_model_input: Entity<SettingsTextInput>,
     ai_key_input: Entity<SettingsTextInput>,
     ai_base_url_input: Entity<SettingsTextInput>,
-    translation_target_input: Entity<SettingsTextInput>,
     translation_key_input: Entity<SettingsTextInput>,
     translation_base_url_input: Entity<SettingsTextInput>,
     translation_region_input: Entity<SettingsTextInput>,
     translation_settings_save_generation: Arc<AtomicU64>,
     main_model_search: Entity<SettingsTextInput>,
     title_model_search: Entity<SettingsTextInput>,
+    translation_model_search: Entity<SettingsTextInput>,
     fetch_model_search: Entity<SettingsTextInput>,
+    translation_language_dropdown: Entity<SearchableDropdown>,
     static_theme_dropdown: Entity<SearchableDropdown>,
     light_theme_dropdown: Entity<SearchableDropdown>,
     dark_theme_dropdown: Entity<SearchableDropdown>,
@@ -574,6 +578,14 @@ impl SettingsWindow {
                 cx,
             )
         });
+        let translation_model_search = cx.new(|cx| {
+            SettingsTextInput::new(
+                "".into(),
+                crate::fl!("settings-search-model-placeholder").into(),
+                false,
+                cx,
+            )
+        });
         cx.subscribe(&main_model_search, |this, _, event, cx| {
             let SettingsInputEvent::Changed(value) = event;
             this.main_model_picker.query = value.clone();
@@ -583,6 +595,12 @@ impl SettingsWindow {
         cx.subscribe(&title_model_search, |this, _, event, cx| {
             let SettingsInputEvent::Changed(value) = event;
             this.title_model_picker.query = value.clone();
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&translation_model_search, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            this.translation_model_picker.query = value.clone();
             cx.notify();
         })
         .detach();
@@ -622,11 +640,11 @@ impl SettingsWindow {
         })
         .detach();
 
-        let translation_target_input = cx.new(|cx| {
-            SettingsTextInput::new(
-                target_language.into(),
-                "Target language, for example en or zh-Hans".into(),
-                false,
+        let translation_language_dropdown = cx.new(|cx| {
+            SearchableDropdown::new(
+                target_language_items(&target_language),
+                target_language,
+                &crate::fl!("settings-search-languages-placeholder"),
                 cx,
             )
         });
@@ -659,11 +677,10 @@ impl SettingsWindow {
                 cx,
             )
         });
-        cx.subscribe(&translation_target_input, |this, _, event, cx| {
-            let SettingsInputEvent::Changed(value) = event;
-            let value = value.to_string();
+        cx.subscribe(&translation_language_dropdown, |this, _, event, cx| {
+            let SearchableDropdownEvent::Selected(value) = event;
             let mut settings = cx.global::<SettingsStore>().settings.clone();
-            settings.translation.target_language = value;
+            settings.translation.target_language = value.clone();
             this.persist_translation_settings(settings, cx);
         })
         .detach();
@@ -860,6 +877,7 @@ impl SettingsWindow {
             selected_translation_provider: translation_provider,
             main_model_picker: ModelPickerState::default(),
             title_model_picker: ModelPickerState::default(),
+            translation_model_picker: ModelPickerState::default(),
             provider_model_picker: ModelPickerState::default(),
             provider_model_selection: Vec::new(),
             font_picker,
@@ -870,14 +888,15 @@ impl SettingsWindow {
             ai_model_input,
             ai_key_input,
             ai_base_url_input,
-            translation_target_input,
             translation_key_input,
             translation_base_url_input,
             translation_region_input,
             translation_settings_save_generation: Arc::new(AtomicU64::new(0)),
             main_model_search,
             title_model_search,
+            translation_model_search,
             fetch_model_search,
+            translation_language_dropdown,
             static_theme_dropdown,
             light_theme_dropdown,
             dark_theme_dropdown,
@@ -1011,6 +1030,7 @@ impl SettingsWindow {
         match target {
             ProviderDropdownTarget::Main => &self.main_model_picker,
             ProviderDropdownTarget::Title => &self.title_model_picker,
+            ProviderDropdownTarget::Translation => &self.translation_model_picker,
         }
     }
 
@@ -1018,6 +1038,7 @@ impl SettingsWindow {
         match target {
             ProviderDropdownTarget::Main => &mut self.main_model_picker,
             ProviderDropdownTarget::Title => &mut self.title_model_picker,
+            ProviderDropdownTarget::Translation => &mut self.translation_model_picker,
         }
     }
 
@@ -1025,7 +1046,29 @@ impl SettingsWindow {
         match target {
             ProviderDropdownTarget::Main => &self.main_model_search,
             ProviderDropdownTarget::Title => &self.title_model_search,
+            ProviderDropdownTarget::Translation => &self.translation_model_search,
         }
+    }
+
+    fn close_model_picker(&mut self, target: ProviderDropdownTarget) {
+        let picker = self.model_picker_mut(target);
+        picker.open = false;
+        picker.anchor = None;
+        picker.query = SharedString::default();
+    }
+
+    fn close_all_model_pickers(&mut self) -> bool {
+        let changed = self.main_model_picker.open
+            || self.title_model_picker.open
+            || self.translation_model_picker.open;
+        for target in [
+            ProviderDropdownTarget::Main,
+            ProviderDropdownTarget::Title,
+            ProviderDropdownTarget::Translation,
+        ] {
+            self.close_model_picker(target);
+        }
+        changed
     }
 
     fn resolved_ai_config_for_provider(
@@ -1079,19 +1122,11 @@ impl SettingsWindow {
         let mut settings = cx.global::<SettingsStore>().settings.clone();
         let model_ref = Some(ModelRef::new(provider, model));
         match target {
-            ProviderDropdownTarget::Main => {
-                settings.ai.main_model = model_ref;
-                self.main_model_picker.open = false;
-                self.main_model_picker.anchor = None;
-                self.main_model_picker.query = SharedString::default();
-            }
-            ProviderDropdownTarget::Title => {
-                settings.ai.title_model = model_ref;
-                self.title_model_picker.open = false;
-                self.title_model_picker.anchor = None;
-                self.title_model_picker.query = SharedString::default();
-            }
+            ProviderDropdownTarget::Main => settings.ai.main_model = model_ref,
+            ProviderDropdownTarget::Title => settings.ai.title_model = model_ref,
+            ProviderDropdownTarget::Translation => settings.ai.translation_model = model_ref,
         }
+        self.close_model_picker(target);
         self.model_search_input(target).update(cx, |input, cx| {
             input.set_content(SharedString::default(), cx);
         });
@@ -2276,10 +2311,7 @@ impl SettingsWindow {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     let open = !this.font_picker.open;
-                    this.main_model_picker.open = false;
-                    this.main_model_picker.anchor = None;
-                    this.title_model_picker.open = false;
-                    this.title_model_picker.anchor = None;
+                    this.close_all_model_pickers();
                     this.font_picker.open = open;
                     this.font_picker.anchor = open
                         .then(|| point(event.position.x - px(8.0), event.position.y + px(20.0)));
@@ -2460,6 +2492,7 @@ impl SettingsWindow {
         let selected = match target {
             ProviderDropdownTarget::Main => settings.ai.main_model.as_ref(),
             ProviderDropdownTarget::Title => settings.ai.title_model.as_ref(),
+            ProviderDropdownTarget::Translation => settings.ai.translation_model.as_ref(),
         };
         let open = picker.open;
         let model_label = selected
@@ -2485,10 +2518,7 @@ impl SettingsWindow {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.main_model_picker.open = false;
-                    this.main_model_picker.anchor = None;
-                    this.title_model_picker.open = false;
-                    this.title_model_picker.anchor = None;
+                    this.close_all_model_pickers();
                     let picker = this.model_picker_mut(target);
                     picker.open = true;
                     picker.anchor = Some(point(
@@ -2628,11 +2658,13 @@ impl SettingsWindow {
         let selected = match target {
             ProviderDropdownTarget::Main => settings.ai.main_model.clone(),
             ProviderDropdownTarget::Title => settings.ai.title_model.clone(),
+            ProviderDropdownTarget::Translation => settings.ai.translation_model.clone(),
         };
         let scroll_handle = self.model_picker(target).scroll_handle.clone();
         let list_id: ElementId = match target {
             ProviderDropdownTarget::Main => "settings-main-model-list".into(),
             ProviderDropdownTarget::Title => "settings-title-model-list".into(),
+            ProviderDropdownTarget::Translation => "settings-translation-model-list".into(),
         };
 
         let rows = entries
@@ -3123,6 +3155,16 @@ impl SettingsWindow {
                     self.model_selector_control(ProviderDropdownTarget::Title, settings, theme, cx)
                         .into_any_element(),
                 ))
+                .child(input_row(
+                    crate::fl!("settings-translation-model"),
+                    self.model_selector_control(
+                        ProviderDropdownTarget::Translation,
+                        settings,
+                        theme,
+                        cx,
+                    )
+                    .into_any_element(),
+                ))
                 .child(
                     div()
                         .text_size(ui_rems(12.0))
@@ -3195,7 +3237,7 @@ impl SettingsWindow {
                     }),
                 )
         };
-        let input_row = |label: &str, input: Entity<SettingsTextInput>| {
+        let input_row = |label: &str, input: AnyElement| {
             div()
                 .flex()
                 .flex_row()
@@ -3224,7 +3266,9 @@ impl SettingsWindow {
                 .child(Self::section_title("Translation", theme))
                 .child(input_row(
                     "Target language",
-                    self.translation_target_input.clone(),
+                    self.translation_language_dropdown
+                        .clone()
+                        .into_any_element(),
                 ))
                 .child(
                     div()
@@ -3265,23 +3309,38 @@ impl SettingsWindow {
                 .gap_2()
                 .child(Self::section_title("Provider credentials", theme))
                 .when(provider != TranslationProvider::Ai, |this| {
-                    this.child(input_row("API key", self.translation_key_input.clone()))
+                    this.child(input_row(
+                        "API key",
+                        self.translation_key_input.clone().into_any_element(),
+                    ))
                         .child(input_row(
                             "API endpoint",
-                            self.translation_base_url_input.clone(),
+                            self.translation_base_url_input.clone().into_any_element(),
                         ))
                         .when(provider == TranslationProvider::Microsoft, |this| {
                             this.child(input_row(
                                 "Azure region",
-                                self.translation_region_input.clone(),
+                                self.translation_region_input.clone().into_any_element(),
                             ))
                         })
                 })
                 .when(provider == TranslationProvider::Ai, |this| {
                     this.child(
                         div()
+                            .id("translation-model-settings-link")
                             .text_color(rgb(theme.text_muted))
-                            .child("Uses the configured AI main model and its credentials."),
+                            .cursor_pointer()
+                            .hover(move |style| style.text_color(rgb(theme.accent)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.select_section(SettingsSection::AiGeneral);
+                                    this.content_scroll.scroll_to_top_of_item(0);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }),
+                            )
+                            .child(crate::fl!("settings-open-translation-model")),
                     )
                 })
                 .child(
@@ -3304,15 +3363,6 @@ impl SettingsWindow {
                 .flex_col()
                 .gap_1()
                 .child(Self::section_title("Pinned translation", theme))
-                .child(self.toggle_row(
-                    "Translate selections automatically",
-                    settings.translation.pinned.enabled,
-                    |settings| {
-                        settings.translation.pinned.enabled = !settings.translation.pinned.enabled
-                    },
-                    theme,
-                    cx,
-                ))
                 .child(self.number_row(
                     "Floating panel width",
                     settings.translation.pinned.width,
@@ -3732,6 +3782,16 @@ impl SettingsWindow {
                         model_ref.provider == provider && model_ref.id == model_id
                     }) {
                         settings.ai.title_model = None;
+                    }
+                    if settings
+                        .ai
+                        .translation_model
+                        .as_ref()
+                        .is_some_and(|model_ref| {
+                            model_ref.provider == provider && model_ref.id == model_id
+                        })
+                    {
+                        settings.ai.translation_model = None;
                     }
                     this.persist_settings(settings, cx);
                     cx.stop_propagation();
@@ -4828,27 +4888,34 @@ impl Render for SettingsWindow {
             SettingsTab::AiProviders => Vec::new(),
             SettingsTab::Translation => self.translation_tab(&settings, resolved, cx),
         };
-        let (main_model_overlay, title_model_overlay) = if self.active_tab == SettingsTab::AiGeneral
-        {
-            (
-                self.model_picker_overlay(
-                    ProviderDropdownTarget::Main,
-                    &settings,
-                    resolved,
-                    window,
-                    cx,
-                ),
-                self.model_picker_overlay(
-                    ProviderDropdownTarget::Title,
-                    &settings,
-                    resolved,
-                    window,
-                    cx,
-                ),
-            )
-        } else {
-            (None, None)
-        };
+        let (main_model_overlay, title_model_overlay, translation_model_overlay) =
+            if self.active_tab == SettingsTab::AiGeneral {
+                (
+                    self.model_picker_overlay(
+                        ProviderDropdownTarget::Main,
+                        &settings,
+                        resolved,
+                        window,
+                        cx,
+                    ),
+                    self.model_picker_overlay(
+                        ProviderDropdownTarget::Title,
+                        &settings,
+                        resolved,
+                        window,
+                        cx,
+                    ),
+                    self.model_picker_overlay(
+                        ProviderDropdownTarget::Translation,
+                        &settings,
+                        resolved,
+                        window,
+                        cx,
+                    ),
+                )
+            } else {
+                (None, None, None)
+            };
         let provider_model_overlay = if self.active_tab == SettingsTab::AiProviders {
             self.provider_model_fetch_overlay(
                 self.selected_ai_provider,
@@ -4886,17 +4953,7 @@ impl Render for SettingsWindow {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
-                    let mut changed = false;
-                    if this.main_model_picker.open {
-                        this.main_model_picker.open = false;
-                        this.main_model_picker.anchor = None;
-                        changed = true;
-                    }
-                    if this.title_model_picker.open {
-                        this.title_model_picker.open = false;
-                        this.title_model_picker.anchor = None;
-                        changed = true;
-                    }
+                    let mut changed = this.close_all_model_pickers();
                     if this.font_picker.open {
                         this.font_picker.open = false;
                         this.font_picker.anchor = None;
@@ -4988,6 +5045,9 @@ impl Render for SettingsWindow {
             )
             .when_some(main_model_overlay, |this, overlay| this.child(overlay))
             .when_some(title_model_overlay, |this, overlay| this.child(overlay))
+            .when_some(translation_model_overlay, |this, overlay| {
+                this.child(overlay)
+            })
             .when_some(provider_model_overlay, |this, overlay| this.child(overlay))
             .when_some(font_picker_overlay, |this, overlay| this.child(overlay))
             .when_some(color_picker_overlay, |this, overlay| this.child(overlay))

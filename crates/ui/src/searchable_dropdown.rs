@@ -31,6 +31,8 @@ pub struct SearchableDropdown {
     scroll_handle: ScrollHandle,
     selected_index: usize,
     just_closed_by_out_click: bool,
+    width: f32,
+    max_height: f32,
 }
 
 impl SearchableDropdown {
@@ -54,7 +56,19 @@ impl SearchableDropdown {
             scroll_handle: ScrollHandle::new(),
             selected_index: 0,
             just_closed_by_out_click: false,
+            width: DROPDOWN_WIDTH,
+            max_height: DROPDOWN_MAX_HEIGHT,
         }
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+
+    pub fn max_height(mut self, max_height: f32) -> Self {
+        self.max_height = max_height;
+        self
     }
 
     pub fn selected_label(&self) -> &str {
@@ -109,6 +123,8 @@ impl SearchableDropdown {
         for (ix, item) in self.items.iter().enumerate() {
             if let Some((highlights, _)) = fuzzy_match(&item.label, query) {
                 matches.push((ix, highlights));
+            } else if fuzzy_match(&item.value, query).is_some() {
+                matches.push((ix, Vec::new()));
             }
         }
         matches
@@ -119,7 +135,7 @@ impl SearchableDropdown {
         let label = self.selected_label().to_string();
 
         div()
-            .w(px(DROPDOWN_WIDTH))
+            .w(px(self.width))
             .h(px(32.0))
             .flex()
             .items_center()
@@ -189,7 +205,7 @@ impl SearchableDropdown {
                 .child(
                     div()
                         .id("searchable-dropdown-panel")
-                        .w(px(DROPDOWN_WIDTH))
+                        .w(px(self.width))
                         .flex()
                         .flex_col()
                         .rounded(px(6.0))
@@ -251,7 +267,7 @@ impl SearchableDropdown {
                                 div()
                                     .id("searchable-dropdown-list")
                                     .track_scroll(&scroll_handle)
-                                    .max_h(px(DROPDOWN_MAX_HEIGHT))
+                                    .max_h(px(self.max_height))
                                     .py_1()
                                     .flex()
                                     .flex_col()

@@ -1140,6 +1140,7 @@ pub struct AiSettings {
     pub providers: BTreeMap<AiProvider, AiProviderConfig>,
     pub main_model: Option<ModelRef>,
     pub title_model: Option<ModelRef>,
+    pub translation_model: Option<ModelRef>,
     pub thinking_level: AiThinkingLevel,
     pub quick_ask: QuickAskSettings,
 }
@@ -1151,6 +1152,7 @@ impl Default for AiSettings {
             providers: BTreeMap::from([(provider, provider.default_config())]),
             main_model: Some(ModelRef::new(provider, provider.default_model())),
             title_model: Some(ModelRef::new(provider, provider.default_title_model())),
+            translation_model: Some(ModelRef::new(provider, provider.default_model())),
             thinking_level: AiThinkingLevel::Medium,
             quick_ask: QuickAskSettings::default(),
         }
@@ -1171,8 +1173,19 @@ impl AiSettings {
         if self.title_model.is_none() {
             self.title_model = self.first_model_ref(true);
         }
+        if self.translation_model.is_none() {
+            self.translation_model = self
+                .main_model
+                .clone()
+                .filter(|model_ref| self.provider_config(model_ref.provider).enabled)
+                .or_else(|| self.first_model_ref(false));
+        }
 
-        let refs = [self.main_model.clone(), self.title_model.clone()];
+        let refs = [
+            self.main_model.clone(),
+            self.title_model.clone(),
+            self.translation_model.clone(),
+        ];
         for mut model_ref in refs.into_iter().flatten() {
             model_ref.sanitize();
             if model_ref.id.is_empty() {
@@ -1202,6 +1215,17 @@ impl AiSettings {
         {
             self.title_model = self.first_model_ref(true);
         }
+        if self
+            .translation_model
+            .as_ref()
+            .is_none_or(|model_ref| !self.provider_config(model_ref.provider).enabled)
+        {
+            self.translation_model = self
+                .main_model
+                .clone()
+                .filter(|model_ref| self.provider_config(model_ref.provider).enabled)
+                .or_else(|| self.first_model_ref(false));
+        }
 
         if let Some(model_ref) = self.main_model.as_mut() {
             model_ref.sanitize();
@@ -1213,6 +1237,9 @@ impl AiSettings {
                 .clamp_for(model_ref.provider, &config.model_name(&model_ref.id));
         }
         if let Some(model_ref) = self.title_model.as_mut() {
+            model_ref.sanitize();
+        }
+        if let Some(model_ref) = self.translation_model.as_mut() {
             model_ref.sanitize();
         }
     }
@@ -1260,6 +1287,30 @@ impl AiSettings {
         let resolved =
             self.resolved_for(title_model.provider, title_model.id, AiThinkingLevel::Off);
         resolved.can_request().then_some(resolved)
+    }
+
+    pub fn resolved_translation(&self) -> ResolvedAiConfig {
+        let Some(model_ref) = self
+            .translation_model
+            .clone()
+            .filter(|model_ref| self.provider_config(model_ref.provider).enabled)
+            .or_else(|| {
+                self.main_model
+                    .clone()
+                    .filter(|model_ref| self.provider_config(model_ref.provider).enabled)
+            })
+            .or_else(|| self.first_model_ref(false))
+        else {
+            return ResolvedAiConfig {
+                provider: AiProvider::OpenAi,
+                model: AiProvider::OpenAi.default_model().to_string(),
+                api_key: String::new(),
+                base_url: AiProvider::OpenAi.default_base_url().to_string(),
+                base_url_overridden: false,
+                thinking_level: AiThinkingLevel::Off,
+            };
+        };
+        self.resolved_for(model_ref.provider, model_ref.id, AiThinkingLevel::Off)
     }
 
     pub fn model_label(&self, model_ref: &ModelRef) -> String {
@@ -1463,7 +1514,6 @@ impl TranslationBoxCorner {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PinnedTranslationSettings {
-    pub enabled: bool,
     pub width: f32,
     pub corner: TranslationBoxCorner,
 }
@@ -1471,7 +1521,6 @@ pub struct PinnedTranslationSettings {
 impl Default for PinnedTranslationSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
             width: DEFAULT_PINNED_TRANSLATION_WIDTH,
             corner: TranslationBoxCorner::TopRight,
         }
@@ -1730,6 +1779,9 @@ impl Settings {
             if let Some(model_ref) = ai.get("main_model").and_then(ModelRef::from_node) {
                 settings.ai.main_model = Some(model_ref);
             }
+            if let Some(model_ref) = ai.get("translation_model").and_then(ModelRef::from_node) {
+                settings.ai.translation_model = Some(model_ref);
+            }
 
             if ai.get("model").is_some()
                 || ai.get("api_key").is_some()
@@ -1794,6 +1846,9 @@ impl Settings {
                     settings.ai.title_model = Some(ModelRef::new(provider, model));
                 }
             }
+            if ai.get("translation_model").is_none() {
+                settings.ai.translation_model = settings.ai.main_model.clone();
+            }
         }
 
         if let Some(translation) = document.get("translation").and_then(KdlNode::children) {
@@ -1815,9 +1870,6 @@ impl Settings {
                 settings.translation.target_language = value.to_string();
             }
             if let Some(pinned) = translation.get("pinned").and_then(KdlNode::children) {
-                if let Some(value) = pinned.get_arg("enabled").and_then(KdlValue::as_bool) {
-                    settings.translation.pinned.enabled = value;
-                }
                 if let Some(value) = pinned.get_arg("width").and_then(value_to_f32) {
                     settings.translation.pinned.width = value;
                 }
@@ -1951,6 +2003,9 @@ impl Settings {
             if let Some(title_model) = &self.ai.title_model {
                 title_model.write_to_document(ai_children, "title_model");
             }
+            if let Some(translation_model) = &self.ai.translation_model {
+                translation_model.write_to_document(ai_children, "translation_model");
+            }
             if self.ai.thinking_level != AiThinkingLevel::default() {
                 push_value_node(ai_children, "thinking", self.ai.thinking_level.as_str());
             }
@@ -2010,10 +2065,12 @@ impl Settings {
                 "target_language",
                 self.translation.target_language.clone(),
             );
-            if self.translation.pinned != PinnedTranslationSettings::default() {
+            let default_pinned = PinnedTranslationSettings::default();
+            if self.translation.pinned.width != default_pinned.width
+                || self.translation.pinned.corner != default_pinned.corner
+            {
                 let mut pinned = KdlNode::new("pinned");
                 let pinned_children = pinned.ensure_children();
-                push_value_node(pinned_children, "enabled", self.translation.pinned.enabled);
                 push_value_node(
                     pinned_children,
                     "width",
@@ -2616,6 +2673,7 @@ ai {
                 AiProvider::DeepSeek.default_model()
             ))
         );
+        assert_eq!(settings.ai.translation_model, settings.ai.main_model);
         assert_eq!(settings.ai.thinking_level, AiThinkingLevel::Medium);
         let deepseek = settings.ai.provider_config(AiProvider::DeepSeek);
         assert!(deepseek.enabled);
@@ -2645,6 +2703,54 @@ ai {
 
         assert_eq!(settings.ai.thinking_level, AiThinkingLevel::High);
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn parses_exports_and_resolves_translation_model() {
+        let settings = parse_settings(
+            r##"
+ai {
+    thinking "high"
+    translation_model "anthropic" "claude-3-5-haiku-latest"
+    providers {
+        anthropic {
+            enabled #true
+            api_key "translation-key"
+            base_url "https://translation.example.com/"
+        }
+    }
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings.ai.translation_model,
+            Some(ModelRef::new(
+                AiProvider::Anthropic,
+                "claude-3-5-haiku-latest"
+            ))
+        );
+        let resolved = settings.ai.resolved_translation();
+        assert_eq!(resolved.provider, AiProvider::Anthropic);
+        assert_eq!(resolved.model, "claude-3-5-haiku-latest");
+        assert_eq!(resolved.api_key, "translation-key");
+        assert_eq!(resolved.base_url, "https://translation.example.com");
+        assert_eq!(resolved.thinking_level, AiThinkingLevel::Off);
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn missing_translation_model_falls_back_to_an_enabled_model() {
+        let mut settings = Settings::default();
+        settings.ai.translation_model = None;
+        settings.sanitize();
+
+        assert_eq!(settings.ai.translation_model, settings.ai.main_model);
+        assert_eq!(
+            settings.ai.resolved_translation().thinking_level,
+            AiThinkingLevel::Off
+        );
     }
 
     #[test]
@@ -2709,7 +2815,32 @@ translation {
             Some("https://translator.example.com")
         );
         assert_eq!(provider.region.as_deref(), Some("eastus"));
-        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+        let exported = settings.to_kdl_string();
+        let exported_document = exported.parse::<KdlDocument>().unwrap();
+        let exported_pinned = exported_document
+            .get("translation")
+            .and_then(KdlNode::children)
+            .and_then(|translation| translation.get("pinned"))
+            .and_then(KdlNode::children)
+            .unwrap();
+        assert!(exported_pinned.get("enabled").is_none());
+        assert_eq!(parse_settings(&exported).unwrap(), settings);
+    }
+
+    #[test]
+    fn pinned_translation_enabled_is_transient() {
+        let settings = parse_settings(
+            r##"
+translation {
+    pinned {
+        enabled #true
+    }
+}
+"##,
+        )
+        .unwrap();
+        let exported = settings.to_kdl_string();
+        assert!(!exported.contains("pinned"));
     }
 
     #[test]

@@ -41,13 +41,19 @@ pub use glyphst_actions::pdf_viewer::*;
 use glyphst_ai_ui::{AiContext, AiContextProvider};
 use glyphst_pdf::{DocumentSnapshot, ReloadCoordinator, ReloadDisposition};
 use glyphst_translation::{LanguageCode, TranslationRequest, TranslationService};
+use glyphst_translation_ui::target_language_items;
+use glyphst_ui::{
+    icons::IconButton,
+    markdown::{Markdown, MarkdownElement, MarkdownStyle},
+    searchable_dropdown::{SearchableDropdown, SearchableDropdownEvent},
+};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, AsyncApp, Bounds, ClipboardItem, Context, Corners,
-    DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, Font, IntoElement,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollStrategy, ScrollWheelEvent,
-    SharedString, Task, TextAlign, TextRun, UniformListScrollHandle, Window, WrappedLine, anchored,
-    canvas, deferred, div, fill, point, prelude::*, px, rgb, rgba, size, uniform_list,
+    DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, Font, FontWeight, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render,
+    RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Task,
+    TextAlign, TextRun, TextStyle, UniformListScrollHandle, Window, WrappedLine, anchored, canvas,
+    deferred, div, fill, point, prelude::*, px, rgb, rgba, size, uniform_list,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
@@ -606,18 +612,37 @@ struct ContextMenuState {
 
 #[derive(Clone)]
 enum TranslationStatus {
+    Idle,
     Loading,
-    Ready(SharedString),
+    Ready {
+        text: SharedString,
+        markdown: Entity<Markdown>,
+    },
     Error(SharedString),
 }
 
 #[derive(Clone)]
 struct TranslationCardState {
     source: SharedString,
-    target_language: SharedString,
     status: TranslationStatus,
     position: Option<GpuiPoint<Pixels>>,
     request_generation: u64,
+}
+
+impl TranslationCardState {
+    fn new(
+        source: impl Into<SharedString>,
+        status: TranslationStatus,
+        position: Option<GpuiPoint<Pixels>>,
+        request_generation: u64,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            status,
+            position,
+            request_generation,
+        }
+    }
 }
 
 enum NoteTarget {
@@ -639,6 +664,7 @@ pub struct PdfOpenOptions {
     pub initial_position: Option<DocumentPosition>,
     pub sidebar_widths: Option<SidebarWidths>,
     pub annotations: PdfAnnotations,
+    pub target_language: String,
 }
 
 pub enum PdfViewEvent {
@@ -775,6 +801,11 @@ pub struct PdfView {
     selection: Option<Selection>,
     translation_popup: Option<TranslationCardState>,
     pinned_translation: Option<TranslationCardState>,
+    translation_popup_scroll: ScrollHandle,
+    pinned_translation_scroll: ScrollHandle,
+    target_language: String,
+    translation_popup_language_dropdown: Option<Entity<SearchableDropdown>>,
+    pinned_translation_language_dropdown: Option<Entity<SearchableDropdown>>,
     translation_request_generation: u64,
     pending_selection_anchor: Option<usize>,
     dragging: bool,
@@ -786,7 +817,6 @@ pub struct PdfView {
     page_image_bounds: Vec<Option<Bounds<Pixels>>>,
     focus_handle: FocusHandle,
     pending_renders: Vec<PendingRender>,
-    control_down: bool,
     zoom: f32,
     base_scale: f32,
     viewport_width: f32,
@@ -1038,6 +1068,11 @@ impl PdfView {
             selection: None,
             translation_popup: None,
             pinned_translation: None,
+            translation_popup_scroll: ScrollHandle::new(),
+            pinned_translation_scroll: ScrollHandle::new(),
+            target_language: options.target_language,
+            translation_popup_language_dropdown: None,
+            pinned_translation_language_dropdown: None,
             translation_request_generation: 0,
             pending_selection_anchor: None,
             dragging: false,
@@ -1049,7 +1084,6 @@ impl PdfView {
             page_image_bounds: Vec::new(),
             focus_handle,
             pending_renders: Vec::new(),
-            control_down: false,
             zoom: behavior.default_zoom,
             base_scale: 1.0,
             viewport_width: 0.0,
@@ -1170,7 +1204,48 @@ impl PdfView {
         .detach();
     }
 
+    fn initialize_translation_dropdowns(&mut self, cx: &mut Context<Self>) {
+        if self.translation_popup_language_dropdown.is_some() {
+            return;
+        }
+        let selected = self.target_language.clone();
+        let popup = cx.new(|cx| {
+            SearchableDropdown::new(
+                target_language_items(&selected),
+                selected.clone(),
+                &crate::fl!("settings-search-languages-placeholder"),
+                cx,
+            )
+            .width(180.0)
+            .max_height(240.0)
+        });
+        let selected = self.target_language.clone();
+        let pinned = cx.new(|cx| {
+            SearchableDropdown::new(
+                target_language_items(&selected),
+                selected,
+                &crate::fl!("settings-search-languages-placeholder"),
+                cx,
+            )
+            .width(180.0)
+            .max_height(240.0)
+        });
+        cx.subscribe(&popup, |this, _, event, cx| {
+            let SearchableDropdownEvent::Selected(language) = event;
+            this.change_target_language(language.clone(), cx);
+        })
+        .detach();
+        cx.subscribe(&pinned, |this, _, event, cx| {
+            let SearchableDropdownEvent::Selected(language) = event;
+            this.change_target_language(language.clone(), cx);
+        })
+        .detach();
+        self.translation_popup_language_dropdown = Some(popup);
+        self.pinned_translation_language_dropdown = Some(pinned);
+    }
+
     pub fn start_loading(&mut self, cx: &mut Context<Self>) {
+        self.initialize_translation_dropdowns(cx);
         if self.loading_task.is_some() || !self.loading {
             return;
         }
@@ -4579,15 +4654,33 @@ impl PdfView {
         let Some(text) = self.selected_source_text() else {
             return;
         };
+        self.translate_text(text, popup_position, update_pinned, cx);
+    }
+
+    fn reset_translation_scroll(&self, pinned: bool) {
+        let scroll_handle = if pinned {
+            &self.pinned_translation_scroll
+        } else {
+            &self.translation_popup_scroll
+        };
+        scroll_handle.set_offset(point(px(0.0), px(0.0)));
+    }
+
+    fn translate_text(
+        &mut self,
+        text: String,
+        popup_position: Option<GpuiPoint<Pixels>>,
+        update_pinned: bool,
+        cx: &mut Context<Self>,
+    ) {
         let settings = cx.global::<SettingsStore>().settings.clone();
-        let target_language = match LanguageCode::new(&settings.translation.target_language) {
+        let target_language = match LanguageCode::new(&self.target_language) {
             Ok(language) => language,
             Err(error) => {
                 self.set_translation_error(
                     popup_position,
                     update_pinned,
                     text,
-                    settings.translation.target_language,
                     error.to_string(),
                     cx,
                 );
@@ -4596,18 +4689,24 @@ impl PdfView {
         };
         self.translation_request_generation = self.translation_request_generation.wrapping_add(1);
         let generation = self.translation_request_generation;
-        let state = TranslationCardState {
-            source: text.clone().into(),
-            target_language: target_language.as_str().to_string().into(),
-            status: TranslationStatus::Loading,
-            position: popup_position,
-            request_generation: generation,
-        };
+        let state = TranslationCardState::new(
+            text.clone(),
+            TranslationStatus::Loading,
+            popup_position,
+            generation,
+        );
         if popup_position.is_some() {
-            self.translation_popup = Some(state.clone());
+            self.reset_translation_scroll(false);
+            self.translation_popup = Some(state);
         }
         if update_pinned {
-            self.pinned_translation = Some(state);
+            self.reset_translation_scroll(true);
+            self.pinned_translation = Some(TranslationCardState::new(
+                text.clone(),
+                TranslationStatus::Loading,
+                None,
+                generation,
+            ));
         }
 
         if !cx.has_global::<TranslationService>() {
@@ -4675,7 +4774,7 @@ impl PdfView {
             .source_language
             .as_deref()
             .and_then(|language| LanguageCode::new(language).ok());
-        let target_language = match LanguageCode::new(&settings.translation.target_language) {
+        let target_language = match LanguageCode::new(&self.target_language) {
             Ok(language) => language,
             Err(error) => {
                 eprintln!("invalid translation target language: {error:#}");
@@ -4732,23 +4831,29 @@ impl PdfView {
         popup_position: Option<GpuiPoint<Pixels>>,
         update_pinned: bool,
         source: String,
-        target_language: String,
         error: String,
         cx: &mut Context<Self>,
     ) {
         self.translation_request_generation = self.translation_request_generation.wrapping_add(1);
-        let state = TranslationCardState {
-            source: source.into(),
-            target_language: target_language.into(),
-            status: TranslationStatus::Error(error.into()),
-            position: popup_position,
-            request_generation: self.translation_request_generation,
-        };
+        let error: SharedString = error.into();
+        let state = TranslationCardState::new(
+            source.clone(),
+            TranslationStatus::Error(error.clone()),
+            popup_position,
+            self.translation_request_generation,
+        );
         if popup_position.is_some() {
-            self.translation_popup = Some(state.clone());
+            self.reset_translation_scroll(false);
+            self.translation_popup = Some(state);
         }
         if update_pinned {
-            self.pinned_translation = Some(state);
+            self.reset_translation_scroll(true);
+            self.pinned_translation = Some(TranslationCardState::new(
+                source,
+                TranslationStatus::Error(error),
+                None,
+                self.translation_request_generation,
+            ));
         }
         cx.notify();
     }
@@ -4760,7 +4865,10 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) {
         let status = match result {
-            Ok(text) if !text.trim().is_empty() => TranslationStatus::Ready(text.into()),
+            Ok(text) if !text.trim().is_empty() => TranslationStatus::Ready {
+                markdown: cx.new(|cx| Markdown::new(text.clone().into(), cx)),
+                text: text.into(),
+            },
             Ok(_) => TranslationStatus::Error(crate::fl!("translation-no-result").into()),
             Err(error) => TranslationStatus::Error(error.into()),
         };
@@ -4778,21 +4886,77 @@ impl PdfView {
     }
 
     fn toggle_pinned_translation(&mut self, cx: &mut Context<Self>) {
-        let enabled = {
-            let store = cx.global_mut::<SettingsStore>();
-            store.settings.translation.pinned.enabled = !store.settings.translation.pinned.enabled;
-            let enabled = store.settings.translation.pinned.enabled;
-            if let Err(error) = store.save() {
-                eprintln!("failed to save translation settings: {error:#}");
-            }
-            enabled
-        };
-        if enabled {
-            self.translate_selection(None, true, cx);
+        if self.pinned_translation.is_none() {
+            self.reset_translation_scroll(true);
+            self.pinned_translation = Some(TranslationCardState::new(
+                SharedString::default(),
+                TranslationStatus::Idle,
+                None,
+                self.translation_request_generation,
+            ));
         } else {
             self.pinned_translation = None;
-            cx.notify();
         }
+        cx.notify();
+    }
+
+    fn change_target_language(&mut self, target_language: String, cx: &mut Context<Self>) {
+        let Ok(target_language) = LanguageCode::new(target_language) else {
+            return;
+        };
+        if self.target_language == target_language.as_str() {
+            return;
+        }
+        self.target_language = target_language.as_str().to_string();
+        for dropdown in [
+            self.translation_popup_language_dropdown.as_ref(),
+            self.pinned_translation_language_dropdown.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            dropdown.update(cx, |dropdown, cx| {
+                dropdown.set_selected_value(target_language.as_str().to_string());
+                cx.notify();
+            });
+        }
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .set_document_target_language(&self.path, target_language.as_str())
+        {
+            eprintln!("failed to save document translation language: {error:#}");
+        }
+
+        let popup = self
+            .translation_popup
+            .as_ref()
+            .map(|state| (state.source.to_string(), state.position));
+        let pinned_source = self
+            .pinned_translation
+            .as_ref()
+            .map(|state| state.source.to_string());
+
+        match (popup, pinned_source) {
+            (Some((source, position)), Some(pinned_source))
+                if !source.is_empty() && source == pinned_source =>
+            {
+                self.translate_text(source, position, true, cx);
+            }
+            (popup, pinned_source) => {
+                if let Some((source, position)) = popup {
+                    self.translate_text(source, position, false, cx);
+                }
+                if let Some(source) = pinned_source
+                    && !source.is_empty()
+                {
+                    self.translate_text(source, None, true, cx);
+                }
+            }
+        }
+        if self.view_language == PdfViewLanguage::Translated {
+            self.request_document_translation(cx);
+        }
+        cx.notify();
     }
 
     fn close_translation_popup(&mut self, cx: &mut Context<Self>) {
@@ -4806,32 +4970,63 @@ impl PdfView {
         state: TranslationCardState,
         pinned: bool,
         theme: Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let source = if state.source.chars().count() > 280 {
-            format!("{}…", state.source.chars().take(280).collect::<String>())
+        let language_dropdown = if pinned {
+            self.pinned_translation_language_dropdown.clone()
         } else {
-            state.source.to_string()
+            self.translation_popup_language_dropdown.clone()
+        };
+        let font = &cx.global::<SettingsStore>().settings.font;
+        let base_text_style = TextStyle {
+            font_family: font.ui_font_family.clone().into(),
+            font_size: ui_rems(13.0).into(),
+            color: rgb(theme.text).into(),
+            font_weight: FontWeight(font.ui_font_weight),
+            ..Default::default()
         };
         let content = match &state.status {
+            TranslationStatus::Idle => div().into_any_element(),
             TranslationStatus::Loading => div()
-                .mt_2()
+                .py_2()
                 .text_color(rgb(theme.text_muted))
                 .child(crate::fl!("translation-loading"))
                 .into_any_element(),
-            TranslationStatus::Ready(text) => div()
-                .mt_2()
-                .text_color(rgb(theme.text))
-                .child(text.clone())
+            TranslationStatus::Ready { markdown, .. } => div()
+                .w_full()
+                .min_w_0()
+                .child(MarkdownElement::new(
+                    markdown.clone(),
+                    MarkdownStyle::from_theme(theme, base_text_style),
+                ))
                 .into_any_element(),
             TranslationStatus::Error(error) => div()
-                .mt_2()
+                .py_2()
                 .text_color(rgb(theme.error))
                 .child(error.clone())
                 .into_any_element(),
         };
+        let copy_text = match &state.status {
+            TranslationStatus::Ready { text, .. } => Some(text.clone()),
+            _ => None,
+        };
+        let scrollable = matches!(
+            state.status,
+            TranslationStatus::Ready { .. } | TranslationStatus::Error(_)
+        );
+        let scroll_handle = if pinned {
+            &self.pinned_translation_scroll
+        } else {
+            &self.translation_popup_scroll
+        };
+        let scrollbar_id = if pinned {
+            "pinned-translation-scrollbar"
+        } else {
+            "translation-popup-scrollbar"
+        };
 
-        let mut card = div()
+        div()
             .occlude()
             .w(px(cx
                 .global::<SettingsStore>()
@@ -4839,79 +5034,103 @@ impl PdfView {
                 .translation
                 .pinned
                 .width))
-            .max_h(px(360.0))
             .overflow_hidden()
-            .p_3()
+            .flex()
+            .flex_col()
             .rounded(px(8.0))
             .border_1()
             .border_color(rgb(theme.border))
             .bg(rgb(theme.surface_background))
             .text_size(ui_rems(13.0))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .items_center()
                     .justify_between()
                     .gap_2()
+                    .p_2()
+                    .border_b(px(1.0))
+                    .border_color(rgb(theme.border_variant))
                     .text_size(ui_rems(11.0))
                     .text_color(rgb(theme.text_muted))
-                    .child(format!(
-                        "{} · {}",
-                        crate::fl!("translation-title"),
-                        state.target_language
-                    ))
+                    .when_some(language_dropdown, |this, dropdown| this.child(dropdown))
                     .child(
                         div()
-                            .id("translation-popup-dismiss")
-                            .cursor_pointer()
-                            .hover(|style| style.text_color(rgb(theme.text)))
-                            .child(if pinned {
-                                crate::fl!("translation-unpin")
-                            } else {
-                                crate::fl!("translation-close")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .when_some(copy_text, |this, text| {
+                                this.child(
+                                    IconButton::new(
+                                        "translation-popup-copy",
+                                        IconName::Copy,
+                                        rgb(theme.text_muted),
+                                        rgb(theme.element_hover),
+                                    )
+                                    .into_div()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |_, _, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                text.to_string(),
+                                            ));
+                                            cx.stop_propagation();
+                                        }),
+                                    ),
+                                )
                             })
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    if pinned {
-                                        this.toggle_pinned_translation(cx);
-                                    } else {
-                                        this.close_translation_popup(cx);
-                                    }
-                                    cx.stop_propagation();
-                                }),
+                            .child(
+                                IconButton::new(
+                                    "translation-popup-dismiss",
+                                    IconName::X,
+                                    rgb(theme.text_muted),
+                                    rgb(theme.element_hover),
+                                )
+                                .into_div()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _, cx| {
+                                        if pinned {
+                                            this.toggle_pinned_translation(cx);
+                                        } else {
+                                            this.close_translation_popup(cx);
+                                        }
+                                        cx.stop_propagation();
+                                    }),
+                                ),
                             ),
                     ),
             )
             .child(
                 div()
-                    .mt_2()
-                    .text_size(ui_rems(11.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(source),
+                    .id(if pinned {
+                        "pinned-translation-content"
+                    } else {
+                        "translation-popup-content"
+                    })
+                    .track_scroll(scroll_handle)
+                    .w_full()
+                    .min_w_0()
+                    .max_h(px(300.0))
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .p_3()
+                    .cursor_text()
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .child(content)
+                    .when(scrollable, |this| {
+                        this.vertical_scrollbar_for_with_id(scroll_handle, scrollbar_id, window, cx)
+                    }),
             )
-            .child(content);
-
-        if let TranslationStatus::Ready(text) = state.status {
-            card = card.child(
-                div()
-                    .id("translation-popup-copy")
-                    .mt_3()
-                    .cursor_pointer()
-                    .text_size(ui_rems(11.0))
-                    .text_color(rgb(theme.accent))
-                    .hover(|style| style.opacity(0.8))
-                    .child(crate::fl!("copy"))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |_, _, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
-                            cx.stop_propagation();
-                        }),
-                    ),
-            );
-        }
-        card.into_any_element()
+            .into_any_element()
     }
 
     fn select_all(&mut self) {
@@ -5828,8 +6047,12 @@ impl PdfView {
         }
     }
 
+    fn scroll_wheel_requests_zoom(event: &ScrollWheelEvent) -> bool {
+        event.modifiers.control
+    }
+
     fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        if self.control_down {
+        if Self::scroll_wheel_requests_zoom(event) {
             let zoom_delta = match event.delta {
                 ScrollDelta::Pixels(pixels) => pixels.y.as_f32() / SCROLL_LINE_MULTIPLIER,
                 ScrollDelta::Lines(lines) => lines.y,
@@ -7960,7 +8183,7 @@ impl PdfView {
                 }),
             )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                if this.control_down {
+                if Self::scroll_wheel_requests_zoom(event) {
                     this.handle_scroll_wheel(event, cx);
                 }
                 cx.stop_propagation();
@@ -9251,7 +9474,7 @@ impl Render for PdfView {
                         .snap_to_window_with_margin(px(8.0))
                         .position(point(position.x + px(12.0), position.y + px(12.0)))
                         .anchor(Anchor::TopLeft)
-                        .child(self.render_translation_card(state, false, theme, cx)),
+                        .child(self.render_translation_card(state, false, theme, window, cx)),
                 )
                 .with_priority(2)
             })
@@ -9263,7 +9486,7 @@ impl Render for PdfView {
                 .translation
                 .pinned
                 .corner;
-            let card = self.render_translation_card(state, true, theme, cx);
+            let card = self.render_translation_card(state, true, theme, window, cx);
             let mut container = div().absolute().m(px(16.0));
             container = match corner {
                 TranslationBoxCorner::TopLeft => container.top(px(0.0)).left(px(0.0)),
@@ -9279,6 +9502,12 @@ impl Render for PdfView {
             .flex()
             .flex_col()
             .cursor_text()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_translation_popup(cx);
+                }),
+            )
             .when(
                 self.hovered_link.is_some() || self.hovered_note.is_some(),
                 |this| this.cursor_pointer(),
@@ -9436,9 +9665,6 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &AddBookmark, window, cx| {
                 this.toggle_bookmark_prompt(window, cx);
-            }))
-            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, _| {
-                this.control_down = event.modifiers.control;
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 this.handle_scroll_wheel(event, cx);
@@ -9616,8 +9842,7 @@ impl Render for PdfView {
                         }
                         cx.notify();
                     }
-                    if cx.global::<SettingsStore>().settings.translation.pinned.enabled
-                        && this.selected_text().is_some()
+                    if this.pinned_translation.is_some() && this.selected_text().is_some()
                     {
                         this.translate_selection(None, true, cx);
                     }
@@ -9942,6 +10167,7 @@ impl Render for PdfView {
 #[cfg(test)]
 mod tests {
     use super::{Glyph, PdfView, TextChunk, TextLine};
+    use gpui::{Modifiers, ScrollWheelEvent};
     use mupdf::{Point, Quad, Rect};
 
     fn test_glyph(c: char, x0: f32, x1: f32) -> Glyph {
@@ -9961,6 +10187,21 @@ mod tests {
             color: 0,
             inferred_space_after: false,
         }
+    }
+
+    #[test]
+    fn wheel_zoom_uses_current_event_modifiers() {
+        let plain = ScrollWheelEvent::default();
+        assert!(!PdfView::scroll_wheel_requests_zoom(&plain));
+
+        let zoom = ScrollWheelEvent {
+            modifiers: Modifiers {
+                control: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(PdfView::scroll_wheel_requests_zoom(&zoom));
     }
 
     fn missing_space_glyphs() -> Vec<Glyph> {

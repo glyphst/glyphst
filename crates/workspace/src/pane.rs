@@ -533,6 +533,16 @@ impl Pane {
             notes: cx.global::<LibraryStore>().notes_for(&path),
         };
         let sidebar_widths = cx.global::<LibraryStore>().sidebar_widths();
+        let target_language = cx
+            .global::<LibraryStore>()
+            .document_target_language(&path)
+            .unwrap_or_else(|| {
+                cx.global::<SettingsStore>()
+                    .settings
+                    .translation
+                    .target_language
+                    .clone()
+            });
         let mut pdf_view = PdfView::open(
             &path,
             self.focus_handle.clone(),
@@ -543,6 +553,7 @@ impl Pane {
                 initial_position: Some(initial_position),
                 sidebar_widths,
                 annotations,
+                target_language,
             },
         )?;
         let pdf_view = cx.new(|cx| {

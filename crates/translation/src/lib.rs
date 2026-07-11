@@ -21,6 +21,163 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_BATCH_TEXTS: usize = 64;
 const MAX_BATCH_CHARS: usize = 24_000;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetLanguage {
+    pub code: &'static str,
+    pub label: &'static str,
+}
+
+pub const TARGET_LANGUAGES: &[TargetLanguage] = &[
+    TargetLanguage {
+        code: "ar",
+        label: "Arabic",
+    },
+    TargetLanguage {
+        code: "bg",
+        label: "Bulgarian",
+    },
+    TargetLanguage {
+        code: "cs",
+        label: "Czech",
+    },
+    TargetLanguage {
+        code: "da",
+        label: "Danish",
+    },
+    TargetLanguage {
+        code: "de",
+        label: "German",
+    },
+    TargetLanguage {
+        code: "el",
+        label: "Greek",
+    },
+    TargetLanguage {
+        code: "en",
+        label: "English",
+    },
+    TargetLanguage {
+        code: "es",
+        label: "Spanish",
+    },
+    TargetLanguage {
+        code: "et",
+        label: "Estonian",
+    },
+    TargetLanguage {
+        code: "fi",
+        label: "Finnish",
+    },
+    TargetLanguage {
+        code: "fr",
+        label: "French",
+    },
+    TargetLanguage {
+        code: "he",
+        label: "Hebrew",
+    },
+    TargetLanguage {
+        code: "hi",
+        label: "Hindi",
+    },
+    TargetLanguage {
+        code: "hu",
+        label: "Hungarian",
+    },
+    TargetLanguage {
+        code: "id",
+        label: "Indonesian",
+    },
+    TargetLanguage {
+        code: "it",
+        label: "Italian",
+    },
+    TargetLanguage {
+        code: "ja",
+        label: "Japanese",
+    },
+    TargetLanguage {
+        code: "ko",
+        label: "Korean",
+    },
+    TargetLanguage {
+        code: "lt",
+        label: "Lithuanian",
+    },
+    TargetLanguage {
+        code: "lv",
+        label: "Latvian",
+    },
+    TargetLanguage {
+        code: "nl",
+        label: "Dutch",
+    },
+    TargetLanguage {
+        code: "no",
+        label: "Norwegian",
+    },
+    TargetLanguage {
+        code: "pl",
+        label: "Polish",
+    },
+    TargetLanguage {
+        code: "pt",
+        label: "Portuguese",
+    },
+    TargetLanguage {
+        code: "pt-br",
+        label: "Portuguese (Brazil)",
+    },
+    TargetLanguage {
+        code: "pt-pt",
+        label: "Portuguese (Portugal)",
+    },
+    TargetLanguage {
+        code: "ro",
+        label: "Romanian",
+    },
+    TargetLanguage {
+        code: "ru",
+        label: "Russian",
+    },
+    TargetLanguage {
+        code: "sk",
+        label: "Slovak",
+    },
+    TargetLanguage {
+        code: "sl",
+        label: "Slovenian",
+    },
+    TargetLanguage {
+        code: "sv",
+        label: "Swedish",
+    },
+    TargetLanguage {
+        code: "th",
+        label: "Thai",
+    },
+    TargetLanguage {
+        code: "tr",
+        label: "Turkish",
+    },
+    TargetLanguage {
+        code: "uk",
+        label: "Ukrainian",
+    },
+    TargetLanguage {
+        code: "vi",
+        label: "Vietnamese",
+    },
+    TargetLanguage {
+        code: "zh-hans",
+        label: "Chinese (Simplified)",
+    },
+    TargetLanguage {
+        code: "zh-hant",
+        label: "Chinese (Traditional)",
+    },
+];
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LanguageCode(String);
 
@@ -272,7 +429,7 @@ impl TranslationService {
                 retry_after: None,
             });
         }
-        let resolved = settings.ai.resolved_main();
+        let resolved = settings.ai.resolved_translation();
         if !resolved.can_request() {
             return Err(TranslationError {
                 provider: TranslationProvider::Ai,
@@ -849,6 +1006,19 @@ mod tests {
     fn language_code_normalizes_and_validates() {
         assert_eq!(LanguageCode::new(" Zh-Hans ").unwrap().as_str(), "zh-hans");
         assert!(LanguageCode::new("bad value").is_err());
+    }
+
+    #[test]
+    fn target_language_catalog_is_unique_and_valid() {
+        let mut codes = std::collections::HashSet::new();
+        for language in TARGET_LANGUAGES {
+            assert!(codes.insert(language.code));
+            assert_eq!(
+                LanguageCode::new(language.code).unwrap().as_str(),
+                language.code
+            );
+            assert!(!language.label.is_empty());
+        }
     }
 
     #[test]
