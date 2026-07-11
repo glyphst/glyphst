@@ -15,6 +15,7 @@ glyphst-core = { path = "../core" }
 glyphst-library = { path = "../library" }
 glyphst-pdf = { path = "../pdf" }
 glyphst-settings = { path = "../settings" }
+glyphst-translation = { path = "../translation" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
 image.workspace = true

@@ -71,6 +71,7 @@ pdf-context-remove-highlight = Remove Highlight
 pdf-context-remove-note = Remove Note
 pdf-context-save-image = Save Image
 pdf-context-save-page-as-image = Save Page as Image
+pdf-context-translate-selection = Translate Selection
 pdf-export-as-image = Export as Image
 pdf-export-as-text = Export as Text
 pdf-failed-to-load = Failed to load PDF
@@ -78,6 +79,11 @@ pdf-loading = Loading { $name }
 pdf-no-pages-available = No pages available
 pdf-page-overview-title = Page Overview
 pdf-thumbnails-title = Thumbnails
+translation-loading = Translating…
+translation-no-result = Translation provider returned no text
+translation-title = Translation
+translation-unpin = Unpin
+translation-close = Close
 
 ## AI
 
@@ -106,6 +112,7 @@ settings-tab-general = General
 settings-tab-keymap = Keymap
 settings-tab-appearance = Appearance
 settings-tab-model-providers = Model Providers
+settings-tab-translation = Translation
 settings-section-general = General
 settings-section-language = Language
 settings-section-zoom = Zoom

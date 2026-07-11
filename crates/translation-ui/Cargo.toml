@@ -1,0 +1,10 @@
+[package]
+name = "glyphst-translation-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glyphst-settings = { path = "../settings" }
+glyphst-translation = { path = "../translation" }
+glyphst-ui = { path = "../ui" }
+gpui.workspace = true

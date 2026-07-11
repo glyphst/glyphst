@@ -11,6 +11,8 @@ members = [
     "crates/pdf-ui",
     "crates/settings",
     "crates/settings-ui",
+    "crates/translation",
+    "crates/translation-ui",
     "crates/ui",
     "crates/workspace",
 ]

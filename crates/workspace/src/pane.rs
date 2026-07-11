@@ -109,6 +109,9 @@ pub(crate) enum PaneEvent {
         replace_active_new_tab: bool,
     },
     OpenSettings,
+    OpenTranslationSplit {
+        source: Entity<PdfView>,
+    },
     TabDrop {
         dragged_tab: Box<DraggedTab>,
         target: PaneDropTarget,
@@ -595,7 +598,7 @@ impl Pane {
         cx.subscribe_in(
             pdf_view,
             window,
-            move |pane, _, event: &PdfViewEvent, _, cx| {
+            move |pane, pdf_view, event: &PdfViewEvent, _, cx| {
                 if !pane.has_tab_id(pdf_view_id) {
                     return;
                 }
@@ -608,6 +611,14 @@ impl Pane {
                         });
                     }
                     PdfViewEvent::OpenSettings => cx.emit(PaneEvent::OpenSettings),
+                    PdfViewEvent::OpenTranslationSplit => {
+                        cx.emit(PaneEvent::OpenTranslationSplit {
+                            source: pdf_view.clone(),
+                        });
+                    }
+                    PdfViewEvent::ViewportChanged(_)
+                    | PdfViewEvent::BlockHovered(_)
+                    | PdfViewEvent::BlockSelected(_) => {}
                 }
             },
         )

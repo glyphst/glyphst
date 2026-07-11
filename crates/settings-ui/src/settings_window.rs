@@ -4,7 +4,8 @@ use glyphst_keymap::keybindings;
 use glyphst_settings::{
     AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, AppLanguage, FontSettings,
     KeymapPreset, ModelRef, ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility,
-    WindowBackgroundMode, localize, setup_ui_font,
+    TranslationBoxCorner, TranslationProvider, TranslationProviderConfig, WindowBackgroundMode,
+    localize, setup_ui_font,
     theme::{
         PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode, ThemeMetadata, ThemeSelection,
         format_rgb_hex, format_rgba_hex, parse_hex_color,
@@ -23,7 +24,15 @@ use gpui::{
     WindowBounds, WindowOptions, anchored, deferred, div, point, prelude::*, px, rgb, rgba, size,
     uniform_list,
 };
-use std::{ops::Range, path::Path};
+use std::{
+    ops::Range,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 // ---- settings panel ----
 
@@ -96,8 +105,7 @@ fn open_settings_window_with_section(
     {
         if let Err(error) = existing_window.update(cx, move |settings, window, cx| {
             if let Some(section) = section {
-                settings.active_tab = section.tab();
-                settings.active_section = section;
+                settings.select_section(section);
                 cx.notify();
             }
             window.activate_window();
@@ -128,8 +136,7 @@ fn open_settings_window_with_section(
             cx.new(|cx| {
                 let mut settings = SettingsWindow::new(open_keymap, cx);
                 if let Some(section) = section {
-                    settings.active_tab = section.tab();
-                    settings.active_section = section;
+                    settings.select_section(section);
                 }
                 settings
             })
@@ -139,13 +146,14 @@ fn open_settings_window_with_section(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsTab {
     General,
     Keymap,
     Appearance,
     AiGeneral,
     AiProviders,
+    Translation,
 }
 
 impl SettingsTab {
@@ -156,6 +164,7 @@ impl SettingsTab {
             Self::Appearance => crate::fl!("settings-tab-appearance"),
             Self::AiGeneral => crate::fl!("settings-tab-general"),
             Self::AiProviders => crate::fl!("settings-tab-model-providers"),
+            Self::Translation => crate::fl!("settings-tab-translation"),
         }
     }
 
@@ -164,7 +173,7 @@ impl SettingsTab {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsSection {
     GeneralLanguage,
     GeneralZoom,
@@ -177,6 +186,58 @@ enum SettingsSection {
     AppearanceOverrides,
     AiGeneral,
     AiProviders,
+    TranslationGeneral,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsNavEntry {
+    Root(SettingsTab),
+    AiParent,
+    AiChild(SettingsSection),
+}
+
+impl SettingsNavEntry {
+    fn element_id(self) -> &'static str {
+        match self {
+            Self::Root(SettingsTab::General) => "settings-nav-general",
+            Self::Root(SettingsTab::Keymap) => "settings-nav-keymap",
+            Self::Root(SettingsTab::Appearance) => "settings-nav-appearance",
+            Self::Root(SettingsTab::AiGeneral) => "settings-nav-ai-general-root",
+            Self::Root(SettingsTab::AiProviders) => "settings-nav-ai-providers-root",
+            Self::Root(SettingsTab::Translation) => "settings-nav-translation",
+            Self::AiParent => "settings-nav-ai",
+            Self::AiChild(SettingsSection::AiGeneral) => "settings-nav-ai-general",
+            Self::AiChild(SettingsSection::AiProviders) => "settings-nav-ai-providers",
+            Self::AiChild(_) => "settings-nav-child",
+        }
+    }
+}
+
+const SETTINGS_NAV_ENTRIES: [SettingsNavEntry; 7] = [
+    SettingsNavEntry::Root(SettingsTab::General),
+    SettingsNavEntry::Root(SettingsTab::Keymap),
+    SettingsNavEntry::Root(SettingsTab::Appearance),
+    SettingsNavEntry::AiParent,
+    SettingsNavEntry::AiChild(SettingsSection::AiGeneral),
+    SettingsNavEntry::AiChild(SettingsSection::AiProviders),
+    SettingsNavEntry::Root(SettingsTab::Translation),
+];
+
+fn visible_settings_nav_entries(ai_expanded: bool) -> impl Iterator<Item = SettingsNavEntry> {
+    let mut show_children = true;
+    SETTINGS_NAV_ENTRIES
+        .into_iter()
+        .filter(move |entry| match entry {
+            SettingsNavEntry::Root(_) => {
+                show_children = true;
+                true
+            }
+            SettingsNavEntry::AiParent => {
+                show_children = ai_expanded;
+                true
+            }
+            SettingsNavEntry::AiChild(_) => show_children,
+        })
 }
 
 const GENERAL_SECTIONS: [SettingsSection; 5] = [
@@ -194,6 +255,7 @@ const APPEARANCE_SECTIONS: [SettingsSection; 3] = [
 ];
 const AI_GENERAL_SECTIONS: [SettingsSection; 1] = [SettingsSection::AiGeneral];
 const AI_PROVIDER_SECTIONS: [SettingsSection; 1] = [SettingsSection::AiProviders];
+const TRANSLATION_SECTIONS: [SettingsSection; 1] = [SettingsSection::TranslationGeneral];
 
 impl SettingsSection {
     fn tab(self) -> SettingsTab {
@@ -209,6 +271,7 @@ impl SettingsSection {
             }
             Self::AiGeneral => SettingsTab::AiGeneral,
             Self::AiProviders => SettingsTab::AiProviders,
+            Self::TranslationGeneral => SettingsTab::Translation,
         }
     }
 
@@ -225,6 +288,7 @@ impl SettingsSection {
             Self::AppearanceOverrides => crate::fl!("settings-section-overrides"),
             Self::AiGeneral => crate::fl!("settings-section-general"),
             Self::AiProviders => crate::fl!("settings-section-model-providers"),
+            Self::TranslationGeneral => crate::fl!("settings-tab-translation"),
         }
     }
 
@@ -235,6 +299,7 @@ impl SettingsSection {
             SettingsTab::Appearance => &APPEARANCE_SECTIONS,
             SettingsTab::AiGeneral => &AI_GENERAL_SECTIONS,
             SettingsTab::AiProviders => &AI_PROVIDER_SECTIONS,
+            SettingsTab::Translation => &TRANSLATION_SECTIONS,
         }
     }
 
@@ -336,6 +401,7 @@ pub struct SettingsWindow {
     status: Option<SharedString>,
     save_error: Option<SharedString>,
     selected_ai_provider: AiProvider,
+    selected_translation_provider: TranslationProvider,
     main_model_picker: ModelPickerState,
     title_model_picker: ModelPickerState,
     provider_model_picker: ModelPickerState,
@@ -348,6 +414,11 @@ pub struct SettingsWindow {
     ai_model_input: Entity<SettingsTextInput>,
     ai_key_input: Entity<SettingsTextInput>,
     ai_base_url_input: Entity<SettingsTextInput>,
+    translation_target_input: Entity<SettingsTextInput>,
+    translation_key_input: Entity<SettingsTextInput>,
+    translation_base_url_input: Entity<SettingsTextInput>,
+    translation_region_input: Entity<SettingsTextInput>,
+    translation_settings_save_generation: Arc<AtomicU64>,
     main_model_search: Entity<SettingsTextInput>,
     title_model_search: Entity<SettingsTextInput>,
     fetch_model_search: Entity<SettingsTextInput>,
@@ -357,6 +428,17 @@ pub struct SettingsWindow {
 }
 
 impl SettingsWindow {
+    fn select_section(&mut self, section: SettingsSection) {
+        self.active_tab = section.tab();
+        self.active_section = section;
+        if matches!(
+            section,
+            SettingsSection::AiGeneral | SettingsSection::AiProviders
+        ) {
+            self.ai_expanded = true;
+        }
+    }
+
     fn font_fallbacks_input_value(font: &FontSettings) -> SharedString {
         font.ui_font_fallbacks.join(", ").into()
     }
@@ -371,7 +453,14 @@ impl SettingsWindow {
     }
 
     pub fn new(open_keymap: fn(&mut App), cx: &mut Context<Self>) -> Self {
-        let (provider, config, font_settings) = {
+        let (
+            provider,
+            config,
+            font_settings,
+            translation_provider,
+            translation_config,
+            target_language,
+        ) = {
             let settings = &cx.global::<SettingsStore>().settings;
             let ai = &settings.ai;
             let provider = ai
@@ -383,6 +472,11 @@ impl SettingsWindow {
                 provider,
                 ai.provider_config(provider),
                 settings.font.clone(),
+                settings.translation.active_provider,
+                settings
+                    .translation
+                    .provider_config(settings.translation.active_provider),
+                settings.translation.target_language.clone(),
             )
         };
 
@@ -523,6 +617,92 @@ impl SettingsWindow {
                             Some(trimmed)
                         };
                 },
+                cx,
+            );
+        })
+        .detach();
+
+        let translation_target_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                target_language.into(),
+                "Target language, for example en or zh-Hans".into(),
+                false,
+                cx,
+            )
+        });
+        let translation_key_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                translation_config.api_key.clone().into(),
+                crate::fl!("settings-api-key-placeholder").into(),
+                true,
+                cx,
+            )
+        });
+        let translation_base_url_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                translation_config
+                    .base_url
+                    .clone()
+                    .or_else(|| translation_provider.default_base_url().map(str::to_string))
+                    .unwrap_or_default()
+                    .into(),
+                "Provider API endpoint".into(),
+                false,
+                cx,
+            )
+        });
+        let translation_region_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                translation_config.region.clone().unwrap_or_default().into(),
+                "Azure region, if required".into(),
+                false,
+                cx,
+            )
+        });
+        cx.subscribe(&translation_target_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let value = value.to_string();
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            settings.translation.target_language = value;
+            this.persist_translation_settings(settings, cx);
+        })
+        .detach();
+        cx.subscribe(&translation_key_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let value = value.to_string();
+            this.update_translation_provider_config(
+                this.selected_translation_provider,
+                move |config| config.api_key = value,
+                cx,
+            );
+        })
+        .detach();
+        cx.subscribe(&translation_base_url_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let value = value.to_string();
+            let provider = this.selected_translation_provider;
+            this.update_translation_provider_config(
+                provider,
+                move |config| {
+                    let value = value.trim().trim_end_matches('/').to_string();
+                    config.base_url = if value.is_empty()
+                        || Some(value.as_str()) == provider.default_base_url()
+                    {
+                        None
+                    } else {
+                        Some(value)
+                    };
+                },
+                cx,
+            );
+        })
+        .detach();
+        cx.subscribe(&translation_region_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let value = value.to_string();
+            this.update_translation_provider_config(
+                this.selected_translation_provider,
+                move |config| config.region = (!value.trim().is_empty()).then_some(value),
                 cx,
             );
         })
@@ -677,6 +857,7 @@ impl SettingsWindow {
             status: None,
             save_error: None,
             selected_ai_provider: provider,
+            selected_translation_provider: translation_provider,
             main_model_picker: ModelPickerState::default(),
             title_model_picker: ModelPickerState::default(),
             provider_model_picker: ModelPickerState::default(),
@@ -689,6 +870,11 @@ impl SettingsWindow {
             ai_model_input,
             ai_key_input,
             ai_base_url_input,
+            translation_target_input,
+            translation_key_input,
+            translation_base_url_input,
+            translation_region_input,
+            translation_settings_save_generation: Arc::new(AtomicU64::new(0)),
             main_model_search,
             title_model_search,
             fetch_model_search,
@@ -715,6 +901,43 @@ impl SettingsWindow {
         cx.notify();
     }
 
+    fn persist_translation_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        cx.global_mut::<SettingsStore>()
+            .set_settings_in_memory(settings);
+        self.status = None;
+        self.save_error = None;
+        let snapshot = cx.global::<SettingsStore>().persistence_snapshot();
+        let generation = self
+            .translation_settings_save_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let save_generation = self.translation_settings_save_generation.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+            if save_generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            let (path, contents) = snapshot;
+            let result = cx
+                .background_spawn(async move {
+                    SettingsStore::write_snapshot(&path, contents)
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .await;
+            if save_generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            _ = this.update(cx, |this, cx| {
+                this.save_error = result.err().map(Into::into);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn base_url_input_content(provider: AiProvider, config: &AiProviderConfig) -> SharedString {
         config
             .base_url
@@ -732,6 +955,46 @@ impl SettingsWindow {
         let mut settings = cx.global::<SettingsStore>().settings.clone();
         update(provider, settings.ai.provider_config_mut(provider));
         self.persist_settings(settings, cx);
+    }
+
+    fn update_translation_provider_config(
+        &mut self,
+        provider: TranslationProvider,
+        update: impl FnOnce(&mut TranslationProviderConfig),
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        update(settings.translation.provider_config_mut(provider));
+        self.persist_translation_settings(settings, cx);
+    }
+
+    fn select_translation_provider(
+        &mut self,
+        provider: TranslationProvider,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_translation_provider = provider;
+        let config = cx
+            .global::<SettingsStore>()
+            .settings
+            .translation
+            .provider_config(provider);
+        self.translation_key_input
+            .update(cx, |input, cx| input.set_content(config.api_key.into(), cx));
+        self.translation_base_url_input.update(cx, |input, cx| {
+            input.set_content(
+                config
+                    .base_url
+                    .or_else(|| provider.default_base_url().map(str::to_string))
+                    .unwrap_or_default()
+                    .into(),
+                cx,
+            );
+        });
+        self.translation_region_input.update(cx, |input, cx| {
+            input.set_content(config.region.unwrap_or_default().into(), cx);
+        });
+        cx.notify();
     }
 
     fn update_font_settings(
@@ -1075,15 +1338,9 @@ impl SettingsWindow {
     }
 
     fn settings_nav(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut entries = vec![
-            self.nav_root_entry(SettingsTab::General, theme, cx),
-            self.nav_root_entry(SettingsTab::Keymap, theme, cx),
-            self.nav_root_entry(SettingsTab::Appearance, theme, cx),
-            self.nav_ai_parent_entry(theme, cx),
-        ];
-        if self.ai_expanded {
-            entries.push(self.nav_ai_children(theme, cx));
-        }
+        let entries = visible_settings_nav_entries(self.ai_expanded)
+            .map(|entry| self.nav_entry(entry, theme, cx))
+            .collect::<Vec<_>>();
 
         div()
             .w(px(220.0))
@@ -1098,135 +1355,19 @@ impl SettingsWindow {
             .children(entries)
     }
 
-    fn nav_ai_children(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
-        let entries = [SettingsSection::AiGeneral, SettingsSection::AiProviders]
-            .into_iter()
-            .map(|section| self.nav_sub_entry(section, theme, cx))
-            .collect::<Vec<_>>();
-
-        div()
-            .w_full()
-            .flex()
-            .flex_row()
-            .child(
-                div()
-                    .w(px(28.0))
-                    .flex_none()
-                    .flex()
-                    .justify_center()
-                    .child(div().w(px(1.0)).h_full().bg(rgb(theme.border_variant))),
-            )
-            .child(div().flex_1().flex().flex_col().children(entries))
-            .into_any_element()
-    }
-
-    fn nav_root_entry(&self, tab: SettingsTab, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
-        let selected = self.active_tab == tab;
-
-        div()
-            .w_full()
-            .h(px(28.0))
-            .px_2()
-            .flex()
-            .flex_row()
-            .items_center()
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(if selected {
-                rgb(theme.border_variant)
-            } else {
-                rgba(0x00000000)
-            })
-            .bg(if selected {
-                rgb(theme.element_selected)
-            } else {
-                rgba(0x00000000)
-            })
-            .text_color(rgb(if selected {
-                theme.text
-            } else {
-                theme.text_muted
-            }))
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.active_tab = tab;
-                    this.active_section = tab.first_section();
-                    this.content_scroll.scroll_to_top_of_item(0);
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .child(tab.label())
-            .into_any_element()
-    }
-
-    fn nav_ai_parent_entry(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
-        let selected = matches!(
-            self.active_tab,
-            SettingsTab::AiGeneral | SettingsTab::AiProviders
-        );
-        let expanded = self.ai_expanded;
-
-        div()
-            .w_full()
-            .h(px(28.0))
-            .px_1()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(if selected {
-                rgb(theme.border_variant)
-            } else {
-                rgba(0x00000000)
-            })
-            .bg(if selected {
-                rgb(theme.element_selected)
-            } else {
-                rgba(0x00000000)
-            })
-            .text_color(rgb(if selected {
-                theme.text
-            } else {
-                theme.text_muted
-            }))
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.ai_expanded = !this.ai_expanded;
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .child(
-                div()
-                    .w(px(16.0))
-                    .flex_none()
-                    .text_color(rgb(theme.text_muted))
-                    .child(if expanded { "▾" } else { "▸" }),
-            )
-            .child(crate::fl!("ai-title"))
-            .into_any_element()
-    }
-
-    fn nav_sub_entry(
+    fn nav_entry(
         &self,
-        section: SettingsSection,
+        entry: SettingsNavEntry,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected = self.active_section == section;
-        let tab = section.tab();
-        let section_index = section.index_in_tab();
-
-        div()
+        let selected = match entry {
+            SettingsNavEntry::Root(tab) => self.active_tab == tab,
+            SettingsNavEntry::AiParent => false,
+            SettingsNavEntry::AiChild(section) => self.active_section == section,
+        };
+        let row = div()
+            .id(entry.element_id())
             .w_full()
             .h(px(28.0))
             .flex()
@@ -1250,20 +1391,68 @@ impl SettingsWindow {
                 theme.text_muted
             }))
             .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.active_tab = tab;
-                    this.active_section = section;
-                    this.ai_expanded = true;
-                    this.content_scroll.scroll_to_top_of_item(section_index);
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .child(div().px_1().child(section.label()))
-            .into_any_element()
+            .cursor_pointer();
+
+        match entry {
+            SettingsNavEntry::Root(tab) => row
+                .px_2()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.active_tab = tab;
+                        this.active_section = tab.first_section();
+                        this.content_scroll.scroll_to_top_of_item(0);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(tab.label())
+                .into_any_element(),
+            SettingsNavEntry::AiParent => {
+                let expanded = self.ai_expanded;
+                row.px_1()
+                    .gap_2()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.ai_expanded = !this.ai_expanded;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .w(px(16.0))
+                            .flex_none()
+                            .text_color(rgb(theme.text_muted))
+                            .child(if expanded { "▾" } else { "▸" }),
+                    )
+                    .child(crate::fl!("ai-title"))
+                    .into_any_element()
+            }
+            SettingsNavEntry::AiChild(section) => {
+                let section_index = section.index_in_tab();
+                row.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.select_section(section);
+                        this.content_scroll.scroll_to_top_of_item(section_index);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .w(px(28.0))
+                        .flex_none()
+                        .flex()
+                        .justify_center()
+                        .child(div().w(px(1.0)).h_full().bg(rgb(theme.border_variant))),
+                )
+                .child(div().px_1().child(section.label()))
+                .into_any_element()
+            }
+        }
     }
 
     fn number_row(
@@ -2936,6 +3125,228 @@ impl SettingsWindow {
         ]
     }
 
+    fn translation_tab(
+        &self,
+        settings: &Settings,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let provider_option = |provider: TranslationProvider| {
+            let selected = settings.translation.active_provider == provider;
+            div()
+                .px_2()
+                .py_1()
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(rgb(if selected { theme.accent } else { theme.border }))
+                .bg(rgb(if selected {
+                    theme.element_selected
+                } else {
+                    theme.surface_background
+                }))
+                .text_size(ui_rems(12.0))
+                .text_color(rgb(theme.text))
+                .cursor_pointer()
+                .hover(move |style| style.bg(rgb(theme.element_hover)))
+                .child(provider.label())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        let mut next = cx.global::<SettingsStore>().settings.clone();
+                        next.translation.active_provider = provider;
+                        next.translation.provider_config_mut(provider).enabled = true;
+                        this.persist_translation_settings(next, cx);
+                        this.select_translation_provider(provider, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+        };
+        let input_row = |label: &str, input: Entity<SettingsTextInput>| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .min_h(px(42.0))
+                .gap_3()
+                .child(
+                    div()
+                        .w(px(118.0))
+                        .flex_none()
+                        .text_color(rgb(theme.text))
+                        .child(label.to_string()),
+                )
+                .child(div().flex_1().min_w_0().child(input))
+                .into_any_element()
+        };
+        let provider = self.selected_translation_provider;
+        let provider_config = settings.translation.provider_config(provider);
+
+        vec![
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Self::section_title("Translation", theme))
+                .child(input_row(
+                    "Target language",
+                    self.translation_target_input.clone(),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(118.0))
+                                .flex_none()
+                                .text_color(rgb(theme.text))
+                                .child("Provider"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .children(
+                                    TranslationProvider::ALL
+                                        .into_iter()
+                                        .map(provider_option)
+                                        .collect::<Vec<_>>(),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(ui_rems(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child("Source language is detected automatically. A document can override the target language from its translation controls."),
+                )
+                .into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Self::section_title("Provider credentials", theme))
+                .when(provider != TranslationProvider::Ai, |this| {
+                    this.child(input_row("API key", self.translation_key_input.clone()))
+                        .child(input_row(
+                            "API endpoint",
+                            self.translation_base_url_input.clone(),
+                        ))
+                        .when(provider == TranslationProvider::Microsoft, |this| {
+                            this.child(input_row(
+                                "Azure region",
+                                self.translation_region_input.clone(),
+                            ))
+                        })
+                })
+                .when(provider == TranslationProvider::Ai, |this| {
+                    this.child(
+                        div()
+                            .text_color(rgb(theme.text_muted))
+                            .child("Uses the configured AI main model and its credentials."),
+                    )
+                })
+                .child(
+                    div()
+                        .text_size(ui_rems(12.0))
+                        .text_color(rgb(if provider_config.enabled {
+                            theme.success
+                        } else {
+                            theme.text_muted
+                        }))
+                        .child(if provider_config.enabled {
+                            "Enabled"
+                        } else {
+                            "Disabled"
+                        }),
+                )
+                .into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(Self::section_title("Pinned translation", theme))
+                .child(self.toggle_row(
+                    "Translate selections automatically",
+                    settings.translation.pinned.enabled,
+                    |settings| {
+                        settings.translation.pinned.enabled = !settings.translation.pinned.enabled
+                    },
+                    theme,
+                    cx,
+                ))
+                .child(self.number_row(
+                    "Floating panel width",
+                    settings.translation.pinned.width,
+                    |settings| settings.translation.pinned.width -= FONT_SIZE_STEP * 8.0,
+                    |settings| settings.translation.pinned.width += FONT_SIZE_STEP * 8.0,
+                    theme,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .h(px(44.0))
+                        .child(
+                            div()
+                                .text_color(rgb(theme.text))
+                                .child("Panel corner"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .children(
+                                    [
+                                        TranslationBoxCorner::TopLeft,
+                                        TranslationBoxCorner::TopRight,
+                                        TranslationBoxCorner::BottomLeft,
+                                        TranslationBoxCorner::BottomRight,
+                                    ]
+                                    .into_iter()
+                                    .map(|corner| {
+                                        let selected = settings.translation.pinned.corner == corner;
+                                        div()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded(px(4.0))
+                                            .border_1()
+                                            .border_color(rgb(if selected {
+                                                theme.accent
+                                            } else {
+                                                theme.border
+                                            }))
+                                            .cursor_pointer()
+                                            .hover(move |style| {
+                                                style.bg(rgb(theme.element_hover))
+                                            })
+                                            .child(corner.as_str())
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    let mut next =
+                                                        cx.global::<SettingsStore>().settings.clone();
+                                                    next.translation.pinned.corner = corner;
+                                                    this.persist_translation_settings(next, cx);
+                                                    cx.stop_propagation();
+                                                }),
+                                            )
+                                    })
+                                    .collect::<Vec<_>>(),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        ]
+    }
+
     fn ai_providers_tab(
         &self,
         settings: &Settings,
@@ -4363,6 +4774,7 @@ impl Render for SettingsWindow {
             SettingsTab::Appearance => self.appearance_tab(&settings, resolved, themes, cx),
             SettingsTab::AiGeneral => self.ai_general_tab(&settings, resolved, cx),
             SettingsTab::AiProviders => Vec::new(),
+            SettingsTab::Translation => self.translation_tab(&settings, resolved, cx),
         };
         let (main_model_overlay, title_model_overlay) = if self.active_tab == SettingsTab::AiGeneral
         {
@@ -4527,5 +4939,72 @@ impl Render for SettingsWindow {
             .when_some(provider_model_overlay, |this, overlay| this.child(overlay))
             .when_some(font_picker_overlay, |this, overlay| this.child(overlay))
             .when_some(color_picker_overlay, |this, overlay| this.child(overlay))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        SETTINGS_NAV_ENTRIES, SettingsNavEntry, SettingsSection, SettingsTab,
+        visible_settings_nav_entries,
+    };
+
+    #[test]
+    fn expanded_navigation_keeps_ai_children_adjacent_to_ai() {
+        let entries = visible_settings_nav_entries(true).collect::<Vec<_>>();
+
+        assert_eq!(
+            entries,
+            vec![
+                SettingsNavEntry::Root(SettingsTab::General),
+                SettingsNavEntry::Root(SettingsTab::Keymap),
+                SettingsNavEntry::Root(SettingsTab::Appearance),
+                SettingsNavEntry::AiParent,
+                SettingsNavEntry::AiChild(SettingsSection::AiGeneral),
+                SettingsNavEntry::AiChild(SettingsSection::AiProviders),
+                SettingsNavEntry::Root(SettingsTab::Translation),
+            ]
+        );
+    }
+
+    #[test]
+    fn collapsed_navigation_hides_only_ai_children() {
+        let entries = visible_settings_nav_entries(false).collect::<Vec<_>>();
+
+        assert_eq!(
+            entries,
+            vec![
+                SettingsNavEntry::Root(SettingsTab::General),
+                SettingsNavEntry::Root(SettingsTab::Keymap),
+                SettingsNavEntry::Root(SettingsTab::Appearance),
+                SettingsNavEntry::AiParent,
+                SettingsNavEntry::Root(SettingsTab::Translation),
+            ]
+        );
+    }
+
+    #[test]
+    fn navigation_entry_ids_are_unique_and_stable_when_ai_collapses() {
+        let ids = SETTINGS_NAV_ENTRIES
+            .iter()
+            .map(|entry| entry.element_id())
+            .collect::<Vec<_>>();
+        let mut unique_ids = ids.clone();
+        unique_ids.sort_unstable();
+        unique_ids.dedup();
+
+        assert_eq!(unique_ids.len(), ids.len());
+        assert_eq!(
+            visible_settings_nav_entries(true)
+                .find(|entry| *entry == SettingsNavEntry::Root(SettingsTab::Translation))
+                .map(SettingsNavEntry::element_id),
+            Some("settings-nav-translation")
+        );
+        assert_eq!(
+            visible_settings_nav_entries(false)
+                .find(|entry| *entry == SettingsNavEntry::Root(SettingsTab::Translation))
+                .map(SettingsNavEntry::element_id),
+            Some("settings-nav-translation")
+        );
     }
 }

@@ -24,7 +24,8 @@ use crate::{
         SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical, TabTransfer,
     },
     pdf_view::{
-        CloseTab, OpenFile, OpenKeybindings, OpenNewTab, OpenSettings, ToggleCommandPalette,
+        CloseTab, OpenFile, OpenKeybindings, OpenNewTab, OpenSettings, PdfView, PdfViewEvent,
+        ToggleCommandPalette,
     },
     picker::{Picker, PickerEvent},
     settings::{SettingsStore, setup_ui_font, ui_rems},
@@ -197,6 +198,14 @@ impl Workspace {
                     }
                 }
                 PaneEvent::OpenSettings => this.open_settings_window(cx),
+                PaneEvent::OpenTranslationSplit { source } => {
+                    this.open_translation_split(
+                        source.clone(),
+                        pane_for_events.clone(),
+                        window,
+                        cx,
+                    );
+                }
                 PaneEvent::TabDrop {
                     dragged_tab,
                     target,
@@ -430,6 +439,110 @@ impl Workspace {
         self.sync_tab_bar_visibility(cx);
         new_pane.update(cx, |pane, cx| pane.focus(window, cx));
         cx.notify();
+    }
+
+    fn open_translation_split(
+        &mut self,
+        original: Entity<PdfView>,
+        source_pane: Entity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (path, position) = {
+            let original = original.read(cx);
+            (
+                original.path().to_path_buf(),
+                original.current_document_position(),
+            )
+        };
+        let translated_pane = self.create_pane(Some(path), Some(position), window, cx);
+        self.pane_group
+            .split(&source_pane, &translated_pane, SplitDirection::Right);
+        self.active_pane = translated_pane.clone();
+        self.sync_tab_bar_visibility(cx);
+
+        let Some(translated) = translated_pane.read(cx).active_pdf_view() else {
+            self.remove_pane(&translated_pane, window, cx);
+            return;
+        };
+        translated.update(cx, |view, cx| view.set_translated_view(true, cx));
+        self.link_translation_views(original, translated, window, cx);
+        translated_pane.update(cx, |pane, cx| pane.focus(window, cx));
+        cx.notify();
+    }
+
+    fn link_translation_views(
+        &self,
+        original: Entity<PdfView>,
+        translated: Entity<PdfView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let translated_target = translated.downgrade();
+        cx.subscribe_in(
+            &original,
+            window,
+            move |_, _, event: &PdfViewEvent, _, cx| match event {
+                PdfViewEvent::ViewportChanged(viewport) => {
+                    if let Some(translated_target) = translated_target.upgrade() {
+                        translated_target.update(cx, |view, cx| {
+                            view.apply_linked_viewport(*viewport, cx);
+                        });
+                    }
+                }
+                PdfViewEvent::BlockHovered(block_id) => {
+                    if let Some(translated_target) = translated_target.upgrade() {
+                        translated_target.update(cx, |view, cx| {
+                            view.apply_linked_hover(*block_id, cx);
+                        });
+                    }
+                }
+                PdfViewEvent::BlockSelected(selection) => {
+                    if let Some(translated_target) = translated_target.upgrade() {
+                        translated_target.update(cx, |view, cx| {
+                            view.apply_linked_selection(*selection, cx);
+                        });
+                    }
+                }
+                PdfViewEvent::OpenDocument { .. }
+                | PdfViewEvent::OpenSettings
+                | PdfViewEvent::OpenTranslationSplit => {}
+            },
+        )
+        .detach();
+
+        let original_target = original.downgrade();
+        cx.subscribe_in(
+            &translated,
+            window,
+            move |_, _, event: &PdfViewEvent, _, cx| match event {
+                PdfViewEvent::ViewportChanged(viewport) => {
+                    if let Some(original_target) = original_target.upgrade() {
+                        original_target.update(cx, |view, cx| {
+                            view.apply_linked_viewport(*viewport, cx);
+                        });
+                    }
+                }
+                PdfViewEvent::BlockHovered(block_id) => {
+                    if let Some(original_target) = original_target.upgrade() {
+                        original_target.update(cx, |view, cx| {
+                            view.apply_linked_hover(*block_id, cx);
+                        });
+                    }
+                }
+                PdfViewEvent::BlockSelected(selection) => {
+                    if let Some(original_target) = original_target.upgrade() {
+                        original_target.update(cx, |view, cx| {
+                            view.apply_linked_selection(*selection, cx);
+                        });
+                    }
+                }
+                PdfViewEvent::OpenDocument { .. }
+                | PdfViewEvent::OpenSettings
+                | PdfViewEvent::OpenTranslationSplit => {}
+            },
+        )
+        .detach();
     }
 
     fn activate_pane(&mut self, pane: Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {

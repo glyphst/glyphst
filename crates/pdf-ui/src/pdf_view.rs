@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     ops::Range,
     path::{Path, PathBuf},
@@ -29,7 +29,9 @@ use crate::notes::{NotePaletteEntry, NotesPalette, NotesPaletteDelegate};
 use crate::picker::{Picker, PickerEvent};
 use crate::scrollbar::{ManualScrollHandle, WithScrollbar as _, uniform_list_scrollbar_for};
 use crate::search::{SearchBar, SearchEvent};
-use crate::settings::{BehaviorSettings, SettingsStore, WindowSettings, ui_rems};
+use crate::settings::{
+    BehaviorSettings, SettingsStore, TranslationBoxCorner, WindowSettings, ui_rems,
+};
 use crate::smooth_scroll::advance_toward;
 use crate::theme::Theme;
 use crate::toc::{TocPalette, TocPaletteDelegate, TocPaletteEntry};
@@ -38,13 +40,14 @@ use arboard::{Clipboard, ImageData};
 pub use glyphst_actions::pdf_viewer::*;
 use glyphst_ai_ui::{AiContext, AiContextProvider};
 use glyphst_pdf::{DocumentSnapshot, ReloadCoordinator, ReloadDisposition};
+use glyphst_translation::{LanguageCode, TranslationRequest, TranslationService};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, AsyncApp, Bounds, ClipboardItem, Context, Corners,
-    DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, Font, IntoElement,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollStrategy, ScrollWheelEvent,
-    SharedString, Task, UniformListScrollHandle, Window, anchored, canvas, deferred, div, fill,
-    point, prelude::*, px, rgb, rgba, size, uniform_list,
+    SharedString, Task, TextAlign, TextRun, UniformListScrollHandle, Window, WrappedLine, anchored,
+    canvas, deferred, div, fill, point, prelude::*, px, rgb, rgba, size, uniform_list,
 };
 use image::{Frame, RgbaImage};
 use mupdf::text_page::TextBlockType;
@@ -109,6 +112,8 @@ const DIFF_FLASH_MAX_RECTS: usize = 64;
 const FOOTBAR_HEIGHT: f32 = 26.0;
 const FOOTBAR_BUTTON_HEIGHT: f32 = 20.0;
 const FOOTBAR_ICON_SIZE: f32 = 14.0;
+const MAX_CACHED_TRANSLATED_LAYOUTS: usize = 512;
+const TRANSLATED_LAYOUT_KEEP_FRAMES: u64 = 120;
 
 static NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -147,16 +152,24 @@ struct LoadedPages {
 struct TextChunk {
     start_page_idx: usize,
     glyphs: Vec<Glyph>,
+    text_blocks: Vec<TextBlock>,
+    text_lines: Vec<TextLine>,
     links: Vec<PdfLink>,
     page_glyph_ranges: Vec<Range<usize>>,
+    page_line_ranges: Vec<Range<usize>>,
+    page_block_ranges: Vec<Range<usize>>,
     line_count: u32,
     block_count: u32,
 }
 
 struct LoadedText {
     glyphs: Vec<Glyph>,
+    text_blocks: Vec<TextBlock>,
+    text_lines: Vec<TextLine>,
     links: Vec<PdfLink>,
     page_glyph_ranges: Vec<Range<usize>>,
+    page_line_ranges: Vec<Range<usize>>,
+    page_block_ranges: Vec<Range<usize>>,
 }
 
 struct ReloadData {
@@ -472,11 +485,14 @@ struct DiffFlashOverlay {
 
 struct PaintData {
     pages: Vec<PaintPage>,
+    translated_text_overlays: Vec<TranslatedTextOverlay>,
     diff_flash_overlays: Vec<DiffFlashOverlay>,
     highlight_overlays: Vec<HighlightOverlay>,
     selected_highlight_borders: Vec<Bounds<Pixels>>,
     note_underlines: Vec<(Bounds<Pixels>, HighlightColor)>,
     link_highlights: Vec<Bounds<Pixels>>,
+    linked_hover_highlights: Vec<Bounds<Pixels>>,
+    linked_selection_highlights: Vec<Bounds<Pixels>>,
     selection_highlights: Vec<Bounds<Pixels>>,
     search_highlights: Vec<Bounds<Pixels>>,
     active_search_highlights: Vec<Bounds<Pixels>>,
@@ -490,6 +506,80 @@ struct Glyph {
     page_idx: usize,
     line_idx: u32,
     block_idx: u32,
+    font_size: f32,
+    color: u32,
+    inferred_space_after: bool,
+}
+
+#[derive(Clone)]
+struct TextLine {
+    glyph_range: Range<usize>,
+    bounds: Rect,
+}
+
+#[derive(Clone)]
+struct TextBlock {
+    id: u32,
+    page_idx: usize,
+    glyph_range: Range<usize>,
+    bounds: Rect,
+    text: String,
+    font_size: f32,
+    color: u32,
+    horizontal: bool,
+}
+
+#[derive(Clone)]
+struct TranslatedBlock {
+    source: TextBlock,
+    text: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PdfViewLanguage {
+    Original,
+    Translated,
+}
+
+#[derive(Clone, Copy)]
+pub struct LinkedViewport {
+    pub page_idx: usize,
+    pub y_in_page: f32,
+    pub zoom: f32,
+    pub generation: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct LinkedBlockSelection {
+    pub block_id: u32,
+    pub generation: u64,
+}
+
+struct TranslatedTextOverlay {
+    mask: Bounds<Pixels>,
+    bounds: Bounds<Pixels>,
+    prepared: Arc<PreparedTranslatedText>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct TranslatedTextLayoutKey {
+    block_id: u32,
+    text: SharedString,
+    font: Font,
+    color: u32,
+    font_size_bits: u32,
+    width_bits: u32,
+    height_bits: u32,
+}
+
+struct PreparedTranslatedText {
+    lines: Vec<Arc<WrappedLine>>,
+    line_height: Pixels,
+}
+
+struct CachedTranslatedTextLayout {
+    prepared: Arc<PreparedTranslatedText>,
+    last_used_frame: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -512,6 +602,22 @@ struct ContextMenuState {
     highlight_color: Option<HighlightColor>,
     has_note: bool,
     grid_overview: bool,
+}
+
+#[derive(Clone)]
+enum TranslationStatus {
+    Loading,
+    Ready(SharedString),
+    Error(SharedString),
+}
+
+#[derive(Clone)]
+struct TranslationCardState {
+    source: SharedString,
+    target_language: SharedString,
+    status: TranslationStatus,
+    position: Option<GpuiPoint<Pixels>>,
+    request_generation: u64,
 }
 
 enum NoteTarget {
@@ -541,6 +647,10 @@ pub enum PdfViewEvent {
         position: Option<DocumentPosition>,
     },
     OpenSettings,
+    OpenTranslationSplit,
+    ViewportChanged(LinkedViewport),
+    BlockHovered(Option<u32>),
+    BlockSelected(Option<LinkedBlockSelection>),
 }
 
 struct SearchMatch {
@@ -642,11 +752,30 @@ pub struct PdfView {
     max_page_width: f32,
     content_height_doc: f32,
     glyphs: Vec<Glyph>,
+    text_blocks: Vec<TextBlock>,
+    text_lines: Vec<TextLine>,
+    page_line_ranges: Vec<Range<usize>>,
+    page_block_ranges: Vec<Range<usize>>,
+    translated_blocks: BTreeMap<u32, TranslatedBlock>,
+    translated_text_layouts: HashMap<TranslatedTextLayoutKey, CachedTranslatedTextLayout>,
+    translated_text_layout_frame: u64,
+    view_language: PdfViewLanguage,
+    linked_viewport_generation: u64,
+    linked_selection_generation: u64,
+    suppress_linked_events: bool,
+    external_hovered_block: Option<u32>,
+    external_selected_block: Option<u32>,
+    hovered_text_block: Option<u32>,
+    translation_document_generation: u64,
+    translation_document_task: Option<Task<()>>,
     links: Vec<PdfLink>,
     highlights: Vec<Highlight>,
     notes: Vec<Note>,
     selected_highlight: Option<u64>,
     selection: Option<Selection>,
+    translation_popup: Option<TranslationCardState>,
+    pinned_translation: Option<TranslationCardState>,
+    translation_request_generation: u64,
     pending_selection_anchor: Option<usize>,
     dragging: bool,
     hovered_link: Option<usize>,
@@ -886,11 +1015,30 @@ impl PdfView {
             max_page_width: 1.0,
             content_height_doc: 0.0,
             glyphs: Vec::new(),
+            text_blocks: Vec::new(),
+            text_lines: Vec::new(),
+            page_line_ranges: vec![0..0; page_count],
+            page_block_ranges: vec![0..0; page_count],
+            translated_blocks: BTreeMap::new(),
+            translated_text_layouts: HashMap::new(),
+            translated_text_layout_frame: 0,
+            view_language: PdfViewLanguage::Original,
+            linked_viewport_generation: 0,
+            linked_selection_generation: 0,
+            suppress_linked_events: false,
+            external_hovered_block: None,
+            external_selected_block: None,
+            hovered_text_block: None,
+            translation_document_generation: 0,
+            translation_document_task: None,
             links: Vec::new(),
             highlights: options.annotations.highlights,
             notes: options.annotations.notes,
             selected_highlight: None,
             selection: None,
+            translation_popup: None,
+            pinned_translation: None,
+            translation_request_generation: 0,
             pending_selection_anchor: None,
             dragging: false,
             hovered_link: None,
@@ -1243,6 +1391,11 @@ impl PdfView {
         self.max_page_width = reload.loaded.max_page_width.max(1.0);
         self.content_height_doc = reload.loaded.content_height_doc;
         self.glyphs.clear();
+        self.text_blocks.clear();
+        self.text_lines.clear();
+        self.page_line_ranges = vec![0..0; self.pages.len()];
+        self.page_block_ranges = vec![0..0; self.pages.len()];
+        self.invalidate_translation_document();
         self.links.clear();
         self.search.matches.clear();
         self.search.active = None;
@@ -1418,6 +1571,11 @@ impl PdfView {
         self.max_page_width = loaded.max_page_width.max(1.0);
         self.content_height_doc = loaded.content_height_doc;
         self.glyphs.clear();
+        self.text_blocks.clear();
+        self.text_lines.clear();
+        self.page_line_ranges = vec![0..0; self.pages.len()];
+        self.page_block_ranges = vec![0..0; self.pages.len()];
+        self.invalidate_translation_document();
         self.links.clear();
         self.search.matches.clear();
         self.search.active = None;
@@ -1469,12 +1627,17 @@ impl PdfView {
 
             let result = cx
                 .background_spawn(async move {
-                    Self::load_page_text_chunk(&snapshot, 0, page_count, page_count, page_bounds)
-                        .map_err(|error| format!("{error:#}"))
+                    let chunk = Self::load_page_text_chunk(
+                        &snapshot,
+                        0,
+                        page_count,
+                        page_count,
+                        page_bounds,
+                    )
+                    .map_err(|error| format!("{error:#}"))?;
+                    Self::merge_text_chunks(vec![chunk], page_count)
                 })
                 .await;
-
-            let result = result.and_then(|chunk| Self::merge_text_chunks(vec![chunk], page_count));
             Self::finish_text_indexing(this, cx, result);
         }));
     }
@@ -1488,8 +1651,10 @@ impl PdfView {
     ) -> Result<TextChunk> {
         let document = snapshot.open()?.into_inner();
         let mut glyphs = Vec::new();
+        let mut text_lines = Vec::new();
         let mut links = Vec::new();
         let mut page_glyph_ranges = Vec::with_capacity(end_page_idx.saturating_sub(start_page_idx));
+        let mut page_line_ranges = Vec::with_capacity(end_page_idx.saturating_sub(start_page_idx));
         let mut next_line_idx = 0;
         let mut next_block_idx = 0;
 
@@ -1511,10 +1676,12 @@ impl PdfView {
                 }
             }
 
+            let line_start = text_lines.len();
             let glyph_range = Self::extract_glyphs(
                 &display_list,
                 page_idx,
                 &mut glyphs,
+                &mut text_lines,
                 &mut next_line_idx,
                 &mut next_block_idx,
             )?;
@@ -1527,13 +1694,32 @@ impl PdfView {
             );
             links.extend(detected_links);
             page_glyph_ranges.push(glyph_range);
+            page_line_ranges.push(line_start..text_lines.len());
+        }
+
+        let text_blocks = Self::build_text_blocks(&glyphs);
+        let mut page_block_ranges = Vec::with_capacity(page_glyph_ranges.len());
+        let mut block_start = 0;
+        for page_idx in start_page_idx..end_page_idx {
+            let page_start = block_start;
+            while text_blocks
+                .get(block_start)
+                .is_some_and(|block| block.page_idx == page_idx)
+            {
+                block_start += 1;
+            }
+            page_block_ranges.push(page_start..block_start);
         }
 
         Ok(TextChunk {
             start_page_idx,
             glyphs,
+            text_blocks,
+            text_lines,
             links,
             page_glyph_ranges,
+            page_line_ranges,
+            page_block_ranges,
             line_count: next_line_idx,
             block_count: next_block_idx,
         })
@@ -1546,10 +1732,16 @@ impl PdfView {
         chunks.sort_by_key(|chunk| chunk.start_page_idx);
 
         let glyph_count = chunks.iter().map(|chunk| chunk.glyphs.len()).sum();
+        let block_count = chunks.iter().map(|chunk| chunk.text_blocks.len()).sum();
+        let line_count = chunks.iter().map(|chunk| chunk.text_lines.len()).sum();
         let link_count = chunks.iter().map(|chunk| chunk.links.len()).sum();
         let mut glyphs = Vec::with_capacity(glyph_count);
+        let mut text_blocks = Vec::with_capacity(block_count);
+        let mut text_lines = Vec::with_capacity(line_count);
         let mut links = Vec::with_capacity(link_count);
         let mut page_glyph_ranges = vec![0..0; page_count];
+        let mut page_line_ranges = vec![0..0; page_count];
+        let mut page_block_ranges = vec![0..0; page_count];
         let mut line_offset = 0_u32;
         let mut block_offset = 0_u32;
 
@@ -1567,6 +1759,20 @@ impl PdfView {
                     .ok_or_else(|| "PDF contains too many text blocks".to_string())?;
             }
 
+            for block in &mut chunk.text_blocks {
+                block.id = block
+                    .id
+                    .checked_add(block_offset)
+                    .ok_or_else(|| "PDF contains too many text blocks".to_string())?;
+                block.glyph_range = (block.glyph_range.start + glyph_offset)
+                    ..(block.glyph_range.end + glyph_offset);
+            }
+
+            for line in &mut chunk.text_lines {
+                line.glyph_range =
+                    (line.glyph_range.start + glyph_offset)..(line.glyph_range.end + glyph_offset);
+            }
+
             for (offset, range) in chunk.page_glyph_ranges.into_iter().enumerate() {
                 let page_idx = chunk.start_page_idx + offset;
                 if page_idx >= page_count {
@@ -1577,6 +1783,28 @@ impl PdfView {
                     (range.start + glyph_offset)..(range.end + glyph_offset);
             }
 
+            let text_line_offset = text_lines.len();
+            for (offset, range) in chunk.page_line_ranges.into_iter().enumerate() {
+                let page_idx = chunk.start_page_idx + offset;
+                if page_idx >= page_count {
+                    return Err("PDF text chunk exceeded page count".to_string());
+                }
+
+                page_line_ranges[page_idx] =
+                    (range.start + text_line_offset)..(range.end + text_line_offset);
+            }
+
+            let text_block_offset = text_blocks.len();
+            for (offset, range) in chunk.page_block_ranges.into_iter().enumerate() {
+                let page_idx = chunk.start_page_idx + offset;
+                if page_idx >= page_count {
+                    return Err("PDF text chunk exceeded page count".to_string());
+                }
+
+                page_block_ranges[page_idx] =
+                    (range.start + text_block_offset)..(range.end + text_block_offset);
+            }
+
             line_offset = line_offset
                 .checked_add(chunk.line_count)
                 .ok_or_else(|| "PDF contains too many text lines".to_string())?;
@@ -1585,13 +1813,19 @@ impl PdfView {
                 .ok_or_else(|| "PDF contains too many text blocks".to_string())?;
 
             glyphs.extend(chunk.glyphs);
+            text_blocks.extend(chunk.text_blocks);
+            text_lines.extend(chunk.text_lines);
             links.extend(chunk.links);
         }
 
         Ok(LoadedText {
             glyphs,
+            text_blocks,
+            text_lines,
             links,
             page_glyph_ranges,
+            page_line_ranges,
+            page_block_ranges,
         })
     }
 
@@ -1616,6 +1850,11 @@ impl PdfView {
 
     fn apply_text_data(&mut self, loaded: LoadedText, cx: &mut Context<Self>) {
         self.glyphs = loaded.glyphs;
+        self.text_blocks = loaded.text_blocks;
+        self.text_lines = loaded.text_lines;
+        self.page_line_ranges = loaded.page_line_ranges;
+        self.page_block_ranges = loaded.page_block_ranges;
+        self.invalidate_translation_document();
         self.links = loaded.links;
         self.text_indexing = false;
         self.hovered_link = None;
@@ -1635,7 +1874,72 @@ impl PdfView {
             self.scroll_to_active_search_match(cx);
         }
 
+        if self.view_language == PdfViewLanguage::Translated {
+            self.request_document_translation(cx);
+        }
         cx.notify();
+    }
+
+    fn invalidate_translation_document(&mut self) {
+        self.translation_document_generation = self.translation_document_generation.wrapping_add(1);
+        self.translation_document_task = None;
+        self.translation_request_generation = self.translation_request_generation.wrapping_add(1);
+        self.translated_blocks.clear();
+        self.translated_text_layouts.clear();
+        self.translation_popup = None;
+        self.pinned_translation = None;
+        self.hovered_text_block = None;
+        self.external_hovered_block = None;
+        self.external_selected_block = None;
+    }
+
+    fn build_text_blocks(glyphs: &[Glyph]) -> Vec<TextBlock> {
+        let mut blocks = Vec::new();
+        let mut start = 0;
+        while start < glyphs.len() {
+            let first = &glyphs[start];
+            let block_id = first.block_idx;
+            let mut end = start + 1;
+            while end < glyphs.len() && glyphs[end].block_idx == block_id {
+                end += 1;
+            }
+            let block_glyphs = &glyphs[start..end];
+            let mut bounds = Self::glyph_line_rect(&block_glyphs[0]);
+            let mut font_size = 0.0;
+            let mut colors = BTreeMap::<u32, usize>::new();
+            let mut text = String::new();
+            for (offset, glyph) in block_glyphs.iter().enumerate() {
+                if offset > 0 {
+                    let previous = &block_glyphs[offset - 1];
+                    if glyph.line_idx != previous.line_idx {
+                        text.push('\n');
+                    } else if previous.inferred_space_after {
+                        text.push(' ');
+                    }
+                }
+                bounds = Self::union_rect(bounds, Self::glyph_line_rect(glyph));
+                font_size += glyph.font_size;
+                *colors.entry(glyph.color).or_default() += 1;
+                text.push(glyph.c);
+            }
+            let color = colors
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(color, _)| color)
+                .unwrap_or(0);
+            blocks.push(TextBlock {
+                id: block_id,
+                page_idx: first.page_idx,
+                glyph_range: start..end,
+                bounds,
+                text,
+                font_size: (font_size / block_glyphs.len() as f32).max(6.0),
+                color,
+                horizontal: true,
+            });
+            start = end;
+        }
+        blocks
     }
 
     fn apply_text_indexing_error(&mut self, error: String, cx: &mut Context<Self>) {
@@ -1964,6 +2268,7 @@ impl PdfView {
         display_list: &DisplayList,
         page_idx: usize,
         glyphs: &mut Vec<Glyph>,
+        text_lines: &mut Vec<TextLine>,
         next_line_idx: &mut u32,
         next_block_idx: &mut u32,
     ) -> Result<Range<usize>> {
@@ -1982,6 +2287,7 @@ impl PdfView {
             for line in block.lines() {
                 let line_idx = *next_line_idx;
                 let line_rect = line.bounds();
+                let line_start = glyphs.len();
                 for ch in line.chars() {
                     if let Some(c) = ch.char() {
                         glyphs.push(Glyph {
@@ -1991,10 +2297,21 @@ impl PdfView {
                             page_idx,
                             line_idx,
                             block_idx,
+                            font_size: ch.size(),
+                            color: ch.argb() & 0x00ff_ffff,
+                            inferred_space_after: false,
                         });
                     }
                 }
 
+                let line_end = glyphs.len();
+                if line_start < line_end {
+                    Self::mark_inferred_spaces(&mut glyphs[line_start..line_end]);
+                    text_lines.push(TextLine {
+                        glyph_range: line_start..line_end,
+                        bounds: line_rect,
+                    });
+                }
                 *next_line_idx = next_line_idx.saturating_add(1);
             }
         }
@@ -2033,27 +2350,185 @@ impl PdfView {
             .collect()
     }
 
-    fn assemble_paint_data(&mut self, pages: Vec<PaintPage>) -> PaintData {
+    fn assemble_paint_data(&mut self, pages: Vec<PaintPage>, window: &mut Window) -> PaintData {
         let (highlight_overlays, selected_highlight_borders) = self.highlight_overlays();
         let note_underlines = self.note_underlines();
         let selection_highlights = self.selection_highlights();
         let (search_highlights, active_search_highlights) = self.search_highlights();
         let link_highlights = self.link_highlights();
+        let linked_hover_highlights = self.external_block_highlights(self.external_hovered_block);
+        let linked_selection_highlights =
+            self.external_block_highlights(self.external_selected_block);
         let now = Instant::now();
         self.diff_flashes
             .retain(|flash| now.saturating_duration_since(flash.started_at) < DIFF_FLASH_DURATION);
         let diff_flash_overlays = self.diff_flash_overlays(now);
+        let translated_text_overlays = self.translated_text_overlays(window);
 
         PaintData {
             pages,
+            translated_text_overlays,
             diff_flash_overlays,
             highlight_overlays,
             selected_highlight_borders,
             note_underlines,
             link_highlights,
+            linked_hover_highlights,
+            linked_selection_highlights,
             selection_highlights,
             search_highlights,
             active_search_highlights,
+        }
+    }
+
+    fn translated_text_overlays(&mut self, window: &mut Window) -> Vec<TranslatedTextOverlay> {
+        if self.view_language != PdfViewLanguage::Translated {
+            return Vec::new();
+        }
+        self.translated_text_layout_frame = self.translated_text_layout_frame.wrapping_add(1);
+        let frame = self.translated_text_layout_frame;
+        let font = window.text_style().font();
+        let translated_blocks = self
+            .page_block_ranges
+            .iter()
+            .enumerate()
+            .filter(|(page_idx, _)| {
+                self.page_image_bounds
+                    .get(*page_idx)
+                    .is_some_and(Option::is_some)
+            })
+            .flat_map(|(_, range)| &self.text_blocks[range.clone()])
+            .filter_map(|block| self.translated_blocks.get(&block.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let overlays = translated_blocks
+            .iter()
+            .filter_map(|block| {
+                let image_bounds = *self
+                    .page_image_bounds
+                    .get(block.source.page_idx)
+                    .and_then(Option::as_ref)?;
+                let bounds = self.pdf_rect_to_screen(
+                    block.source.page_idx,
+                    block.source.bounds,
+                    image_bounds,
+                );
+                let scale = bounds.size.height.as_f32()
+                    / (block.source.bounds.y1 - block.source.bounds.y0).max(1.0);
+                let padding = px(1.0);
+                let font_size = px((block.source.font_size * scale * 0.92).max(6.0));
+                let key = TranslatedTextLayoutKey {
+                    block_id: block.source.id,
+                    text: block.text.clone().into(),
+                    font: font.clone(),
+                    color: block.source.color,
+                    font_size_bits: font_size.as_f32().to_bits(),
+                    width_bits: bounds.size.width.as_f32().to_bits(),
+                    height_bits: bounds.size.height.as_f32().to_bits(),
+                };
+                let prepared = if let Some(cached) = self.translated_text_layouts.get_mut(&key) {
+                    cached.last_used_frame = frame;
+                    cached.prepared.clone()
+                } else {
+                    let prepared = Arc::new(Self::prepare_translated_text(
+                        block.text.clone().into(),
+                        font.clone(),
+                        block.source.color,
+                        font_size,
+                        bounds,
+                        window,
+                    )?);
+                    self.translated_text_layouts.insert(
+                        key,
+                        CachedTranslatedTextLayout {
+                            prepared: prepared.clone(),
+                            last_used_frame: frame,
+                        },
+                    );
+                    prepared
+                };
+                Some(TranslatedTextOverlay {
+                    mask: Bounds::new(
+                        point(bounds.left() - padding, bounds.top() - padding),
+                        size(
+                            bounds.size.width + padding * 2.0,
+                            bounds.size.height + padding * 2.0,
+                        ),
+                    ),
+                    bounds,
+                    prepared,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.prune_translated_text_layouts(frame);
+        overlays
+    }
+
+    fn prepare_translated_text(
+        text: SharedString,
+        font: Font,
+        color: u32,
+        requested_font_size: Pixels,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+    ) -> Option<PreparedTranslatedText> {
+        let mut font_size = requested_font_size;
+        for _ in 0..12 {
+            let run = TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: rgb(color).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let lines = match window.text_system().shape_text(
+                text.clone(),
+                font_size,
+                &[run],
+                Some(bounds.size.width),
+                None,
+            ) {
+                Ok(lines) => lines,
+                Err(error) => {
+                    eprintln!("failed to shape translated PDF text: {error:#}");
+                    return None;
+                }
+            };
+            let line_height = font_size * 1.15;
+            let height: Pixels = lines.iter().map(|line| line.size(line_height).height).sum();
+            if height <= bounds.size.height || font_size <= px(6.0) {
+                return Some(PreparedTranslatedText {
+                    lines: lines.into_iter().map(Arc::new).collect(),
+                    line_height,
+                });
+            }
+            font_size = (font_size * 0.9).max(px(6.0));
+        }
+        None
+    }
+
+    fn prune_translated_text_layouts(&mut self, frame: u64) {
+        self.translated_text_layouts.retain(|_, cached| {
+            cached.last_used_frame == frame
+                || frame.saturating_sub(cached.last_used_frame) <= TRANSLATED_LAYOUT_KEEP_FRAMES
+        });
+        if self.translated_text_layouts.len() <= MAX_CACHED_TRANSLATED_LAYOUTS {
+            return;
+        }
+
+        let mut candidates = self
+            .translated_text_layouts
+            .iter()
+            .map(|(key, cached)| (key.clone(), cached.last_used_frame))
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|(_, last_used_frame)| *last_used_frame);
+        let remove_count = self
+            .translated_text_layouts
+            .len()
+            .saturating_sub(MAX_CACHED_TRANSLATED_LAYOUTS);
+        for (key, _) in candidates.into_iter().take(remove_count) {
+            self.translated_text_layouts.remove(&key);
         }
     }
 
@@ -2088,6 +2563,7 @@ impl PdfView {
         &mut self,
         bounds: Bounds<Pixels>,
         scale_factor: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PaintData {
         let page_idx = self
@@ -2127,16 +2603,20 @@ impl PdfView {
         }
 
         let image = self.cached_or_request_render(key, cx);
-        self.assemble_paint_data(vec![PaintPage {
-            bounds: image_bounds,
-            image,
-        }])
+        self.assemble_paint_data(
+            vec![PaintPage {
+                bounds: image_bounds,
+                image,
+            }],
+            window,
+        )
     }
 
     fn paint_data(
         &mut self,
         bounds: Bounds<Pixels>,
         scale_factor: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<PaintData> {
         let viewport_width = bounds.size.width.as_f32().max(1.0);
@@ -2144,7 +2624,7 @@ impl PdfView {
         self.viewport_height = bounds.size.height.as_f32().max(1.0);
         self.base_scale = viewport_width / self.max_page_width.max(1.0);
         if self.is_presentation_mode() {
-            return Ok(self.presentation_paint_data(bounds, scale_factor, cx));
+            return Ok(self.presentation_paint_data(bounds, scale_factor, window, cx));
         }
         self.clamp_scroll();
 
@@ -2214,7 +2694,7 @@ impl PdfView {
             });
         }
 
-        Ok(self.assemble_paint_data(pages))
+        Ok(self.assemble_paint_data(pages, window))
     }
 
     fn image_bounds_for_page(
@@ -2352,6 +2832,7 @@ impl PdfView {
             self.hovered_link = None;
             self.pending_link = None;
             self.schedule_position_save(cx);
+            self.emit_linked_viewport(cx);
             cx.notify();
         }
 
@@ -2394,6 +2875,7 @@ impl PdfView {
             self.hovered_link = None;
             self.pending_link = None;
             self.schedule_position_save(cx);
+            self.emit_linked_viewport(cx);
             cx.notify();
         }
 
@@ -2454,6 +2936,90 @@ impl PdfView {
             zoom: self.zoom,
             page: self.page_index_for_scroll_y(self.target_scroll_y_doc) + 1,
         }
+    }
+
+    pub fn set_translated_view(&mut self, translated: bool, cx: &mut Context<Self>) {
+        self.view_language = if translated {
+            PdfViewLanguage::Translated
+        } else {
+            PdfViewLanguage::Original
+        };
+        if translated {
+            self.request_document_translation(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn apply_linked_viewport(&mut self, viewport: LinkedViewport, cx: &mut Context<Self>) {
+        let Some(page) = self.pages.get(viewport.page_idx) else {
+            return;
+        };
+        self.suppress_linked_events = true;
+        self.zoom = viewport.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        self.set_scroll_doc(
+            self.scroll_x_doc,
+            page.offset_y + viewport.y_in_page.max(0.0).min(page.height),
+            cx,
+        );
+        self.suppress_linked_events = false;
+    }
+
+    pub fn apply_linked_hover(&mut self, block_id: Option<u32>, cx: &mut Context<Self>) {
+        if self.external_hovered_block != block_id {
+            self.external_hovered_block = block_id;
+            cx.notify();
+        }
+    }
+
+    pub fn apply_linked_selection(
+        &mut self,
+        selection: Option<LinkedBlockSelection>,
+        cx: &mut Context<Self>,
+    ) {
+        let block_id = selection.map(|selection| selection.block_id);
+        if self.external_selected_block != block_id {
+            self.external_selected_block = block_id;
+            cx.notify();
+        }
+    }
+
+    fn emit_linked_viewport(&mut self, cx: &mut Context<Self>) {
+        if self.suppress_linked_events || self.pages.is_empty() {
+            return;
+        }
+        self.linked_viewport_generation = self.linked_viewport_generation.wrapping_add(1);
+        let page_idx = self.page_index_for_scroll_y(self.target_scroll_y_doc);
+        let page = &self.pages[page_idx];
+        cx.emit(PdfViewEvent::ViewportChanged(LinkedViewport {
+            page_idx,
+            y_in_page: (self.target_scroll_y_doc - page.offset_y).clamp(0.0, page.height),
+            zoom: self.zoom,
+            generation: self.linked_viewport_generation,
+        }));
+    }
+
+    fn set_hovered_text_block(&mut self, block_id: Option<u32>, cx: &mut Context<Self>) {
+        if self.hovered_text_block != block_id {
+            self.hovered_text_block = block_id;
+            if !self.suppress_linked_events {
+                cx.emit(PdfViewEvent::BlockHovered(block_id));
+            }
+            cx.notify();
+        }
+    }
+
+    fn emit_linked_selection(&mut self, cx: &mut Context<Self>) {
+        if self.suppress_linked_events {
+            return;
+        }
+        self.linked_selection_generation = self.linked_selection_generation.wrapping_add(1);
+        let selection = self.selection_bounds().and_then(|(start, _)| {
+            self.glyphs.get(start).map(|glyph| LinkedBlockSelection {
+                block_id: glyph.block_idx,
+                generation: self.linked_selection_generation,
+            })
+        });
+        cx.emit(PdfViewEvent::BlockSelected(selection));
     }
 
     fn record_current_history_position(&self, cx: &mut Context<Self>) {
@@ -3448,12 +4014,14 @@ impl PdfView {
 
     fn text_from_display_list(display_list: &DisplayList) -> Result<String> {
         let mut glyphs = Vec::new();
+        let mut text_lines = Vec::new();
         let mut next_line_idx = 0;
         let mut next_block_idx = 0;
         let range = Self::extract_glyphs(
             display_list,
             0,
             &mut glyphs,
+            &mut text_lines,
             &mut next_line_idx,
             &mut next_block_idx,
         )?;
@@ -3762,47 +4330,45 @@ impl PdfView {
             return false;
         };
 
-        if !Self::same_word_segment(left, right)
-            || left.c.is_whitespace()
-            || right.c.is_whitespace()
-            || left.c.is_control()
-            || right.c.is_control()
-        {
-            return false;
-        }
-
-        let left_rect = Self::quad_rect(&left.quad);
-        let right_rect = Self::quad_rect(&right.quad);
-        let gap = right_rect.x0 - left_rect.x1;
-        if gap <= 0.0 {
-            return false;
-        }
-
-        gap >= Self::inferred_space_threshold(glyphs, left_ix)
+        Self::same_word_segment(left, right) && left.inferred_space_after
     }
 
-    fn inferred_space_threshold(glyphs: &[Glyph], ix: usize) -> f32 {
-        let Some(glyph) = glyphs.get(ix) else {
-            return 0.0;
-        };
+    fn mark_inferred_spaces(glyphs: &mut [Glyph]) {
         let mut space_widths = glyphs
             .iter()
-            .filter(|candidate| Self::same_word_segment(candidate, glyph))
-            .filter(|candidate| candidate.c.is_whitespace() && !candidate.c.is_control())
-            .filter_map(|candidate| {
-                let rect = Self::quad_rect(&candidate.quad);
+            .filter(|glyph| glyph.c.is_whitespace() && !glyph.c.is_control())
+            .filter_map(|glyph| {
+                let rect = Self::quad_rect(&glyph.quad);
                 let width = rect.x1 - rect.x0;
                 (width > 0.0).then_some(width)
             })
             .collect::<Vec<_>>();
+        space_widths.sort_by(|left, right| left.total_cmp(right));
+        let explicit_space_threshold = space_widths
+            .get(space_widths.len() / 2)
+            .map(|width| width * INFERRED_SPACE_WIDTH_RATIO);
 
-        if !space_widths.is_empty() {
-            space_widths.sort_by(|a, b| a.total_cmp(b));
-            return space_widths[space_widths.len() / 2] * INFERRED_SPACE_WIDTH_RATIO;
+        for index in 0..glyphs.len().saturating_sub(1) {
+            let (left, right) = (&glyphs[index], &glyphs[index + 1]);
+            if left.c.is_whitespace()
+                || right.c.is_whitespace()
+                || left.c.is_control()
+                || right.c.is_control()
+            {
+                continue;
+            }
+
+            let left_rect = Self::quad_rect(&left.quad);
+            let right_rect = Self::quad_rect(&right.quad);
+            let gap = right_rect.x0 - left_rect.x1;
+            if gap <= 0.0 {
+                continue;
+            }
+            let fallback_threshold = (left_rect.y1 - left_rect.y0) * INFERRED_SPACE_HEIGHT_RATIO;
+            if gap >= explicit_space_threshold.unwrap_or(fallback_threshold) {
+                glyphs[index].inferred_space_after = true;
+            }
         }
-
-        let rect = Self::quad_rect(&glyph.quad);
-        (rect.y1 - rect.y0) * INFERRED_SPACE_HEIGHT_RATIO
     }
 
     fn nearby_glyph_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<usize> {
@@ -3820,18 +4386,23 @@ impl PdfView {
     }
 
     fn exact_glyph_at_pdf(&self, page_idx: usize, point: mupdf::Point) -> Option<usize> {
-        let range = self.pages.get(page_idx)?.glyph_range.clone();
-        if range.start >= range.end || range.end > self.glyphs.len() {
+        let line_range = self.page_line_ranges.get(page_idx)?.clone();
+        if line_range.start >= line_range.end || line_range.end > self.text_lines.len() {
             return None;
         }
 
-        self.glyphs[range.clone()]
+        self.text_lines[line_range]
             .iter()
-            .enumerate()
-            .find_map(|(offset, glyph)| {
-                Self::quad_rect(&glyph.quad)
-                    .contains(point.x, point.y)
-                    .then_some(range.start + offset)
+            .filter(|line| line.bounds.contains(point.x, point.y))
+            .find_map(|line| {
+                self.glyphs[line.glyph_range.clone()]
+                    .iter()
+                    .enumerate()
+                    .find_map(|(offset, glyph)| {
+                        Self::quad_rect(&glyph.quad)
+                            .contains(point.x, point.y)
+                            .then_some(line.glyph_range.start + offset)
+                    })
             })
     }
 
@@ -3845,17 +4416,22 @@ impl PdfView {
             return Some(ix);
         }
 
-        let range = self.pages.get(page_idx)?.glyph_range.clone();
-        if range.start >= range.end || range.end > self.glyphs.len() {
+        let line_range = self.page_line_ranges.get(page_idx)?.clone();
+        if line_range.start >= line_range.end || line_range.end > self.text_lines.len() {
             return None;
         }
 
-        self.glyphs[range.clone()]
+        self.text_lines[line_range]
             .iter()
-            .enumerate()
-            .filter_map(|(offset, glyph)| {
+            .flat_map(|line| {
+                self.glyphs[line.glyph_range.clone()]
+                    .iter()
+                    .enumerate()
+                    .map(move |(offset, glyph)| (line.glyph_range.start + offset, glyph))
+            })
+            .filter_map(|(glyph_ix, glyph)| {
                 let distance = Self::distance_to_rect(point, Self::quad_rect(&glyph.quad));
-                (distance <= tolerance).then_some((range.start + offset, distance))
+                (distance <= tolerance).then_some((glyph_ix, distance))
             })
             .min_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(ix, _)| ix)
@@ -3898,40 +4474,28 @@ impl PdfView {
         page_idx: usize,
         point: mupdf::Point,
     ) -> Option<(f32, usize, usize, Rect)> {
-        let range = self.pages.get(page_idx)?.glyph_range.clone();
-        if range.start >= range.end || range.end > self.glyphs.len() {
+        let line_range = self.page_line_ranges.get(page_idx)?.clone();
+        if line_range.start >= line_range.end || line_range.end > self.text_lines.len() {
             return None;
         }
 
-        let mut best = None;
-        let mut start = range.start;
+        self.text_lines[line_range]
+            .iter()
+            .filter_map(|line| {
+                let start = line.glyph_range.start;
+                let end = line.glyph_range.end.checked_sub(1)?;
+                let rect = line.bounds;
+                let dy = if point.y < rect.y0 {
+                    rect.y0 - point.y
+                } else if point.y > rect.y1 {
+                    point.y - rect.y1
+                } else {
+                    0.0
+                };
 
-        while start < range.end {
-            let line_idx = self.glyphs[start].line_idx;
-            let mut end = start;
-            let mut rect = Self::quad_rect(&self.glyphs[start].quad);
-
-            while end + 1 < range.end && self.glyphs[end + 1].line_idx == line_idx {
-                end += 1;
-                rect = Self::union_rect(rect, Self::quad_rect(&self.glyphs[end].quad));
-            }
-
-            let dy = if point.y < rect.y0 {
-                rect.y0 - point.y
-            } else if point.y > rect.y1 {
-                point.y - rect.y1
-            } else {
-                0.0
-            };
-
-            if best.as_ref().is_none_or(|(best_dy, _, _, _)| dy < *best_dy) {
-                best = Some((dy, start, end, rect));
-            }
-
-            start = end + 1;
-        }
-
-        best
+                Some((dy, start, end, rect))
+            })
+            .min_by(|(left, _, _, _), (right, _, _, _)| left.total_cmp(right))
     }
 
     fn selection_bounds(&self) -> Option<(usize, usize)> {
@@ -3947,6 +4511,17 @@ impl PdfView {
     }
 
     pub(crate) fn selected_text(&self) -> Option<String> {
+        if self.view_language == PdfViewLanguage::Translated {
+            let (start, _) = self.selection_bounds()?;
+            let block_id = self.glyphs.get(start)?.block_idx;
+            if let Some(block) = self.translated_blocks.get(&block_id) {
+                return Some(block.text.clone());
+            }
+        }
+        self.selected_source_text()
+    }
+
+    fn selected_source_text(&self) -> Option<String> {
         let (start, end) = self.selection_bounds()?;
         Self::text_for_glyph_range(&self.glyphs, start..end + 1)
     }
@@ -3993,6 +4568,348 @@ impl PdfView {
         if let Some(text) = self.selected_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+    }
+
+    fn translate_selection(
+        &mut self,
+        popup_position: Option<GpuiPoint<Pixels>>,
+        update_pinned: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = self.selected_source_text() else {
+            return;
+        };
+        let settings = cx.global::<SettingsStore>().settings.clone();
+        let target_language = match LanguageCode::new(&settings.translation.target_language) {
+            Ok(language) => language,
+            Err(error) => {
+                self.set_translation_error(
+                    popup_position,
+                    update_pinned,
+                    text,
+                    settings.translation.target_language,
+                    error.to_string(),
+                    cx,
+                );
+                return;
+            }
+        };
+        self.translation_request_generation = self.translation_request_generation.wrapping_add(1);
+        let generation = self.translation_request_generation;
+        let state = TranslationCardState {
+            source: text.clone().into(),
+            target_language: target_language.as_str().to_string().into(),
+            status: TranslationStatus::Loading,
+            position: popup_position,
+            request_generation: generation,
+        };
+        if popup_position.is_some() {
+            self.translation_popup = Some(state.clone());
+        }
+        if update_pinned {
+            self.pinned_translation = Some(state);
+        }
+
+        if !cx.has_global::<TranslationService>() {
+            self.finish_translation_request(
+                generation,
+                Err("translation service is unavailable".to_string()),
+                cx,
+            );
+            return;
+        }
+
+        let service = cx.global::<TranslationService>().clone();
+        let provider = settings.translation.active_provider;
+        let source_language = settings
+            .translation
+            .source_language
+            .as_deref()
+            .and_then(|language| LanguageCode::new(language).ok());
+        let request = TranslationRequest {
+            provider,
+            source_language,
+            target_language,
+            texts: vec![text],
+            context_before: None,
+            context_after: None,
+        };
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    service
+                        .translate(&settings, request)
+                        .map(|response| {
+                            response.translations.into_iter().next().unwrap_or_default()
+                        })
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                this.finish_translation_request(generation, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn request_document_translation(&mut self, cx: &mut Context<Self>) {
+        if self.view_language != PdfViewLanguage::Translated
+            || self.text_blocks.is_empty()
+            || !cx.has_global::<TranslationService>()
+        {
+            return;
+        }
+        self.translation_document_generation = self.translation_document_generation.wrapping_add(1);
+        let generation = self.translation_document_generation;
+        let blocks = self
+            .text_blocks
+            .iter()
+            .filter(|block| block.horizontal && !block.text.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        let settings = cx.global::<SettingsStore>().settings.clone();
+        let provider = settings.translation.active_provider;
+        let source_language = settings
+            .translation
+            .source_language
+            .as_deref()
+            .and_then(|language| LanguageCode::new(language).ok());
+        let target_language = match LanguageCode::new(&settings.translation.target_language) {
+            Ok(language) => language,
+            Err(error) => {
+                eprintln!("invalid translation target language: {error:#}");
+                return;
+            }
+        };
+        let service = cx.global::<TranslationService>().clone();
+
+        self.translation_document_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let texts = blocks
+                        .iter()
+                        .map(|block| block.text.clone())
+                        .collect::<Vec<_>>();
+                    service
+                        .translate_batches(
+                            &settings,
+                            provider,
+                            source_language,
+                            target_language,
+                            texts,
+                        )
+                        .map(|translations| (blocks, translations))
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                if this.translation_document_generation != generation {
+                    return;
+                }
+                this.translation_document_task = None;
+                match result {
+                    Ok((blocks, translations)) if blocks.len() == translations.len() => {
+                        this.translated_blocks = blocks
+                            .into_iter()
+                            .zip(translations)
+                            .map(|(source, text)| (source.id, TranslatedBlock { source, text }))
+                            .collect();
+                        this.translated_text_layouts.clear();
+                    }
+                    Ok(_) => {
+                        eprintln!("translation provider returned an incomplete document result");
+                    }
+                    Err(error) => eprintln!("failed to translate document: {error}"),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn set_translation_error(
+        &mut self,
+        popup_position: Option<GpuiPoint<Pixels>>,
+        update_pinned: bool,
+        source: String,
+        target_language: String,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.translation_request_generation = self.translation_request_generation.wrapping_add(1);
+        let state = TranslationCardState {
+            source: source.into(),
+            target_language: target_language.into(),
+            status: TranslationStatus::Error(error.into()),
+            position: popup_position,
+            request_generation: self.translation_request_generation,
+        };
+        if popup_position.is_some() {
+            self.translation_popup = Some(state.clone());
+        }
+        if update_pinned {
+            self.pinned_translation = Some(state);
+        }
+        cx.notify();
+    }
+
+    fn finish_translation_request(
+        &mut self,
+        generation: u64,
+        result: std::result::Result<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let status = match result {
+            Ok(text) if !text.trim().is_empty() => TranslationStatus::Ready(text.into()),
+            Ok(_) => TranslationStatus::Error(crate::fl!("translation-no-result").into()),
+            Err(error) => TranslationStatus::Error(error.into()),
+        };
+        if let Some(popup) = self.translation_popup.as_mut()
+            && popup.request_generation == generation
+        {
+            popup.status = status.clone();
+        }
+        if let Some(pinned) = self.pinned_translation.as_mut()
+            && pinned.request_generation == generation
+        {
+            pinned.status = status;
+        }
+        cx.notify();
+    }
+
+    fn toggle_pinned_translation(&mut self, cx: &mut Context<Self>) {
+        let enabled = {
+            let store = cx.global_mut::<SettingsStore>();
+            store.settings.translation.pinned.enabled = !store.settings.translation.pinned.enabled;
+            let enabled = store.settings.translation.pinned.enabled;
+            if let Err(error) = store.save() {
+                eprintln!("failed to save translation settings: {error:#}");
+            }
+            enabled
+        };
+        if enabled {
+            self.translate_selection(None, true, cx);
+        } else {
+            self.pinned_translation = None;
+            cx.notify();
+        }
+    }
+
+    fn close_translation_popup(&mut self, cx: &mut Context<Self>) {
+        if self.translation_popup.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn render_translation_card(
+        &self,
+        state: TranslationCardState,
+        pinned: bool,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let source = if state.source.chars().count() > 280 {
+            format!("{}…", state.source.chars().take(280).collect::<String>())
+        } else {
+            state.source.to_string()
+        };
+        let content = match &state.status {
+            TranslationStatus::Loading => div()
+                .mt_2()
+                .text_color(rgb(theme.text_muted))
+                .child(crate::fl!("translation-loading"))
+                .into_any_element(),
+            TranslationStatus::Ready(text) => div()
+                .mt_2()
+                .text_color(rgb(theme.text))
+                .child(text.clone())
+                .into_any_element(),
+            TranslationStatus::Error(error) => div()
+                .mt_2()
+                .text_color(rgb(theme.error))
+                .child(error.clone())
+                .into_any_element(),
+        };
+
+        let mut card = div()
+            .occlude()
+            .w(px(cx
+                .global::<SettingsStore>()
+                .settings
+                .translation
+                .pinned
+                .width))
+            .max_h(px(360.0))
+            .overflow_hidden()
+            .p_3()
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
+            .text_size(ui_rems(13.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .text_size(ui_rems(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(format!(
+                        "{} · {}",
+                        crate::fl!("translation-title"),
+                        state.target_language
+                    ))
+                    .child(
+                        div()
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(rgb(theme.text)))
+                            .child(if pinned {
+                                crate::fl!("translation-unpin")
+                            } else {
+                                crate::fl!("translation-close")
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    if pinned {
+                                        this.toggle_pinned_translation(cx);
+                                    } else {
+                                        this.close_translation_popup(cx);
+                                    }
+                                    cx.stop_propagation();
+                                }),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .text_size(ui_rems(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(source),
+            )
+            .child(content);
+
+        if let TranslationStatus::Ready(text) = state.status {
+            card = card.child(
+                div()
+                    .mt_3()
+                    .cursor_pointer()
+                    .text_size(ui_rems(11.0))
+                    .text_color(rgb(theme.accent))
+                    .hover(|style| style.opacity(0.8))
+                    .child(crate::fl!("copy"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                            cx.stop_propagation();
+                        }),
+                    ),
+            );
+        }
+        card.into_any_element()
     }
 
     fn select_all(&mut self) {
@@ -4364,7 +5281,7 @@ impl PdfView {
                 if glyph.block_idx != previous.block_idx {
                     Self::push_search_separator(&mut text, &mut glyph_map);
                     Self::push_search_separator(&mut text, &mut glyph_map);
-                } else if glyph.line_idx != previous.line_idx {
+                } else if glyph.line_idx != previous.line_idx || previous.inferred_space_after {
                     Self::push_search_separator(&mut text, &mut glyph_map);
                 }
             }
@@ -4549,6 +5466,7 @@ impl PdfView {
         self.hovered_link = None;
         self.pending_link = None;
         self.schedule_position_save(cx);
+        self.emit_linked_viewport(cx);
         cx.notify();
     }
 
@@ -6076,6 +6994,16 @@ impl PdfView {
                 state.highlight_color.is_none() && state.has_selection,
                 |menu| {
                     menu.child(Self::context_menu_entry(
+                        crate::fl!("pdf-context-translate-selection"),
+                        theme,
+                        |this, _, cx| {
+                            let position = this.context_menu_position;
+                            this.close_context_menu(cx);
+                            this.translate_selection(position, false, cx);
+                        },
+                        cx,
+                    ))
+                    .child(Self::context_menu_entry(
                         crate::fl!("copy"),
                         theme,
                         |this, _, cx| this.copy_selection(cx),
@@ -7984,6 +8912,16 @@ impl PdfView {
         self.highlight_bounds_for_range(start..end + 1)
     }
 
+    fn external_block_highlights(&self, block_id: Option<u32>) -> Vec<Bounds<Pixels>> {
+        let Some(block_id) = block_id else {
+            return Vec::new();
+        };
+        let Some(block) = self.text_blocks.iter().find(|block| block.id == block_id) else {
+            return Vec::new();
+        };
+        self.highlight_bounds_for_range(block.glyph_range.clone())
+    }
+
     fn link_highlights(&self) -> Vec<Bounds<Pixels>> {
         let Some(link_ix) = self.hovered_link else {
             return Vec::new();
@@ -8280,6 +9218,35 @@ impl Render for PdfView {
         } else {
             None
         };
+        let translation_popup = self.translation_popup.clone().and_then(|state| {
+            state.position.map(|position| {
+                deferred(
+                    anchored()
+                        .snap_to_window_with_margin(px(8.0))
+                        .position(point(position.x + px(12.0), position.y + px(12.0)))
+                        .anchor(Anchor::TopLeft)
+                        .child(self.render_translation_card(state, false, theme, cx)),
+                )
+                .with_priority(2)
+            })
+        });
+        let pinned_translation = self.pinned_translation.clone().map(|state| {
+            let corner = cx
+                .global::<SettingsStore>()
+                .settings
+                .translation
+                .pinned
+                .corner;
+            let card = self.render_translation_card(state, true, theme, cx);
+            let mut container = div().absolute().m(px(16.0));
+            container = match corner {
+                TranslationBoxCorner::TopLeft => container.top(px(0.0)).left(px(0.0)),
+                TranslationBoxCorner::TopRight => container.top(px(0.0)).right(px(0.0)),
+                TranslationBoxCorner::BottomLeft => container.bottom(px(0.0)).left(px(0.0)),
+                TranslationBoxCorner::BottomRight => container.bottom(px(0.0)).right(px(0.0)),
+            };
+            container.child(card)
+        });
 
         div()
             .size_full()
@@ -8301,6 +9268,30 @@ impl Render for PdfView {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| {
                 this.copy_selection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &TranslateSelection, _, cx| {
+                this.close_context_menu(cx);
+                this.translate_selection(
+                    this.selection_bounds()
+                        .and_then(|(start, end)| {
+                            this.highlight_bounds_for_range(start..end + 1)
+                                .last()
+                                .map(|bounds| {
+                                    point(
+                                        bounds.right() + px(4.0),
+                                        bounds.bottom() + px(4.0),
+                                    )
+                                })
+                        }),
+                    false,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, _: &TogglePinnedTranslation, _, cx| {
+                this.toggle_pinned_translation(cx);
+            }))
+            .on_action(cx.listener(|_, _: &OpenTranslationSplit, _, cx| {
+                cx.emit(PdfViewEvent::OpenTranslationSplit);
             }))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
                 this.select_all();
@@ -8556,6 +9547,12 @@ impl Render for PdfView {
                 if !this.dragging {
                     this.update_hovered_link(event.position, cx);
                     this.update_hovered_note(event.position, cx);
+                    this.set_hovered_text_block(
+                        this.glyph_at_screen(event.position)
+                            .and_then(|glyph_ix| this.glyphs.get(glyph_ix))
+                            .map(|glyph| glyph.block_idx),
+                        cx,
+                    );
                     return;
                 }
 
@@ -8564,6 +9561,7 @@ impl Render for PdfView {
                     this.pending_selection_anchor = None;
                     this.update_hovered_link(event.position, cx);
                     this.update_hovered_note(event.position, cx);
+                    this.set_hovered_text_block(None, cx);
                     return;
                 }
 
@@ -8575,6 +9573,7 @@ impl Render for PdfView {
                     } else if let Some(anchor) = this.pending_selection_anchor {
                         this.selection = Some(Selection { anchor, head: ix });
                     }
+                    this.emit_linked_selection(cx);
                     cx.notify();
                 }
             }))
@@ -8591,6 +9590,12 @@ impl Render for PdfView {
                         }
                         cx.notify();
                     }
+                    if cx.global::<SettingsStore>().settings.translation.pinned.enabled
+                        && this.selected_text().is_some()
+                    {
+                        this.translate_selection(None, true, cx);
+                    }
+                    this.emit_linked_selection(cx);
                 }),
             )
             .on_mouse_up(
@@ -8619,11 +9624,16 @@ impl Render for PdfView {
                                     canvas(
                                         move |bounds, window, cx| {
                                             prepaint_view.update(cx, |this, cx| {
-                                                this.paint_data(bounds, window.scale_factor(), cx)
-                                                    .expect("failed to render PDF")
+                                                this.paint_data(
+                                                    bounds,
+                                                    window.scale_factor(),
+                                                    window,
+                                                    cx,
+                                                )
+                                                .expect("failed to render PDF")
                                             })
                                         },
-                                        move |_, paint_data, window, _| {
+                                        move |_, paint_data, window, cx| {
                                             for page in paint_data.pages {
                                                 window
                                                     .paint_quad(fill(page.bounds, rgb(theme.page)));
@@ -8636,6 +9646,35 @@ impl Render for PdfView {
                                                         0,
                                                         false,
                                                     );
+                                                }
+                                            }
+
+                                            for overlay in paint_data.translated_text_overlays {
+                                                window.paint_quad(fill(
+                                                    overlay.mask,
+                                                    rgb(theme.page),
+                                                ));
+                                                let mut y = overlay.bounds.top();
+                                                for line in &overlay.prepared.lines {
+                                                    if y >= overlay.bounds.bottom() {
+                                                        break;
+                                                    }
+                                                    if let Err(error) = line.as_ref().paint(
+                                                        point(overlay.bounds.left(), y),
+                                                        overlay.prepared.line_height,
+                                                        TextAlign::Left,
+                                                        Some(overlay.bounds),
+                                                        window,
+                                                        cx,
+                                                    ) {
+                                                        eprintln!(
+                                                            "failed to paint translated PDF text: {error:#}"
+                                                        );
+                                                        break;
+                                                    }
+                                                    y += line
+                                                        .size(overlay.prepared.line_height)
+                                                        .height;
                                                 }
                                             }
 
@@ -8707,6 +9746,20 @@ impl Render for PdfView {
                                                 window.paint_quad(fill(
                                                     highlight,
                                                     rgba(Self::with_alpha(theme.accent, 0x33)),
+                                                ));
+                                            }
+
+                                            for highlight in paint_data.linked_hover_highlights {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    rgba(Self::with_alpha(theme.accent, 0x44)),
+                                                ));
+                                            }
+
+                                            for highlight in paint_data.linked_selection_highlights {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    rgba(Self::with_alpha(theme.accent, 0x66)),
                                                 ));
                                             }
 
@@ -8804,6 +9857,8 @@ impl Render for PdfView {
                     cx,
                 ))
             })
+            .when_some(translation_popup, |this, popup| this.child(popup))
+            .when_some(pinned_translation, |this, pinned| this.child(pinned))
             .when_some(self.notes_palette.clone(), |this, palette| {
                 this.child(Self::render_centered_overlay(
                     palette,
@@ -8860,7 +9915,7 @@ impl Render for PdfView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Glyph, PdfView};
+    use super::{Glyph, PdfView, TextChunk, TextLine};
     use mupdf::{Point, Quad, Rect};
 
     fn test_glyph(c: char, x0: f32, x1: f32) -> Glyph {
@@ -8876,11 +9931,14 @@ mod tests {
             page_idx: 0,
             line_idx: 0,
             block_idx: 0,
+            font_size: 12.0,
+            color: 0,
+            inferred_space_after: false,
         }
     }
 
     fn missing_space_glyphs() -> Vec<Glyph> {
-        [
+        let mut glyphs = [
             ('1', 0.0, 5.0),
             ('0', 5.0, 10.0),
             ('0', 10.0, 15.0),
@@ -8896,7 +9954,9 @@ mod tests {
         ]
         .into_iter()
         .map(|(c, x0, x1)| test_glyph(c, x0, x1))
-        .collect()
+        .collect::<Vec<_>>();
+        PdfView::mark_inferred_spaces(&mut glyphs);
+        glyphs
     }
 
     #[test]
@@ -8993,5 +10053,72 @@ mod tests {
             PdfView::text_for_glyph_range(&glyphs, 0..glyphs.len()).as_deref(),
             Some("100 by default")
         );
+    }
+
+    #[test]
+    fn build_text_blocks_handles_large_glyph_sets_without_rescanning() {
+        let mut glyphs = (0..100_000)
+            .map(|index| {
+                let mut glyph = test_glyph('a', index as f32 * 5.0, index as f32 * 5.0 + 5.0);
+                glyph.block_idx = (index / 1000) as u32;
+                glyph.line_idx = (index / 100) as u32;
+                glyph
+            })
+            .collect::<Vec<_>>();
+        for line in glyphs.chunks_mut(100) {
+            PdfView::mark_inferred_spaces(line);
+        }
+
+        let blocks = PdfView::build_text_blocks(&glyphs);
+
+        assert_eq!(blocks.len(), 100);
+        assert!(blocks.iter().all(|block| block.text.len() >= 1000));
+    }
+
+    #[test]
+    fn merge_text_chunks_offsets_block_and_page_indexes() {
+        let first_glyphs = vec![test_glyph('a', 0.0, 5.0)];
+        let second_glyphs = vec![test_glyph('b', 0.0, 5.0)];
+        let first_bounds = PdfView::glyph_line_rect(&first_glyphs[0]);
+        let second_bounds = PdfView::glyph_line_rect(&second_glyphs[0]);
+        let first = TextChunk {
+            start_page_idx: 0,
+            text_blocks: PdfView::build_text_blocks(&first_glyphs),
+            glyphs: first_glyphs,
+            text_lines: vec![TextLine {
+                glyph_range: 0..1,
+                bounds: first_bounds,
+            }],
+            links: Vec::new(),
+            page_glyph_ranges: std::iter::once(0..1).collect(),
+            page_line_ranges: std::iter::once(0..1).collect(),
+            page_block_ranges: std::iter::once(0..1).collect(),
+            line_count: 1,
+            block_count: 1,
+        };
+        let second = TextChunk {
+            start_page_idx: 1,
+            text_blocks: PdfView::build_text_blocks(&second_glyphs),
+            glyphs: second_glyphs,
+            text_lines: vec![TextLine {
+                glyph_range: 0..1,
+                bounds: second_bounds,
+            }],
+            links: Vec::new(),
+            page_glyph_ranges: std::iter::once(0..1).collect(),
+            page_line_ranges: std::iter::once(0..1).collect(),
+            page_block_ranges: std::iter::once(0..1).collect(),
+            line_count: 1,
+            block_count: 1,
+        };
+
+        let merged = PdfView::merge_text_chunks(vec![second, first], 2).unwrap();
+
+        assert_eq!(merged.page_glyph_ranges, vec![0..1, 1..2]);
+        assert_eq!(merged.page_line_ranges, vec![0..1, 1..2]);
+        assert_eq!(merged.page_block_ranges, vec![0..1, 1..2]);
+        assert_eq!(merged.text_blocks[0].id, 0);
+        assert_eq!(merged.text_blocks[1].id, 1);
+        assert_eq!(merged.text_blocks[1].glyph_range, 1..2);
     }
 }

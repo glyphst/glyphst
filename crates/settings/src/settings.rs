@@ -41,6 +41,10 @@ const MIN_QUICK_ASK_TRANSPARENCY: f32 = 0.0;
 const MAX_QUICK_ASK_TRANSPARENCY: f32 = 1.0;
 const MIN_QUICK_ASK_TEXT_SIZE: f32 = 8.0;
 const MAX_QUICK_ASK_TEXT_SIZE: f32 = 32.0;
+const DEFAULT_TRANSLATION_TARGET_LANGUAGE: &str = "en";
+const DEFAULT_PINNED_TRANSLATION_WIDTH: f32 = 360.0;
+const MIN_PINNED_TRANSLATION_WIDTH: f32 = 240.0;
+const MAX_PINNED_TRANSLATION_WIDTH: f32 = 640.0;
 const DEFAULT_UI_FONT_FALLBACKS: &[&str] = &[
     "Noto Sans CJK SC",
     "Noto Sans SC",
@@ -1306,6 +1310,252 @@ impl AiSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TranslationProvider {
+    #[default]
+    Ai,
+    DeepL,
+    Google,
+    Microsoft,
+}
+
+impl TranslationProvider {
+    pub const ALL: [Self; 4] = [Self::Ai, Self::DeepL, Self::Google, Self::Microsoft];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ai => "ai",
+            Self::DeepL => "deepl",
+            Self::Google => "google",
+            Self::Microsoft => "microsoft",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ai" => Some(Self::Ai),
+            "deepl" => Some(Self::DeepL),
+            "google" => Some(Self::Google),
+            "microsoft" => Some(Self::Microsoft),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ai => "AI model",
+            Self::DeepL => "DeepL",
+            Self::Google => "Google Cloud Translation",
+            Self::Microsoft => "Microsoft Translator",
+        }
+    }
+
+    pub fn default_base_url(self) -> Option<&'static str> {
+        match self {
+            Self::Ai => None,
+            Self::DeepL => Some("https://api-free.deepl.com"),
+            Self::Google => Some("https://translation.googleapis.com"),
+            Self::Microsoft => Some("https://api.cognitive.microsofttranslator.com"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TranslationProviderConfig {
+    pub enabled: bool,
+    pub api_key: String,
+    pub base_url: Option<String>,
+    pub region: Option<String>,
+}
+
+impl TranslationProviderConfig {
+    pub fn default_for(provider: TranslationProvider) -> Self {
+        Self {
+            enabled: provider == TranslationProvider::Ai,
+            api_key: String::new(),
+            base_url: None,
+            region: None,
+        }
+    }
+
+    fn sanitize(&mut self, provider: TranslationProvider) {
+        self.api_key = self.api_key.trim().to_string();
+        self.base_url = self
+            .base_url
+            .take()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .filter(|value| Some(value.as_str()) != provider.default_base_url());
+        self.region = self
+            .region
+            .take()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    }
+
+    fn from_document(provider: TranslationProvider, document: &KdlDocument) -> Self {
+        let mut config = Self::default_for(provider);
+        if let Some(value) = document.get_arg("enabled").and_then(KdlValue::as_bool) {
+            config.enabled = value;
+        }
+        if let Some(value) = document.get_arg("api_key").and_then(KdlValue::as_string) {
+            config.api_key = value.to_string();
+        }
+        config.base_url = document
+            .get_arg("base_url")
+            .and_then(KdlValue::as_string)
+            .map(str::to_string);
+        config.region = document
+            .get_arg("region")
+            .and_then(KdlValue::as_string)
+            .map(str::to_string);
+        config.sanitize(provider);
+        config
+    }
+
+    fn write_to_document(&self, document: &mut KdlDocument) {
+        push_value_node(document, "enabled", self.enabled);
+        if !self.api_key.is_empty() {
+            push_value_node(document, "api_key", self.api_key.clone());
+        }
+        if let Some(base_url) = &self.base_url {
+            push_value_node(document, "base_url", base_url.clone());
+        }
+        if let Some(region) = &self.region {
+            push_value_node(document, "region", region.clone());
+        }
+    }
+
+    fn is_default_for(&self, provider: TranslationProvider) -> bool {
+        self == &Self::default_for(provider)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TranslationBoxCorner {
+    TopLeft,
+    #[default]
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl TranslationBoxCorner {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TopLeft => "top-left",
+            Self::TopRight => "top-right",
+            Self::BottomLeft => "bottom-left",
+            Self::BottomRight => "bottom-right",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "top-left" => Some(Self::TopLeft),
+            "top-right" => Some(Self::TopRight),
+            "bottom-left" => Some(Self::BottomLeft),
+            "bottom-right" => Some(Self::BottomRight),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PinnedTranslationSettings {
+    pub enabled: bool,
+    pub width: f32,
+    pub corner: TranslationBoxCorner,
+}
+
+impl Default for PinnedTranslationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            width: DEFAULT_PINNED_TRANSLATION_WIDTH,
+            corner: TranslationBoxCorner::TopRight,
+        }
+    }
+}
+
+impl PinnedTranslationSettings {
+    fn sanitize(&mut self) {
+        self.width = if self.width.is_finite() {
+            self.width
+                .clamp(MIN_PINNED_TRANSLATION_WIDTH, MAX_PINNED_TRANSLATION_WIDTH)
+        } else {
+            DEFAULT_PINNED_TRANSLATION_WIDTH
+        };
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TranslationSettings {
+    pub providers: BTreeMap<TranslationProvider, TranslationProviderConfig>,
+    pub active_provider: TranslationProvider,
+    pub source_language: Option<String>,
+    pub target_language: String,
+    pub pinned: PinnedTranslationSettings,
+}
+
+impl Default for TranslationSettings {
+    fn default() -> Self {
+        Self {
+            providers: BTreeMap::from([(
+                TranslationProvider::Ai,
+                TranslationProviderConfig::default_for(TranslationProvider::Ai),
+            )]),
+            active_provider: TranslationProvider::Ai,
+            source_language: None,
+            target_language: DEFAULT_TRANSLATION_TARGET_LANGUAGE.to_string(),
+            pinned: PinnedTranslationSettings::default(),
+        }
+    }
+}
+
+impl TranslationSettings {
+    fn sanitize(&mut self) {
+        self.source_language = self
+            .source_language
+            .take()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"));
+        self.target_language = self.target_language.trim().to_string();
+        if self.target_language.is_empty() {
+            self.target_language = DEFAULT_TRANSLATION_TARGET_LANGUAGE.to_string();
+        }
+        self.target_language.make_ascii_lowercase();
+        self.pinned.sanitize();
+
+        for (provider, config) in &mut self.providers {
+            config.sanitize(*provider);
+        }
+
+        if !self.provider_config(self.active_provider).enabled {
+            self.active_provider = TranslationProvider::ALL
+                .into_iter()
+                .find(|provider| self.provider_config(*provider).enabled)
+                .unwrap_or(TranslationProvider::Ai);
+        }
+    }
+
+    pub fn provider_config(&self, provider: TranslationProvider) -> TranslationProviderConfig {
+        self.providers
+            .get(&provider)
+            .cloned()
+            .unwrap_or_else(|| TranslationProviderConfig::default_for(provider))
+    }
+
+    pub fn provider_config_mut(
+        &mut self,
+        provider: TranslationProvider,
+    ) -> &mut TranslationProviderConfig {
+        self.providers
+            .entry(provider)
+            .or_insert_with(|| TranslationProviderConfig::default_for(provider))
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub behavior: BehaviorSettings,
@@ -1314,6 +1564,7 @@ pub struct Settings {
     pub tab_bar_visibility: TabBarVisibility,
     pub language: AppLanguage,
     pub ai: AiSettings,
+    pub translation: TranslationSettings,
     pub keymap_preset: KeymapPreset,
     pub keybinding_overrides: Vec<KeyBindingOverride>,
     pub theme: ThemeSelection,
@@ -1326,6 +1577,7 @@ impl Settings {
         self.font.sanitize();
         self.window.sanitize();
         self.ai.sanitize();
+        self.translation.sanitize();
         self.overrides.sanitize();
         self.theme.sanitize();
         self.keybinding_overrides.retain_mut(|binding| {
@@ -1544,6 +1796,55 @@ impl Settings {
             }
         }
 
+        if let Some(translation) = document.get("translation").and_then(KdlNode::children) {
+            if let Some(value) = translation
+                .get_arg("provider")
+                .and_then(KdlValue::as_string)
+                .and_then(TranslationProvider::parse)
+            {
+                settings.translation.active_provider = value;
+            }
+            settings.translation.source_language = translation
+                .get_arg("source_language")
+                .and_then(KdlValue::as_string)
+                .map(str::to_string);
+            if let Some(value) = translation
+                .get_arg("target_language")
+                .and_then(KdlValue::as_string)
+            {
+                settings.translation.target_language = value.to_string();
+            }
+            if let Some(pinned) = translation.get("pinned").and_then(KdlNode::children) {
+                if let Some(value) = pinned.get_arg("enabled").and_then(KdlValue::as_bool) {
+                    settings.translation.pinned.enabled = value;
+                }
+                if let Some(value) = pinned.get_arg("width").and_then(value_to_f32) {
+                    settings.translation.pinned.width = value;
+                }
+                if let Some(value) = pinned
+                    .get_arg("corner")
+                    .and_then(KdlValue::as_string)
+                    .and_then(TranslationBoxCorner::parse)
+                {
+                    settings.translation.pinned.corner = value;
+                }
+            }
+            if let Some(providers) = translation.get("providers").and_then(KdlNode::children) {
+                for node in providers.nodes() {
+                    let Some(provider) = TranslationProvider::parse(node.name().value()) else {
+                        continue;
+                    };
+                    let Some(children) = node.children() else {
+                        continue;
+                    };
+                    settings.translation.providers.insert(
+                        provider,
+                        TranslationProviderConfig::from_document(provider, children),
+                    );
+                }
+            }
+        }
+
         if let Some(overrides) = document.get("theme-overrides").and_then(KdlNode::children) {
             settings.overrides = PartialTheme::from_document(overrides);
         }
@@ -1689,6 +1990,62 @@ impl Settings {
             document.nodes_mut().push(ai);
         }
 
+        if self.translation != TranslationSettings::default() {
+            let mut translation = KdlNode::new("translation");
+            let translation_children = translation.ensure_children();
+            push_value_node(
+                translation_children,
+                "provider",
+                self.translation.active_provider.as_str(),
+            );
+            if let Some(source_language) = &self.translation.source_language {
+                push_value_node(
+                    translation_children,
+                    "source_language",
+                    source_language.clone(),
+                );
+            }
+            push_value_node(
+                translation_children,
+                "target_language",
+                self.translation.target_language.clone(),
+            );
+            if self.translation.pinned != PinnedTranslationSettings::default() {
+                let mut pinned = KdlNode::new("pinned");
+                let pinned_children = pinned.ensure_children();
+                push_value_node(pinned_children, "enabled", self.translation.pinned.enabled);
+                push_value_node(
+                    pinned_children,
+                    "width",
+                    self.translation.pinned.width as f64,
+                );
+                push_value_node(
+                    pinned_children,
+                    "corner",
+                    self.translation.pinned.corner.as_str(),
+                );
+                translation_children.nodes_mut().push(pinned);
+            }
+
+            let mut providers = KdlNode::new("providers");
+            let providers_children = providers.ensure_children();
+            for provider in TranslationProvider::ALL {
+                let Some(config) = self.translation.providers.get(&provider) else {
+                    continue;
+                };
+                if config.is_default_for(provider) {
+                    continue;
+                }
+                let mut provider_node = KdlNode::new(provider.as_str());
+                config.write_to_document(provider_node.ensure_children());
+                providers_children.nodes_mut().push(provider_node);
+            }
+            if !providers_children.nodes().is_empty() {
+                translation_children.nodes_mut().push(providers);
+            }
+            document.nodes_mut().push(translation);
+        }
+
         if !self.keybinding_overrides.is_empty() {
             let mut keybindings = KdlNode::new("keybindings");
             let keybinding_children = keybindings.ensure_children();
@@ -1790,6 +2147,18 @@ impl SettingsStore {
         Ok(())
     }
 
+    pub fn set_settings_in_memory(&mut self, settings: Settings) {
+        let mut settings = settings;
+        settings.sanitize();
+        validate_theme_selection(&mut settings, &self.registry, self.system_appearance);
+        let resolved_theme = self.registry.resolve(
+            settings.theme.name(self.system_appearance),
+            settings.overrides,
+        );
+        self.settings = settings;
+        self.resolved_theme = resolved_theme;
+    }
+
     pub fn set_system_appearance(&mut self, appearance: ThemeAppearance) {
         if self.system_appearance == appearance {
             return;
@@ -1802,12 +2171,21 @@ impl SettingsStore {
     }
 
     pub fn save(&mut self) -> Result<()> {
+        let (path, contents) = self.persistence_snapshot();
+        Self::write_snapshot(&path, contents)
+    }
+
+    pub fn persistence_snapshot(&self) -> (PathBuf, String) {
         let path = if self.user_managed {
-            &self.config_path
+            self.config_path.clone()
         } else {
-            &self.state_path
+            self.state_path.clone()
         };
-        write_kdl(path, self.export())
+        (path, self.export())
+    }
+
+    pub fn write_snapshot(path: &Path, contents: String) -> Result<()> {
+        write_kdl(path, contents)
     }
 
     pub fn override_settings(&mut self, settings: Settings) {
@@ -1853,7 +2231,9 @@ fn validate_theme_selection(
 }
 
 pub fn parse_settings(text: &str) -> Result<Settings> {
-    let document = text.parse::<KdlDocument>()?;
+    let document = text
+        .parse::<KdlDocument>()
+        .context("failed to parse KDL document")?;
     Ok(Settings::from_document(&document))
 }
 
@@ -2283,6 +2663,52 @@ ai {
 
         assert_eq!(settings.ai.quick_ask.transparency, 0.35);
         assert_eq!(settings.ai.quick_ask.text_size, 18.0);
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn parses_and_exports_translation_settings() {
+        let settings = parse_settings(
+            r##"
+translation {
+    provider "microsoft"
+    target_language "zh-Hans"
+    pinned {
+        enabled #true
+        width 420
+        corner "bottom-left"
+    }
+    providers {
+        microsoft {
+            enabled #true
+            api_key "test-key"
+            base_url "https://translator.example.com/"
+            region "eastus"
+        }
+    }
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings.translation.active_provider,
+            TranslationProvider::Microsoft
+        );
+        assert_eq!(settings.translation.target_language, "zh-hans");
+        assert_eq!(settings.translation.pinned.width, 420.0);
+        assert_eq!(
+            settings.translation.pinned.corner,
+            TranslationBoxCorner::BottomLeft
+        );
+        let provider = settings
+            .translation
+            .provider_config(TranslationProvider::Microsoft);
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://translator.example.com")
+        );
+        assert_eq!(provider.region.as_deref(), Some("eastus"));
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 

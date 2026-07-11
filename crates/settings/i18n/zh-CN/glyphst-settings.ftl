@@ -63,6 +63,7 @@ pdf-context-remove-highlight = 移除高亮
 pdf-context-remove-note = 移除笔记
 pdf-context-save-image = 保存图像
 pdf-context-save-page-as-image = 将页面另存为图像
+pdf-context-translate-selection = 翻译选中文本
 pdf-export-as-image = 导出为图像
 pdf-export-as-text = 导出为文本
 pdf-failed-to-load = PDF 加载失败
@@ -70,6 +71,11 @@ pdf-loading = 正在加载 { $name }
 pdf-no-pages-available = 没有可用页面
 pdf-page-overview-title = 页面概览
 pdf-thumbnails-title = 缩略图
+translation-loading = 正在翻译…
+translation-no-result = 翻译服务未返回文本
+translation-title = 翻译
+translation-unpin = 取消固定
+translation-close = 关闭
 
 ## AI
 
@@ -98,6 +104,7 @@ settings-tab-general = 常规
 settings-tab-keymap = 键位
 settings-tab-appearance = 外观
 settings-tab-model-providers = 模型提供商
+settings-tab-translation = 翻译
 settings-section-general = 常规
 settings-section-language = 语言
 settings-section-zoom = 缩放

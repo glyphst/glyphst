@@ -115,6 +115,9 @@ pub mod pdf_viewer {
             GridCursorLeft,
             GridCursorRight,
             GridOverviewConfirm,
+            TranslateSelection,
+            TogglePinnedTranslation,
+            OpenTranslationSplit,
         ]
     );
 }

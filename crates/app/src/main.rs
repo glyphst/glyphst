@@ -19,6 +19,7 @@ use glyphst_keymap::keybindings;
 use glyphst_library::{DocumentPosition, LibraryStore};
 use glyphst_pdf_ui::pdf_view::RenderCache;
 use glyphst_settings::{SettingsStore, localize};
+use glyphst_translation::TranslationService;
 use glyphst_ui::{assets, fonts};
 use glyphst_workspace::{NewTab, Workspace, WorkspaceCallbacks, WorkspaceWindowRequest};
 
@@ -47,7 +48,27 @@ fn main() {
             cx.set_global(settings_store);
             cx.set_global(LibraryStore::load());
             cx.set_global(RenderCache::new());
+            match TranslationService::new() {
+                Ok(service) => {
+                    cx.set_global(service.clone());
+                    cx.spawn(async move |cx| {
+                        let result = cx
+                            .background_spawn(async move { service.initialize_persistent_cache() })
+                            .await;
+                        if let Err(error) = result {
+                            eprintln!(
+                                "failed to initialize persistent translation cache: {error:#}"
+                            );
+                        }
+                    })
+                    .detach();
+                }
+                Err(error) => eprintln!("failed to initialize translation service: {error:#}"),
+            }
             cx.on_app_quit(|cx| {
+                if let Err(error) = cx.global_mut::<SettingsStore>().save() {
+                    eprintln!("failed to save settings: {error:#}");
+                }
                 if let Err(error) = cx.global::<LibraryStore>().save() {
                     eprintln!("failed to save PDF library: {error:#}");
                 }
