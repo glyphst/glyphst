@@ -279,6 +279,7 @@ impl NewTab {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
+            .id(label.clone())
             .flex()
             .items_center()
             .justify_center()

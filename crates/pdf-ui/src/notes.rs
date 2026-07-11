@@ -15,6 +15,10 @@ use gpui::{
 const MAX_VISIBLE_MATCHES: usize = 12;
 const MATCH_ROW_HEIGHT: f32 = 52.0;
 
+fn note_match_id(note_id: u64) -> gpui::ElementId {
+    format!("notes-picker-entry-{note_id}").into()
+}
+
 pub type NotesPalette = Picker<NotesPaletteDelegate>;
 
 #[derive(Clone)]
@@ -120,6 +124,14 @@ impl PickerDelegate for NotesPaletteDelegate {
 
     fn match_count(&self) -> usize {
         self.matches.len()
+    }
+
+    fn match_id(&self, match_ix: usize) -> gpui::ElementId {
+        self.matches
+            .get(match_ix)
+            .and_then(|note_match| self.entries.get(note_match.entry_ix))
+            .map(|entry| note_match_id(entry.id))
+            .unwrap_or_else(|| note_match_id(match_ix as u64))
     }
 
     fn update_matches(&mut self, query: &str) {
@@ -251,5 +263,20 @@ fn compact_text(text: &str, fallback: &str) -> SharedString {
         fallback.into()
     } else {
         text.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::note_match_id;
+
+    #[test]
+    fn note_match_ids_follow_notes_across_reordering() {
+        let before = [note_match_id(41), note_match_id(88), note_match_id(103)];
+        let after = [note_match_id(103), note_match_id(41)];
+
+        assert_eq!(before[0], after[1]);
+        assert_eq!(before[2], after[0]);
+        assert_ne!(before[0], before[1]);
     }
 }

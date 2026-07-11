@@ -588,7 +588,7 @@ struct Selection {
     head: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum HighlightColorAction {
     Create,
     Change,
@@ -4862,6 +4862,7 @@ impl PdfView {
                     ))
                     .child(
                         div()
+                            .id("translation-popup-dismiss")
                             .cursor_pointer()
                             .hover(|style| style.text_color(rgb(theme.text)))
                             .child(if pinned {
@@ -4894,6 +4895,7 @@ impl PdfView {
         if let TranslationStatus::Ready(text) = state.status {
             card = card.child(
                 div()
+                    .id("translation-popup-copy")
                     .mt_3()
                     .cursor_pointer()
                     .text_size(ui_rems(11.0))
@@ -6545,6 +6547,7 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
+            .id(label.clone())
             .flex()
             .items_center()
             .h(px(30.0))
@@ -6576,12 +6579,14 @@ impl PdfView {
     }
 
     fn grid_overview_toolbar_button(
+        id: &'static str,
         label: String,
         theme: Theme,
         handler: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
+            .id(id)
             .flex()
             .items_center()
             .justify_center()
@@ -6611,6 +6616,7 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
+            .id(label.clone())
             .flex()
             .items_center()
             .h(px(30.0))
@@ -6843,6 +6849,7 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
+            .id(format!("highlight-swatch-{action:?}-{color:?}"))
             .w(px(22.0))
             .h(px(22.0))
             .border_1()
@@ -7081,6 +7088,7 @@ impl PdfView {
     }
 
     fn render_footbar_icon_button(
+        id: &'static str,
         icon: IconName,
         open: bool,
         theme: Theme,
@@ -7088,6 +7096,7 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
+            .id(id)
             .flex()
             .flex_none()
             .items_center()
@@ -7127,6 +7136,7 @@ impl PdfView {
 
     fn render_toc_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         Self::render_footbar_icon_button(
+            "footbar-toc",
             IconName::TableOfContents,
             self.toc_sidebar_open,
             theme,
@@ -7137,6 +7147,7 @@ impl PdfView {
 
     fn render_notes_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         Self::render_footbar_icon_button(
+            "footbar-notes",
             IconName::NotebookTabs,
             self.notes_sidebar_open,
             theme,
@@ -7151,6 +7162,7 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         Self::render_footbar_icon_button(
+            "footbar-thumbnails",
             IconName::PanelLeft,
             self.thumbnail_sidebar_open,
             theme,
@@ -7165,6 +7177,7 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         Self::render_footbar_icon_button(
+            "footbar-grid-overview",
             IconName::LayoutGrid,
             self.grid_overview_open,
             theme,
@@ -7175,6 +7188,7 @@ impl PdfView {
 
     fn render_ai_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         Self::render_footbar_icon_button(
+            "footbar-ai",
             IconName::Bot,
             self.ai_panel.is_some(),
             theme,
@@ -7544,6 +7558,7 @@ impl PdfView {
         if selecting && selected_count > 0 {
             toolbar_actions = toolbar_actions
                 .child(Self::grid_overview_toolbar_button(
+                    "thumbnail-sidebar-actions",
                     actions_label,
                     theme,
                     |this, event, _, cx| {
@@ -7555,6 +7570,7 @@ impl PdfView {
                     cx,
                 ))
                 .child(Self::grid_overview_toolbar_button(
+                    "thumbnail-sidebar-cancel",
                     cancel_label,
                     theme,
                     |this, _, _, cx| this.cancel_thumbnail_sidebar_selection(cx),
@@ -7562,6 +7578,7 @@ impl PdfView {
                 ));
         } else if selecting {
             toolbar_actions = toolbar_actions.child(Self::grid_overview_toolbar_button(
+                "thumbnail-sidebar-cancel",
                 cancel_label,
                 theme,
                 |this, _, _, cx| this.cancel_thumbnail_sidebar_selection(cx),
@@ -7569,6 +7586,7 @@ impl PdfView {
             ));
         } else {
             toolbar_actions = toolbar_actions.child(Self::grid_overview_toolbar_button(
+                "thumbnail-sidebar-select",
                 crate::fl!("select"),
                 theme,
                 |this, _, _, cx| this.enter_thumbnail_sidebar_selection(cx),
@@ -7687,6 +7705,7 @@ impl PdfView {
 
                                                 Some(
                                                     div()
+                                                        .id(("thumbnail-sidebar-page", page_idx))
                                                         .flex()
                                                         .flex_col()
                                                         .items_center()
@@ -7970,6 +7989,7 @@ impl PdfView {
                             {
                                 toolbar = toolbar
                                     .child(Self::grid_overview_toolbar_button(
+                                        "grid-overview-actions",
                                         crate::fl!("actions-menu"),
                                         theme,
                                         |this, event, _, cx| {
@@ -7981,6 +8001,7 @@ impl PdfView {
                                         cx,
                                     ))
                                     .child(Self::grid_overview_toolbar_button(
+                                        "grid-overview-cancel",
                                         crate::fl!("cancel-selection"),
                                         theme,
                                         |this, _, _, cx| this.cancel_grid_overview_selection(cx),
@@ -7988,6 +8009,7 @@ impl PdfView {
                                     ));
                             } else if self.grid_overview_selecting {
                                 toolbar = toolbar.child(Self::grid_overview_toolbar_button(
+                                    "grid-overview-cancel",
                                     crate::fl!("cancel"),
                                     theme,
                                     |this, _, _, cx| this.cancel_grid_overview_selection(cx),
@@ -7995,6 +8017,7 @@ impl PdfView {
                                 ));
                             } else {
                                 toolbar = toolbar.child(Self::grid_overview_toolbar_button(
+                                    "grid-overview-select",
                                     crate::fl!("select"),
                                     theme,
                                     |this, _, _, cx| this.enter_grid_overview_selection(cx),
@@ -8327,6 +8350,7 @@ impl PdfView {
 
                                     Some(
                                         div()
+                                            .id(("toc-sidebar-entry", entry_ix))
                                             .flex()
                                             .flex_row()
                                             .w_full()
@@ -8356,6 +8380,7 @@ impl PdfView {
                                             .child(div().flex_none().w(px(depth as f32 * 14.0)))
                                             .child(
                                                 div()
+                                                    .id(("toc-sidebar-disclosure", entry_ix))
                                                     .flex()
                                                     .flex_none()
                                                     .items_center()
@@ -8490,6 +8515,7 @@ impl PdfView {
 
                                     Some(
                                         div()
+                                            .id(format!("notes-sidebar-note-{note_id}"))
                                             .flex()
                                             .flex_row()
                                             .w_full()

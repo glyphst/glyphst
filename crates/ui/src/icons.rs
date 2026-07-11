@@ -3,8 +3,8 @@ use crate::{
     style::{CONTROL_ICON_SIZE, CONTROL_SIZE, RADIUS_MD},
 };
 use gpui::{
-    Div, IntoElement, ParentElement, Rems, RenderOnce, Rgba, SharedString, Styled as _, div,
-    prelude::*, px, svg,
+    Div, ElementId, IntoElement, ParentElement, Rems, RenderOnce, Rgba, SharedString, Stateful,
+    Styled as _, div, prelude::*, px, svg,
 };
 
 #[derive(Clone, Copy)]
@@ -95,6 +95,7 @@ impl RenderOnce for Icon {
 
 #[derive(IntoElement)]
 pub struct IconButton {
+    id: ElementId,
     icon: IconName,
     icon_size: Rems,
     icon_color: Rgba,
@@ -105,8 +106,14 @@ pub struct IconButton {
 }
 
 impl IconButton {
-    pub fn new(icon: IconName, icon_color: Rgba, hover_background: Rgba) -> Self {
+    pub fn new(
+        id: impl Into<ElementId>,
+        icon: IconName,
+        icon_color: Rgba,
+        hover_background: Rgba,
+    ) -> Self {
         Self {
+            id: id.into(),
             icon,
             icon_size: ui_rems(CONTROL_ICON_SIZE),
             icon_color,
@@ -137,7 +144,7 @@ impl IconButton {
         self
     }
 
-    pub fn into_div(self) -> Div {
+    pub fn into_div(self) -> Stateful<Div> {
         let icon_color = if self.toggled {
             self.toggled_icon_color.unwrap_or(self.icon_color)
         } else {
@@ -150,6 +157,7 @@ impl IconButton {
         };
 
         div()
+            .id(self.id)
             .flex()
             .flex_none()
             .items_center()

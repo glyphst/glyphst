@@ -295,6 +295,7 @@ impl SearchableDropdown {
             .collect::<Vec<_>>();
 
         div()
+            .id(("searchable-dropdown-item", item_ix))
             .h(px(ITEM_HEIGHT))
             .px_3()
             .flex()
@@ -308,6 +309,7 @@ impl SearchableDropdown {
             })
             .text_color(rgb(if selected { theme.accent } else { theme.text }))
             .cursor_pointer()
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {

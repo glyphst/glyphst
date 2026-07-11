@@ -101,6 +101,14 @@ impl PickerDelegate for HistoryPaletteDelegate {
         self.matches.len()
     }
 
+    fn match_id(&self, match_ix: usize) -> gpui::ElementId {
+        self.matches
+            .get(match_ix)
+            .and_then(|entry_match| self.entries.get(entry_match.entry_ix))
+            .map(|entry| format!("history-picker-{}", entry.path.display()).into())
+            .unwrap_or_else(|| ("history-picker", match_ix).into())
+    }
+
     fn update_matches(&mut self, query: &str) {
         let query = normalize_query(query);
         let mut matches = self

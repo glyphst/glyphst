@@ -802,6 +802,7 @@ impl Pane {
             .child(div().flex_1().min_w_0().truncate().child(label))
             .child(
                 div()
+                    .id(("tab-close", tab_id))
                     .flex_none()
                     .w(ui_rems(PANE_TAB_CLOSE_SIZE))
                     .h(ui_rems(PANE_TAB_CLOSE_SIZE))
@@ -853,6 +854,7 @@ impl Pane {
             .children(tabs)
             .child(
                 div()
+                    .id("pane-new-tab")
                     .w(ui_rems(32.0))
                     .h_full()
                     .flex()

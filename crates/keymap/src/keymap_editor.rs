@@ -25,7 +25,7 @@ const ICON_COL: f32 = 36.0;
 const CONTEXT_COL: f32 = 170.0;
 const SOURCE_COL: f32 = 90.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SortColumn {
     Category,
     Action,
@@ -387,6 +387,7 @@ impl KeymapEditor {
 
         match column {
             Some(column) => base
+                .id(format!("keymap-column-{column:?}"))
                 .hover(move |style| style.bg(rgb(theme.element_hover)))
                 .cursor_pointer()
                 .on_mouse_down(
@@ -445,6 +446,7 @@ impl KeymapEditor {
         let cell_label = label.clone();
 
         div()
+            .id(("keymap-row", index))
             .group("keymap-row")
             .h(px(ROW_HEIGHT))
             .w_full()
@@ -580,6 +582,7 @@ impl KeymapEditor {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
+            .id(label.clone())
             .h(px(28.0))
             .px_3()
             .flex()
@@ -626,6 +629,7 @@ impl KeymapEditor {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
+            .id(label.clone())
             .flex()
             .items_center()
             .gap_2()
@@ -855,6 +859,7 @@ impl KeymapEditor {
                                 )
                                 .child(
                                     div()
+                                        .id("keymap-view-conflicts")
                                         .px_2()
                                         .py_1()
                                         .flex()

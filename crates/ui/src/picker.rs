@@ -8,9 +8,9 @@ use crate::style::{INPUT_ROW_HEIGHT, RADIUS_LG, RADIUS_MD, TextSize, modal_shado
 use crate::text_input::SingleLineTextElement;
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-    Point as GpuiPoint, Render, ScrollStrategy, ShapedLine, SharedString, UTF16Selection,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent,
+    Pixels, Point as GpuiPoint, Render, ScrollStrategy, ShapedLine, SharedString, UTF16Selection,
     UniformListScrollHandle, Window, div, point, prelude::*, px, rgb, rgba, uniform_list,
 };
 
@@ -29,6 +29,9 @@ pub trait PickerDelegate: Sized + 'static {
     fn max_visible_matches(&self) -> usize;
     fn match_count(&self) -> usize;
     fn update_matches(&mut self, query: &str);
+    fn match_id(&self, match_ix: usize) -> ElementId {
+        ("picker-match", match_ix).into()
+    }
     fn render_match(
         &self,
         match_ix: usize,
@@ -719,6 +722,8 @@ impl<D: PickerDelegate> Render for Picker<D> {
                                                 visible_range
                                                     .map(|match_ix| {
                                                         let selected = match_ix == this.selected_ix;
+                                                        let match_id =
+                                                            this.delegate.match_id(match_ix);
                                                         div()
                                                             .w_full()
                                                             .h(px(row_height))
@@ -739,6 +744,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                                                             )
                                                             .child(
                                                                 div()
+                                                                    .id(match_id)
                                                                     .flex()
                                                                     .flex_row()
                                                                     .items_center()

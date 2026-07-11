@@ -686,6 +686,7 @@ impl Render for SearchBar {
             )
             .child(
                 IconButton::new(
+                    "pdf-search-case-sensitive",
                     IconName::CaseSensitive,
                     rgb(theme.text_muted),
                     rgb(theme.element_hover),
@@ -705,6 +706,7 @@ impl Render for SearchBar {
             )
             .child(
                 IconButton::new(
+                    "pdf-search-previous",
                     IconName::ChevronUp,
                     rgb(theme.text_muted),
                     rgb(theme.element_hover),
@@ -720,6 +722,7 @@ impl Render for SearchBar {
             )
             .child(
                 IconButton::new(
+                    "pdf-search-next",
                     IconName::ChevronDown,
                     rgb(theme.text_muted),
                     rgb(theme.element_hover),
@@ -734,15 +737,20 @@ impl Render for SearchBar {
                 ),
             )
             .child(
-                IconButton::new(IconName::X, rgb(theme.text_muted), rgb(theme.element_hover))
-                    .into_div()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.dismiss(window, cx);
-                            cx.stop_propagation();
-                        }),
-                    ),
+                IconButton::new(
+                    "pdf-search-close",
+                    IconName::X,
+                    rgb(theme.text_muted),
+                    rgb(theme.element_hover),
+                )
+                .into_div()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.dismiss(window, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
             )
     }
 }

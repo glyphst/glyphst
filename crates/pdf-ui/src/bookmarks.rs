@@ -127,6 +127,14 @@ impl PickerDelegate for BookmarkPaletteDelegate {
         self.matches.len()
     }
 
+    fn match_id(&self, match_ix: usize) -> gpui::ElementId {
+        self.matches
+            .get(match_ix)
+            .and_then(|bookmark_match| self.entries.get(bookmark_match.entry_ix))
+            .map(|entry| format!("bookmark-picker-{}", entry.id).into())
+            .unwrap_or_else(|| ("bookmark-picker", match_ix).into())
+    }
+
     fn update_matches(&mut self, query: &str) {
         let query = normalize_query(query);
         let mut matches = self

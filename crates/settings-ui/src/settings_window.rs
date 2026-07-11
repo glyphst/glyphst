@@ -1477,7 +1477,13 @@ impl SettingsWindow {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(self.small_button("−", decrement, theme, cx))
+                    .child(self.small_button(
+                        format!("number-row-{label}-decrement"),
+                        "−",
+                        decrement,
+                        theme,
+                        cx,
+                    ))
                     .child(
                         div()
                             .w(px(72.0))
@@ -1485,7 +1491,13 @@ impl SettingsWindow {
                             .text_color(rgb(theme.text_muted))
                             .child(format!("{value:.2}")),
                     )
-                    .child(self.small_button("+", increment, theme, cx)),
+                    .child(self.small_button(
+                        format!("number-row-{label}-increment"),
+                        "+",
+                        increment,
+                        theme,
+                        cx,
+                    )),
             )
     }
 
@@ -1506,6 +1518,7 @@ impl SettingsWindow {
             .child(div().text_color(rgb(theme.text)).child(label))
             .child(
                 div()
+                    .id(format!("settings-toggle-{label}"))
                     .h(px(28.0))
                     .min_w(px(56.0))
                     .px_2()
@@ -1540,12 +1553,14 @@ impl SettingsWindow {
     /// Compact On/Off toggle switch used in the provider list rows.
     fn compact_toggle(
         &self,
+        id: impl Into<gpui::ElementId>,
         enabled: bool,
         update: impl FnOnce(&mut Settings) + Clone + 'static,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
+            .id(id)
             .h(px(20.0))
             .min_w(px(38.0))
             .px_2()
@@ -1603,12 +1618,14 @@ impl SettingsWindow {
 
     fn small_button(
         &self,
+        id: impl Into<gpui::ElementId>,
         label: &'static str,
         update: impl FnOnce(&mut Settings) + Clone + 'static,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
+            .id(id)
             .h(px(28.0))
             .min_w(px(30.0))
             .px_2()
@@ -1632,6 +1649,7 @@ impl SettingsWindow {
 
     fn reset_font_settings_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .id("settings-reset-fonts")
             .h(px(28.0))
             .min_w(px(30.0))
             .px_2()
@@ -1684,6 +1702,7 @@ impl SettingsWindow {
                         .gap_2()
                         .when(config.override_value.is_some(), |this| {
                             this.child(self.small_button(
+                                format!("color-row-{}-reset", config.label),
                                 "Reset",
                                 move |settings| reset(&mut settings.overrides),
                                 theme,
@@ -1692,6 +1711,7 @@ impl SettingsWindow {
                         })
                         .child(
                             div()
+                                .id(format!("color-row-{}-pick", config.label))
                                 .h(px(28.0))
                                 .px_2()
                                 .flex()
@@ -1824,6 +1844,7 @@ impl SettingsWindow {
                                 picker.swatches.iter().copied().map(move |color| {
                                     let selected = color == picker.current;
                                     div()
+                                        .id(format!("color-picker-swatch-{color:08x}"))
                                         .w(px(28.0))
                                         .h(px(28.0))
                                         .border_2()
@@ -1868,6 +1889,7 @@ impl SettingsWindow {
         let selected = is_dynamic == current_is_dynamic;
 
         div()
+            .id(format!("theme-mode-{label}"))
             .h(px(30.0))
             .px_3()
             .flex()
@@ -1952,6 +1974,7 @@ impl SettingsWindow {
         let selected = mode == selected_mode;
 
         div()
+            .id(format!("appearance-mode-{label}"))
             .h(px(30.0))
             .px_3()
             .flex()
@@ -2001,6 +2024,7 @@ impl SettingsWindow {
         let selected = mode == selected_mode;
 
         div()
+            .id(format!("background-mode-{label}"))
             .h(px(30.0))
             .px_3()
             .flex()
@@ -2043,6 +2067,7 @@ impl SettingsWindow {
         let selected = visibility == selected_visibility;
 
         div()
+            .id(format!("tab-bar-visibility-{label}"))
             .h(px(30.0))
             .px_3()
             .flex()
@@ -2084,6 +2109,7 @@ impl SettingsWindow {
         let selected = language == selected_language;
 
         div()
+            .id(format!("settings-language-{}", language.label()))
             .h(px(30.0))
             .px_3()
             .flex()
@@ -2121,6 +2147,7 @@ impl SettingsWindow {
         let selected = preset == selected_preset;
 
         div()
+            .id(format!("settings-keymap-{}", preset.label()))
             .h(px(30.0))
             .px_3()
             .flex()
@@ -2160,6 +2187,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
+            .id("settings-open-keybindings")
             .h(px(28.0))
             .px_2()
             .flex()
@@ -2297,6 +2325,7 @@ impl SettingsWindow {
         let family_for_click = family.clone();
 
         div()
+            .id(format!("settings-font-{family}"))
             .h(px(30.0))
             .px_3()
             .flex()
@@ -2544,6 +2573,7 @@ impl SettingsWindow {
                     model_ref.provider == provider && model_ref.id == model.id
                 });
                 div()
+                    .id(format!("settings-model-{}-{}", provider.label(), model.id))
                     .h(px(30.0))
                     .pl(px(24.0))
                     .pr_3()
@@ -2678,12 +2708,14 @@ impl SettingsWindow {
 
     fn ai_action_button(
         &self,
+        id: impl Into<gpui::ElementId>,
         label: impl IntoElement,
         theme: Theme,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
+            .id(id)
             .h(px(28.0))
             .min_w(px(30.0))
             .px_2()
@@ -2724,6 +2756,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
+            .id(format!("settings-base-url-default-{}", provider.label()))
             .h(px(28.0))
             .min_w(px(30.0))
             .px_2()
@@ -3134,6 +3167,7 @@ impl SettingsWindow {
         let provider_option = |provider: TranslationProvider| {
             let selected = settings.translation.active_provider == provider;
             div()
+                .id(format!("translation-provider-{}", provider.label()))
                 .px_2()
                 .py_1()
                 .rounded(px(4.0))
@@ -3314,6 +3348,10 @@ impl SettingsWindow {
                                     .map(|corner| {
                                         let selected = settings.translation.pinned.corner == corner;
                                         div()
+                                            .id(format!(
+                                                "translation-panel-corner-{}",
+                                                corner.as_str()
+                                            ))
                                             .px_2()
                                             .py_1()
                                             .rounded(px(4.0))
@@ -3414,6 +3452,7 @@ impl SettingsWindow {
                     .child(self.ai_key_input.clone())
                     .child(
                         div()
+                            .id("settings-toggle-api-key-mask")
                             .h(px(28.0))
                             .min_w(px(40.0))
                             .px_2()
@@ -3440,6 +3479,7 @@ impl SettingsWindow {
                             .child(if key_masked { "Show" } else { "Hide" }),
                     )
                     .child(self.ai_action_button(
+                        "settings-test-ai-connection",
                         "Test",
                         theme,
                         move |this, cx| this.test_connection(provider, cx),
@@ -3568,6 +3608,7 @@ impl SettingsWindow {
     ) -> AnyElement {
         let selected = self.selected_ai_provider == provider;
         div()
+            .id(format!("settings-provider-{}", provider.label()))
             .h(px(34.0))
             .px_3()
             .flex()
@@ -3595,6 +3636,7 @@ impl SettingsWindow {
             )
             .child(div().truncate().child(provider.label()))
             .child(self.compact_toggle(
+                format!("settings-provider-toggle-{}", provider.label()),
                 enabled,
                 move |settings| {
                     let config = settings.ai.provider_config_mut(provider);
@@ -3661,7 +3703,9 @@ impl SettingsWindow {
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let button_id = format!("settings-remove-model-{}-{model_id}", provider.label());
         div()
+            .id(button_id)
             .h(px(24.0))
             .px_2()
             .flex()
@@ -3703,6 +3747,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
+            .id(format!("settings-add-model-{}", provider.label()))
             .h(px(28.0))
             .px_2()
             .flex()
@@ -3742,6 +3787,7 @@ impl SettingsWindow {
     ) -> impl IntoElement {
         let loading = self.provider_model_picker.loading;
         div()
+            .id(format!("settings-fetch-models-{}", provider.label()))
             .h(px(28.0))
             .px_2()
             .flex()
@@ -3944,6 +3990,7 @@ impl SettingsWindow {
                                     .justify_end()
                                     .gap_2()
                                     .child(self.ai_action_button(
+                                        "settings-cancel-fetched-models",
                                         crate::fl!("cancel"),
                                         theme,
                                         |this, cx| {
@@ -3955,6 +4002,7 @@ impl SettingsWindow {
                                         cx,
                                     ))
                                     .child(self.ai_action_button(
+                                        "settings-add-fetched-models",
                                         "Add selected",
                                         theme,
                                         move |this, cx| this.confirm_fetched_models(provider, cx),
@@ -3977,10 +4025,12 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = model.id.clone();
+        let row_id = format!("settings-fetched-model-{}-{id}", provider.label());
         let meta = model
             .owned_by
             .unwrap_or_else(|| provider.label().to_string());
         div()
+            .id(row_id)
             .h(px(42.0))
             .px_3()
             .flex()
@@ -4270,6 +4320,7 @@ impl SettingsWindow {
                 ))
                 .when(settings.overrides.page_gap.is_some(), |this| {
                     this.child(div().flex().justify_end().child(self.small_button(
+                        "settings-reset-page-gap",
                         "Reset page gap",
                         |settings| settings.overrides.page_gap = None,
                         resolved,
@@ -4724,6 +4775,7 @@ impl SettingsWindow {
 
     fn export_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .id("settings-export")
             .h(px(28.0))
             .min_w(px(30.0))
             .px_2()

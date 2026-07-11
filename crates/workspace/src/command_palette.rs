@@ -102,6 +102,14 @@ impl PickerDelegate for CommandPaletteDelegate {
         self.matches.len()
     }
 
+    fn match_id(&self, match_ix: usize) -> gpui::ElementId {
+        self.matches
+            .get(match_ix)
+            .and_then(|command_match| self.commands.get(command_match.command_ix))
+            .map(|command| format!("command-palette-{}", command.action.name()).into())
+            .unwrap_or_else(|| ("command-palette", match_ix).into())
+    }
+
     fn update_matches(&mut self, query: &str) {
         let query = normalize_action_query(query);
         let mut matches = self

@@ -136,6 +136,14 @@ impl PickerDelegate for ThemeSelectorDelegate {
         self.matches.len()
     }
 
+    fn match_id(&self, match_ix: usize) -> gpui::ElementId {
+        self.matches
+            .get(match_ix)
+            .and_then(|theme_match| self.themes.get(theme_match.candidate_ix))
+            .map(|metadata| format!("theme-selector-{}", metadata.id).into())
+            .unwrap_or_else(|| ("theme-selector", match_ix).into())
+    }
+
     fn update_matches(&mut self, query: &str) {
         let mut matches = Vec::new();
         for (ix, meta) in self.themes.iter().enumerate() {

@@ -556,6 +556,7 @@ impl Render for NoteEditor {
         for color in HighlightColor::ALL {
             color_palette = color_palette.child(
                 div()
+                    .id(format!("note-editor-color-{color:?}"))
                     .w(px(22.0))
                     .h(px(22.0))
                     .border_1()

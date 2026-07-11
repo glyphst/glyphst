@@ -183,26 +183,30 @@ impl Render for KeystrokeInput {
             .gap_1()
             .when(recording, |this| {
                 this.child(
-                    IconButton::new(IconName::Stop, rgb(theme.error), rgb(theme.element_hover))
-                        .into_div()
-                        .id("keystroke-stop")
-                        .tooltip(text_tooltip("Stop Recording"))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.focus_handle.focus(window, cx);
-                                cx.stop_propagation();
-                            }),
-                        ),
+                    IconButton::new(
+                        "keystroke-stop",
+                        IconName::Stop,
+                        rgb(theme.error),
+                        rgb(theme.element_hover),
+                    )
+                    .into_div()
+                    .tooltip(text_tooltip("Stop Recording"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.focus_handle.focus(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
                 )
                 .child(
                     IconButton::new(
+                        "keystroke-clear",
                         IconName::Delete,
                         rgb(theme.text_muted),
                         rgb(theme.element_hover),
                     )
                     .into_div()
-                    .id("keystroke-clear")
                     .tooltip(text_tooltip("Clear"))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -217,12 +221,12 @@ impl Render for KeystrokeInput {
             .when(!recording, |this| {
                 this.child(
                     IconButton::new(
+                        "keystroke-record",
                         IconName::Play,
                         rgb(theme.text_muted),
                         rgb(theme.element_hover),
                     )
                     .into_div()
-                    .id("keystroke-record")
                     .tooltip(text_tooltip("Record"))
                     .on_mouse_down(
                         MouseButton::Left,

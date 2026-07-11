@@ -1646,6 +1646,7 @@ impl AiPanel {
         let mut list = div().flex().flex_col().gap_1().p_2();
         list = list.child(
             div()
+                .id("ai-new-session")
                 .flex()
                 .items_center()
                 .justify_between()
@@ -1693,6 +1694,7 @@ impl AiPanel {
             let meta = format!("p. {} · {} messages", session.page, session.messages.len());
             list = list.child(
                 div()
+                    .id(format!("ai-session-{session_id}"))
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -1762,6 +1764,7 @@ impl AiPanel {
             let selected = ix == selected_ix;
             menu = menu.child(
                 div()
+                    .id(("ai-mention-completion", ix))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -1823,7 +1826,7 @@ impl AiPanel {
             .pt_2()
             .text_size(ui_rems(11.0));
 
-        for mention in mentions {
+        for (mention_ix, mention) in mentions.into_iter().enumerate() {
             row = row.child(
                 div()
                     .flex()
@@ -1839,6 +1842,7 @@ impl AiPanel {
                     .child(div().text_color(rgb(theme.accent)).child(mention.label()))
                     .child(
                         div()
+                            .id(("ai-remove-attachment", mention_ix))
                             .text_color(rgb(theme.text_muted))
                             .cursor_pointer()
                             .hover(move |style| style.text_color(rgb(theme.text)))
@@ -1874,9 +1878,10 @@ impl AiPanel {
                 cx.stop_propagation();
             });
 
-        for mention in MentionKind::ALL {
+        for (mention_ix, mention) in MentionKind::ALL.into_iter().enumerate() {
             menu = menu.child(
                 div()
+                    .id(("ai-attachment-menu-entry", mention_ix))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -2051,6 +2056,7 @@ impl AiPanel {
                         let selected = provider == selected_provider && model.id == selected_model;
                         let model_for_click = model.id.clone();
                         div()
+                            .id(format!("ai-model-{provider:?}-{}", model.id))
                             .h(px(30.0))
                             .flex()
                             .items_center()
@@ -2129,11 +2135,15 @@ impl AiPanel {
                 cx.stop_propagation();
             });
 
-        for level in AiThinkingLevel::supported_for(selected_provider, &selected_model) {
+        for (level_ix, level) in AiThinkingLevel::supported_for(selected_provider, &selected_model)
+            .iter()
+            .enumerate()
+        {
             let level = *level;
             let selected = level == selected_level;
             menu = menu.child(
                 div()
+                    .id(("ai-thinking-level", level_ix))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -2503,6 +2513,7 @@ impl Render for AiPanel {
                             .gap_1()
                             .child(
                                 div()
+                                    .id("ai-panel-new-session")
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -2527,6 +2538,7 @@ impl Render for AiPanel {
                             )
                             .child(
                                 div()
+                                    .id("ai-panel-toggle-sessions")
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -2555,6 +2567,7 @@ impl Render for AiPanel {
                             )
                             .child(
                                 div()
+                                    .id("ai-panel-close")
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -2660,6 +2673,7 @@ impl Render for AiPanel {
                                         .gap_1()
                                         .child(
                                             div()
+                                                .id("ai-attachment-menu-button")
                                                 .flex()
                                                 .items_center()
                                                 .gap_1()
@@ -2695,6 +2709,7 @@ impl Render for AiPanel {
                                         )
                                         .child(
                                             div()
+                                                .id("ai-model-menu-button")
                                                 .flex()
                                                 .items_center()
                                                 .gap_1()
@@ -2735,6 +2750,7 @@ impl Render for AiPanel {
                                         )
                                         .child(
                                             div()
+                                                .id("ai-thinking-menu-button")
                                                 .flex()
                                                 .items_center()
                                                 .gap_1()

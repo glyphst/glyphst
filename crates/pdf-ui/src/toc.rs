@@ -11,6 +11,10 @@ use gpui::{
 const MAX_VISIBLE_MATCHES: usize = 12;
 const MATCH_ROW_HEIGHT: f32 = 40.0;
 
+fn toc_match_id(entry_ix: usize) -> gpui::ElementId {
+    ("toc-picker-entry", entry_ix).into()
+}
+
 pub type TocPalette = Picker<TocPaletteDelegate>;
 
 #[derive(Clone)]
@@ -70,6 +74,13 @@ impl PickerDelegate for TocPaletteDelegate {
 
     fn match_count(&self) -> usize {
         self.matches.len()
+    }
+
+    fn match_id(&self, match_ix: usize) -> gpui::ElementId {
+        self.matches
+            .get(match_ix)
+            .map(|entry_match| toc_match_id(entry_match.entry_ix))
+            .unwrap_or_else(|| toc_match_id(match_ix))
     }
 
     fn update_matches(&mut self, query: &str) {
@@ -170,5 +181,20 @@ impl PickerDelegate for TocPaletteDelegate {
         }) {
             eprintln!("failed to navigate to TOC entry: {error:#}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toc_match_id;
+
+    #[test]
+    fn toc_match_ids_follow_entries_across_reordering() {
+        let before = [toc_match_id(2), toc_match_id(7), toc_match_id(11)];
+        let after = [toc_match_id(11), toc_match_id(2)];
+
+        assert_eq!(before[0], after[1]);
+        assert_eq!(before[2], after[0]);
+        assert_ne!(before[0], before[1]);
     }
 }

@@ -1103,6 +1103,7 @@ impl Workspace {
     }
 
     fn toolbar_icon_button(
+        id: &'static str,
         icon: IconName,
         active: bool,
         theme: Theme,
@@ -1110,6 +1111,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
+            .id(id)
             .flex_none()
             .w(ui_rems(28.0))
             .h(ui_rems(TOOLBAR_BUTTON_HEIGHT))
@@ -1301,6 +1303,7 @@ impl Workspace {
                 ));
         } else {
             toolbar = toolbar.child(Self::toolbar_icon_button(
+                "toolbar-collapsed-menu",
                 IconName::Menu,
                 false,
                 theme,
