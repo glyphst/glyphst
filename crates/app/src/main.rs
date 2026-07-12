@@ -37,6 +37,8 @@ fn main() {
         return;
     }
 
+    ztracing::init();
+
     application()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {

@@ -7,3 +7,5 @@ edition.workspace = true
 anyhow.workspace = true
 glyphst-core = { path = "../core" }
 mupdf.workspace = true
+tracing.workspace = true
+ztracing.workspace = true

@@ -3,6 +3,9 @@ name = "glyphst"
 version.workspace = true
 edition.workspace = true
 
+[features]
+tracy = ["ztracing/tracy"]
+
 [dependencies]
 anyhow.workspace = true
 dirs.workspace = true
@@ -22,6 +25,7 @@ serde.workspace = true
 serde_json.workspace = true
 tikv-jemalloc-sys.workspace = true
 tikv-jemallocator.workspace = true
+ztracing.workspace = true
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 tikv-jemallocator = { version = "0.7", features = ["background_threads"] }

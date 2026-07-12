@@ -32,6 +32,27 @@ nix develop
 cargo run
 ```
 
+## Profiling
+
+Glyphst supports Zed-style CPU tracing with
+[Tracy](https://github.com/wolfpld/tracy). Start the Tracy profiler, then run:
+
+```sh
+ZTRACING=1 cargo run -p glyphst --features tracy --release
+```
+
+The core PDF loading, text extraction, display-list creation, rendering, and
+image rasterization paths are instrumented. Add more traced functions with:
+
+```rust
+#[ztracing::instrument(skip_all)]
+fn function_to_profile() {}
+```
+
+Use a release build when profiling because debug builds have different
+performance characteristics. Profiling instrumentation is a no-op unless the
+`tracy` feature is enabled and `ZTRACING` is set.
+
 ## Development workflow
 
 ```sh

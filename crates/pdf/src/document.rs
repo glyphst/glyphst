@@ -14,6 +14,7 @@ pub struct DocumentSnapshot {
 }
 
 impl DocumentSnapshot {
+    #[ztracing::instrument(skip_all)]
     pub fn read(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let format = document_format(path)?;
@@ -61,6 +62,7 @@ impl GlyphstDocument {
         snapshot.open()
     }
 
+    #[ztracing::instrument(skip_all)]
     pub fn from_snapshot(snapshot: &DocumentSnapshot, layout: DocumentLayout) -> Result<Self> {
         configure_context(snapshot.format(), layout)?;
         let mut inner =

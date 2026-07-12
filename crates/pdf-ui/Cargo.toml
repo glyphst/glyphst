@@ -22,3 +22,5 @@ gpui.workspace = true
 image.workspace = true
 mupdf.workspace = true
 smallvec.workspace = true
+tracing.workspace = true
+ztracing.workspace = true

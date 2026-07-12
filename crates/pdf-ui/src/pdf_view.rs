@@ -1692,6 +1692,7 @@ impl PdfView {
         }
     }
 
+    #[ztracing::instrument(skip_all)]
     fn load_document_pages(
         snapshot: &DocumentSnapshot,
         document_layout: DocumentLayout,
@@ -1877,6 +1878,7 @@ impl PdfView {
         }));
     }
 
+    #[ztracing::instrument(skip_all, fields(start_page_idx, end_page_idx, page_count))]
     fn load_page_text_chunk(
         snapshot: &DocumentSnapshot,
         document_layout: DocumentLayout,
@@ -2140,6 +2142,7 @@ impl PdfView {
         self.external_selected_block = None;
     }
 
+    #[ztracing::instrument(skip_all, fields(glyph_count = glyphs.len()))]
     fn build_text_blocks(glyphs: &[Glyph]) -> Vec<TextBlock> {
         let mut blocks = Vec::new();
         let mut start = 0;
@@ -2511,6 +2514,7 @@ impl PdfView {
             })
     }
 
+    #[ztracing::instrument(skip_all, fields(page_idx))]
     fn extract_glyphs(
         display_list: &DisplayList,
         page_idx: usize,
@@ -3866,6 +3870,7 @@ impl PdfView {
         }
     }
 
+    #[ztracing::instrument(skip_all, fields(page_idx))]
     fn get_or_create_display_list(
         &mut self,
         page_idx: usize,
@@ -4033,6 +4038,7 @@ impl PdfView {
         .detach();
     }
 
+    #[ztracing::instrument(skip_all, fields(physical_width, physical_height))]
     fn render_page(
         display_list: &DisplayList,
         page_bounds: Rect,
@@ -4765,6 +4771,7 @@ impl PdfView {
             .with_context(|| format!("failed to save image to {}", path.display()))
     }
 
+    #[ztracing::instrument(skip_all)]
     fn rasterize_page_to_rgba(
         display_list: &DisplayList,
         page_bounds: Rect,
