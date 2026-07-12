@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow};
-pub use glyphst_core::HighlightColor;
+pub use glyphst_core::{EpubReaderPreferences, HighlightColor, SemanticTextAnchor};
 use gpui::Global;
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -32,6 +32,14 @@ const AI_SESSIONS_V1_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("
 const UI_STATE_V1_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("ui_state_v1");
 const DOCUMENT_PREFERENCES_V1_TABLE: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("document_preferences_v1");
+const STORAGE_V2_MIGRATION_KEY: &str = "storage_v2";
+const STORAGE_V2_VERSION: u8 = 2;
+const HISTORY_V2_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("history_v2");
+const BOOKMARKS_V2_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("bookmarks_v2");
+const HIGHLIGHTS_V2_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("highlights_v2");
+const NOTES_V2_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("notes_v2");
+const DOCUMENT_PREFERENCES_V2_TABLE: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("document_preferences_v2");
 const SIDEBAR_WIDTHS_KEY: &str = "sidebar_widths";
 const MAX_AI_SESSIONS: usize = 200;
 
@@ -81,12 +89,133 @@ impl StoredPathV1 {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct StoredDocumentPositionV1 {
+    scroll_x_doc: f32,
+    scroll_y_doc: f32,
+    zoom: f32,
+    page: usize,
+}
+
+impl From<&DocumentPosition> for StoredDocumentPositionV1 {
+    fn from(position: &DocumentPosition) -> Self {
+        Self {
+            scroll_x_doc: position.scroll_x_doc,
+            scroll_y_doc: position.scroll_y_doc,
+            zoom: position.zoom,
+            page: position.page,
+        }
+    }
+}
+
+impl StoredDocumentPositionV1 {
+    fn into_domain(self) -> DocumentPosition {
+        DocumentPosition {
+            scroll_x_doc: self.scroll_x_doc,
+            scroll_y_doc: self.scroll_y_doc,
+            zoom: self.zoom,
+            page: self.page,
+            semantic: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LegacyHistoryEntry {
+    path: PathBuf,
+    opened: u64,
+    position: StoredDocumentPositionV1,
+}
+
+impl LegacyHistoryEntry {
+    fn into_domain(self) -> HistoryEntry {
+        HistoryEntry {
+            path: self.path,
+            opened: self.opened,
+            position: self.position.into_domain(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LegacyBookmark {
+    id: u64,
+    path: PathBuf,
+    label: String,
+    position: StoredDocumentPositionV1,
+    created: u64,
+}
+
+impl LegacyBookmark {
+    fn into_domain(self) -> Bookmark {
+        Bookmark {
+            id: self.id,
+            path: self.path,
+            label: self.label,
+            position: self.position.into_domain(),
+            created: self.created,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LegacyHighlight {
+    id: u64,
+    path: PathBuf,
+    color: HighlightColor,
+    rects: Vec<HighlightRect>,
+    text: String,
+    note: String,
+    created: u64,
+}
+
+impl LegacyHighlight {
+    fn into_domain(self) -> Highlight {
+        Highlight {
+            id: self.id,
+            path: self.path,
+            color: self.color,
+            rects: self.rects,
+            semantic_range: None,
+            text: self.text,
+            note: self.note,
+            created: self.created,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LegacyNote {
+    id: u64,
+    path: PathBuf,
+    color: HighlightColor,
+    rects: Vec<HighlightRect>,
+    text: String,
+    body: String,
+    created: u64,
+}
+
+impl LegacyNote {
+    fn into_domain(self) -> Note {
+        Note {
+            id: self.id,
+            path: self.path,
+            color: self.color,
+            rects: self.rects,
+            semantic_range: None,
+            text: self.text,
+            body: self.body,
+            created: self.created,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredHistoryEntryV1 {
     version: u8,
     path: StoredPathV1,
     opened: u64,
-    position: DocumentPosition,
+    position: StoredDocumentPositionV1,
 }
 
 impl From<&HistoryEntry> for StoredHistoryEntryV1 {
@@ -95,18 +224,18 @@ impl From<&HistoryEntry> for StoredHistoryEntryV1 {
             version: STORAGE_SCHEMA_VERSION,
             path: StoredPathV1::from_path(&entry.path),
             opened: entry.opened,
-            position: entry.position,
+            position: StoredDocumentPositionV1::from(&entry.position),
         }
     }
 }
 
 impl StoredHistoryEntryV1 {
     fn into_domain(self) -> Result<HistoryEntry> {
-        require_storage_version(self.version)?;
+        require_storage_version(self.version, STORAGE_SCHEMA_VERSION)?;
         Ok(HistoryEntry {
             path: self.path.into_path()?,
             opened: self.opened,
-            position: self.position,
+            position: self.position.into_domain(),
         })
     }
 }
@@ -117,7 +246,7 @@ struct StoredBookmarkV1 {
     id: u64,
     path: StoredPathV1,
     label: String,
-    position: DocumentPosition,
+    position: StoredDocumentPositionV1,
     created: u64,
 }
 
@@ -128,7 +257,7 @@ impl From<&Bookmark> for StoredBookmarkV1 {
             id: bookmark.id,
             path: StoredPathV1::from_path(&bookmark.path),
             label: bookmark.label.clone(),
-            position: bookmark.position,
+            position: StoredDocumentPositionV1::from(&bookmark.position),
             created: bookmark.created,
         }
     }
@@ -136,12 +265,12 @@ impl From<&Bookmark> for StoredBookmarkV1 {
 
 impl StoredBookmarkV1 {
     fn into_domain(self) -> Result<Bookmark> {
-        require_storage_version(self.version)?;
+        require_storage_version(self.version, STORAGE_SCHEMA_VERSION)?;
         Ok(Bookmark {
             id: self.id,
             path: self.path.into_path()?,
             label: self.label,
-            position: self.position,
+            position: self.position.into_domain(),
             created: self.created,
         })
     }
@@ -176,12 +305,13 @@ impl From<&Highlight> for StoredHighlightV1 {
 
 impl StoredHighlightV1 {
     fn into_domain(self) -> Result<Highlight> {
-        require_storage_version(self.version)?;
+        require_storage_version(self.version, STORAGE_SCHEMA_VERSION)?;
         Ok(Highlight {
             id: self.id,
             path: self.path.into_path()?,
             color: self.color,
             rects: self.rects,
+            semantic_range: None,
             text: self.text,
             note: self.note,
             created: self.created,
@@ -218,12 +348,13 @@ impl From<&Note> for StoredNoteV1 {
 
 impl StoredNoteV1 {
     fn into_domain(self) -> Result<Note> {
-        require_storage_version(self.version)?;
+        require_storage_version(self.version, STORAGE_SCHEMA_VERSION)?;
         Ok(Note {
             id: self.id,
             path: self.path.into_path()?,
             color: self.color,
             rects: self.rects,
+            semantic_range: None,
             text: self.text,
             body: self.body,
             created: self.created,
@@ -260,7 +391,7 @@ impl From<&AiSession> for StoredAiSessionV1 {
 
 impl StoredAiSessionV1 {
     fn into_domain(self) -> Result<AiSession> {
-        require_storage_version(self.version)?;
+        require_storage_version(self.version, STORAGE_SCHEMA_VERSION)?;
         Ok(AiSession {
             id: self.id,
             path: self.path.into_path()?,
@@ -290,7 +421,7 @@ impl From<SidebarWidths> for StoredSidebarWidthsV1 {
 
 impl StoredSidebarWidthsV1 {
     fn into_domain(self) -> Result<SidebarWidths> {
-        require_storage_version(self.version)?;
+        require_storage_version(self.version, STORAGE_SCHEMA_VERSION)?;
         Ok(self.widths)
     }
 }
@@ -314,20 +445,278 @@ impl From<&DocumentPreferences> for StoredDocumentPreferencesV1 {
 
 impl StoredDocumentPreferencesV1 {
     fn into_domain(self) -> Result<DocumentPreferences> {
-        require_storage_version(self.version)?;
+        require_storage_version(self.version, STORAGE_SCHEMA_VERSION)?;
         Ok(DocumentPreferences {
             path: self.path.into_path()?,
             target_language: self.target_language,
+            epub: None,
         })
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredHistoryEntryV2 {
+    version: u8,
+    path: StoredPathV1,
+    opened: u64,
+    position: DocumentPosition,
+}
+
+impl From<&HistoryEntry> for StoredHistoryEntryV2 {
+    fn from(entry: &HistoryEntry) -> Self {
+        Self {
+            version: STORAGE_V2_VERSION,
+            path: StoredPathV1::from_path(&entry.path),
+            opened: entry.opened,
+            position: entry.position.clone(),
+        }
+    }
+}
+
+impl StoredHistoryEntryV2 {
+    fn into_domain(self) -> Result<HistoryEntry> {
+        require_storage_version(self.version, STORAGE_V2_VERSION)?;
+        Ok(HistoryEntry {
+            path: self.path.into_path()?,
+            opened: self.opened,
+            position: self.position,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredBookmarkV2 {
+    version: u8,
+    id: u64,
+    path: StoredPathV1,
+    label: String,
+    position: DocumentPosition,
+    created: u64,
+}
+
+impl From<&Bookmark> for StoredBookmarkV2 {
+    fn from(bookmark: &Bookmark) -> Self {
+        Self {
+            version: STORAGE_V2_VERSION,
+            id: bookmark.id,
+            path: StoredPathV1::from_path(&bookmark.path),
+            label: bookmark.label.clone(),
+            position: bookmark.position.clone(),
+            created: bookmark.created,
+        }
+    }
+}
+
+impl StoredBookmarkV2 {
+    fn into_domain(self) -> Result<Bookmark> {
+        require_storage_version(self.version, STORAGE_V2_VERSION)?;
+        Ok(Bookmark {
+            id: self.id,
+            path: self.path.into_path()?,
+            label: self.label,
+            position: self.position,
+            created: self.created,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredHighlightV2 {
+    version: u8,
+    id: u64,
+    path: StoredPathV1,
+    color: HighlightColor,
+    rects: Vec<HighlightRect>,
+    semantic_range: Option<SemanticTextRange>,
+    text: String,
+    note: String,
+    created: u64,
+}
+
+impl From<&Highlight> for StoredHighlightV2 {
+    fn from(highlight: &Highlight) -> Self {
+        Self {
+            version: STORAGE_V2_VERSION,
+            id: highlight.id,
+            path: StoredPathV1::from_path(&highlight.path),
+            color: highlight.color,
+            rects: highlight.rects.clone(),
+            semantic_range: highlight.semantic_range.clone(),
+            text: highlight.text.clone(),
+            note: highlight.note.clone(),
+            created: highlight.created,
+        }
+    }
+}
+
+impl StoredHighlightV2 {
+    fn into_domain(self) -> Result<Highlight> {
+        require_storage_version(self.version, STORAGE_V2_VERSION)?;
+        Ok(Highlight {
+            id: self.id,
+            path: self.path.into_path()?,
+            color: self.color,
+            rects: self.rects,
+            semantic_range: self.semantic_range,
+            text: self.text,
+            note: self.note,
+            created: self.created,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredNoteV2 {
+    version: u8,
+    id: u64,
+    path: StoredPathV1,
+    color: HighlightColor,
+    rects: Vec<HighlightRect>,
+    semantic_range: Option<SemanticTextRange>,
+    text: String,
+    body: String,
+    created: u64,
+}
+
+impl From<&Note> for StoredNoteV2 {
+    fn from(note: &Note) -> Self {
+        Self {
+            version: STORAGE_V2_VERSION,
+            id: note.id,
+            path: StoredPathV1::from_path(&note.path),
+            color: note.color,
+            rects: note.rects.clone(),
+            semantic_range: note.semantic_range.clone(),
+            text: note.text.clone(),
+            body: note.body.clone(),
+            created: note.created,
+        }
+    }
+}
+
+impl StoredNoteV2 {
+    fn into_domain(self) -> Result<Note> {
+        require_storage_version(self.version, STORAGE_V2_VERSION)?;
+        Ok(Note {
+            id: self.id,
+            path: self.path.into_path()?,
+            color: self.color,
+            rects: self.rects,
+            semantic_range: self.semantic_range,
+            text: self.text,
+            body: self.body,
+            created: self.created,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredDocumentPreferencesV2 {
+    version: u8,
+    path: StoredPathV1,
+    target_language: String,
+    epub: Option<EpubReaderPreferences>,
+}
+
+impl From<&DocumentPreferences> for StoredDocumentPreferencesV2 {
+    fn from(preferences: &DocumentPreferences) -> Self {
+        Self {
+            version: STORAGE_V2_VERSION,
+            path: StoredPathV1::from_path(&preferences.path),
+            target_language: preferences.target_language.clone(),
+            epub: preferences.epub,
+        }
+    }
+}
+
+impl StoredDocumentPreferencesV2 {
+    fn into_domain(self) -> Result<DocumentPreferences> {
+        require_storage_version(self.version, STORAGE_V2_VERSION)?;
+        Ok(DocumentPreferences {
+            path: self.path.into_path()?,
+            target_language: self.target_language,
+            epub: self.epub,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentPosition {
     pub scroll_x_doc: f32,
     pub scroll_y_doc: f32,
     pub zoom: f32,
     pub page: usize,
+    pub semantic: Option<ReflowPosition>,
+}
+
+impl DocumentPosition {
+    pub fn fixed(scroll_x_doc: f32, scroll_y_doc: f32, zoom: f32, page: usize) -> Self {
+        Self {
+            scroll_x_doc,
+            scroll_y_doc,
+            zoom,
+            page,
+            semantic: None,
+        }
+    }
+
+    pub fn reflow(
+        anchor: SemanticTextAnchor,
+        viewport_fraction: f32,
+        progress: f32,
+        zoom: f32,
+        generated_page: usize,
+    ) -> Self {
+        Self {
+            scroll_x_doc: 0.0,
+            scroll_y_doc: 0.0,
+            zoom,
+            page: generated_page,
+            semantic: Some(ReflowPosition {
+                anchor,
+                viewport_fraction: finite_fraction(viewport_fraction),
+                progress: finite_fraction(progress),
+            }),
+        }
+    }
+
+    pub fn is_reflow(&self) -> bool {
+        self.semantic.is_some()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReflowPosition {
+    pub anchor: SemanticTextAnchor,
+    pub viewport_fraction: f32,
+    pub progress: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticTextRange {
+    pub start: SemanticTextAnchor,
+    pub end: SemanticTextAnchor,
+}
+
+struct AnnotationGeometry {
+    rects: Vec<HighlightRect>,
+    semantic_range: Option<SemanticTextRange>,
+}
+
+impl AnnotationGeometry {
+    fn fixed(rects: Vec<HighlightRect>) -> Self {
+        Self {
+            rects,
+            semantic_range: None,
+        }
+    }
+
+    fn reflow(rects: Vec<HighlightRect>, semantic_range: SemanticTextRange) -> Self {
+        Self {
+            rects,
+            semantic_range: Some(semantic_range),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -367,6 +756,7 @@ pub struct Highlight {
     pub path: PathBuf,
     pub color: HighlightColor,
     pub rects: Vec<HighlightRect>,
+    pub semantic_range: Option<SemanticTextRange>,
     pub text: String,
     pub note: String,
     pub created: u64,
@@ -378,6 +768,7 @@ pub struct Note {
     pub path: PathBuf,
     pub color: HighlightColor,
     pub rects: Vec<HighlightRect>,
+    pub semantic_range: Option<SemanticTextRange>,
     pub text: String,
     pub body: String,
     pub created: u64,
@@ -419,6 +810,7 @@ pub struct SidebarWidths {
 pub struct DocumentPreferences {
     pub path: PathBuf,
     pub target_language: String,
+    pub epub: Option<EpubReaderPreferences>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -450,7 +842,7 @@ impl LibraryStore {
         match Self::open(path) {
             Ok(store) => store,
             Err(error) => {
-                eprintln!("failed to open PDF library database: {error:#}");
+                eprintln!("failed to open document library database: {error:#}");
                 Self {
                     library: Library::default(),
                     database: None,
@@ -513,6 +905,16 @@ impl LibraryStore {
             .iter()
             .find(|preferences| preferences.path == path)
             .map(|preferences| preferences.target_language.clone())
+            .filter(|target_language| !target_language.is_empty())
+    }
+
+    pub fn epub_reader_preferences(&self, path: &Path) -> Option<EpubReaderPreferences> {
+        let path = normalize_path(path);
+        self.library
+            .document_preferences
+            .iter()
+            .find(|preferences| preferences.path == path)
+            .and_then(|preferences| preferences.epub)
     }
 
     pub fn set_document_target_language(
@@ -525,9 +927,16 @@ impl LibraryStore {
         if target_language.is_empty() {
             return Err(anyhow!("document target language cannot be empty"));
         }
+        let epub = self
+            .library
+            .document_preferences
+            .iter()
+            .find(|preferences| preferences.path == path)
+            .and_then(|preferences| preferences.epub);
         let preferences = DocumentPreferences {
             path: path.clone(),
             target_language,
+            epub,
         };
         self.write_document_preferences(&preferences)?;
         if let Some(existing) = self
@@ -543,6 +952,68 @@ impl LibraryStore {
                 .document_preferences
                 .sort_by(|left, right| left.path.cmp(&right.path));
         }
+        Ok(())
+    }
+
+    pub fn set_epub_reader_preferences(
+        &mut self,
+        path: &Path,
+        preferences: EpubReaderPreferences,
+    ) -> Result<()> {
+        let path = normalize_path(path);
+        let preferences = preferences.sanitized();
+        let target_language = self
+            .library
+            .document_preferences
+            .iter()
+            .find(|existing| existing.path == path)
+            .map(|existing| existing.target_language.clone())
+            .unwrap_or_default();
+        let document_preferences = DocumentPreferences {
+            path: path.clone(),
+            target_language,
+            epub: Some(preferences),
+        };
+        self.write_document_preferences(&document_preferences)?;
+        if let Some(existing) = self
+            .library
+            .document_preferences
+            .iter_mut()
+            .find(|existing| existing.path == path)
+        {
+            *existing = document_preferences;
+        } else {
+            self.library.document_preferences.push(document_preferences);
+            self.library
+                .document_preferences
+                .sort_by(|left, right| left.path.cmp(&right.path));
+        }
+        Ok(())
+    }
+
+    pub fn clear_epub_reader_preferences(&mut self, path: &Path) -> Result<()> {
+        let path = normalize_path(path);
+        let Some(index) = self
+            .library
+            .document_preferences
+            .iter()
+            .position(|preferences| preferences.path == path)
+        else {
+            return Ok(());
+        };
+        if self.library.document_preferences[index].epub.is_none() {
+            return Ok(());
+        }
+
+        let mut preferences = self.library.document_preferences[index].clone();
+        preferences.epub = None;
+        if preferences.target_language.is_empty() {
+            self.delete_document_preferences(&path)?;
+            self.library.document_preferences.remove(index);
+            return Ok(());
+        }
+        self.write_document_preferences(&preferences)?;
+        self.library.document_preferences[index] = preferences;
         Ok(())
     }
 
@@ -604,7 +1075,7 @@ impl LibraryStore {
             .history
             .iter()
             .find(|entry| entry.path == path)
-            .map(|entry| entry.position)
+            .map(|entry| entry.position.clone())
     }
 
     pub fn record_history(&mut self, path: &Path, position: DocumentPosition) {
@@ -661,9 +1132,37 @@ impl LibraryStore {
         text: impl Into<String>,
         note: impl Into<String>,
     ) -> Result<Highlight> {
-        let highlight =
-            self.library
-                .build_highlight(path, color, rects, text, note, current_timestamp());
+        let highlight = self.library.build_highlight(
+            path,
+            color,
+            AnnotationGeometry::fixed(rects),
+            text,
+            note,
+            current_timestamp(),
+        );
+        self.write_highlight(&highlight)?;
+        self.library.highlights.push(highlight.clone());
+        self.library.sanitize();
+        Ok(highlight)
+    }
+
+    pub fn add_reflow_highlight(
+        &mut self,
+        path: &Path,
+        color: HighlightColor,
+        semantic_range: SemanticTextRange,
+        rects: Vec<HighlightRect>,
+        text: impl Into<String>,
+        note: impl Into<String>,
+    ) -> Result<Highlight> {
+        let highlight = self.library.build_highlight(
+            path,
+            color,
+            AnnotationGeometry::reflow(rects, semantic_range),
+            text,
+            note,
+            current_timestamp(),
+        );
         self.write_highlight(&highlight)?;
         self.library.highlights.push(highlight.clone());
         self.library.sanitize();
@@ -678,9 +1177,37 @@ impl LibraryStore {
         text: impl Into<String>,
         body: impl Into<String>,
     ) -> Result<Note> {
-        let note = self
-            .library
-            .build_note(path, color, rects, text, body, current_timestamp());
+        let note = self.library.build_note(
+            path,
+            color,
+            AnnotationGeometry::fixed(rects),
+            text,
+            body,
+            current_timestamp(),
+        );
+        self.write_note(&note)?;
+        self.library.notes.push(note.clone());
+        self.library.sanitize();
+        Ok(note)
+    }
+
+    pub fn add_reflow_note(
+        &mut self,
+        path: &Path,
+        color: HighlightColor,
+        semantic_range: SemanticTextRange,
+        rects: Vec<HighlightRect>,
+        text: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Result<Note> {
+        let note = self.library.build_note(
+            path,
+            color,
+            AnnotationGeometry::reflow(rects, semantic_range),
+            text,
+            body,
+            current_timestamp(),
+        );
         self.write_note(&note)?;
         self.library.notes.push(note.clone());
         self.library.sanitize();
@@ -799,7 +1326,7 @@ impl LibraryStore {
 
     fn write_history_entries(&self, history: &[HistoryEntry]) -> Result<()> {
         let Some(database) = &self.database else {
-            return Ok(());
+            return Err(anyhow!("document library database is unavailable"));
         };
         let valid_paths = history
             .iter()
@@ -807,7 +1334,7 @@ impl LibraryStore {
             .collect::<HashSet<_>>();
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(HISTORY_V1_TABLE)?;
+            let mut table = write_txn.open_table(HISTORY_V2_TABLE)?;
             let mut existing_paths = Vec::new();
             for entry in table.iter()? {
                 let (path, _) = entry?;
@@ -822,7 +1349,7 @@ impl LibraryStore {
 
             for entry in history {
                 let key = history_key(&entry.path);
-                let encoded = encode(&StoredHistoryEntryV1::from(entry))?;
+                let encoded = encode(&StoredHistoryEntryV2::from(entry))?;
                 table.insert(key.as_slice(), encoded.as_slice())?;
             }
         }
@@ -836,8 +1363,8 @@ impl LibraryStore {
         };
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(BOOKMARKS_V1_TABLE)?;
-            let encoded = encode(&StoredBookmarkV1::from(bookmark))?;
+            let mut table = write_txn.open_table(BOOKMARKS_V2_TABLE)?;
+            let encoded = encode(&StoredBookmarkV2::from(bookmark))?;
             table.insert(bookmark.id, encoded.as_slice())?;
         }
         write_txn.commit()?;
@@ -850,7 +1377,7 @@ impl LibraryStore {
         };
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(BOOKMARKS_V1_TABLE)?;
+            let mut table = write_txn.open_table(BOOKMARKS_V2_TABLE)?;
             table.remove(id)?;
         }
         write_txn.commit()?;
@@ -863,8 +1390,8 @@ impl LibraryStore {
         };
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(HIGHLIGHTS_V1_TABLE)?;
-            let encoded = encode(&StoredHighlightV1::from(highlight))?;
+            let mut table = write_txn.open_table(HIGHLIGHTS_V2_TABLE)?;
+            let encoded = encode(&StoredHighlightV2::from(highlight))?;
             table.insert(highlight.id, encoded.as_slice())?;
         }
         write_txn.commit()?;
@@ -877,7 +1404,7 @@ impl LibraryStore {
         };
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(HIGHLIGHTS_V1_TABLE)?;
+            let mut table = write_txn.open_table(HIGHLIGHTS_V2_TABLE)?;
             table.remove(id)?;
         }
         write_txn.commit()?;
@@ -890,8 +1417,8 @@ impl LibraryStore {
         };
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(NOTES_V1_TABLE)?;
-            let encoded = encode(&StoredNoteV1::from(note))?;
+            let mut table = write_txn.open_table(NOTES_V2_TABLE)?;
+            let encoded = encode(&StoredNoteV2::from(note))?;
             table.insert(note.id, encoded.as_slice())?;
         }
         write_txn.commit()?;
@@ -904,7 +1431,7 @@ impl LibraryStore {
         };
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(NOTES_V1_TABLE)?;
+            let mut table = write_txn.open_table(NOTES_V2_TABLE)?;
             table.remove(id)?;
         }
         write_txn.commit()?;
@@ -970,14 +1497,28 @@ impl LibraryStore {
 
     fn write_document_preferences(&self, preferences: &DocumentPreferences) -> Result<()> {
         let Some(database) = &self.database else {
-            return Ok(());
+            return Err(anyhow!("document library database is unavailable"));
         };
         let key = history_key(&preferences.path);
-        let encoded = encode(&StoredDocumentPreferencesV1::from(preferences))?;
+        let encoded = encode(&StoredDocumentPreferencesV2::from(preferences))?;
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V1_TABLE)?;
+            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE)?;
             table.insert(key.as_slice(), encoded.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn delete_document_preferences(&self, path: &Path) -> Result<()> {
+        let Some(database) = &self.database else {
+            return Err(anyhow!("document library database is unavailable"));
+        };
+        let key = history_key(path);
+        let write_txn = database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE)?;
+            table.remove(key.as_slice())?;
         }
         write_txn.commit()?;
         Ok(())
@@ -1055,7 +1596,7 @@ impl Library {
         &mut self,
         path: &Path,
         color: HighlightColor,
-        rects: Vec<HighlightRect>,
+        geometry: AnnotationGeometry,
         text: impl Into<String>,
         note: impl Into<String>,
         created: u64,
@@ -1066,7 +1607,8 @@ impl Library {
             id,
             path: normalize_path(path),
             color,
-            rects,
+            rects: geometry.rects,
+            semantic_range: geometry.semantic_range,
             text: text.into(),
             note: note.into(),
             created,
@@ -1077,7 +1619,7 @@ impl Library {
         &mut self,
         path: &Path,
         color: HighlightColor,
-        rects: Vec<HighlightRect>,
+        geometry: AnnotationGeometry,
         text: impl Into<String>,
         body: impl Into<String>,
         created: u64,
@@ -1088,7 +1630,8 @@ impl Library {
             id,
             path: normalize_path(path),
             color,
-            rects,
+            rects: geometry.rects,
+            semantic_range: geometry.semantic_range,
             text: text.into(),
             body: body.into(),
             created,
@@ -1140,7 +1683,12 @@ impl Library {
         self.highlights.retain_mut(|highlight| {
             highlight.text = highlight.text.trim().to_string();
             highlight.note = highlight.note.trim().to_string();
-            !highlight.path.as_os_str().is_empty() && !highlight.rects.is_empty()
+            !highlight.path.as_os_str().is_empty()
+                && (!highlight.rects.is_empty()
+                    || highlight
+                        .semantic_range
+                        .as_ref()
+                        .is_some_and(valid_semantic_range))
         });
         self.highlights.sort_by(|left, right| {
             left.created
@@ -1151,7 +1699,13 @@ impl Library {
         self.notes.retain_mut(|note| {
             note.text = note.text.trim().to_string();
             note.body = note.body.trim().to_string();
-            !note.path.as_os_str().is_empty() && !note.rects.is_empty() && !note.body.is_empty()
+            !note.path.as_os_str().is_empty()
+                && (!note.rects.is_empty()
+                    || note
+                        .semantic_range
+                        .as_ref()
+                        .is_some_and(valid_semantic_range))
+                && !note.body.is_empty()
         });
         self.notes.sort_by(|left, right| {
             left.created
@@ -1193,7 +1747,9 @@ impl Library {
         self.document_preferences.retain_mut(|preferences| {
             preferences.path = normalize_path(&preferences.path);
             preferences.target_language = preferences.target_language.trim().to_ascii_lowercase();
-            !preferences.path.as_os_str().is_empty() && !preferences.target_language.is_empty()
+            preferences.epub = preferences.epub.map(EpubReaderPreferences::sanitized);
+            !preferences.path.as_os_str().is_empty()
+                && (!preferences.target_language.is_empty() || preferences.epub.is_some())
         });
         self.document_preferences
             .sort_by(|left, right| left.path.cmp(&right.path));
@@ -1290,22 +1846,40 @@ fn ensure_tables(database: &Database) -> Result<()> {
     {
         write_txn.open_table(DOCUMENT_PREFERENCES_V1_TABLE)?;
     }
+    {
+        write_txn.open_table(HISTORY_V2_TABLE)?;
+    }
+    {
+        write_txn.open_table(BOOKMARKS_V2_TABLE)?;
+    }
+    {
+        write_txn.open_table(HIGHLIGHTS_V2_TABLE)?;
+    }
+    {
+        write_txn.open_table(NOTES_V2_TABLE)?;
+    }
+    {
+        write_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE)?;
+    }
     write_txn.commit()?;
     Ok(())
 }
 
 fn load_library(database: &Database) -> Result<Library> {
     let mut library = Library::default();
-    let has_v1_storage = {
+    let (has_v1_storage, has_v2_storage) = {
         let read_txn = database.begin_read()?;
-        read_txn
-            .open_table(STORAGE_MIGRATIONS_TABLE)?
-            .get(STORAGE_V1_MIGRATION_KEY)?
-            .is_some()
+        let table = read_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        (
+            table.get(STORAGE_V1_MIGRATION_KEY)?.is_some(),
+            table.get(STORAGE_V2_MIGRATION_KEY)?.is_some(),
+        )
     };
 
     let read_txn = database.begin_read()?;
-    if has_v1_storage {
+    if has_v2_storage {
+        load_storage_v2(&read_txn, &mut library)?;
+    } else if has_v1_storage {
         load_storage_v1(&read_txn, &mut library)?;
     } else {
         load_legacy_storage(&read_txn, &mut library)?;
@@ -1316,7 +1890,87 @@ fn load_library(database: &Database) -> Result<Library> {
     if !has_v1_storage {
         migrate_legacy_storage_v1(database, &library)?;
     }
+    if !has_v2_storage {
+        migrate_storage_v2(database, &library)?;
+    }
     Ok(library)
+}
+
+fn load_storage_v2(read_txn: &redb::ReadTransaction, library: &mut Library) -> Result<()> {
+    {
+        let table = read_txn.open_table(HISTORY_V2_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredHistoryEntryV2>(value.value())
+                .and_then(StoredHistoryEntryV2::into_domain)
+            {
+                Ok(mut entry) => {
+                    entry.path = normalize_path(&entry.path);
+                    library.history.push(entry);
+                }
+                Err(error) => eprintln!("failed to decode document history entry: {error:#}"),
+            }
+        }
+    }
+    {
+        let table = read_txn.open_table(BOOKMARKS_V2_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredBookmarkV2>(value.value()).and_then(StoredBookmarkV2::into_domain)
+            {
+                Ok(mut entry) => {
+                    entry.path = normalize_path(&entry.path);
+                    library.bookmarks.push(entry);
+                }
+                Err(error) => eprintln!("failed to decode document bookmark: {error:#}"),
+            }
+        }
+    }
+    {
+        let table = read_txn.open_table(HIGHLIGHTS_V2_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredHighlightV2>(value.value())
+                .and_then(StoredHighlightV2::into_domain)
+            {
+                Ok(mut entry) => {
+                    entry.path = normalize_path(&entry.path);
+                    library.highlights.push(entry);
+                }
+                Err(error) => eprintln!("failed to decode document highlight: {error:#}"),
+            }
+        }
+    }
+    {
+        let table = read_txn.open_table(NOTES_V2_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredNoteV2>(value.value()).and_then(StoredNoteV2::into_domain) {
+                Ok(mut entry) => {
+                    entry.path = normalize_path(&entry.path);
+                    library.notes.push(entry);
+                }
+                Err(error) => eprintln!("failed to decode document note: {error:#}"),
+            }
+        }
+    }
+    load_shared_v1_storage(read_txn, library)?;
+    {
+        let table = read_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredDocumentPreferencesV2>(value.value())
+                .and_then(StoredDocumentPreferencesV2::into_domain)
+            {
+                Ok(mut preferences) => {
+                    preferences.path = normalize_path(&preferences.path);
+                    library.document_preferences.push(preferences);
+                }
+                Err(error) => eprintln!("failed to decode document preferences: {error:#}"),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn load_storage_v1(read_txn: &redb::ReadTransaction, library: &mut Library) -> Result<()> {
@@ -1381,33 +2035,7 @@ fn load_storage_v1(read_txn: &redb::ReadTransaction, library: &mut Library) -> R
         }
     }
 
-    {
-        let table = read_txn.open_table(AI_SESSIONS_V1_TABLE)?;
-        for entry in table.iter()? {
-            let (_, value) = entry?;
-            match decode::<StoredAiSessionV1>(value.value())
-                .and_then(StoredAiSessionV1::into_domain)
-            {
-                Ok(mut entry) => {
-                    entry.path = normalize_path(&entry.path);
-                    library.ai_sessions.push(entry);
-                }
-                Err(error) => eprintln!("failed to decode AI session: {error:#}"),
-            }
-        }
-    }
-
-    {
-        let table = read_txn.open_table(UI_STATE_V1_TABLE)?;
-        if let Some(value) = table.get(SIDEBAR_WIDTHS_KEY)? {
-            match decode::<StoredSidebarWidthsV1>(value.value())
-                .and_then(StoredSidebarWidthsV1::into_domain)
-            {
-                Ok(widths) => library.sidebar_widths = Some(widths),
-                Err(error) => eprintln!("failed to decode sidebar widths: {error:#}"),
-            }
-        }
-    }
+    load_shared_v1_storage(read_txn, library)?;
     {
         let table = read_txn.open_table(DOCUMENT_PREFERENCES_V1_TABLE)?;
         for entry in table.iter()? {
@@ -1426,13 +2054,44 @@ fn load_storage_v1(read_txn: &redb::ReadTransaction, library: &mut Library) -> R
     Ok(())
 }
 
+fn load_shared_v1_storage(read_txn: &redb::ReadTransaction, library: &mut Library) -> Result<()> {
+    {
+        let table = read_txn.open_table(AI_SESSIONS_V1_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredAiSessionV1>(value.value())
+                .and_then(StoredAiSessionV1::into_domain)
+            {
+                Ok(mut entry) => {
+                    entry.path = normalize_path(&entry.path);
+                    library.ai_sessions.push(entry);
+                }
+                Err(error) => eprintln!("failed to decode AI session: {error:#}"),
+            }
+        }
+    }
+    {
+        let table = read_txn.open_table(UI_STATE_V1_TABLE)?;
+        if let Some(value) = table.get(SIDEBAR_WIDTHS_KEY)? {
+            match decode::<StoredSidebarWidthsV1>(value.value())
+                .and_then(StoredSidebarWidthsV1::into_domain)
+            {
+                Ok(widths) => library.sidebar_widths = Some(widths),
+                Err(error) => eprintln!("failed to decode sidebar widths: {error:#}"),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn load_legacy_storage(read_txn: &redb::ReadTransaction, library: &mut Library) -> Result<()> {
     {
         let table = read_txn.open_table(HISTORY_TABLE)?;
         for entry in table.iter()? {
             let (_, value) = entry?;
-            match decode::<HistoryEntry>(value.value()) {
-                Ok(mut entry) => {
+            match decode::<LegacyHistoryEntry>(value.value()) {
+                Ok(entry) => {
+                    let mut entry = entry.into_domain();
                     entry.path = normalize_path(&entry.path);
                     library.history.push(entry);
                 }
@@ -1445,8 +2104,9 @@ fn load_legacy_storage(read_txn: &redb::ReadTransaction, library: &mut Library) 
         let table = read_txn.open_table(BOOKMARKS_TABLE)?;
         for entry in table.iter()? {
             let (_, value) = entry?;
-            match decode::<Bookmark>(value.value()) {
-                Ok(mut entry) => {
+            match decode::<LegacyBookmark>(value.value()) {
+                Ok(entry) => {
+                    let mut entry = entry.into_domain();
                     entry.path = normalize_path(&entry.path);
                     library.bookmarks.push(entry);
                 }
@@ -1459,8 +2119,9 @@ fn load_legacy_storage(read_txn: &redb::ReadTransaction, library: &mut Library) 
         let table = read_txn.open_table(HIGHLIGHTS_TABLE)?;
         for entry in table.iter()? {
             let (_, value) = entry?;
-            match decode::<Highlight>(value.value()) {
-                Ok(mut entry) => {
+            match decode::<LegacyHighlight>(value.value()) {
+                Ok(entry) => {
+                    let mut entry = entry.into_domain();
                     entry.path = normalize_path(&entry.path);
                     library.highlights.push(entry);
                 }
@@ -1473,8 +2134,9 @@ fn load_legacy_storage(read_txn: &redb::ReadTransaction, library: &mut Library) 
         let table = read_txn.open_table(NOTES_TABLE)?;
         for entry in table.iter()? {
             let (_, value) = entry?;
-            match decode::<Note>(value.value()) {
-                Ok(mut entry) => {
+            match decode::<LegacyNote>(value.value()) {
+                Ok(entry) => {
+                    let mut entry = entry.into_domain();
                     entry.path = normalize_path(&entry.path);
                     library.notes.push(entry);
                 }
@@ -1580,6 +2242,59 @@ fn migrate_legacy_storage_v1(database: &Database, library: &Library) -> Result<(
     Ok(())
 }
 
+fn migrate_storage_v2(database: &Database, library: &Library) -> Result<()> {
+    let write_txn = database.begin_write()?;
+    {
+        let migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        if migrations.get(STORAGE_V2_MIGRATION_KEY)?.is_some() {
+            return Ok(());
+        }
+    }
+    {
+        let mut table = write_txn.open_table(HISTORY_V2_TABLE)?;
+        for entry in &library.history {
+            let key = history_key(&entry.path);
+            let encoded = encode(&StoredHistoryEntryV2::from(entry))?;
+            table.insert(key.as_slice(), encoded.as_slice())?;
+        }
+    }
+    {
+        let mut table = write_txn.open_table(BOOKMARKS_V2_TABLE)?;
+        for bookmark in &library.bookmarks {
+            let encoded = encode(&StoredBookmarkV2::from(bookmark))?;
+            table.insert(bookmark.id, encoded.as_slice())?;
+        }
+    }
+    {
+        let mut table = write_txn.open_table(HIGHLIGHTS_V2_TABLE)?;
+        for highlight in &library.highlights {
+            let encoded = encode(&StoredHighlightV2::from(highlight))?;
+            table.insert(highlight.id, encoded.as_slice())?;
+        }
+    }
+    {
+        let mut table = write_txn.open_table(NOTES_V2_TABLE)?;
+        for note in &library.notes {
+            let encoded = encode(&StoredNoteV2::from(note))?;
+            table.insert(note.id, encoded.as_slice())?;
+        }
+    }
+    {
+        let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE)?;
+        for preferences in &library.document_preferences {
+            let key = history_key(&preferences.path);
+            let encoded = encode(&StoredDocumentPreferencesV2::from(preferences))?;
+            table.insert(key.as_slice(), encoded.as_slice())?;
+        }
+    }
+    {
+        let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        migrations.insert(STORAGE_V2_MIGRATION_KEY, [STORAGE_V2_VERSION].as_slice())?;
+    }
+    write_txn.commit()?;
+    Ok(())
+}
+
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     bincode::serialize(value).context("failed to encode library value")
 }
@@ -1588,14 +2303,28 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     bincode::deserialize(bytes).context("failed to decode library value")
 }
 
-fn require_storage_version(version: u8) -> Result<()> {
-    if version == STORAGE_SCHEMA_VERSION {
+fn require_storage_version(version: u8, expected: u8) -> Result<()> {
+    if version == expected {
         Ok(())
     } else {
         Err(anyhow!(
-            "unsupported library storage schema version: {version}"
+            "unsupported library storage schema version: expected {expected}, found {version}"
         ))
     }
+}
+
+fn finite_fraction(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn valid_semantic_range(range: &SemanticTextRange) -> bool {
+    !range.start.quote.is_empty()
+        && !range.end.quote.is_empty()
+        && range.start.logical_offset <= range.end.logical_offset
 }
 
 fn history_key(path: &Path) -> Vec<u8> {
@@ -1635,12 +2364,7 @@ mod tests {
     use super::*;
 
     fn position(page: usize) -> DocumentPosition {
-        DocumentPosition {
-            scroll_x_doc: page as f32,
-            scroll_y_doc: page as f32 * 10.0,
-            zoom: 1.25,
-            page,
-        }
+        DocumentPosition::fixed(page as f32, page as f32 * 10.0, 1.25, page)
     }
 
     fn temp_library_path(name: &str) -> PathBuf {
@@ -1883,6 +2607,244 @@ mod tests {
         let _ = fs::remove_file(database_path);
     }
 
+    #[test]
+    fn history_save_fails_when_database_is_unavailable() {
+        let document_path = Path::new("/tmp/unavailable-history.epub");
+        let mut store = LibraryStore {
+            library: Library::default(),
+            database: None,
+            startup_error: Some("database startup failed".to_string()),
+        };
+        store.record_history(document_path, position(1));
+
+        let error = store.save().unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "document library database is unavailable"
+        );
+        assert_eq!(store.history_position(document_path), Some(position(1)));
+    }
+
+    #[test]
+    fn document_preference_writes_fail_when_database_is_unavailable() {
+        let document_path = Path::new("/tmp/unavailable-preferences.epub");
+        let preferences = EpubReaderPreferences {
+            font_size: 19.0,
+            line_height: 1.7,
+            horizontal_margin: 40.0,
+            max_content_width: 680.0,
+            theme: glyphst_core::EpubTheme::Sepia,
+            use_publisher_styles: false,
+        };
+        let mut store = LibraryStore {
+            library: Library::default(),
+            database: None,
+            startup_error: Some("database startup failed".to_string()),
+        };
+
+        let language_error = store
+            .set_document_target_language(document_path, "ja")
+            .unwrap_err();
+        assert_eq!(
+            language_error.to_string(),
+            "document library database is unavailable"
+        );
+        assert_eq!(store.document_target_language(document_path), None);
+
+        let epub_error = store
+            .set_epub_reader_preferences(document_path, preferences)
+            .unwrap_err();
+        assert_eq!(
+            epub_error.to_string(),
+            "document library database is unavailable"
+        );
+        assert_eq!(store.epub_reader_preferences(document_path), None);
+
+        store
+            .library
+            .document_preferences
+            .push(DocumentPreferences {
+                path: normalize_path(document_path),
+                target_language: "ja".to_string(),
+                epub: Some(preferences),
+            });
+        let clear_error = store
+            .clear_epub_reader_preferences(document_path)
+            .unwrap_err();
+        assert_eq!(
+            clear_error.to_string(),
+            "document library database is unavailable"
+        );
+        assert_eq!(
+            store.document_target_language(document_path).as_deref(),
+            Some("ja")
+        );
+        assert_eq!(
+            store.epub_reader_preferences(document_path),
+            Some(preferences)
+        );
+    }
+
+    #[test]
+    fn clears_epub_reader_preferences_and_preserves_target_language() {
+        let database_path = temp_library_path("clear-epub-preferences");
+        let document_path = Path::new("/tmp/book.epub");
+        let preferences = EpubReaderPreferences {
+            font_size: 19.0,
+            line_height: 1.7,
+            horizontal_margin: 40.0,
+            max_content_width: 680.0,
+            theme: glyphst_core::EpubTheme::Sepia,
+            use_publisher_styles: false,
+        };
+
+        {
+            let mut store = LibraryStore::open(database_path.clone()).unwrap();
+            store
+                .set_document_target_language(document_path, "ja")
+                .unwrap();
+            store
+                .set_epub_reader_preferences(document_path, preferences)
+                .unwrap();
+            store.clear_epub_reader_preferences(document_path).unwrap();
+
+            assert_eq!(store.epub_reader_preferences(document_path), None);
+            assert_eq!(
+                store.document_target_language(document_path).as_deref(),
+                Some("ja")
+            );
+        }
+
+        {
+            let store = LibraryStore::open(database_path.clone()).unwrap();
+            assert_eq!(store.epub_reader_preferences(document_path), None);
+            assert_eq!(
+                store.document_target_language(document_path).as_deref(),
+                Some("ja")
+            );
+        }
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn epub_preferences_do_not_create_a_target_language_override() {
+        let database_path = temp_library_path("epub-preferences-without-language");
+        let document_path = Path::new("/tmp/book-with-global-language.epub");
+        let preferences = EpubReaderPreferences {
+            font_size: 19.0,
+            line_height: 1.7,
+            horizontal_margin: 40.0,
+            max_content_width: 680.0,
+            theme: glyphst_core::EpubTheme::Sepia,
+            use_publisher_styles: false,
+        };
+
+        {
+            let mut store = LibraryStore::open(database_path.clone()).unwrap();
+            store
+                .set_epub_reader_preferences(document_path, preferences)
+                .unwrap();
+            assert_eq!(store.document_target_language(document_path), None);
+        }
+
+        {
+            let mut store = LibraryStore::open(database_path.clone()).unwrap();
+            assert_eq!(store.document_target_language(document_path), None);
+            assert_eq!(
+                store.epub_reader_preferences(document_path),
+                Some(preferences)
+            );
+            store.clear_epub_reader_preferences(document_path).unwrap();
+            assert_eq!(store.library.document_preferences.len(), 0);
+        }
+
+        {
+            let store = LibraryStore::open(database_path.clone()).unwrap();
+            assert_eq!(store.document_target_language(document_path), None);
+            assert_eq!(store.epub_reader_preferences(document_path), None);
+        }
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn persists_epub_positions_annotations_and_preferences() {
+        let database_path = temp_library_path("epub-round-trip");
+        let document_path = PathBuf::from("/tmp/book.epub");
+        let start = SemanticTextAnchor::new(12, "chapter text", "before ", " after");
+        let end = SemanticTextAnchor::new(24, "selection end", "middle ", " suffix");
+        let position = DocumentPosition::reflow(start.clone(), 0.25, 0.4, 1.5, 3);
+        let range = SemanticTextRange {
+            start: start.clone(),
+            end: end.clone(),
+        };
+        let preferences = EpubReaderPreferences {
+            font_size: 19.0,
+            line_height: 1.7,
+            horizontal_margin: 40.0,
+            max_content_width: 680.0,
+            theme: glyphst_core::EpubTheme::Sepia,
+            use_publisher_styles: false,
+        };
+
+        {
+            let mut store = LibraryStore::open(database_path.clone()).unwrap();
+            store.record_history(&document_path, position.clone());
+            store
+                .add_bookmark(&document_path, "Chapter", position.clone())
+                .unwrap();
+            store
+                .add_reflow_highlight(
+                    &document_path,
+                    HighlightColor::Yellow,
+                    range.clone(),
+                    Vec::new(),
+                    "selected text",
+                    "",
+                )
+                .unwrap();
+            store
+                .add_reflow_note(
+                    &document_path,
+                    HighlightColor::Blue,
+                    range.clone(),
+                    Vec::new(),
+                    "selected text",
+                    "remember this",
+                )
+                .unwrap();
+            store
+                .set_epub_reader_preferences(&document_path, preferences)
+                .unwrap();
+            store.save().unwrap();
+        }
+
+        {
+            let store = LibraryStore::open(database_path.clone()).unwrap();
+            assert_eq!(
+                store.history_position(&document_path),
+                Some(position.clone())
+            );
+            assert_eq!(store.bookmarks()[0].position, position);
+            assert_eq!(
+                store.highlights_for(&document_path)[0].semantic_range,
+                Some(range.clone())
+            );
+            assert_eq!(
+                store.notes_for(&document_path)[0].semantic_range,
+                Some(range)
+            );
+            assert_eq!(
+                store.epub_reader_preferences(&document_path),
+                Some(preferences)
+            );
+        }
+
+        let _ = fs::remove_file(database_path);
+    }
+
     #[cfg(unix)]
     #[test]
     fn serializes_non_utf8_paths_without_loss() {
@@ -1908,6 +2870,7 @@ mod tests {
         let preferences = DocumentPreferences {
             path: entry.path.clone(),
             target_language: "ja".to_string(),
+            epub: None,
         };
         assert_eq!(
             decode::<StoredDocumentPreferencesV1>(
@@ -2050,6 +3013,7 @@ mod tests {
             path: document_path.clone(),
             color: HighlightColor::Yellow,
             rects: vec![rect],
+            semantic_range: None,
             text: "legacy highlight".to_string(),
             note: String::new(),
             created: 3,
@@ -2059,6 +3023,7 @@ mod tests {
             path: document_path.clone(),
             color: HighlightColor::Blue,
             rects: vec![rect],
+            semantic_range: None,
             text: "legacy note".to_string(),
             body: "legacy body".to_string(),
             created: 4,
@@ -2092,26 +3057,69 @@ mod tests {
                 table
                     .insert(
                         document_path.to_str().unwrap(),
-                        encode(&history).unwrap().as_slice(),
+                        encode(&LegacyHistoryEntry {
+                            path: history.path.clone(),
+                            opened: history.opened,
+                            position: StoredDocumentPositionV1::from(&history.position),
+                        })
+                        .unwrap()
+                        .as_slice(),
                     )
                     .unwrap();
             }
             {
                 let mut table = write_txn.open_table(BOOKMARKS_TABLE).unwrap();
                 table
-                    .insert(bookmark.id, encode(&bookmark).unwrap().as_slice())
+                    .insert(
+                        bookmark.id,
+                        encode(&LegacyBookmark {
+                            id: bookmark.id,
+                            path: bookmark.path.clone(),
+                            label: bookmark.label.clone(),
+                            position: StoredDocumentPositionV1::from(&bookmark.position),
+                            created: bookmark.created,
+                        })
+                        .unwrap()
+                        .as_slice(),
+                    )
                     .unwrap();
             }
             {
                 let mut table = write_txn.open_table(HIGHLIGHTS_TABLE).unwrap();
                 table
-                    .insert(highlight.id, encode(&highlight).unwrap().as_slice())
+                    .insert(
+                        highlight.id,
+                        encode(&LegacyHighlight {
+                            id: highlight.id,
+                            path: highlight.path.clone(),
+                            color: highlight.color,
+                            rects: highlight.rects.clone(),
+                            text: highlight.text.clone(),
+                            note: highlight.note.clone(),
+                            created: highlight.created,
+                        })
+                        .unwrap()
+                        .as_slice(),
+                    )
                     .unwrap();
             }
             {
                 let mut table = write_txn.open_table(NOTES_TABLE).unwrap();
                 table
-                    .insert(note.id, encode(&note).unwrap().as_slice())
+                    .insert(
+                        note.id,
+                        encode(&LegacyNote {
+                            id: note.id,
+                            path: note.path.clone(),
+                            color: note.color,
+                            rects: note.rects.clone(),
+                            text: note.text.clone(),
+                            body: note.body.clone(),
+                            created: note.created,
+                        })
+                        .unwrap()
+                        .as_slice(),
+                    )
                     .unwrap();
             }
             {
@@ -2147,9 +3155,10 @@ mod tests {
             let write_txn = database.begin_write().unwrap();
             {
                 let mut table = write_txn.open_table(HISTORY_TABLE).unwrap();
-                let replacement_history = HistoryEntry {
-                    position: position(99),
-                    ..history.clone()
+                let replacement_history = LegacyHistoryEntry {
+                    path: history.path.clone(),
+                    opened: history.opened,
+                    position: StoredDocumentPositionV1::from(&position(99)),
                 };
                 table
                     .insert(
@@ -2176,10 +3185,10 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                decode::<HistoryEntry>(legacy_history.value())
+                decode::<LegacyHistoryEntry>(legacy_history.value())
                     .unwrap()
                     .position,
-                position(99)
+                StoredDocumentPositionV1::from(&position(99))
             );
             assert!(
                 read_txn

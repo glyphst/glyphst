@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
+use glyphst_core::{EpubReaderPreferences, EpubTheme};
 use gpui::{App, Font, FontFallbacks, FontWeight, Global, Window, WindowBackgroundAppearance};
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
@@ -1608,6 +1609,7 @@ impl TranslationSettings {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub behavior: BehaviorSettings,
+    pub reading: EpubReaderPreferences,
     pub font: FontSettings,
     pub window: WindowSettings,
     pub tab_bar_visibility: TabBarVisibility,
@@ -1623,6 +1625,7 @@ pub struct Settings {
 impl Settings {
     pub fn sanitize(&mut self) {
         self.behavior.sanitize();
+        self.reading = self.reading.sanitized();
         self.font.sanitize();
         self.window.sanitize();
         self.ai.sanitize();
@@ -1698,6 +1701,34 @@ impl Settings {
             && let Some(value) = scroll.get_arg("smooth").and_then(KdlValue::as_bool)
         {
             settings.behavior.smooth_scrolling = value;
+        }
+
+        if let Some(reading) = document.get("reading").and_then(KdlNode::children) {
+            if let Some(value) = reading.get_arg("font_size").and_then(value_to_f32) {
+                settings.reading.font_size = value;
+            }
+            if let Some(value) = reading.get_arg("line_height").and_then(value_to_f32) {
+                settings.reading.line_height = value;
+            }
+            if let Some(value) = reading.get_arg("horizontal_margin").and_then(value_to_f32) {
+                settings.reading.horizontal_margin = value;
+            }
+            if let Some(value) = reading.get_arg("max_content_width").and_then(value_to_f32) {
+                settings.reading.max_content_width = value;
+            }
+            if let Some(value) = reading
+                .get_arg("theme")
+                .and_then(KdlValue::as_string)
+                .and_then(EpubTheme::parse)
+            {
+                settings.reading.theme = value;
+            }
+            if let Some(value) = reading
+                .get_arg("publisher_styles")
+                .and_then(KdlValue::as_bool)
+            {
+                settings.reading.use_publisher_styles = value;
+            }
         }
 
         if let Some(panes) = document.get("panes").and_then(KdlNode::children)
@@ -1939,6 +1970,32 @@ impl Settings {
         let scroll_children = scroll.ensure_children();
         push_value_node(scroll_children, "smooth", self.behavior.smooth_scrolling);
         document.nodes_mut().push(scroll);
+
+        let mut reading = KdlNode::new("reading");
+        let reading_children = reading.ensure_children();
+        push_value_node(reading_children, "font_size", self.reading.font_size as f64);
+        push_value_node(
+            reading_children,
+            "line_height",
+            self.reading.line_height as f64,
+        );
+        push_value_node(
+            reading_children,
+            "horizontal_margin",
+            self.reading.horizontal_margin as f64,
+        );
+        push_value_node(
+            reading_children,
+            "max_content_width",
+            self.reading.max_content_width as f64,
+        );
+        push_value_node(reading_children, "theme", self.reading.theme.as_str());
+        push_value_node(
+            reading_children,
+            "publisher_styles",
+            self.reading.use_publisher_styles,
+        );
+        document.nodes_mut().push(reading);
 
         let mut panes = KdlNode::new("panes");
         let panes_children = panes.ensure_children();
@@ -2441,6 +2498,34 @@ theme-overrides {
         );
         assert_eq!(settings.overrides.background, Some(0x101010));
         assert_eq!(settings.overrides.selection_highlight, None);
+    }
+
+    #[test]
+    fn parses_and_exports_epub_reading_settings() {
+        let settings = parse_settings(
+            r#"
+reading {
+    font_size 20.0
+    line_height 1.8
+    horizontal_margin 48.0
+    max_content_width 680.0
+    theme "sepia"
+    publisher_styles #false
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(settings.reading.font_size, 20.0);
+        assert_eq!(settings.reading.line_height, 1.8);
+        assert_eq!(settings.reading.horizontal_margin, 48.0);
+        assert_eq!(settings.reading.max_content_width, 680.0);
+        assert_eq!(settings.reading.theme, EpubTheme::Sepia);
+        assert!(!settings.reading.use_publisher_styles);
+        assert_eq!(
+            parse_settings(&settings.to_kdl_string()).unwrap().reading,
+            settings.reading
+        );
     }
 
     #[test]

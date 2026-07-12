@@ -61,7 +61,7 @@ struct NewTabEntry {
     path: PathBuf,
     file_name: SharedString,
     directory: SharedString,
-    page: usize,
+    last_read: SharedString,
 }
 
 pub(crate) enum NewTabEvent {
@@ -97,7 +97,7 @@ impl NewTab {
                 .collect::<Vec<_>>()
         };
 
-        let mut board = Self {
+        let board = Self {
             entries,
             thumbnails: HashMap::new(),
             focus_handle,
@@ -108,21 +108,16 @@ impl NewTab {
             selection: BTreeSet::new(),
         };
 
-        for path in board
-            .entries
-            .iter()
-            .map(|entry| entry.path.clone())
-            .collect::<Vec<_>>()
-        {
-            board.start_thumbnail_render(path, cx);
-        }
-
         cx.observe_global::<SettingsStore>(|_, cx| cx.notify())
             .detach();
         board
     }
 
     fn start_thumbnail_render(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.thumbnails.contains_key(&path) {
+            return;
+        }
+
         self.thumbnails
             .insert(path.clone(), ThumbnailState::Loading);
 
@@ -253,23 +248,12 @@ impl NewTab {
     }
 
     fn refresh_entries(&mut self, cx: &mut Context<Self>) {
-        let missing_thumbnail_paths: Vec<PathBuf> = {
-            let store = cx.global::<LibraryStore>();
-            self.entries = store
-                .history_entries()
-                .iter()
-                .map(NewTabEntry::from_history)
-                .collect();
-            self.entries
-                .iter()
-                .map(|entry| entry.path.clone())
-                .filter(|path| !self.thumbnails.contains_key(path))
-                .collect()
-        };
-
-        for path in missing_thumbnail_paths {
-            self.start_thumbnail_render(path, cx);
-        }
+        let store = cx.global::<LibraryStore>();
+        self.entries = store
+            .history_entries()
+            .iter()
+            .map(NewTabEntry::from_history)
+            .collect();
     }
 
     fn render_toolbar_button(
@@ -314,7 +298,7 @@ impl NewTab {
         let path = entry.path.clone();
         let file_name = entry.file_name.clone();
         let directory = entry.directory.clone();
-        let page = entry.page;
+        let last_read = entry.last_read.clone();
         let border_color = if selected { theme.accent } else { theme.border };
         let card_bg = if selected {
             rgba(with_alpha(theme.accent, 0x22))
@@ -404,7 +388,7 @@ impl NewTab {
                     .truncate()
                     .text_size(ui_rems(11.0))
                     .text_color(rgb(theme.text_muted))
-                    .child(crate::fl!("new-tab-last-read", page = page as i64)),
+                    .child(last_read),
             )
     }
 
@@ -483,7 +467,20 @@ impl NewTabEntry {
             path: entry.path.clone(),
             file_name,
             directory,
-            page: entry.position.page,
+            last_read: entry
+                .position
+                .semantic
+                .as_ref()
+                .map(|position| {
+                    crate::fl!(
+                        "new-tab-last-read-progress",
+                        progress = (position.progress.clamp(0.0, 1.0) * 100.0).round() as i64
+                    )
+                    .into()
+                })
+                .unwrap_or_else(|| {
+                    crate::fl!("new-tab-last-read", page = entry.position.page as i64).into()
+                }),
         }
     }
 }
@@ -546,6 +543,20 @@ impl Render for NewTab {
                         rows,
                         cx.processor(move |this, visible_range: Range<usize>, _window, cx| {
                             let theme = cx.global::<SettingsStore>().resolved_theme;
+                            let visible_paths = visible_range
+                                .clone()
+                                .flat_map(|row_ix| {
+                                    let first_entry_ix = row_ix * cols;
+                                    first_entry_ix..first_entry_ix + cols
+                                })
+                                .filter_map(|entry_ix| {
+                                    this.entries.get(entry_ix).map(|entry| entry.path.clone())
+                                })
+                                .collect::<Vec<_>>();
+
+                            for path in visible_paths {
+                                this.start_thumbnail_render(path, cx);
+                            }
 
                             visible_range
                                 .map(|row_ix| {
@@ -708,10 +719,13 @@ impl Render for NewTab {
 }
 
 fn render_cover_thumbnail(path: &Path) -> Result<ThumbnailImage> {
-    let document = mupdf::Document::open(path)?;
+    let mut document = mupdf::Document::open(path)?;
+    if document.is_reflowable()? {
+        document.layout(480.0, 640.0, 16.0)?;
+    }
     let page_count = document.page_count()?;
     if page_count <= 0 {
-        bail!("PDF has no pages");
+        bail!("document has no readable content");
     }
 
     let page = document.load_page(0)?;

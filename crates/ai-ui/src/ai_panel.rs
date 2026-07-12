@@ -642,7 +642,7 @@ impl AiPanel {
         match mention {
             MentionKind::CurrentPageText => ContextBlock::new(
                 mention,
-                Some(context.current_page),
+                (context.current_page > 0).then_some(context.current_page),
                 context
                     .current_page_text
                     .unwrap_or_else(|| tr("ai-no-current-page-text")),
@@ -680,6 +680,8 @@ impl AiPanel {
                 .file_name()
                 .and_then(|file_name| file_name.to_str())
                 .map(str::to_string),
+            format: None,
+            location_label: None,
             page_count: 0,
             current_page: self.current_page,
             has_selection: false,
@@ -687,6 +689,8 @@ impl AiPanel {
 
         if let Some(context) = self.context_provider.context(cx) {
             document.file_name = context.document_file_name.or(document.file_name);
+            document.format = context.document_format;
+            document.location_label = context.location_label;
             document.page_count = context.page_count;
             document.current_page = context.current_page;
             document.has_selection = context.selected_text.is_some();

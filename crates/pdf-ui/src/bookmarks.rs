@@ -339,7 +339,7 @@ impl PickerDelegate for BookmarkPromptDelegate {
 
         if let Err(error) =
             cx.global_mut::<LibraryStore>()
-                .add_bookmark(&self.path, label, self.position)
+                .add_bookmark(&self.path, label, self.position.clone())
         {
             eprintln!("failed to add bookmark: {error:#}");
         }

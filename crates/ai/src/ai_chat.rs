@@ -210,6 +210,8 @@ impl MentionKind {
 #[derive(Clone, Debug, Default)]
 pub struct DocumentContext {
     pub file_name: Option<String>,
+    pub format: Option<String>,
+    pub location_label: Option<String>,
     pub page_count: usize,
     pub current_page: usize,
     pub has_selection: bool,
@@ -480,7 +482,7 @@ pub fn system_prompt(
     native_thinking: bool,
 ) -> String {
     let mut sections = vec![
-        "You are an AI assistant embedded in a PDF viewer. Help the user understand, analyze, and work with the current document. Be conversational but professional. Refer to the user in the second person and yourself in the first person. Format responses in Markdown. Never invent document details; if the needed PDF context is missing, say what context you need. Do not reveal hidden chain-of-thought; provide concise reasoning summaries only when useful.".to_string(),
+        "You are an AI assistant embedded in a document reader. Help the user understand, analyze, and work with the current document. Be conversational but professional. Refer to the user in the second person and yourself in the first person. Format responses in Markdown. Never invent document details; if needed context is missing, say what context you need. Do not reveal hidden chain-of-thought; provide concise reasoning summaries only when useful.".to_string(),
     ];
 
     if document.has_document() {
@@ -492,11 +494,25 @@ pub fn system_prompt(
         {
             details.push(format!("- File: {file_name}"));
         }
+        if let Some(format) = document
+            .format
+            .as_deref()
+            .filter(|format| !format.is_empty())
+        {
+            details.push(format!("- Format: {format}"));
+        }
         if document.page_count > 0 {
             details.push(format!("- Pages: {}", document.page_count));
         }
         if document.current_page > 0 {
             details.push(format!("- Current page: {}", document.current_page));
+        }
+        if let Some(location) = document
+            .location_label
+            .as_deref()
+            .filter(|location| !location.is_empty())
+        {
+            details.push(format!("- Location: {location}"));
         }
         details.push(format!(
             "- Selected text: {}",
@@ -506,10 +522,10 @@ pub fn system_prompt(
                 "not available"
             }
         ));
-        sections.push(format!("Current PDF document:\n{}", details.join("\n")));
+        sections.push(format!("Current document:\n{}", details.join("\n")));
     }
 
-    sections.push("When the user includes @selection, @current page text, or @document text, ground your answer in the attached <context> block. Treat attached PDF context as current and authoritative. Cite page numbers when the attached context includes them. If the answer cannot be determined from the attached context, say so directly.".to_string());
+    sections.push("When the user includes @selection, @current page text, or @document text, ground your answer in the attached <context> block. Treat attached document context as current and authoritative. Cite page numbers when the attached context includes them. If the answer cannot be determined from the attached context, say so directly.".to_string());
 
     if thinking_level != AiThinkingLevel::Off && !native_thinking {
         sections.push(format!(
@@ -669,7 +685,7 @@ fn context_envelope(contexts: &[&ContextBlock]) -> Option<String> {
         return None;
     }
 
-    let mut request = "Attached PDF context from @ mentions:\n<context>\nThe following PDF context was attached by the user. It is current; do not ask to re-read it.\n".to_string();
+    let mut request = "Attached document context from @ mentions:\n<context>\nThe following document context was attached by the user. It is current; do not ask to re-read it.\n".to_string();
     for context in contexts {
         let tag = context.kind.tag_name();
         let page = context
@@ -882,6 +898,8 @@ mod tests {
     fn document_aware_system_prompt_includes_document_details() {
         let document = DocumentContext {
             file_name: Some("paper.pdf".to_string()),
+            format: Some("PDF".to_string()),
+            location_label: None,
             page_count: 42,
             current_page: 9,
             has_selection: true,

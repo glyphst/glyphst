@@ -75,6 +75,7 @@ pub mod pdf_viewer {
             ZoomIn,
             ZoomOut,
             ResetZoom,
+            TogglePublisherStyles,
             Reload,
             Search,
             NextSearchResult,

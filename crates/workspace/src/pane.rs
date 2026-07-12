@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Result, bail};
+use glyphst_core::DocumentFormat;
 use gpui::{
     Along, AnyElement, App, AppContext, Axis, BorderStyle, Bounds, Context, CursorStyle,
     DispatchPhase, DragMoveEvent, Element, ElementId, Entity, EntityId, EventEmitter, FocusHandle,
@@ -149,7 +150,7 @@ impl Pane {
                 |path| match pane.create_document_tab(path, initial_position, window, cx) {
                     Ok(tab) => Some(tab),
                     Err(error) => {
-                        eprintln!("failed to open PDF: {error:#}");
+                        eprintln!("failed to open document: {error:#}");
                         None
                     }
                 },
@@ -481,6 +482,16 @@ impl Pane {
         }
     }
 
+    pub(crate) fn stage_all_tab_positions(&mut self, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            if let Tab::Document(pdf_view) = tab {
+                pdf_view.update(cx, |pdf_view, cx| {
+                    pdf_view.stage_current_history_position(cx);
+                });
+            }
+        }
+    }
+
     fn create_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Tab {
         let focus_handle = self.focus_handle.clone();
         let new_tab = cx.new(|cx| NewTab::new(focus_handle.clone(), cx));
@@ -506,7 +517,7 @@ impl Pane {
     ) -> Result<Tab> {
         let path = normalize_path(&path);
         if !path.exists() {
-            bail!("PDF no longer exists: {}", path.display());
+            bail!("document no longer exists: {}", path.display());
         }
         if !Self::is_supported_document_path(&path) {
             bail!("unsupported file type: {}", path.display());
@@ -522,12 +533,7 @@ impl Pane {
         };
         let initial_position = position
             .or_else(|| cx.global::<LibraryStore>().history_position(&path))
-            .unwrap_or(DocumentPosition {
-                scroll_x_doc: 0.0,
-                scroll_y_doc: 0.0,
-                zoom: behavior.default_zoom,
-                page: 1,
-            });
+            .unwrap_or_else(|| DocumentPosition::fixed(0.0, 0.0, behavior.default_zoom, 1));
         let annotations = PdfAnnotations {
             highlights: cx.global::<LibraryStore>().highlights_for(&path),
             notes: cx.global::<LibraryStore>().notes_for(&path),
@@ -543,6 +549,10 @@ impl Pane {
                     .target_language
                     .clone()
             });
+        let epub_preferences = cx
+            .global::<LibraryStore>()
+            .epub_reader_preferences(&path)
+            .unwrap_or_else(|| cx.global::<SettingsStore>().settings.reading);
         let mut pdf_view = PdfView::open(
             &path,
             self.focus_handle.clone(),
@@ -550,10 +560,11 @@ impl Pane {
             window_settings,
             theme,
             PdfOpenOptions {
-                initial_position: Some(initial_position),
+                initial_position: Some(initial_position.clone()),
                 sidebar_widths,
                 annotations,
                 target_language,
+                epub_preferences,
             },
         )?;
         let pdf_view = cx.new(|cx| {
@@ -617,7 +628,7 @@ impl Pane {
                     PdfViewEvent::OpenDocument { path, position } => {
                         cx.emit(PaneEvent::OpenDocument {
                             path: path.clone(),
-                            position: *position,
+                            position: position.clone(),
                             replace_active_new_tab: false,
                         });
                     }
@@ -696,7 +707,8 @@ impl Pane {
     fn is_supported_document_path(path: &Path) -> bool {
         path.extension()
             .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+            .and_then(DocumentFormat::from_extension)
+            .is_some()
     }
 
     fn tab_label(&self, tab_ix: usize, cx: &App) -> SharedString {

@@ -14,8 +14,8 @@ use glyphst_actions::{
         OpenSettings, OpenTranslationSplit, PrevSearchResult, PreviousHalfPage, PreviousPage,
         Reload, ResetZoom, ScrollLineDown, ScrollLineUp, Search, SelectAll, Toc, ToggleAiPanel,
         ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview, ToggleNotes,
-        TogglePinnedTranslation, TogglePresentationMode, ToggleThumbnailSidebar, ToggleToc,
-        ToggleTransparency, TranslateSelection, ZoomIn, ZoomOut,
+        TogglePinnedTranslation, TogglePresentationMode, TogglePublisherStyles,
+        ToggleThumbnailSidebar, ToggleToc, ToggleTransparency, TranslateSelection, ZoomIn, ZoomOut,
     },
     search::{SearchInputCancel, SearchInputConfirm, SearchInputPrevious},
     settings_panel::PanelClose,
@@ -1067,6 +1067,15 @@ fn command_specs() -> &'static [CommandSpec] {
                     &[],
                     true,
                 ),
+                spec::<TogglePublisherStyles>(
+                    "toggle-publisher-styles",
+                    "Toggle EPUB Publisher Styles",
+                    KeyBindingCategory::PdfView,
+                    &[],
+                    &[],
+                    &["publisher-styles"],
+                    true,
+                ),
                 spec::<Reload>(
                     "reload",
                     "Reload Document",
@@ -1548,7 +1557,7 @@ mod tests {
 
     #[test]
     fn categories_hide_raw_predicates() {
-        assert_eq!(KeyBindingCategory::PdfView.label(), "PDF View");
+        assert_eq!(KeyBindingCategory::PdfView.label(), "Document Reader");
         let predicate = KeyBindingCategory::PdfView.predicate();
         assert!(predicate.starts_with("PdfView && !GridOverview"));
         assert!(predicate.contains("!Search"));

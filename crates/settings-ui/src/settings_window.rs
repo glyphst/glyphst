@@ -179,6 +179,7 @@ enum SettingsSection {
     GeneralLanguage,
     GeneralZoom,
     GeneralScroll,
+    GeneralReading,
     GeneralKeymap,
     GeneralWindow,
     GeneralTabs,
@@ -241,10 +242,11 @@ fn visible_settings_nav_entries(ai_expanded: bool) -> impl Iterator<Item = Setti
         })
 }
 
-const GENERAL_SECTIONS: [SettingsSection; 5] = [
+const GENERAL_SECTIONS: [SettingsSection; 6] = [
     SettingsSection::GeneralLanguage,
     SettingsSection::GeneralZoom,
     SettingsSection::GeneralScroll,
+    SettingsSection::GeneralReading,
     SettingsSection::GeneralWindow,
     SettingsSection::GeneralTabs,
 ];
@@ -264,6 +266,7 @@ impl SettingsSection {
             Self::GeneralLanguage
             | Self::GeneralZoom
             | Self::GeneralScroll
+            | Self::GeneralReading
             | Self::GeneralWindow
             | Self::GeneralTabs => SettingsTab::General,
             Self::GeneralKeymap => SettingsTab::Keymap,
@@ -281,6 +284,7 @@ impl SettingsSection {
             Self::GeneralLanguage => crate::fl!("settings-section-language"),
             Self::GeneralZoom => crate::fl!("settings-section-zoom"),
             Self::GeneralScroll => crate::fl!("settings-section-scroll"),
+            Self::GeneralReading => crate::fl!("settings-section-reading"),
             Self::GeneralKeymap => crate::fl!("settings-section-keymap"),
             Self::GeneralWindow => crate::fl!("settings-section-window"),
             Self::GeneralTabs => crate::fl!("settings-section-tabs"),
@@ -1492,13 +1496,16 @@ impl SettingsWindow {
 
     fn number_row(
         &self,
-        label: &'static str,
+        label: impl Into<SharedString>,
         value: f32,
         decrement: impl FnOnce(&mut Settings) + Clone + 'static,
         increment: impl FnOnce(&mut Settings) + Clone + 'static,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let label = label.into();
+        let decrement_id = format!("number-row-{label}-decrement");
+        let increment_id = format!("number-row-{label}-increment");
         div()
             .flex()
             .flex_row()
@@ -1512,13 +1519,7 @@ impl SettingsWindow {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(self.small_button(
-                        format!("number-row-{label}-decrement"),
-                        "−",
-                        decrement,
-                        theme,
-                        cx,
-                    ))
+                    .child(self.small_button(decrement_id, "−", decrement, theme, cx))
                     .child(
                         div()
                             .w(px(72.0))
@@ -1526,24 +1527,20 @@ impl SettingsWindow {
                             .text_color(rgb(theme.text_muted))
                             .child(format!("{value:.2}")),
                     )
-                    .child(self.small_button(
-                        format!("number-row-{label}-increment"),
-                        "+",
-                        increment,
-                        theme,
-                        cx,
-                    )),
+                    .child(self.small_button(increment_id, "+", increment, theme, cx)),
             )
     }
 
     fn toggle_row(
         &self,
-        label: &'static str,
+        label: impl Into<SharedString>,
         enabled: bool,
         update: impl FnOnce(&mut Settings) + Clone + 'static,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let label = label.into();
+        let toggle_id = format!("settings-toggle-{label}");
         div()
             .flex()
             .flex_row()
@@ -1553,7 +1550,7 @@ impl SettingsWindow {
             .child(div().text_color(rgb(theme.text)).child(label))
             .child(
                 div()
-                    .id(format!("settings-toggle-{label}"))
+                    .id(toggle_id)
                     .h(px(28.0))
                     .min_w(px(56.0))
                     .px_2()
@@ -2994,6 +2991,57 @@ impl SettingsWindow {
                     settings.behavior.smooth_scrolling,
                     |settings| {
                         settings.behavior.smooth_scrolling = !settings.behavior.smooth_scrolling
+                    },
+                    theme,
+                    cx,
+                ))
+                .into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(Self::section_title(
+                    crate::fl!("settings-section-reading"),
+                    theme,
+                ))
+                .child(self.number_row(
+                    crate::fl!("settings-reading-font-size"),
+                    settings.reading.font_size,
+                    |settings| settings.reading.font_size -= 1.0,
+                    |settings| settings.reading.font_size += 1.0,
+                    theme,
+                    cx,
+                ))
+                .child(self.number_row(
+                    crate::fl!("settings-reading-line-height"),
+                    settings.reading.line_height,
+                    |settings| settings.reading.line_height -= NUMBER_STEP_SMALL,
+                    |settings| settings.reading.line_height += NUMBER_STEP_SMALL,
+                    theme,
+                    cx,
+                ))
+                .child(self.number_row(
+                    crate::fl!("settings-reading-margin"),
+                    settings.reading.horizontal_margin,
+                    |settings| settings.reading.horizontal_margin -= 4.0,
+                    |settings| settings.reading.horizontal_margin += 4.0,
+                    theme,
+                    cx,
+                ))
+                .child(self.number_row(
+                    crate::fl!("settings-reading-width"),
+                    settings.reading.max_content_width,
+                    |settings| settings.reading.max_content_width -= 40.0,
+                    |settings| settings.reading.max_content_width += 40.0,
+                    theme,
+                    cx,
+                ))
+                .child(self.toggle_row(
+                    crate::fl!("settings-reading-publisher-styles"),
+                    settings.reading.use_publisher_styles,
+                    |settings| {
+                        settings.reading.use_publisher_styles =
+                            !settings.reading.use_publisher_styles
                     },
                     theme,
                     cx,

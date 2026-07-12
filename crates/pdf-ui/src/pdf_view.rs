@@ -21,8 +21,8 @@ use crate::go_to_page::{GoToPagePrompt, GoToPagePromptDelegate};
 use crate::history::{HistoryPalette, HistoryPaletteDelegate};
 use crate::icons::{Icon, IconName};
 use crate::library::{
-    DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore, Note, SidebarWidths,
-    normalize_path,
+    DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore, Note,
+    SemanticTextRange, SidebarWidths, normalize_path,
 };
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
 use crate::notes::{NotePaletteEntry, NotesPalette, NotesPaletteDelegate};
@@ -39,6 +39,10 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use arboard::{Clipboard, ImageData};
 pub use glyphst_actions::pdf_viewer::*;
 use glyphst_ai_ui::{AiContext, AiContextProvider};
+use glyphst_core::{
+    DocumentCapabilities, DocumentFormat, DocumentLayout, EpubReaderPreferences, EpubTheme,
+    SemanticTextAnchor,
+};
 use glyphst_pdf::{DocumentSnapshot, ReloadCoordinator, ReloadDisposition};
 use glyphst_translation::{LanguageCode, TranslationRequest, TranslationService};
 use glyphst_translation_ui::target_language_items;
@@ -648,6 +652,7 @@ impl TranslationCardState {
 enum NoteTarget {
     New {
         rects: Vec<HighlightRect>,
+        semantic_range: Option<SemanticTextRange>,
         text: String,
     },
     Edit {
@@ -665,6 +670,7 @@ pub struct PdfOpenOptions {
     pub sidebar_widths: Option<SidebarWidths>,
     pub annotations: PdfAnnotations,
     pub target_language: String,
+    pub epub_preferences: EpubReaderPreferences,
 }
 
 pub enum PdfViewEvent {
@@ -762,6 +768,13 @@ enum PageSelectionSource {
     ThumbnailSidebar,
 }
 
+struct EpubStepperConfig {
+    label: SharedString,
+    value: String,
+    decrease_id: &'static str,
+    increase_id: &'static str,
+}
+
 impl Render for DraggedSidebar {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -772,6 +785,11 @@ pub struct PdfView {
     doc_id: u64,
     path: PathBuf,
     file_name: SharedString,
+    format: DocumentFormat,
+    capabilities: DocumentCapabilities,
+    document_layout: DocumentLayout,
+    epub_preferences: EpubReaderPreferences,
+    epub_style_panel_position: Option<GpuiPoint<Pixels>>,
     document_snapshot: Arc<DocumentSnapshot>,
     pages: Vec<PdfPage>,
     page_count: usize,
@@ -879,7 +897,9 @@ pub struct PdfView {
     loading: bool,
     loading_error: Option<String>,
     pending_initial_position: Option<DocumentPosition>,
+    pending_semantic_position: Option<DocumentPosition>,
     loading_task: Option<Task<()>>,
+    reflow_resize_task: Option<Task<()>>,
     file_watch_task: Option<Task<()>>,
     reload_task: Option<Task<()>>,
     reload_coordinator: ReloadCoordinator,
@@ -901,6 +921,8 @@ pub struct PdfView {
     _document: mupdf::Document,
 }
 
+pub type DocumentView = PdfView;
+
 #[derive(Clone)]
 struct PdfViewAiContextProvider {
     pdf_view: gpui::WeakEntity<PdfView>,
@@ -915,8 +937,31 @@ impl AiContextProvider for PdfViewAiContextProvider {
                     .file_name()
                     .and_then(|file_name| file_name.to_str())
                     .map(str::to_string),
-                page_count: pdf_view.page_count(),
-                current_page: pdf_view.current_page(),
+                document_format: Some(
+                    match pdf_view.format {
+                        DocumentFormat::Pdf => "PDF",
+                        DocumentFormat::Epub => "EPUB",
+                    }
+                    .to_string(),
+                ),
+                location_label: pdf_view.capabilities.reflow.then(|| {
+                    let progress = if pdf_view.max_scroll_y_doc() > 0.0 {
+                        pdf_view.target_scroll_y_doc / pdf_view.max_scroll_y_doc()
+                    } else {
+                        0.0
+                    };
+                    format!("Reading progress: {:.0}%", progress.clamp(0.0, 1.0) * 100.0)
+                }),
+                page_count: if pdf_view.capabilities.reflow {
+                    0
+                } else {
+                    pdf_view.page_count()
+                },
+                current_page: if pdf_view.capabilities.reflow {
+                    0
+                } else {
+                    pdf_view.current_page()
+                },
                 current_page_text: pdf_view.current_page_text(),
                 selected_text: pdf_view.selected_text(),
                 document_text: pdf_view.document_text(),
@@ -1001,11 +1046,11 @@ impl PdfView {
         focus_handle: FocusHandle,
         behavior: BehaviorSettings,
         window_settings: WindowSettings,
-        _theme: Theme,
+        theme: Theme,
         options: PdfOpenOptions,
     ) -> Result<Self> {
         let path = normalize_path(path.as_ref());
-        let file_name = path
+        let mut file_name: SharedString = path
             .file_name()
             .and_then(|name| name.to_str())
             .map(ToString::to_string)
@@ -1013,37 +1058,89 @@ impl PdfView {
             .into();
 
         let document_snapshot = Arc::new(DocumentSnapshot::read(&path)?);
-        let document = document_snapshot.open()?.into_inner();
+        let format = document_snapshot.format();
+        let epub_preferences = options.epub_preferences.sanitized();
+        let requested_layout = if format == DocumentFormat::Epub {
+            DocumentLayout::Reflow(epub_preferences.layout_for_viewport(720.0, 960.0))
+        } else {
+            DocumentLayout::Fixed
+        };
+        let opened_document = document_snapshot.open_with_layout(requested_layout)?;
+        let capabilities = opened_document.capabilities();
+        let document_layout = opened_document.layout();
+        if format == DocumentFormat::Epub
+            && let Ok(title) = opened_document.inner().metadata(mupdf::MetadataName::Title)
+            && !title.trim().is_empty()
+        {
+            file_name = title.into();
+        }
+        let document = opened_document.into_inner();
         let page_count = document.page_count()?;
         if page_count <= 0 {
-            bail!("PDF has no pages");
+            bail!("document has no readable content");
         }
         let outlines = match document.outlines() {
             Ok(outlines) => outlines,
             Err(error) => {
-                eprintln!("failed to read PDF table of contents: {error:#}");
+                eprintln!("failed to read document table of contents: {error:#}");
                 Vec::new()
             }
         };
         let toc = Self::flatten_toc(outlines, page_count as usize);
 
         let page_count = page_count as usize;
+        let provisional_pages = if capabilities.reflow {
+            document
+                .load_page((page_count / 2) as i32)
+                .and_then(|page| page.bounds())
+                .map_err(anyhow::Error::from)
+                .and_then(|bounds| {
+                    Self::provisional_reflow_pages(page_count, bounds, theme.page_gap)
+                })
+                .map(Some)
+                .unwrap_or_else(|error| {
+                    eprintln!("failed to build provisional EPUB pages: {error:#}");
+                    None
+                })
+        } else {
+            None
+        };
+        let loading = provisional_pages.is_none();
+        let (pages, max_page_width, content_height_doc, page_image_bounds) =
+            if let Some(loaded) = provisional_pages {
+                let page_image_bounds = (0..loaded.pages.len()).map(|_| None).collect();
+                (
+                    loaded.pages,
+                    loaded.max_page_width.max(1.0),
+                    loaded.content_height_doc,
+                    page_image_bounds,
+                )
+            } else {
+                (Vec::new(), 1.0, 0.0, Vec::new())
+            };
         let sidebar_widths = options
             .sidebar_widths
             .map(Self::sanitize_sidebar_widths)
             .unwrap_or_else(Self::default_sidebar_widths);
         let mut reload_coordinator = ReloadCoordinator::default();
-        reload_coordinator.begin_initial_load();
+        if loading {
+            reload_coordinator.begin_initial_load();
+        }
 
-        Ok(Self {
+        let mut view = Self {
             doc_id: next_document_id(),
             path,
             file_name,
+            format,
+            capabilities,
+            document_layout,
+            epub_preferences,
+            epub_style_panel_position: None,
             document_snapshot,
-            pages: Vec::new(),
+            pages,
             page_count,
-            max_page_width: 1.0,
-            content_height_doc: 0.0,
+            max_page_width,
+            content_height_doc,
             glyphs: Vec::new(),
             text_blocks: Vec::new(),
             text_lines: Vec::new(),
@@ -1081,7 +1178,7 @@ impl PdfView {
             hovered_note_position: None,
             pending_link: None,
             panning: None,
-            page_image_bounds: Vec::new(),
+            page_image_bounds,
             focus_handle,
             pending_renders: Vec::new(),
             zoom: behavior.default_zoom,
@@ -1143,10 +1240,12 @@ impl PdfView {
             transparency_enabled: window_settings.transparency_enabled_by_default(),
             window_settings,
             search: SearchState::default(),
-            loading: true,
+            loading,
             loading_error: None,
             pending_initial_position: options.initial_position,
+            pending_semantic_position: None,
             loading_task: None,
+            reflow_resize_task: None,
             file_watch_task: None,
             reload_task: None,
             reload_coordinator,
@@ -1165,7 +1264,13 @@ impl PdfView {
             context_menu_note: None,
             _image_clipboard: None,
             _document: document,
-        })
+        };
+        if !view.loading
+            && let Some(position) = view.pending_initial_position.take()
+        {
+            view.restore_position(position);
+        }
+        Ok(view)
     }
 
     pub fn register_cache_eviction(cx: &mut Context<Self>) {
@@ -1246,25 +1351,35 @@ impl PdfView {
 
     pub fn start_loading(&mut self, cx: &mut Context<Self>) {
         self.initialize_translation_dropdowns(cx);
-        if self.loading_task.is_some() || !self.loading {
+        if self.loading_task.is_some() {
             return;
         }
 
         self.start_file_watch(cx);
+        if !self.loading {
+            return;
+        }
 
         let snapshot = self.document_snapshot.clone();
+        let document_layout = self.document_layout;
         let page_count = self.page_count;
         let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
 
         self.loading_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    Self::load_page_chunk(&snapshot, 0, page_count)
-                        .map_err(|error| format!("{error:#}"))
+                    let (loaded_page_count, loaded) =
+                        Self::load_document_pages(&snapshot, document_layout, page_gap)
+                            .map_err(|error| format!("{error:#}"))?;
+                    if loaded_page_count != page_count {
+                        return Err(format!(
+                            "document page count changed while loading: expected {page_count}, got {loaded_page_count}"
+                        ));
+                    }
+                    Ok(loaded)
                 })
                 .await;
 
-            let result = result.and_then(|chunk| Self::merge_page_chunks(vec![chunk], page_gap));
             Self::finish_loading(this, cx, result);
         }));
     }
@@ -1335,6 +1450,7 @@ impl PdfView {
 
     fn start_reload(&mut self, generation: u64, cx: &mut Context<Self>) {
         let path = self.path.clone();
+        let document_layout = self.document_layout;
         let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
 
         self.reload_task = Some(cx.spawn(async move |this, cx| {
@@ -1342,7 +1458,7 @@ impl PdfView {
                 .background_spawn({
                     let path = path.clone();
                     async move {
-                        Self::load_reload_data(&path, page_gap)
+                        Self::load_reload_data(&path, document_layout, page_gap)
                             .map_err(|error| format!("{error:#}"))
                     }
                 })
@@ -1352,19 +1468,13 @@ impl PdfView {
         }));
     }
 
-    fn load_reload_data(path: &Path, page_gap: f32) -> Result<ReloadData> {
+    fn load_reload_data(
+        path: &Path,
+        document_layout: DocumentLayout,
+        page_gap: f32,
+    ) -> Result<ReloadData> {
         let snapshot = Arc::new(DocumentSnapshot::read(path)?);
-        let document = snapshot.open()?.into_inner();
-        let page_count = document.page_count()?;
-        if page_count <= 0 {
-            bail!("PDF has no pages");
-        }
-        let page_count = page_count as usize;
-        drop(document);
-
-        let chunk = Self::load_page_chunk(&snapshot, 0, page_count)?;
-        let loaded =
-            Self::merge_page_chunks(vec![chunk], page_gap).map_err(|error| anyhow!(error))?;
+        let (page_count, loaded) = Self::load_document_pages(&snapshot, document_layout, page_gap)?;
 
         Ok(ReloadData {
             snapshot,
@@ -1408,10 +1518,14 @@ impl PdfView {
         reload: ReloadData,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let document = reload.snapshot.open()?.into_inner();
+        let pending_position = self.pending_initial_position.take();
+        let document = reload
+            .snapshot
+            .open_with_layout(self.document_layout)?
+            .into_inner();
         let document_page_count = document.page_count()?;
         if document_page_count <= 0 {
-            bail!("PDF has no pages");
+            bail!("document has no readable content");
         }
         let document_page_count = document_page_count as usize;
         if document_page_count != reload.page_count {
@@ -1429,13 +1543,16 @@ impl PdfView {
                 Vec::new()
             }
         };
-        let diff_pending_pages = self
-            .page_image_bounds
-            .iter()
-            .enumerate()
-            .filter_map(|(page_idx, bounds)| bounds.as_ref().map(|_| page_idx))
-            .filter(|page_idx| *page_idx < reload.loaded.pages.len())
-            .collect::<BTreeSet<_>>();
+        let diff_pending_pages = if self.capabilities.reload_diff {
+            self.page_image_bounds
+                .iter()
+                .enumerate()
+                .filter_map(|(page_idx, bounds)| bounds.as_ref().map(|_| page_idx))
+                .filter(|page_idx| *page_idx < reload.loaded.pages.len())
+                .collect::<BTreeSet<_>>()
+        } else {
+            BTreeSet::new()
+        };
 
         self.evict_previous_document(cx);
         self.loading_task = None;
@@ -1482,7 +1599,6 @@ impl PdfView {
         self.loading = false;
         self.loading_error = None;
         self.text_indexing = false;
-        self.pending_initial_position = None;
         self.diff_pending_pages = diff_pending_pages;
         self.grid_overview_cursor = self.grid_overview_cursor.min(self.last_page_index());
         self.thumbnail_sidebar_current_page = self
@@ -1498,10 +1614,13 @@ impl PdfView {
         {
             self.context_menu_page = None;
         }
-        self.clamp_scroll();
+        if let Some(position) = pending_position {
+            self.restore_position(position);
+        } else {
+            self.clamp_scroll();
+        }
         self.refresh_notes_sidebar_entries();
         self.sync_search_bar(cx);
-        self.start_text_indexing(cx);
         cx.notify();
 
         Ok(())
@@ -1573,16 +1692,21 @@ impl PdfView {
         }
     }
 
-    fn load_page_chunk(
+    fn load_document_pages(
         snapshot: &DocumentSnapshot,
-        start_page_idx: usize,
-        end_page_idx: usize,
-    ) -> Result<PageChunk> {
-        let document = snapshot.open()?.into_inner();
-        let mut pages = Vec::with_capacity(end_page_idx.saturating_sub(start_page_idx));
+        document_layout: DocumentLayout,
+        page_gap: f32,
+    ) -> Result<(usize, LoadedPages)> {
+        let document = snapshot.open_with_layout(document_layout)?.into_inner();
+        let page_count = document.page_count()?;
+        if page_count <= 0 {
+            bail!("document has no readable content");
+        }
+        let page_count = page_count as usize;
+        let mut pages = Vec::with_capacity(page_count);
         let mut max_page_width = 0.0_f32;
 
-        for page_idx in start_page_idx..end_page_idx {
+        for page_idx in 0..page_count {
             let page = document.load_page(page_idx as i32)?;
             let page_bounds = page.bounds()?;
             let page_width = page_bounds.x1 - page_bounds.x0;
@@ -1599,11 +1723,46 @@ impl PdfView {
             max_page_width = max_page_width.max(page_width);
         }
 
-        Ok(PageChunk {
-            start_page_idx,
-            pages,
-            max_page_width,
-        })
+        let loaded = Self::merge_page_chunks(
+            vec![PageChunk {
+                start_page_idx: 0,
+                pages,
+                max_page_width,
+            }],
+            page_gap,
+        )
+        .map_err(anyhow::Error::msg)?;
+        Ok((page_count, loaded))
+    }
+
+    fn provisional_reflow_pages(
+        page_count: usize,
+        page_bounds: Rect,
+        page_gap: f32,
+    ) -> Result<LoadedPages> {
+        let page_width = page_bounds.x1 - page_bounds.x0;
+        let page_height = page_bounds.y1 - page_bounds.y0;
+        if page_width <= 0.0 || page_height <= 0.0 {
+            bail!("reflowable document page has invalid bounds");
+        }
+        let pages = (0..page_count)
+            .map(|_| PdfPage {
+                bounds: page_bounds,
+                width: page_width,
+                height: page_height,
+                offset_y: 0.0,
+                glyph_range: 0..0,
+            })
+            .collect();
+        Self::merge_page_chunks(
+            vec![PageChunk {
+                start_page_idx: 0,
+                pages,
+                max_page_width: page_width,
+            }],
+            page_gap,
+        )
+        .map_err(anyhow::Error::msg)
     }
 
     fn merge_page_chunks(
@@ -1671,7 +1830,6 @@ impl PdfView {
             self.clamp_scroll();
         }
 
-        self.start_text_indexing(cx);
         cx.notify();
     }
 
@@ -1692,6 +1850,7 @@ impl PdfView {
         self.sync_search_bar(cx);
 
         let snapshot = self.document_snapshot.clone();
+        let document_layout = self.document_layout;
         let page_count = self.pages.len();
         let page_bounds: Vec<Rect> = self.pages.iter().map(|page| page.bounds).collect();
 
@@ -1704,6 +1863,7 @@ impl PdfView {
                 .background_spawn(async move {
                     let chunk = Self::load_page_text_chunk(
                         &snapshot,
+                        document_layout,
                         0,
                         page_count,
                         page_count,
@@ -1719,12 +1879,13 @@ impl PdfView {
 
     fn load_page_text_chunk(
         snapshot: &DocumentSnapshot,
+        document_layout: DocumentLayout,
         start_page_idx: usize,
         end_page_idx: usize,
         page_count: usize,
         page_bounds: Vec<Rect>,
     ) -> Result<TextChunk> {
-        let document = snapshot.open()?.into_inner();
+        let document = snapshot.open_with_layout(document_layout)?.into_inner();
         let mut glyphs = Vec::new();
         let mut text_lines = Vec::new();
         let mut links = Vec::new();
@@ -1940,6 +2101,17 @@ impl PdfView {
             page.glyph_range = glyph_range;
         }
 
+        self.refresh_semantic_annotations();
+        self.refresh_notes_sidebar_entries();
+        if let Some(position) = self.pending_semantic_position.take() {
+            self.restore_position(position);
+        }
+        if self.capabilities.reflow {
+            self.record_current_history_position(cx);
+            if let Err(error) = cx.global::<LibraryStore>().save() {
+                eprintln!("failed to save document history: {error:#}");
+            }
+        }
         self.recompute_search();
         self.search.active = self.nearest_search_match_index();
         self.sync_search_bar(cx);
@@ -2697,7 +2869,12 @@ impl PdfView {
         let viewport_width = bounds.size.width.as_f32().max(1.0);
         self.viewport_width = viewport_width;
         self.viewport_height = bounds.size.height.as_f32().max(1.0);
-        self.base_scale = viewport_width / self.max_page_width.max(1.0);
+        self.schedule_reflow_for_viewport(viewport_width, cx);
+        self.base_scale = if self.capabilities.reflow {
+            1.0
+        } else {
+            viewport_width / self.max_page_width.max(1.0)
+        };
         if self.is_presentation_mode() {
             return Ok(self.presentation_paint_data(bounds, scale_factor, window, cx));
         }
@@ -2761,12 +2938,17 @@ impl PdfView {
         }
 
         let mut pages = Vec::with_capacity(visible_page_renders.len());
+        let mut has_rendered_page = false;
         for (_, image_bounds, key) in visible_page_renders {
             let image = self.cached_or_request_render(key, cx);
+            has_rendered_page |= image.is_some();
             pages.push(PaintPage {
                 bounds: image_bounds,
                 image,
             });
+        }
+        if has_rendered_page {
+            self.start_text_indexing(cx);
         }
 
         Ok(self.assemble_paint_data(pages, window))
@@ -2879,6 +3061,184 @@ impl PdfView {
         self.clamp_scroll();
     }
 
+    fn schedule_reflow_for_viewport(&mut self, viewport_width: f32, cx: &mut Context<Self>) {
+        if !self.capabilities.reflow {
+            return;
+        }
+        let desired_width = self
+            .epub_preferences
+            .layout_for_viewport(viewport_width, 960.0)
+            .width
+            .round();
+        let current_width = match self.document_layout {
+            DocumentLayout::Reflow(layout) => layout.width.round(),
+            DocumentLayout::Fixed => return,
+        };
+        if (desired_width - current_width).abs() < 1.0 {
+            return;
+        }
+
+        self.reflow_resize_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            _ = this.update(cx, |this, cx| {
+                this.reflow_resize_task = None;
+                this.reflow_to_viewport(desired_width, cx);
+            });
+        }));
+    }
+
+    fn reflow_to_viewport(&mut self, viewport_width: f32, cx: &mut Context<Self>) {
+        if !self.capabilities.reflow {
+            return;
+        }
+        let layout = self
+            .epub_preferences
+            .layout_for_viewport(viewport_width, 960.0);
+        if self.document_layout == DocumentLayout::Reflow(layout) {
+            return;
+        }
+        let position = self
+            .pending_semantic_position
+            .clone()
+            .or_else(|| self.pending_initial_position.clone())
+            .filter(DocumentPosition::is_reflow)
+            .unwrap_or_else(|| self.current_document_position());
+        self.pending_initial_position = Some(position);
+        self.document_layout = DocumentLayout::Reflow(layout);
+        self.request_reload(cx);
+    }
+
+    fn update_epub_preferences(
+        &mut self,
+        update: impl FnOnce(&mut EpubReaderPreferences),
+        cx: &mut Context<Self>,
+    ) {
+        if !self.capabilities.reflow {
+            return;
+        }
+        let mut preferences = self.epub_preferences;
+        update(&mut preferences);
+        preferences = preferences.sanitized();
+        if preferences == self.epub_preferences {
+            return;
+        }
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .set_epub_reader_preferences(&self.path, preferences)
+        {
+            eprintln!("failed to save EPUB reader preferences: {error:#}");
+            return;
+        }
+        self.epub_preferences = preferences;
+        let position = self
+            .pending_semantic_position
+            .clone()
+            .or_else(|| self.pending_initial_position.clone())
+            .filter(DocumentPosition::is_reflow)
+            .unwrap_or_else(|| self.current_document_position());
+        self.pending_initial_position = Some(position);
+        self.document_layout = DocumentLayout::Reflow(
+            preferences.layout_for_viewport(self.viewport_width.max(240.0), 960.0),
+        );
+        self.request_reload(cx);
+        cx.notify();
+    }
+
+    fn increase_epub_font_size(&mut self, cx: &mut Context<Self>) {
+        self.update_epub_preferences(|preferences| preferences.font_size += 1.0, cx);
+    }
+
+    fn decrease_epub_font_size(&mut self, cx: &mut Context<Self>) {
+        self.update_epub_preferences(|preferences| preferences.font_size -= 1.0, cx);
+    }
+
+    fn increase_epub_line_height(&mut self, cx: &mut Context<Self>) {
+        self.update_epub_preferences(|preferences| preferences.line_height += 0.1, cx);
+    }
+
+    fn decrease_epub_line_height(&mut self, cx: &mut Context<Self>) {
+        self.update_epub_preferences(|preferences| preferences.line_height -= 0.1, cx);
+    }
+
+    fn increase_epub_horizontal_margin(&mut self, cx: &mut Context<Self>) {
+        self.update_epub_preferences(|preferences| preferences.horizontal_margin += 4.0, cx);
+    }
+
+    fn decrease_epub_horizontal_margin(&mut self, cx: &mut Context<Self>) {
+        self.update_epub_preferences(|preferences| preferences.horizontal_margin -= 4.0, cx);
+    }
+
+    fn increase_epub_max_content_width(&mut self, cx: &mut Context<Self>) {
+        self.update_epub_preferences(|preferences| preferences.max_content_width += 40.0, cx);
+    }
+
+    fn decrease_epub_max_content_width(&mut self, cx: &mut Context<Self>) {
+        self.update_epub_preferences(|preferences| preferences.max_content_width -= 40.0, cx);
+    }
+
+    fn toggle_epub_publisher_styles(&mut self, cx: &mut Context<Self>) {
+        self.update_epub_preferences(
+            |preferences| preferences.use_publisher_styles = !preferences.use_publisher_styles,
+            cx,
+        );
+    }
+
+    fn set_epub_theme(&mut self, theme: EpubTheme, cx: &mut Context<Self>) {
+        self.update_epub_preferences(|preferences| preferences.theme = theme, cx);
+    }
+
+    fn reset_epub_preferences(&mut self, cx: &mut Context<Self>) {
+        if !self.capabilities.reflow {
+            return;
+        }
+        let preferences = cx.global::<SettingsStore>().settings.reading.sanitized();
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .clear_epub_reader_preferences(&self.path)
+        {
+            eprintln!("failed to clear EPUB reader preferences: {error:#}");
+            return;
+        }
+        if preferences == self.epub_preferences {
+            cx.notify();
+            return;
+        }
+        let position = self
+            .pending_semantic_position
+            .clone()
+            .or_else(|| self.pending_initial_position.clone())
+            .filter(DocumentPosition::is_reflow)
+            .unwrap_or_else(|| self.current_document_position());
+        self.pending_initial_position = Some(position);
+        self.epub_preferences = preferences;
+        self.document_layout = DocumentLayout::Reflow(
+            preferences.layout_for_viewport(self.viewport_width.max(240.0), 960.0),
+        );
+        self.request_reload(cx);
+        cx.notify();
+    }
+
+    fn toggle_epub_style_panel(&mut self, position: GpuiPoint<Pixels>, cx: &mut Context<Self>) {
+        if self.epub_style_panel_position.take().is_none() {
+            self.close_context_menu(cx);
+            self.close_grid_overview_actions(cx);
+            self.close_thumbnail_sidebar_actions(cx);
+            self.epub_style_panel_position = Some(point(
+                position.x,
+                position.y - px(FOOTBAR_BUTTON_HEIGHT / 2.0),
+            ));
+        }
+        cx.notify();
+    }
+
+    fn close_epub_style_panel(&mut self, cx: &mut Context<Self>) {
+        if self.epub_style_panel_position.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn clamp_scroll(&mut self) {
         let max_scroll_x = self.max_scroll_x_doc();
         self.scroll_x_doc = self.scroll_x_doc.clamp(-max_scroll_x, max_scroll_x);
@@ -2982,11 +3342,54 @@ impl PdfView {
         &self.path
     }
 
+    pub fn format(&self) -> DocumentFormat {
+        self.format
+    }
+
+    pub fn capabilities(&self) -> DocumentCapabilities {
+        self.capabilities
+    }
+
     pub fn file_name(&self) -> SharedString {
         self.file_name.clone()
     }
 
     fn restore_position(&mut self, position: DocumentPosition) {
+        if self.capabilities.reflow
+            && let Some(reflow) = position.semantic.as_ref()
+        {
+            self.zoom = position.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+            let progress_scroll = reflow.progress.clamp(0.0, 1.0) * self.max_scroll_y_doc();
+            if self.glyphs.is_empty() {
+                self.scroll_x_doc = 0.0;
+                self.scroll_y_doc = progress_scroll;
+                self.target_scroll_x_doc = 0.0;
+                self.target_scroll_y_doc = progress_scroll;
+                self.clamp_scroll();
+                self.pending_semantic_position = Some(position);
+                return;
+            }
+            if !reflow.anchor.is_empty()
+                && let Some(glyph_ix) = Self::resolve_semantic_anchor(&self.glyphs, &reflow.anchor)
+                && let Some(scroll_y) = self.scroll_y_for_glyph(glyph_ix)
+            {
+                self.scroll_x_doc = 0.0;
+                self.scroll_y_doc = scroll_y
+                    - reflow.viewport_fraction * (self.viewport_height / self.effective_scale());
+                self.target_scroll_x_doc = 0.0;
+                self.target_scroll_y_doc = self.scroll_y_doc;
+                self.clamp_scroll();
+                self.pending_semantic_position = None;
+                return;
+            }
+            self.scroll_x_doc = 0.0;
+            self.scroll_y_doc = progress_scroll;
+            self.target_scroll_x_doc = 0.0;
+            self.target_scroll_y_doc = progress_scroll;
+            self.clamp_scroll();
+            self.pending_semantic_position = None;
+            return;
+        }
         self.zoom = position.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         self.scroll_x_doc = position.scroll_x_doc;
         self.scroll_y_doc = position.scroll_y_doc;
@@ -2996,24 +3399,198 @@ impl PdfView {
     }
 
     pub fn current_document_position(&self) -> DocumentPosition {
-        if let Some(page_idx) = self.presentation_page_index() {
-            return DocumentPosition {
-                scroll_x_doc: 0.0,
-                scroll_y_doc: self.page_scroll_y_doc(page_idx),
-                zoom: self.zoom,
-                page: page_idx + 1,
+        if self.capabilities.reflow {
+            let page_idx = self.page_index_for_scroll_y(self.target_scroll_y_doc);
+            let progress = if self.max_scroll_y_doc() > 0.0 {
+                self.target_scroll_y_doc / self.max_scroll_y_doc()
+            } else {
+                0.0
             };
+            if self.glyphs.is_empty() {
+                return DocumentPosition::reflow(
+                    SemanticTextAnchor::empty(),
+                    0.0,
+                    progress,
+                    self.zoom,
+                    page_idx + 1,
+                );
+            }
+            let y_in_page = self
+                .pages
+                .get(page_idx)
+                .map(|page| (self.target_scroll_y_doc - page.offset_y).max(0.0))
+                .unwrap_or(0.0);
+            let glyph_ix = self
+                .pages
+                .get(page_idx)
+                .and_then(|page| {
+                    page.glyph_range
+                        .clone()
+                        .find(|glyph_ix| {
+                            self.glyphs
+                                .get(*glyph_ix)
+                                .is_some_and(|glyph| Self::glyph_line_rect(glyph).y1 >= y_in_page)
+                        })
+                        .or(Some(page.glyph_range.start))
+                })
+                .unwrap_or(0)
+                .min(self.glyphs.len().saturating_sub(1));
+            let anchor = Self::semantic_anchor_for_glyph(&self.glyphs, glyph_ix);
+            let viewport_height_doc = self.viewport_height / self.effective_scale();
+            let viewport_fraction = if viewport_height_doc > 0.0 {
+                self.scroll_y_for_glyph(glyph_ix)
+                    .map(|anchor_y| {
+                        ((anchor_y - self.target_scroll_y_doc) / viewport_height_doc)
+                            .clamp(0.0, 1.0)
+                    })
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            return DocumentPosition::reflow(
+                anchor,
+                viewport_fraction,
+                progress,
+                self.zoom,
+                page_idx + 1,
+            );
+        }
+        if let Some(page_idx) = self.presentation_page_index() {
+            return DocumentPosition::fixed(
+                0.0,
+                self.page_scroll_y_doc(page_idx),
+                self.zoom,
+                page_idx + 1,
+            );
         }
 
-        DocumentPosition {
-            scroll_x_doc: self.target_scroll_x_doc,
-            scroll_y_doc: self.target_scroll_y_doc,
-            zoom: self.zoom,
-            page: self.page_index_for_scroll_y(self.target_scroll_y_doc) + 1,
+        DocumentPosition::fixed(
+            self.target_scroll_x_doc,
+            self.target_scroll_y_doc,
+            self.zoom,
+            self.page_index_for_scroll_y(self.target_scroll_y_doc) + 1,
+        )
+    }
+
+    fn semantic_anchor_for_glyph(glyphs: &[Glyph], glyph_ix: usize) -> SemanticTextAnchor {
+        const QUOTE_LEN: usize = 32;
+        const CONTEXT_LEN: usize = 24;
+
+        let glyph_ix = glyph_ix.min(glyphs.len().saturating_sub(1));
+        let quote_end = (glyph_ix + QUOTE_LEN).min(glyphs.len());
+        let prefix_start = glyph_ix.saturating_sub(CONTEXT_LEN);
+        let suffix_end = (quote_end + CONTEXT_LEN).min(glyphs.len());
+        SemanticTextAnchor::new(
+            glyph_ix,
+            glyphs[glyph_ix..quote_end]
+                .iter()
+                .map(|glyph| glyph.c)
+                .collect::<String>(),
+            glyphs[prefix_start..glyph_ix]
+                .iter()
+                .map(|glyph| glyph.c)
+                .collect::<String>(),
+            glyphs[quote_end..suffix_end]
+                .iter()
+                .map(|glyph| glyph.c)
+                .collect::<String>(),
+        )
+    }
+
+    fn resolve_semantic_anchor(glyphs: &[Glyph], anchor: &SemanticTextAnchor) -> Option<usize> {
+        if glyphs.is_empty() {
+            return None;
+        }
+        let quote = anchor.quote.chars().collect::<Vec<_>>();
+        let candidate = usize::try_from(anchor.logical_offset).ok()?;
+        if candidate < glyphs.len() && Self::glyph_chars_match(glyphs, candidate, &quote) {
+            return Some(candidate);
+        }
+        if quote.is_empty() {
+            return Some(candidate.min(glyphs.len() - 1));
+        }
+
+        let mut fallback = None;
+        for start in 0..glyphs.len() {
+            if !Self::glyph_chars_match(glyphs, start, &quote) {
+                continue;
+            }
+            fallback.get_or_insert(start);
+            let prefix_start = start.saturating_sub(anchor.prefix.chars().count());
+            let prefix = glyphs[prefix_start..start]
+                .iter()
+                .map(|glyph| glyph.c)
+                .collect::<String>();
+            let suffix_start = (start + quote.len()).min(glyphs.len());
+            let suffix_end = (suffix_start + anchor.suffix.chars().count()).min(glyphs.len());
+            let suffix = glyphs[suffix_start..suffix_end]
+                .iter()
+                .map(|glyph| glyph.c)
+                .collect::<String>();
+            if prefix.ends_with(&anchor.prefix) && suffix.starts_with(&anchor.suffix) {
+                return Some(start);
+            }
+        }
+        fallback.or_else(|| Some(candidate.min(glyphs.len() - 1)))
+    }
+
+    fn glyph_chars_match(glyphs: &[Glyph], start: usize, expected: &[char]) -> bool {
+        start + expected.len() <= glyphs.len()
+            && glyphs[start..start + expected.len()]
+                .iter()
+                .map(|glyph| glyph.c)
+                .eq(expected.iter().copied())
+    }
+
+    fn scroll_y_for_glyph(&self, glyph_ix: usize) -> Option<f32> {
+        let glyph = self.glyphs.get(glyph_ix)?;
+        let page = self.pages.get(glyph.page_idx)?;
+        Some(page.offset_y + Self::glyph_line_rect(glyph).y0)
+    }
+
+    fn semantic_range_for_selection(&self, start: usize, end: usize) -> SemanticTextRange {
+        SemanticTextRange {
+            start: Self::semantic_anchor_for_glyph(&self.glyphs, start),
+            end: Self::semantic_anchor_for_glyph(&self.glyphs, end),
+        }
+    }
+
+    fn refresh_semantic_annotations(&mut self) {
+        let highlight_ranges = self
+            .highlights
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, highlight)| {
+                let range = highlight.semantic_range.as_ref()?;
+                let start = Self::resolve_semantic_anchor(&self.glyphs, &range.start)?;
+                let end = Self::resolve_semantic_anchor(&self.glyphs, &range.end)?;
+                Some((ix, start.min(end)..start.max(end).saturating_add(1)))
+            })
+            .collect::<Vec<_>>();
+        for (ix, range) in highlight_ranges {
+            self.highlights[ix].rects = self.highlight_rects_for_range(range);
+        }
+
+        let note_ranges = self
+            .notes
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, note)| {
+                let range = note.semantic_range.as_ref()?;
+                let start = Self::resolve_semantic_anchor(&self.glyphs, &range.start)?;
+                let end = Self::resolve_semantic_anchor(&self.glyphs, &range.end)?;
+                Some((ix, start.min(end)..start.max(end).saturating_add(1)))
+            })
+            .collect::<Vec<_>>();
+        for (ix, range) in note_ranges {
+            self.notes[ix].rects = self.highlight_rects_for_range(range);
         }
     }
 
     pub fn set_translated_view(&mut self, translated: bool, cx: &mut Context<Self>) {
+        if translated && !self.capabilities.translated_document {
+            return;
+        }
         self.view_language = if translated {
             PdfViewLanguage::Translated
         } else {
@@ -3105,18 +3682,33 @@ impl PdfView {
     }
 
     pub fn flush_current_history_position(&mut self, cx: &mut Context<Self>) {
-        self.position_save_task.take();
-        if self.loading || self.loading_error.is_some() {
-            return;
-        }
-
-        self.record_current_history_position(cx);
+        self.stage_current_history_position(cx);
         if let Err(error) = cx.global::<LibraryStore>().save() {
-            eprintln!("failed to save PDF history: {error:#}");
+            eprintln!("failed to save document history: {error:#}");
         }
     }
 
+    pub fn stage_current_history_position(&mut self, cx: &mut Context<Self>) {
+        self.position_save_task.take();
+        if self.loading_error.is_some() {
+            return;
+        }
+
+        let position = if self.loading {
+            self.pending_semantic_position
+                .clone()
+                .or_else(|| self.pending_initial_position.clone())
+                .unwrap_or_else(|| self.current_document_position())
+        } else {
+            self.current_document_position()
+        };
+        cx.global_mut::<LibraryStore>()
+            .record_history(&self.path, position);
+    }
+
     fn schedule_position_save(&mut self, cx: &mut Context<Self>) {
+        self.pending_semantic_position = None;
+        self.pending_initial_position = None;
         self.record_current_history_position(cx);
         self.position_save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -3124,7 +3716,7 @@ impl PdfView {
                 .await;
             _ = this.update(cx, |_, cx| {
                 if let Err(error) = cx.global::<LibraryStore>().save() {
-                    eprintln!("failed to save PDF history: {error:#}");
+                    eprintln!("failed to save document history: {error:#}");
                 }
             });
         }));
@@ -5158,10 +5750,20 @@ impl PdfView {
             return;
         }
 
-        match cx
-            .global_mut::<LibraryStore>()
-            .add_highlight(&self.path, color, rects, text, "")
-        {
+        let result = if self.capabilities.reflow {
+            cx.global_mut::<LibraryStore>().add_reflow_highlight(
+                &self.path,
+                color,
+                self.semantic_range_for_selection(start, end),
+                rects,
+                text,
+                "",
+            )
+        } else {
+            cx.global_mut::<LibraryStore>()
+                .add_highlight(&self.path, color, rects, text, "")
+        };
+        match result {
             Ok(highlight) => {
                 self.selected_highlight = Some(highlight.id);
                 self.highlights.push(highlight);
@@ -5231,7 +5833,14 @@ impl PdfView {
         self.open_note_editor(
             "".into(),
             HighlightColor::Yellow,
-            NoteTarget::New { rects, text },
+            NoteTarget::New {
+                rects,
+                semantic_range: self
+                    .capabilities
+                    .reflow
+                    .then(|| self.semantic_range_for_selection(start, end)),
+                text,
+            },
             window,
             cx,
         );
@@ -5303,11 +5912,25 @@ impl PdfView {
         };
 
         match target {
-            NoteTarget::New { rects, text } => {
-                match cx
-                    .global_mut::<LibraryStore>()
-                    .add_note(&self.path, color, rects, text, body)
-                {
+            NoteTarget::New {
+                rects,
+                semantic_range,
+                text,
+            } => {
+                let result = if let Some(semantic_range) = semantic_range {
+                    cx.global_mut::<LibraryStore>().add_reflow_note(
+                        &self.path,
+                        color,
+                        semantic_range,
+                        rects,
+                        text,
+                        body,
+                    )
+                } else {
+                    cx.global_mut::<LibraryStore>()
+                        .add_note(&self.path, color, rects, text, body)
+                };
+                match result {
                     Ok(note) => {
                         let note_id = note.id;
                         self.notes.push(note);
@@ -5798,6 +6421,10 @@ impl PdfView {
         self.pages.len()
     }
 
+    fn page_counter_label(current_page: usize, page_count: usize) -> String {
+        format!("{current_page} / {page_count}")
+    }
+
     fn last_page_index(&self) -> usize {
         self.pages.len().saturating_sub(1)
     }
@@ -6108,6 +6735,7 @@ impl PdfView {
         self.close_bookmark_palette(window, cx);
         self.close_bookmark_prompt(window, cx);
         self.close_go_to_page_prompt(window, cx);
+        self.close_epub_style_panel(cx);
     }
 
     fn apply_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -6178,6 +6806,9 @@ impl PdfView {
     }
 
     fn toggle_presentation_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.capabilities.presentation {
+            return;
+        }
         if let Some(page_idx) = self.presentation_page.take() {
             let scroll_y_doc = self.page_scroll_y_doc(page_idx);
             self.set_scroll_doc(self.scroll_x_doc, scroll_y_doc, cx);
@@ -6386,10 +7017,16 @@ impl PdfView {
     }
 
     fn toggle_thumbnail_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.capabilities.page_overview {
+            return;
+        }
         self.set_thumbnail_sidebar_open(!self.thumbnail_sidebar_open, window, cx);
     }
 
     fn toggle_grid_overview(&mut self, cx: &mut Context<Self>) {
+        if !self.capabilities.page_overview {
+            return;
+        }
         self.set_grid_overview_open(!self.grid_overview_open, cx);
     }
 
@@ -6532,6 +7169,9 @@ impl PdfView {
     }
 
     fn toggle_go_to_page_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.capabilities.reflow {
+            return;
+        }
         if self.go_to_page_prompt.is_some() {
             self.close_go_to_page_prompt(window, cx);
             return;
@@ -6661,6 +7301,12 @@ impl PdfView {
         Self::push_jump_position(&mut self.jump_back, current_position);
         self.jump_forward.clear();
         self.position_from_search = false;
+        if self.capabilities.reflow && position.is_reflow() {
+            self.restore_position(position);
+            self.schedule_position_save(cx);
+            cx.notify();
+            return;
+        }
         self.set_zoom(position.zoom, cx);
         self.set_scroll_doc(position.scroll_x_doc, position.scroll_y_doc, cx);
     }
@@ -7342,6 +7988,7 @@ impl PdfView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
+                    this.close_epub_style_panel(cx);
                     handler(this, window, cx);
                     cx.stop_propagation();
                 }),
@@ -7418,6 +8065,300 @@ impl PdfView {
             |this, window, cx| this.toggle_ai_panel(window, cx),
             cx,
         )
+    }
+
+    fn render_epub_control(
+        id: &'static str,
+        label: impl Into<SharedString>,
+        active: bool,
+        theme: Theme,
+        handler: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .h(ui_rems(FOOTBAR_BUTTON_HEIGHT))
+            .min_w(px(24.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.0))
+            .bg(if active {
+                rgb(theme.element_selected)
+            } else {
+                rgba(0x00000000)
+            })
+            .text_color(rgb(if active {
+                theme.accent
+            } else {
+                theme.footer_text
+            }))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    handler(this, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label.into())
+    }
+
+    fn render_epub_stepper(
+        config: EpubStepperConfig,
+        decrease: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        increase: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(div().text_color(rgb(theme.text)).child(config.label))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(Self::render_epub_control(
+                        config.decrease_id,
+                        "−",
+                        false,
+                        theme,
+                        decrease,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .min_w(px(54.0))
+                            .text_center()
+                            .text_color(rgb(theme.text_muted))
+                            .child(config.value),
+                    )
+                    .child(Self::render_epub_control(
+                        config.increase_id,
+                        "+",
+                        false,
+                        theme,
+                        increase,
+                        cx,
+                    )),
+            )
+    }
+
+    fn render_epub_theme_option(
+        id: &'static str,
+        label: SharedString,
+        option: EpubTheme,
+        selected: EpubTheme,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        Self::render_epub_control(
+            id,
+            label,
+            option == selected,
+            theme,
+            move |this, cx| this.set_epub_theme(option, cx),
+            cx,
+        )
+    }
+
+    fn render_epub_style_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.epub_style_panel_position.is_some();
+        div()
+            .id("footbar-epub-style")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .h(ui_rems(FOOTBAR_BUTTON_HEIGHT))
+            .px_2()
+            .rounded(px(4.0))
+            .text_color(rgb(if open {
+                theme.accent
+            } else {
+                theme.footer_text
+            }))
+            .bg(if open {
+                rgb(theme.element_selected)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.toggle_epub_style_panel(event.position, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(Icon::new(
+                IconName::Settings,
+                ui_rems(FOOTBAR_ICON_SIZE),
+                rgb(if open {
+                    theme.accent
+                } else {
+                    theme.footer_text
+                }),
+            ))
+    }
+
+    fn render_epub_style_panel(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let preferences = self.epub_preferences;
+        div()
+            .id("epub-style-panel")
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(340.0))
+            .p_3()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .rounded(px(6.0))
+            .bg(rgb(theme.surface_background))
+            .text_size(ui_rems(12.0))
+            .text_color(rgb(theme.text))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .text_size(ui_rems(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(crate::fl!("epub-appearance-title")),
+            )
+            .child(Self::render_epub_stepper(
+                EpubStepperConfig {
+                    label: crate::fl!("epub-font-size").into(),
+                    value: format!("{:.0}", preferences.font_size),
+                    decrease_id: "epub-font-decrease",
+                    increase_id: "epub-font-increase",
+                },
+                |this, cx| this.decrease_epub_font_size(cx),
+                |this, cx| this.increase_epub_font_size(cx),
+                theme,
+                cx,
+            ))
+            .child(Self::render_epub_stepper(
+                EpubStepperConfig {
+                    label: crate::fl!("epub-line-height").into(),
+                    value: format!("{:.1}", preferences.line_height),
+                    decrease_id: "epub-line-decrease",
+                    increase_id: "epub-line-increase",
+                },
+                |this, cx| this.decrease_epub_line_height(cx),
+                |this, cx| this.increase_epub_line_height(cx),
+                theme,
+                cx,
+            ))
+            .child(Self::render_epub_stepper(
+                EpubStepperConfig {
+                    label: crate::fl!("epub-horizontal-margin").into(),
+                    value: format!("{:.0} px", preferences.horizontal_margin),
+                    decrease_id: "epub-margin-decrease",
+                    increase_id: "epub-margin-increase",
+                },
+                |this, cx| this.decrease_epub_horizontal_margin(cx),
+                |this, cx| this.increase_epub_horizontal_margin(cx),
+                theme,
+                cx,
+            ))
+            .child(Self::render_epub_stepper(
+                EpubStepperConfig {
+                    label: crate::fl!("epub-max-content-width").into(),
+                    value: format!("{:.0} px", preferences.max_content_width),
+                    decrease_id: "epub-width-decrease",
+                    increase_id: "epub-width-increase",
+                },
+                |this, cx| this.decrease_epub_max_content_width(cx),
+                |this, cx| this.increase_epub_max_content_width(cx),
+                theme,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_color(rgb(theme.text))
+                            .child(crate::fl!("epub-theme")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(Self::render_epub_theme_option(
+                                "epub-theme-light",
+                                crate::fl!("epub-theme-light").into(),
+                                EpubTheme::Light,
+                                preferences.theme,
+                                theme,
+                                cx,
+                            ))
+                            .child(Self::render_epub_theme_option(
+                                "epub-theme-sepia",
+                                crate::fl!("epub-theme-sepia").into(),
+                                EpubTheme::Sepia,
+                                preferences.theme,
+                                theme,
+                                cx,
+                            ))
+                            .child(Self::render_epub_theme_option(
+                                "epub-theme-dark",
+                                crate::fl!("epub-theme-dark").into(),
+                                EpubTheme::Dark,
+                                preferences.theme,
+                                theme,
+                                cx,
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_color(rgb(theme.text))
+                            .child(crate::fl!("epub-publisher-styles")),
+                    )
+                    .child(Self::render_epub_control(
+                        "epub-publisher-styles",
+                        if preferences.use_publisher_styles {
+                            crate::fl!("epub-enabled")
+                        } else {
+                            crate::fl!("epub-disabled")
+                        },
+                        preferences.use_publisher_styles,
+                        theme,
+                        |this, cx| this.toggle_epub_publisher_styles(cx),
+                        cx,
+                    )),
+            )
+            .child(Self::render_epub_control(
+                "epub-reset-defaults",
+                crate::fl!("epub-reset-global-defaults"),
+                false,
+                theme,
+                |this, cx| this.reset_epub_preferences(cx),
+                cx,
+            ))
     }
 
     fn selected_page_indices(&self, source: PageSelectionSource) -> Vec<usize> {
@@ -7744,7 +8685,8 @@ impl PdfView {
             .iter()
             .filter(|page_idx| **page_idx < page_count)
             .count();
-        let selecting = self.thumbnail_sidebar_selecting;
+        let page_export = self.capabilities.page_export;
+        let selecting = page_export && self.thumbnail_sidebar_selecting;
         let zoom = Self::thumbnail_sidebar_zoom(self.thumbnail_sidebar_width);
         let row_height = Self::thumbnail_sidebar_row_height(self.thumbnail_sidebar_width);
         let thumbnail_max_width = Self::grid_overview_thumbnail_max_width(zoom);
@@ -7778,43 +8720,45 @@ impl PdfView {
         } else {
             crate::fl!("cancel")
         };
-        if selecting && selected_count > 0 {
-            toolbar_actions = toolbar_actions
-                .child(Self::grid_overview_toolbar_button(
-                    "thumbnail-sidebar-actions",
-                    actions_label,
-                    theme,
-                    |this, event, _, cx| {
-                        this.toggle_thumbnail_sidebar_actions(
-                            point(event.position.x, event.position.y),
-                            cx,
-                        );
-                    },
-                    cx,
-                ))
-                .child(Self::grid_overview_toolbar_button(
+        if page_export {
+            if selecting && selected_count > 0 {
+                toolbar_actions = toolbar_actions
+                    .child(Self::grid_overview_toolbar_button(
+                        "thumbnail-sidebar-actions",
+                        actions_label,
+                        theme,
+                        |this, event, _, cx| {
+                            this.toggle_thumbnail_sidebar_actions(
+                                point(event.position.x, event.position.y),
+                                cx,
+                            );
+                        },
+                        cx,
+                    ))
+                    .child(Self::grid_overview_toolbar_button(
+                        "thumbnail-sidebar-cancel",
+                        cancel_label,
+                        theme,
+                        |this, _, _, cx| this.cancel_thumbnail_sidebar_selection(cx),
+                        cx,
+                    ));
+            } else if selecting {
+                toolbar_actions = toolbar_actions.child(Self::grid_overview_toolbar_button(
                     "thumbnail-sidebar-cancel",
                     cancel_label,
                     theme,
                     |this, _, _, cx| this.cancel_thumbnail_sidebar_selection(cx),
                     cx,
                 ));
-        } else if selecting {
-            toolbar_actions = toolbar_actions.child(Self::grid_overview_toolbar_button(
-                "thumbnail-sidebar-cancel",
-                cancel_label,
-                theme,
-                |this, _, _, cx| this.cancel_thumbnail_sidebar_selection(cx),
-                cx,
-            ));
-        } else {
-            toolbar_actions = toolbar_actions.child(Self::grid_overview_toolbar_button(
-                "thumbnail-sidebar-select",
-                crate::fl!("select"),
-                theme,
-                |this, _, _, cx| this.enter_thumbnail_sidebar_selection(cx),
-                cx,
-            ));
+            } else {
+                toolbar_actions = toolbar_actions.child(Self::grid_overview_toolbar_button(
+                    "thumbnail-sidebar-select",
+                    crate::fl!("select"),
+                    theme,
+                    |this, _, _, cx| this.enter_thumbnail_sidebar_selection(cx),
+                    cx,
+                ));
+            }
         }
 
         let header_end = div()
@@ -8132,6 +9076,7 @@ impl PdfView {
         let actions_position = self.grid_overview_actions_position;
         let scroll_handle = self.grid_overview_scroll.clone();
         let measure_view = cx.entity();
+        let page_export = self.capabilities.page_export;
 
         let measure = canvas(
             {
@@ -8207,45 +9152,53 @@ impl PdfView {
                     .child(
                         {
                             let mut toolbar = div().flex().items_center().gap_2();
-                            if self.grid_overview_selecting
-                                && !self.grid_overview_selection.is_empty()
-                            {
-                                toolbar = toolbar
-                                    .child(Self::grid_overview_toolbar_button(
-                                        "grid-overview-actions",
-                                        crate::fl!("actions-menu"),
+                            if page_export {
+                                if self.grid_overview_selecting
+                                    && !self.grid_overview_selection.is_empty()
+                                {
+                                    toolbar = toolbar
+                                        .child(Self::grid_overview_toolbar_button(
+                                            "grid-overview-actions",
+                                            crate::fl!("actions-menu"),
+                                            theme,
+                                            |this, event, _, cx| {
+                                                this.toggle_grid_overview_actions(
+                                                    point(event.position.x, event.position.y),
+                                                    cx,
+                                                );
+                                            },
+                                            cx,
+                                        ))
+                                        .child(Self::grid_overview_toolbar_button(
+                                            "grid-overview-cancel",
+                                            crate::fl!("cancel-selection"),
+                                            theme,
+                                            |this, _, _, cx| {
+                                                this.cancel_grid_overview_selection(cx)
+                                            },
+                                            cx,
+                                        ));
+                                } else if self.grid_overview_selecting {
+                                    toolbar = toolbar.child(Self::grid_overview_toolbar_button(
+                                        "grid-overview-cancel",
+                                        crate::fl!("cancel"),
                                         theme,
-                                        |this, event, _, cx| {
-                                            this.toggle_grid_overview_actions(
-                                                point(event.position.x, event.position.y),
-                                                cx,
-                                            );
+                                        |this, _, _, cx| {
+                                            this.cancel_grid_overview_selection(cx)
                                         },
                                         cx,
-                                    ))
-                                    .child(Self::grid_overview_toolbar_button(
-                                        "grid-overview-cancel",
-                                        crate::fl!("cancel-selection"),
+                                    ));
+                                } else {
+                                    toolbar = toolbar.child(Self::grid_overview_toolbar_button(
+                                        "grid-overview-select",
+                                        crate::fl!("select"),
                                         theme,
-                                        |this, _, _, cx| this.cancel_grid_overview_selection(cx),
+                                        |this, _, _, cx| {
+                                            this.enter_grid_overview_selection(cx)
+                                        },
                                         cx,
                                     ));
-                            } else if self.grid_overview_selecting {
-                                toolbar = toolbar.child(Self::grid_overview_toolbar_button(
-                                    "grid-overview-cancel",
-                                    crate::fl!("cancel"),
-                                    theme,
-                                    |this, _, _, cx| this.cancel_grid_overview_selection(cx),
-                                    cx,
-                                ));
-                            } else {
-                                toolbar = toolbar.child(Self::grid_overview_toolbar_button(
-                                    "grid-overview-select",
-                                    crate::fl!("select"),
-                                    theme,
-                                    |this, _, _, cx| this.enter_grid_overview_selection(cx),
-                                    cx,
-                                ));
+                                }
                             }
                             toolbar
                         },
@@ -9129,8 +10082,13 @@ impl PdfView {
                     .gap_1()
                     .child(self.render_toc_button(theme, cx))
                     .child(self.render_notes_button(theme, cx))
-                    .child(self.render_thumbnail_sidebar_button(theme, cx))
-                    .child(self.render_grid_overview_button(theme, cx)),
+                    .when(self.capabilities.page_overview, |this| {
+                        this.child(self.render_thumbnail_sidebar_button(theme, cx))
+                            .child(self.render_grid_overview_button(theme, cx))
+                    })
+                    .when(self.capabilities.reflow, |this| {
+                        this.child(self.render_epub_style_button(theme, cx))
+                    }),
             )
             .child(
                 div()
@@ -9138,7 +10096,10 @@ impl PdfView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(format!("{} / {}", self.current_page(), self.pages.len()))
+                    .child(Self::page_counter_label(
+                        self.current_page(),
+                        self.pages.len(),
+                    ))
                     .child(self.render_ai_button(theme, cx)),
             )
             .into_any_element()
@@ -9436,7 +10397,8 @@ impl Render for PdfView {
                     .anchor(Anchor::TopLeft)
                     .child(Self::render_context_menu(
                         ContextMenuState {
-                            has_page: self.context_menu_page.is_some(),
+                            has_page: self.capabilities.page_export
+                                && self.context_menu_page.is_some(),
                             has_image: !self.grid_overview_open
                                 && self.context_menu_image.is_some(),
                             has_selection: context_menu_has_selection,
@@ -9450,6 +10412,16 @@ impl Render for PdfView {
                     )),
             )
             .with_priority(1)
+        });
+        let epub_style_panel = self.epub_style_panel_position.map(|position| {
+            deferred(
+                anchored()
+                    .snap_to_window_with_margin(px(8.0))
+                    .position(position)
+                    .anchor(Anchor::BottomLeft)
+                    .child(self.render_epub_style_panel(theme, cx)),
+            )
+            .with_priority(3)
         });
         let note_popup = if self.context_menu_position.is_none() && self.note_editor.is_none() {
             self.hovered_note
@@ -9506,6 +10478,7 @@ impl Render for PdfView {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.close_translation_popup(cx);
+                    this.close_epub_style_panel(cx);
                 }),
             )
             .when(
@@ -9545,8 +10518,10 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &TogglePinnedTranslation, _, cx| {
                 this.toggle_pinned_translation(cx);
             }))
-            .on_action(cx.listener(|_, _: &OpenTranslationSplit, _, cx| {
-                cx.emit(PdfViewEvent::OpenTranslationSplit);
+            .on_action(cx.listener(|this, _: &OpenTranslationSplit, _, cx| {
+                if this.capabilities.translation_split {
+                    cx.emit(PdfViewEvent::OpenTranslationSplit);
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
                 this.select_all();
@@ -9666,6 +10641,11 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &AddBookmark, window, cx| {
                 this.toggle_bookmark_prompt(window, cx);
             }))
+            .when(self.capabilities.publisher_styles, |this| {
+                this.on_action(cx.listener(|this, _: &TogglePublisherStyles, _, cx| {
+                    this.toggle_epub_publisher_styles(cx);
+                }))
+            })
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 this.handle_scroll_wheel(event, cx);
             }))
@@ -10160,6 +11140,7 @@ impl Render for PdfView {
             })
             .children(note_popup)
             .children(context_menu)
+            .children(epub_style_panel)
             .into_any_element()
     }
 }
@@ -10169,6 +11150,22 @@ mod tests {
     use super::{Glyph, PdfView, TextChunk, TextLine};
     use gpui::{Modifiers, ScrollWheelEvent};
     use mupdf::{Point, Quad, Rect};
+
+    #[test]
+    fn page_counter_uses_generated_pages_for_any_document_format() {
+        assert_eq!(PdfView::page_counter_label(3, 12), "3 / 12");
+    }
+
+    #[test]
+    fn provisional_reflow_pages_use_uniform_sample_bounds() {
+        let loaded =
+            PdfView::provisional_reflow_pages(3, Rect::new(0.0, 0.0, 320.0, 480.0), 12.0).unwrap();
+        assert_eq!(loaded.pages.len(), 3);
+        assert_eq!(loaded.pages[0].offset_y, 0.0);
+        assert_eq!(loaded.pages[1].offset_y, 492.0);
+        assert_eq!(loaded.pages[2].offset_y, 984.0);
+        assert_eq!(loaded.content_height_doc, 1464.0);
+    }
 
     fn test_glyph(c: char, x0: f32, x1: f32) -> Glyph {
         Glyph {
@@ -10320,6 +11317,32 @@ mod tests {
             PdfView::text_for_glyph_range(&glyphs, 0..glyphs.len()).as_deref(),
             Some("100 by default")
         );
+    }
+
+    #[test]
+    fn semantic_anchor_survives_shifted_glyph_offsets() {
+        let original = "before selected passage after"
+            .chars()
+            .enumerate()
+            .map(|(ix, c)| test_glyph(c, ix as f32, ix as f32 + 1.0))
+            .collect::<Vec<_>>();
+        let selected = "selected passage";
+        let start = "before ".chars().count();
+        let anchor = PdfView::semantic_anchor_for_glyph(&original, start);
+
+        let mut shifted = "preface "
+            .chars()
+            .enumerate()
+            .map(|(ix, c)| test_glyph(c, ix as f32, ix as f32 + 1.0))
+            .collect::<Vec<_>>();
+        shifted.extend(original);
+        let resolved = PdfView::resolve_semantic_anchor(&shifted, &anchor).unwrap();
+        let resolved_text = shifted[resolved..resolved + selected.chars().count()]
+            .iter()
+            .map(|glyph| glyph.c)
+            .collect::<String>();
+
+        assert_eq!(resolved_text, selected);
     }
 
     #[test]

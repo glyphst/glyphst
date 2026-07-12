@@ -18,7 +18,7 @@ pub use glyphst_actions::workspace::{
 use crate::{
     command_palette::{CommandPalette, CommandPaletteDelegate},
     icons::{Icon, IconName},
-    library::{DocumentPosition, normalize_path},
+    library::{DocumentPosition, LibraryStore, normalize_path},
     pane::{
         DraggedTab, Pane, PaneDropTarget, PaneEvent, PaneGroup, SplitDirection, SplitDown,
         SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical, TabTransfer,
@@ -151,6 +151,15 @@ impl Workspace {
             cx.refresh_windows();
         })
         .detach();
+        cx.on_release(|this, cx| {
+            for pane in this.pane_group.panes() {
+                pane.update(cx, |pane, cx| pane.stage_all_tab_positions(cx));
+            }
+            if let Err(error) = cx.global::<LibraryStore>().save() {
+                eprintln!("failed to save document library: {error:#}");
+            }
+        })
+        .detach();
 
         workspace
     }
@@ -189,12 +198,12 @@ impl Workspace {
                     this.active_pane = pane_for_events.clone();
                     if let Err(error) = this.focus_or_open_document(
                         path.clone(),
-                        *position,
+                        position.clone(),
                         *replace_active_new_tab,
                         window,
                         cx,
                     ) {
-                        eprintln!("failed to open PDF: {error:#}");
+                        eprintln!("failed to open document: {error:#}");
                     }
                 }
                 PaneEvent::OpenSettings => this.open_settings_window(cx),

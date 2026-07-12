@@ -127,7 +127,7 @@ fn handle_open_request(request: instance::OpenRequest, cx: &mut App) {
         if let Some(path) = update_path
             && let Err(error) = workspace.open_document_external(path, window, cx)
         {
-            eprintln!("failed to open PDF: {error:#}");
+            eprintln!("failed to open document: {error:#}");
         }
         window.activate_window();
     }) {
