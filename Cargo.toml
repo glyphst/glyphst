@@ -28,11 +28,11 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 bincode = "1.3"
 dirs = "6"
 futures = "0.3"
-gpui = { git = "https://github.com/zed-industries/zed", rev = "7ed553b391393ee4e62782e710605778e2200a18", package = "gpui", default-features = false, features = [
+gpui = { git = "https://github.com/zed-industries/zed", rev = "49ad06c1b4047b018b1622e1cf94cafcacd39247", package = "gpui", default-features = false, features = [
     "wayland",
     "x11",
 ] }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "7ed553b391393ee4e62782e710605778e2200a18", package = "gpui_platform", default-features = false, features = [
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "49ad06c1b4047b018b1622e1cf94cafcacd39247", package = "gpui_platform", default-features = false, features = [
     "font-kit",
     "wayland",
     "x11",
