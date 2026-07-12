@@ -1,6 +1,6 @@
 # Project Information
 
-A contracted PDF viewer built using GPUI.
+A desktop PDF viewer built using GPUI.
 
 ## Reference Projects
 
