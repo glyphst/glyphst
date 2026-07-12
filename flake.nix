@@ -58,6 +58,10 @@
           pkgs = mkPkgs system;
           lib = pkgs.lib;
           rustToolchain = mkRustToolchain pkgs;
+          fontsConf = pkgs.makeFontsConf {
+            fontDirectories = [ ];
+            includes = [ "${pkgs.fontconfig.out}/etc/fonts/conf.d" ];
+          };
           linuxLibraries = with pkgs; [
             alsa-lib
             fontconfig
@@ -98,6 +102,7 @@
 
             buildInputs = linuxLibraries;
 
+            FONTCONFIG_FILE = fontsConf;
             LD_LIBRARY_PATH = lib.makeLibraryPath linuxLibraries;
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
             NIX_LDFLAGS = "-rpath ${

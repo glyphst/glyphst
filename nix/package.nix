@@ -10,6 +10,8 @@
   python3,
   unzip,
   copyDesktopItems,
+  makeFontsConf,
+  makeWrapper,
   makeDesktopItem,
   alsa-lib,
   fontconfig,
@@ -39,6 +41,10 @@
     libva
     libglvnd
   ];
+  fontsConf = makeFontsConf {
+    fontDirectories = [ ];
+    includes = [ "${fontconfig.out}/etc/fonts/conf.d" ];
+  };
 in
   rustPlatform.buildRustPackage {
     pname = "glyphst";
@@ -68,6 +74,7 @@ in
       clang
       copyDesktopItems
       gnumake
+      makeWrapper
       perl
       pkg-config
       python3
@@ -103,6 +110,10 @@ in
     dontPatchELF = stdenv.hostPlatform.isLinux;
 
     doCheck = false;
+
+    postInstall = ''
+      wrapProgram $out/bin/glyphst --set FONTCONFIG_FILE ${fontsConf}
+    '';
 
     desktopItems = [
       (makeDesktopItem {
