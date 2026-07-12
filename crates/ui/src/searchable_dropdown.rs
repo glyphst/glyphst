@@ -79,6 +79,10 @@ impl SearchableDropdown {
             .unwrap_or(&self.selected_value)
     }
 
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
     fn open(&mut self, anchor: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.anchor = Some(anchor);

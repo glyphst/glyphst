@@ -649,6 +649,22 @@ impl TranslationCardState {
     }
 }
 
+fn reset_translation_cards_for_document_replacement(
+    popup: &mut Option<TranslationCardState>,
+    pinned: &mut Option<TranslationCardState>,
+    request_generation: u64,
+) {
+    *popup = None;
+    if pinned.is_some() {
+        *pinned = Some(TranslationCardState::new(
+            SharedString::default(),
+            TranslationStatus::Idle,
+            None,
+            request_generation,
+        ));
+    }
+}
+
 enum NoteTarget {
     New {
         rects: Vec<HighlightRect>,
@@ -1345,6 +1361,8 @@ impl PdfView {
             this.change_target_language(language.clone(), cx);
         })
         .detach();
+        cx.observe(&popup, |_, _, cx| cx.notify()).detach();
+        cx.observe(&pinned, |_, _, cx| cx.notify()).detach();
         self.translation_popup_language_dropdown = Some(popup);
         self.pinned_translation_language_dropdown = Some(pinned);
     }
@@ -1587,7 +1605,7 @@ impl PdfView {
         self.text_lines.clear();
         self.page_line_ranges = vec![0..0; self.pages.len()];
         self.page_block_ranges = vec![0..0; self.pages.len()];
-        self.invalidate_translation_document();
+        self.replace_translation_document();
         self.links.clear();
         self.search.matches.clear();
         self.search.active = None;
@@ -1810,7 +1828,7 @@ impl PdfView {
         self.text_lines.clear();
         self.page_line_ranges = vec![0..0; self.pages.len()];
         self.page_block_ranges = vec![0..0; self.pages.len()];
-        self.invalidate_translation_document();
+        self.replace_translation_document();
         self.links.clear();
         self.search.matches.clear();
         self.search.active = None;
@@ -2132,14 +2150,23 @@ impl PdfView {
     fn invalidate_translation_document(&mut self) {
         self.translation_document_generation = self.translation_document_generation.wrapping_add(1);
         self.translation_document_task = None;
-        self.translation_request_generation = self.translation_request_generation.wrapping_add(1);
         self.translated_blocks.clear();
         self.translated_text_layouts.clear();
-        self.translation_popup = None;
-        self.pinned_translation = None;
         self.hovered_text_block = None;
         self.external_hovered_block = None;
         self.external_selected_block = None;
+    }
+
+    fn replace_translation_document(&mut self) {
+        self.invalidate_translation_document();
+        self.translation_request_generation = self.translation_request_generation.wrapping_add(1);
+        self.reset_translation_scroll(false);
+        self.reset_translation_scroll(true);
+        reset_translation_cards_for_document_replacement(
+            &mut self.translation_popup,
+            &mut self.pinned_translation,
+            self.translation_request_generation,
+        );
     }
 
     #[ztracing::instrument(skip_all, fields(glyph_count = glyphs.len()))]
@@ -5307,6 +5334,7 @@ impl PdfView {
                 generation,
             ));
         }
+        cx.notify();
 
         if !cx.has_global::<TranslationService>() {
             self.finish_translation_request(
@@ -5577,6 +5605,9 @@ impl PdfView {
         } else {
             self.translation_popup_language_dropdown.clone()
         };
+        let language_dropdown_open = language_dropdown
+            .as_ref()
+            .is_some_and(|dropdown| dropdown.read(cx).is_open());
         let font = &cx.global::<SettingsStore>().settings.font;
         let base_text_style = TextStyle {
             font_family: font.ui_font_family.clone().into(),
@@ -5644,6 +5675,11 @@ impl PdfView {
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
+            .when(!pinned && !language_dropdown_open, |this| {
+                this.on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.close_translation_popup(cx);
+                }))
+            })
             .on_scroll_wheel(|_, _, cx| {
                 cx.stop_propagation();
             })
@@ -5709,22 +5745,27 @@ impl PdfView {
             )
             .child(
                 div()
-                    .id(if pinned {
-                        "pinned-translation-content"
-                    } else {
-                        "translation-popup-content"
-                    })
-                    .track_scroll(scroll_handle)
                     .w_full()
                     .min_w_0()
-                    .max_h(px(300.0))
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .p_3()
-                    .cursor_text()
-                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                    .child(content)
+                    .child(
+                        div()
+                            .id(if pinned {
+                                "pinned-translation-content"
+                            } else {
+                                "translation-popup-content"
+                            })
+                            .track_scroll(scroll_handle)
+                            .w_full()
+                            .min_w_0()
+                            .max_h(px(300.0))
+                            .flex()
+                            .flex_col()
+                            .overflow_y_scroll()
+                            .p_3()
+                            .cursor_text()
+                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                            .child(content),
+                    )
                     .when(scrollable, |this| {
                         this.vertical_scrollbar_for_with_id(scroll_handle, scrollbar_id, window, cx)
                     }),
@@ -10484,7 +10525,6 @@ impl Render for PdfView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.close_translation_popup(cx);
                     this.close_epub_style_panel(cx);
                 }),
             )
@@ -11154,8 +11194,11 @@ impl Render for PdfView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Glyph, PdfView, TextChunk, TextLine};
-    use gpui::{Modifiers, ScrollWheelEvent};
+    use super::{
+        Glyph, PdfView, TextChunk, TextLine, TranslationCardState, TranslationStatus,
+        reset_translation_cards_for_document_replacement,
+    };
+    use gpui::{Modifiers, ScrollWheelEvent, point, px};
     use mupdf::{Point, Quad, Rect};
 
     #[test]
@@ -11206,6 +11249,42 @@ mod tests {
             ..Default::default()
         };
         assert!(PdfView::scroll_wheel_requests_zoom(&zoom));
+    }
+
+    #[test]
+    fn document_replacement_clears_popup_and_preserves_pinned_mode() {
+        let mut popup = Some(TranslationCardState::new(
+            "popup",
+            TranslationStatus::Loading,
+            Some(point(px(10.0), px(20.0))),
+            7,
+        ));
+        let mut pinned = Some(TranslationCardState::new(
+            "pinned",
+            TranslationStatus::Loading,
+            None,
+            7,
+        ));
+
+        reset_translation_cards_for_document_replacement(&mut popup, &mut pinned, 8);
+
+        assert!(popup.is_none());
+        let pinned = pinned.unwrap();
+        assert!(pinned.source.is_empty());
+        assert!(matches!(pinned.status, TranslationStatus::Idle));
+        assert!(pinned.position.is_none());
+        assert_eq!(pinned.request_generation, 8);
+    }
+
+    #[test]
+    fn document_replacement_does_not_enable_pinned_mode() {
+        let mut popup = None;
+        let mut pinned = None;
+
+        reset_translation_cards_for_document_replacement(&mut popup, &mut pinned, 8);
+
+        assert!(popup.is_none());
+        assert!(pinned.is_none());
     }
 
     fn missing_space_glyphs() -> Vec<Glyph> {
