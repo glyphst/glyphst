@@ -12,13 +12,15 @@ use crate::{
     keybindings::{self, EditableKeyBinding, KeyBindingCategory},
     keystroke_input::{
         KeystrokeInput, KeystrokeInputEvent, format_keystroke, render_keybinding_keystroke,
-        text_tooltip,
     },
     scrollbar::uniform_list_scrollbar_for,
     settings::{Settings, SettingsStore, ui_rems},
     theme::Theme,
 };
-use glyphst_ui::settings_input::{SettingsInputEvent, SettingsTextInput};
+use glyphst_ui::{
+    settings_input::{SettingsInputEvent, SettingsTextInput},
+    tooltip::text_tooltip,
+};
 
 const ROW_HEIGHT: f32 = 36.0;
 const ICON_COL: f32 = 36.0;

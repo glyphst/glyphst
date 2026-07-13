@@ -3,6 +3,7 @@ use std::ops::Range;
 use crate::pdf_view::PdfView;
 use crate::picker::{Picker, PickerDelegate, fuzzy_match, normalize_query};
 use crate::theme::Theme;
+use glyphst_ui::tooltip::text_tooltip;
 use gpui::{
     AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, SharedString, StyledText,
     WeakEntity, Window, div, prelude::*, px, rgb,
@@ -146,9 +147,11 @@ impl PickerDelegate for TocPaletteDelegate {
             .child(div().flex_none().w(px(depth as f32 * 14.0)))
             .child(
                 div()
+                    .id(("toc-picker-title", entry.entry_ix))
                     .flex_1()
                     .min_w_0()
                     .truncate()
+                    .tooltip(text_tooltip(title.clone()))
                     .child(StyledText::new(title).with_highlights(highlights)),
             )
             .child(

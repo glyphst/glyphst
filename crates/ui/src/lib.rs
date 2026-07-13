@@ -9,6 +9,7 @@ pub mod settings_input;
 pub mod smooth_scroll;
 pub mod style;
 pub mod text_input;
+pub mod tooltip;
 
 pub use glyphst_actions::{input, menu};
 pub use glyphst_settings as settings;

@@ -50,6 +50,7 @@ use glyphst_ui::{
     icons::IconButton,
     markdown::{Markdown, MarkdownElement, MarkdownStyle},
     searchable_dropdown::{SearchableDropdown, SearchableDropdownEvent},
+    tooltip::text_tooltip,
 };
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, AsyncApp, Bounds, ClipboardItem, Context, Corners,
@@ -9651,6 +9652,7 @@ impl PdfView {
                                             )
                                             .child(
                                                 div()
+                                                    .id(("toc-sidebar-title", entry_ix))
                                                     .flex()
                                                     .flex_1()
                                                     .min_w_0()
@@ -9658,6 +9660,7 @@ impl PdfView {
                                                     .h(px(28.0))
                                                     .px_1()
                                                     .truncate()
+                                                    .tooltip(text_tooltip(title.clone()))
                                                     .text_color(rgb(title_color))
                                                     .child(title),
                                             )
