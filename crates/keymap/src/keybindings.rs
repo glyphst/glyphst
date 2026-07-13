@@ -1293,6 +1293,15 @@ fn command_specs() -> &'static [CommandSpec] {
                     &["grid-overview", "page-overview"],
                     true,
                 ),
+                spec::<ToggleCommandPalette>(
+                    "toggle-command-palette",
+                    "Toggle Command Palette",
+                    KeyBindingCategory::PageOverview,
+                    &["primary-shift-p"],
+                    &["primary-shift-p"],
+                    &["command-palette"],
+                    false,
+                ),
                 spec::<ZoomIn>(
                     "zoom-in",
                     "Zoom In",
@@ -1591,6 +1600,31 @@ mod tests {
             rows.iter()
                 .any(|row| row.category == KeyBindingCategory::SearchResults)
         );
+    }
+
+    #[test]
+    fn command_palette_is_available_in_workspace_and_page_overview() {
+        let expected = vec![expand_platform_keystroke("primary-shift-p")];
+
+        for preset in [KeymapPreset::Modern, KeymapPreset::Vim] {
+            let rows = editable_bindings(preset, &[])
+                .into_iter()
+                .filter(|row| row.action == "toggle-command-palette")
+                .collect::<Vec<_>>();
+
+            assert_eq!(rows.len(), 2);
+            for category in [
+                KeyBindingCategory::Workspace,
+                KeyBindingCategory::PageOverview,
+            ] {
+                let row = rows
+                    .iter()
+                    .find(|row| row.category == category)
+                    .expect("command palette binding should exist in category");
+                assert_eq!(row.keystrokes, expected);
+                assert_eq!(row.default_keystrokes, expected);
+            }
+        }
     }
 
     #[test]

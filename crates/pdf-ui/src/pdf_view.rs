@@ -7653,6 +7653,9 @@ impl PdfView {
                 cx.stop_propagation();
                 cx.new(|_| *sidebar)
             })
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                this.close_context_menu(cx);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| {
@@ -7680,6 +7683,7 @@ impl PdfView {
         content: impl IntoElement + 'static,
         resize_handle: impl IntoElement + 'static,
         theme: Theme,
+        pdf_view: gpui::WeakEntity<Self>,
     ) -> impl IntoElement {
         div()
             .relative()
@@ -7693,6 +7697,11 @@ impl PdfView {
             .bg(rgb(theme.surface_background))
             .text_size(ui_rems(12.0))
             .text_color(rgb(theme.text))
+            .capture_any_mouse_down(move |_: &MouseDownEvent, _, cx| {
+                let _ = pdf_view.update(cx, |this, cx| {
+                    this.close_context_menu(cx);
+                });
+            })
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
@@ -8833,7 +8842,6 @@ impl PdfView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.close_context_menu(cx);
                     this.close_thumbnail_sidebar_actions(cx);
                     cx.stop_propagation();
                 }),
@@ -8935,7 +8943,6 @@ impl PdfView {
                                                         .on_mouse_down(
                                                             MouseButton::Left,
                                                             cx.listener(move |this, _, _, cx| {
-                                                                this.close_context_menu(cx);
                                                                 this.close_thumbnail_sidebar_actions(cx);
                                                                 if this.thumbnail_sidebar_selecting {
                                                                     this.toggle_thumbnail_sidebar_page_selection(
@@ -9076,6 +9083,7 @@ impl PdfView {
                 )
             });
 
+        let pdf_view = cx.entity().downgrade();
         Self::render_sidebar_shell(
             title,
             self.thumbnail_sidebar_width,
@@ -9088,6 +9096,7 @@ impl PdfView {
                 cx,
             ),
             theme,
+            pdf_view,
         )
     }
 
@@ -9681,6 +9690,7 @@ impl PdfView {
                 )
             });
 
+        let pdf_view = cx.entity().downgrade();
         Self::render_sidebar_shell(
             crate::fl!("table-of-contents-title"),
             self.toc_sidebar_width,
@@ -9693,6 +9703,7 @@ impl PdfView {
                 cx,
             ),
             theme,
+            pdf_view,
         )
     }
 
@@ -9814,6 +9825,7 @@ impl PdfView {
                 )
             });
 
+        let pdf_view = cx.entity().downgrade();
         Self::render_sidebar_shell(
             crate::fl!("notes-title"),
             self.notes_sidebar_width,
@@ -9826,6 +9838,7 @@ impl PdfView {
                 cx,
             ),
             theme,
+            pdf_view,
         )
     }
 
