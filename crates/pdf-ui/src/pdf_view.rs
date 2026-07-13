@@ -30,7 +30,8 @@ use crate::picker::{Picker, PickerEvent};
 use crate::scrollbar::{ManualScrollHandle, WithScrollbar as _, uniform_list_scrollbar_for};
 use crate::search::{SearchBar, SearchEvent};
 use crate::settings::{
-    BehaviorSettings, SettingsStore, TranslationBoxCorner, WindowSettings, ui_rems,
+    BehaviorSettings, PageImageQuality, PageTextFormat, SettingsStore, TranslationBoxCorner,
+    WindowSettings, ui_rems,
 };
 use crate::smooth_scroll::advance_toward;
 use crate::theme::Theme;
@@ -38,7 +39,8 @@ use crate::toc::{TocPalette, TocPaletteDelegate, TocPaletteEntry};
 use anyhow::{Context as _, Result, anyhow, bail};
 use arboard::{Clipboard, ImageData};
 pub use glyphst_actions::pdf_viewer::*;
-use glyphst_ai_ui::{AiContext, AiContextProvider};
+use glyphst_ai::ai_chat::{ContextBlock, ImageContext, MentionKind, MentionReference};
+use glyphst_ai_ui::{AiContext, AiContextProvider, AiPageState, ResolvedPageContext};
 use glyphst_core::{
     DocumentCapabilities, DocumentFormat, DocumentLayout, EpubReaderPreferences, EpubTheme,
     SemanticTextAnchor,
@@ -60,8 +62,8 @@ use gpui::{
     TextAlign, TextRun, TextStyle, UniformListScrollHandle, Window, WrappedLine, anchored, canvas,
     deferred, div, fill, point, prelude::*, px, rgb, rgba, size, uniform_list,
 };
-use image::{Frame, RgbaImage};
-use mupdf::text_page::TextBlockType;
+use image::{Frame, RgbaImage, codecs::jpeg::JpegEncoder};
+use mupdf::text_page::{TextBlockType, TextCharFlags};
 use mupdf::{
     ColorParams, Colorspace, DestinationKind, Device, DisplayList, Image as PdfImage, Matrix,
     Pixmap, Quad, Rect, TextPageFlags,
@@ -945,10 +947,24 @@ struct PdfViewAiContextProvider {
     pdf_view: gpui::WeakEntity<PdfView>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct PageMarkdownBlock {
+    lines: Vec<String>,
+    average_font_size: f32,
+    bold_ratio: f32,
+}
+
+struct PageContextSource {
+    bounds: Rect,
+    width: f32,
+    height: f32,
+    display_list: DisplayList,
+}
+
 impl AiContextProvider for PdfViewAiContextProvider {
-    fn context(&self, cx: &mut gpui::App) -> Option<AiContext> {
+    fn context(&self, include_document_text: bool, cx: &gpui::App) -> Option<AiContext> {
         self.pdf_view
-            .update(cx, |pdf_view, _| AiContext {
+            .read_with(cx, |pdf_view, _| AiContext {
                 document_file_name: pdf_view
                     .path
                     .file_name()
@@ -979,15 +995,512 @@ impl AiContextProvider for PdfViewAiContextProvider {
                 } else {
                     pdf_view.current_page()
                 },
-                current_page_text: pdf_view.current_page_text(),
                 selected_text: pdf_view.selected_text(),
-                document_text: pdf_view.document_text(),
+                document_text: include_document_text
+                    .then(|| pdf_view.document_text())
+                    .flatten(),
             })
             .ok()
+    }
+
+    fn page_state(&self, cx: &gpui::App) -> Option<AiPageState> {
+        self.pdf_view
+            .read_with(cx, |pdf_view, _| pdf_view.ai_page_state())
+            .ok()
+    }
+
+    fn resolve_page_references(
+        &self,
+        references: Vec<MentionReference>,
+        cx: &gpui::App,
+    ) -> Task<Result<Vec<ResolvedPageContext>>> {
+        let inputs = self
+            .pdf_view
+            .read_with(cx, |pdf_view, cx| {
+                let ai_settings = &cx.global::<SettingsStore>().settings.ai;
+                let references = PdfView::prepare_page_references(
+                    references,
+                    pdf_view.document_layout,
+                    pdf_view.page_count,
+                )?;
+                Ok((
+                    pdf_view.document_snapshot.clone(),
+                    pdf_view.document_layout,
+                    pdf_view.page_count,
+                    ai_settings.page_text_format,
+                    ai_settings.page_image_quality,
+                    references,
+                ))
+            })
+            .map_err(|error| anyhow!("failed to access PDF page context: {error}"))
+            .and_then(|inputs| inputs);
+
+        cx.background_spawn(async move {
+            let (snapshot, document_layout, page_count, text_format, image_quality, references) =
+                inputs?;
+            PdfView::resolve_page_contexts(
+                &snapshot,
+                document_layout,
+                page_count,
+                text_format,
+                image_quality,
+                references,
+            )
+        })
     }
 }
 
 impl PdfView {
+    fn ai_page_state(&self) -> AiPageState {
+        if self.capabilities.reflow {
+            AiPageState::default()
+        } else {
+            AiPageState {
+                page_count: self.page_count(),
+                current_page: self.current_page(),
+            }
+        }
+    }
+
+    // This resolver owns only page-scoped mentions. Selection and document-text
+    // mentions are resolved synchronously by the AI panel and are ignored here.
+    fn prepare_page_references(
+        references: Vec<MentionReference>,
+        document_layout: DocumentLayout,
+        page_count: usize,
+    ) -> Result<Vec<MentionReference>> {
+        let page_references = references
+            .into_iter()
+            .filter(|reference| {
+                matches!(reference.kind, MentionKind::Page | MentionKind::PageImage)
+            })
+            .collect::<Vec<_>>();
+        if page_references.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !matches!(document_layout, DocumentLayout::Fixed) {
+            bail!("page references are unavailable for reflowable documents");
+        }
+
+        let mut unique = Vec::with_capacity(page_references.len());
+        let mut seen = HashSet::with_capacity(page_references.len());
+        for reference in page_references {
+            let page = reference.page.ok_or_else(|| {
+                anyhow!("{} requires a 1-based page number", reference.kind.token())
+            })?;
+            if page == 0 || page > page_count {
+                bail!(
+                    "invalid page reference {}: page must be between 1 and {}",
+                    reference.display_text(),
+                    page_count
+                );
+            }
+            if seen.insert(reference) {
+                unique.push(reference);
+            }
+        }
+        Ok(unique)
+    }
+
+    #[ztracing::instrument(skip_all, fields(reference_count = references.len()))]
+    fn resolve_page_contexts(
+        snapshot: &DocumentSnapshot,
+        document_layout: DocumentLayout,
+        expected_page_count: usize,
+        text_format: PageTextFormat,
+        image_quality: PageImageQuality,
+        references: Vec<MentionReference>,
+    ) -> Result<Vec<ResolvedPageContext>> {
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !matches!(document_layout, DocumentLayout::Fixed) {
+            bail!("page references are unavailable for reflowable documents");
+        }
+
+        let opened = snapshot
+            .open_with_layout(document_layout)
+            .context("failed to open document for page context")?;
+        if opened.is_reflowable() {
+            bail!("page references are unavailable for reflowable documents");
+        }
+        let document = opened.into_inner();
+        let actual_page_count = document
+            .page_count()
+            .context("failed to read document page count for page context")?;
+        if actual_page_count < 0 || actual_page_count as usize != expected_page_count {
+            bail!(
+                "document page count changed while resolving page context: expected {}, got {}",
+                expected_page_count,
+                actual_page_count
+            );
+        }
+
+        let mut page_sources = HashMap::new();
+        for reference in &references {
+            let page_number = reference
+                .page
+                .context("validated page reference lost its page number")?;
+            let page_idx = page_number - 1;
+            if page_sources.contains_key(&page_idx) {
+                continue;
+            }
+            let page = document
+                .load_page(page_idx as i32)
+                .with_context(|| format!("failed to load PDF page {page_number}"))?;
+            let page_bounds = page
+                .bounds()
+                .with_context(|| format!("failed to read bounds for PDF page {page_number}"))?;
+            let page_width = page_bounds.x1 - page_bounds.x0;
+            let page_height = page_bounds.y1 - page_bounds.y0;
+            let display_list = DisplayList::new(page_bounds).with_context(|| {
+                format!("failed to create display list for PDF page {page_number}")
+            })?;
+            let device = Device::from_display_list(&display_list).with_context(|| {
+                format!("failed to create display-list device for PDF page {page_number}")
+            })?;
+            page.run(&device, &Matrix::IDENTITY)
+                .with_context(|| format!("failed to record PDF page {page_number}"))?;
+            page_sources.insert(
+                page_idx,
+                PageContextSource {
+                    bounds: page_bounds,
+                    width: page_width,
+                    height: page_height,
+                    display_list,
+                },
+            );
+        }
+
+        let mut resolved = Vec::with_capacity(references.len());
+        for reference in references {
+            let page_number = reference
+                .page
+                .context("validated page reference lost its page number")?;
+            let page_idx = page_number - 1;
+            let source = page_sources
+                .get(&page_idx)
+                .with_context(|| format!("PDF page {page_number} was not prepared"))?;
+            match reference.kind {
+                MentionKind::Page => {
+                    let markdown = Self::extract_page_markdown(&source.display_list, text_format)
+                        .with_context(|| {
+                        format!("failed to extract text from PDF page {page_number}")
+                    })?;
+                    resolved.push(ResolvedPageContext::Text(ContextBlock::new(
+                        MentionKind::Page,
+                        Some(page_number),
+                        markdown,
+                    )));
+                }
+                MentionKind::PageImage => {
+                    let bytes = Self::render_page_jpeg(
+                        &source.display_list,
+                        source.bounds,
+                        source.width,
+                        source.height,
+                        image_quality,
+                    )
+                    .with_context(|| format!("failed to render PDF page {page_number} as JPEG"))?;
+                    resolved.push(ResolvedPageContext::Image(ImageContext::new(
+                        MentionKind::PageImage,
+                        Some(page_number),
+                        "image/jpeg",
+                        bytes,
+                    )));
+                }
+                MentionKind::Selection | MentionKind::DocumentText => {
+                    unreachable!("non-page references are filtered before background resolution")
+                }
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    fn extract_page_markdown(display_list: &DisplayList, format: PageTextFormat) -> Result<String> {
+        let mut flags = TextPageFlags::PRESERVE_WHITESPACE | TextPageFlags::ACCURATE_BBOXES;
+        if format == PageTextFormat::Semantic {
+            flags |= TextPageFlags::PARAGRAPH_BREAK | TextPageFlags::TABLE_HUNT;
+        }
+        let text_page = display_list
+            .to_text_page(flags)
+            .context("failed to create MuPDF structured text page")?;
+        let mut blocks = Vec::new();
+
+        for block in text_page.blocks() {
+            if block.r#type() != TextBlockType::Text {
+                continue;
+            }
+
+            let mut lines = Vec::new();
+            let mut total_font_size = 0.0_f32;
+            let mut character_count = 0_usize;
+            let mut bold_count = 0_usize;
+            for line in block.lines() {
+                let mut text = String::new();
+                for ch in line.chars() {
+                    let Some(c) = ch.char() else {
+                        continue;
+                    };
+                    text.push(c);
+                    if !c.is_whitespace() {
+                        total_font_size += ch.size().max(0.0);
+                        character_count += 1;
+                        let is_bold = ch.flags().contains(TextCharFlags::BOLD)
+                            || ch.font().is_some_and(|font| font.is_bold());
+                        bold_count += usize::from(is_bold);
+                    }
+                }
+                lines.push(text.trim_end_matches(['\r', '\n']).to_string());
+            }
+
+            if lines.iter().all(|line| line.trim().is_empty()) {
+                continue;
+            }
+            blocks.push(PageMarkdownBlock {
+                lines,
+                average_font_size: if character_count == 0 {
+                    0.0
+                } else {
+                    total_font_size / character_count as f32
+                },
+                bold_ratio: if character_count == 0 {
+                    0.0
+                } else {
+                    bold_count as f32 / character_count as f32
+                },
+            });
+        }
+
+        Ok(match format {
+            PageTextFormat::Block => Self::format_block_markdown(&blocks),
+            PageTextFormat::Semantic => Self::format_semantic_markdown(&blocks),
+        })
+    }
+
+    fn format_block_markdown(blocks: &[PageMarkdownBlock]) -> String {
+        blocks
+            .iter()
+            .map(|block| {
+                block
+                    .lines
+                    .iter()
+                    .map(|line| Self::escape_commonmark(line))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    fn format_semantic_markdown(blocks: &[PageMarkdownBlock]) -> String {
+        let mut font_sizes = blocks
+            .iter()
+            .filter(|block| block.average_font_size.is_finite() && block.average_font_size > 0.0)
+            .map(|block| block.average_font_size)
+            .collect::<Vec<_>>();
+        font_sizes.sort_by(f32::total_cmp);
+        let baseline = font_sizes
+            .get(font_sizes.len().saturating_sub(1) / 2)
+            .copied()
+            .unwrap_or(0.0);
+
+        blocks
+            .iter()
+            .map(|block| {
+                if let Some(list) = Self::semantic_list_markdown(&block.lines) {
+                    return list;
+                }
+                if let Some(level) = Self::semantic_heading_level(block, baseline) {
+                    let heading = block.lines[0].trim();
+                    return format!("{} {}", "#".repeat(level), Self::escape_commonmark(heading));
+                }
+
+                block
+                    .lines
+                    .iter()
+                    .map(|line| Self::escape_commonmark(line))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    fn semantic_heading_level(block: &PageMarkdownBlock, baseline: f32) -> Option<usize> {
+        if baseline <= 0.0 || block.lines.len() != 1 {
+            return None;
+        }
+        let text = block.lines[0].trim();
+        if text.is_empty()
+            || text.chars().count() > 120
+            || text.ends_with(['.', ',', ';', ':', '?', '!'])
+        {
+            return None;
+        }
+
+        let relative_size = block.average_font_size / baseline;
+        if relative_size >= 1.6 {
+            Some(1)
+        } else if relative_size >= 1.35 {
+            Some(2)
+        } else if relative_size >= 1.18 && block.bold_ratio >= 0.5 {
+            Some(3)
+        } else {
+            None
+        }
+    }
+
+    fn semantic_list_markdown(lines: &[String]) -> Option<String> {
+        let non_empty = lines
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        if non_empty.is_empty() {
+            return None;
+        }
+
+        let mut items = Vec::with_capacity(non_empty.len());
+        for line in non_empty {
+            let trimmed = line.trim_start();
+            if let Some(item) = Self::strip_unordered_list_marker(trimmed) {
+                items.push(format!("- {}", Self::escape_commonmark(item)));
+                continue;
+            }
+            if let Some((number, item)) = Self::strip_ordered_list_marker(trimmed) {
+                items.push(format!("{number}. {}", Self::escape_commonmark(item)));
+                continue;
+            }
+            return None;
+        }
+        Some(items.join("\n"))
+    }
+
+    fn strip_unordered_list_marker(line: &str) -> Option<&str> {
+        ["•", "◦", "▪", "‣", "-", "*", "+"]
+            .into_iter()
+            .find_map(|marker| {
+                line.strip_prefix(marker)
+                    .and_then(|rest| rest.strip_prefix(char::is_whitespace))
+                    .map(str::trim_start)
+                    .filter(|item| !item.is_empty())
+            })
+    }
+
+    fn strip_ordered_list_marker(line: &str) -> Option<(&str, &str)> {
+        let digit_count = line.bytes().take_while(u8::is_ascii_digit).count();
+        if digit_count == 0 {
+            return None;
+        }
+        let number = &line[..digit_count];
+        let rest = &line[digit_count..];
+        let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))?;
+        let item = rest.strip_prefix(char::is_whitespace)?.trim_start();
+        (!item.is_empty()).then_some((number, item))
+    }
+
+    fn escape_commonmark(text: &str) -> String {
+        let mut escaped = String::with_capacity(text.len());
+        for c in text.chars() {
+            if matches!(
+                c,
+                '\\' | '`'
+                    | '*'
+                    | '_'
+                    | '{'
+                    | '}'
+                    | '['
+                    | ']'
+                    | '('
+                    | ')'
+                    | '<'
+                    | '>'
+                    | '#'
+                    | '+'
+                    | '-'
+                    | '.'
+                    | '!'
+                    | '|'
+            ) {
+                escaped.push('\\');
+            }
+            escaped.push(c);
+        }
+        escaped
+    }
+
+    fn page_image_dimensions(
+        page_width: f32,
+        page_height: f32,
+        max_dimension: u32,
+    ) -> Result<(u32, u32)> {
+        if !page_width.is_finite()
+            || !page_height.is_finite()
+            || page_width <= 0.0
+            || page_height <= 0.0
+            || max_dimension == 0
+        {
+            bail!("PDF page has invalid image dimensions");
+        }
+        let scale = max_dimension as f32 / page_width.max(page_height);
+        let width = (page_width * scale)
+            .round()
+            .clamp(1.0, max_dimension as f32) as u32;
+        let height = (page_height * scale)
+            .round()
+            .clamp(1.0, max_dimension as f32) as u32;
+        Ok((width, height))
+    }
+
+    fn render_page_jpeg(
+        display_list: &DisplayList,
+        page_bounds: Rect,
+        page_width: f32,
+        page_height: f32,
+        quality: PageImageQuality,
+    ) -> Result<Vec<u8>> {
+        let (width, height) =
+            Self::page_image_dimensions(page_width, page_height, quality.max_dimension())?;
+        let mut pixmap =
+            Pixmap::new_with_w_h(&Colorspace::device_rgb(), width as i32, height as i32, true)
+                .context("failed to allocate page image")?;
+        pixmap.samples_mut().fill(255);
+
+        let zoom_x = width as f32 / page_width;
+        let zoom_y = height as f32 / page_height;
+        let matrix = Matrix::new(
+            zoom_x,
+            0.0,
+            0.0,
+            zoom_y,
+            -page_bounds.x0 * zoom_x,
+            -page_bounds.y0 * zoom_y,
+        );
+        {
+            let device =
+                Device::from_pixmap(&pixmap).context("failed to create page image device")?;
+            display_list
+                .run(&device, &matrix, Rect::INF)
+                .context("failed to rasterize page image")?;
+        }
+
+        let samples = pixmap.samples();
+        let expected_len = width as usize * height as usize * 4;
+        if samples.len() != expected_len || pixmap.n() != 4 {
+            bail!(
+                "unexpected page image pixmap layout: {} samples, {} components",
+                samples.len(),
+                pixmap.n()
+            );
+        }
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, quality.jpeg_quality())
+            .encode(samples, width, height, image::ExtendedColorType::Rgba8)
+            .context("failed to encode page image as JPEG")?;
+        Ok(bytes)
+    }
+
     fn default_sidebar_widths() -> SidebarWidths {
         SidebarWidths {
             thumbnails: THUMBNAIL_SIDEBAR_WIDTH,
@@ -5228,11 +5741,6 @@ impl PdfView {
         Self::text_for_glyph_range(&self.glyphs, start..end + 1)
     }
 
-    pub(crate) fn current_page_text(&self) -> Option<String> {
-        let page = self.pages.get(self.current_page_index())?;
-        Self::text_for_glyph_range(&self.glyphs, page.glyph_range.clone())
-    }
-
     pub(crate) fn document_text(&self) -> Option<String> {
         Self::text_for_glyph_range(&self.glyphs, 0..self.glyphs.len())
     }
@@ -6809,7 +7317,7 @@ impl PdfView {
 
         let previous_focus_handle = self.focus_handle.clone();
         let document_path = self.path.clone();
-        let current_page = self.current_page();
+        let page_state = self.ai_page_state();
         let context_provider = PdfViewAiContextProvider {
             pdf_view: cx.entity().downgrade(),
         };
@@ -6819,7 +7327,7 @@ impl PdfView {
                 previous_focus_handle.clone(),
                 context_provider.clone(),
                 document_path.clone(),
-                current_page,
+                page_state,
                 width,
                 cx,
             )
@@ -6897,7 +7405,7 @@ impl PdfView {
 
         let previous_focus_handle = self.focus_handle.clone();
         let document_path = self.path.clone();
-        let current_page = self.current_page();
+        let page_state = self.ai_page_state();
         let context_provider = PdfViewAiContextProvider {
             pdf_view: cx.entity().downgrade(),
         };
@@ -6906,7 +7414,7 @@ impl PdfView {
                 previous_focus_handle.clone(),
                 context_provider.clone(),
                 document_path.clone(),
-                current_page,
+                page_state,
                 self.ai_panel_width,
                 cx,
             )
@@ -11211,15 +11719,140 @@ impl Render for PdfView {
 #[cfg(test)]
 mod tests {
     use super::{
-        Glyph, PdfView, TextChunk, TextLine, TranslationCardState, TranslationStatus,
-        reset_translation_cards_for_document_replacement,
+        Glyph, PageMarkdownBlock, PdfView, TextChunk, TextLine, TranslationCardState,
+        TranslationStatus, reset_translation_cards_for_document_replacement,
     };
+    use glyphst_ai::ai_chat::{MentionKind, MentionReference};
+    use glyphst_core::{DocumentLayout, EpubLayout};
     use gpui::{Modifiers, ScrollWheelEvent, point, px};
     use mupdf::{Point, Quad, Rect};
 
     #[test]
     fn page_counter_uses_generated_pages_for_any_document_format() {
         assert_eq!(PdfView::page_counter_label(3, 12), "3 / 12");
+    }
+
+    #[test]
+    fn page_block_markdown_escapes_commonmark_and_preserves_spacing() {
+        let blocks = vec![
+            PageMarkdownBlock {
+                lines: vec![
+                    "# Heading".to_string(),
+                    "literal *stars* and [link](url)".to_string(),
+                    String::new(),
+                ],
+                average_font_size: 12.0,
+                bold_ratio: 0.0,
+            },
+            PageMarkdownBlock {
+                lines: vec!["next_block.".to_string()],
+                average_font_size: 12.0,
+                bold_ratio: 0.0,
+            },
+        ];
+
+        assert_eq!(
+            PdfView::format_block_markdown(&blocks),
+            "\\# Heading\nliteral \\*stars\\* and \\[link\\]\\(url\\)\n\n\nnext\\_block\\."
+        );
+    }
+
+    #[test]
+    fn semantic_page_markdown_converts_conservative_headings_and_lists() {
+        let blocks = vec![
+            PageMarkdownBlock {
+                lines: vec!["Overview".to_string()],
+                average_font_size: 24.0,
+                bold_ratio: 0.9,
+            },
+            PageMarkdownBlock {
+                lines: vec!["plain *text*.".to_string()],
+                average_font_size: 12.0,
+                bold_ratio: 0.0,
+            },
+            PageMarkdownBlock {
+                lines: vec!["• First *item*".to_string(), "- Second".to_string()],
+                average_font_size: 12.0,
+                bold_ratio: 0.0,
+            },
+            PageMarkdownBlock {
+                lines: vec!["1) One".to_string(), "2. Two".to_string()],
+                average_font_size: 12.0,
+                bold_ratio: 0.0,
+            },
+        ];
+
+        assert_eq!(
+            PdfView::format_semantic_markdown(&blocks),
+            "# Overview\n\nplain \\*text\\*\\.\n\n- First \\*item\\*\n- Second\n\n1. One\n2. Two"
+        );
+    }
+
+    #[test]
+    fn page_image_dimensions_preserve_aspect_ratio_at_preset_edge() {
+        assert_eq!(
+            PdfView::page_image_dimensions(612.0, 792.0, 1600).unwrap(),
+            (1236, 1600)
+        );
+        assert_eq!(
+            PdfView::page_image_dimensions(792.0, 612.0, 1024).unwrap(),
+            (1024, 791)
+        );
+        assert!(PdfView::page_image_dimensions(0.0, 612.0, 1024).is_err());
+    }
+
+    #[test]
+    fn page_reference_validation_rejects_invalid_pages_and_deduplicates_exact_refs() {
+        let page = MentionReference::new(MentionKind::Page, Some(2));
+        let image = MentionReference::new(MentionKind::PageImage, Some(2));
+        let references = PdfView::prepare_page_references(
+            vec![
+                MentionReference::new(MentionKind::Selection, None),
+                page,
+                image,
+                page,
+            ],
+            DocumentLayout::Fixed,
+            3,
+        )
+        .unwrap();
+        assert_eq!(references, vec![page, image]);
+
+        assert!(
+            PdfView::prepare_page_references(
+                vec![MentionReference::new(MentionKind::Page, None)],
+                DocumentLayout::Fixed,
+                3,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("requires a 1-based page number")
+        );
+        for invalid_page in [0, 4] {
+            assert!(
+                PdfView::prepare_page_references(
+                    vec![MentionReference::new(
+                        MentionKind::PageImage,
+                        Some(invalid_page),
+                    )],
+                    DocumentLayout::Fixed,
+                    3,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("page must be between 1 and 3")
+            );
+        }
+        assert!(
+            PdfView::prepare_page_references(
+                vec![page],
+                DocumentLayout::Reflow(EpubLayout::default()),
+                3,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("reflowable documents")
+        );
     }
 
     #[test]

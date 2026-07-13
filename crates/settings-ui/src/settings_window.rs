@@ -3,9 +3,9 @@ use glyphst_ai::ai_client::{AiModelInfo, list_ai_models, test_ai_connection};
 use glyphst_keymap::keybindings;
 use glyphst_settings::{
     AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, AppLanguage, FontSettings,
-    KeymapPreset, ModelRef, ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility,
-    TranslationBoxCorner, TranslationProvider, TranslationProviderConfig, WindowBackgroundMode,
-    localize, setup_ui_font,
+    KeymapPreset, ModelRef, PageImageQuality, PageTextFormat, ResolvedAiConfig, Settings,
+    SettingsStore, TabBarVisibility, TranslationBoxCorner, TranslationProvider,
+    TranslationProviderConfig, WindowBackgroundMode, localize, setup_ui_font,
     theme::{
         PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode, ThemeMetadata, ThemeSelection,
         format_rgb_hex, format_rgba_hex, parse_hex_color,
@@ -2131,6 +2131,92 @@ impl SettingsWindow {
             .child(label)
     }
 
+    fn page_text_format_option(
+        &self,
+        label: String,
+        format: PageTextFormat,
+        selected_format: PageTextFormat,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = format == selected_format;
+
+        div()
+            .id(format!("page-text-format-{}", format.as_str()))
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(if selected {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.border_variant)
+            })
+            .bg(if selected {
+                rgb(theme.element_selected)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.change_settings(
+                        move |settings| settings.ai.page_text_format = format,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
+    fn page_image_quality_option(
+        &self,
+        label: String,
+        quality: PageImageQuality,
+        selected_quality: PageImageQuality,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = quality == selected_quality;
+
+        div()
+            .id(format!("page-image-quality-{}", quality.as_str()))
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(if selected {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.border_variant)
+            })
+            .bg(if selected {
+                rgb(theme.element_selected)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.change_settings(
+                        move |settings| settings.ai.page_image_quality = quality,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
     fn language_option(
         &self,
         language: AppLanguage,
@@ -3185,6 +3271,80 @@ impl SettingsWindow {
         };
 
         vec![
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Self::section_title(
+                    crate::fl!("settings-page-context"),
+                    theme,
+                ))
+                .child(input_row(
+                    crate::fl!("settings-page-text-format"),
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(self.page_text_format_option(
+                            crate::fl!("settings-page-text-format-block"),
+                            PageTextFormat::Block,
+                            settings.ai.page_text_format,
+                            theme,
+                            cx,
+                        ))
+                        .child(self.page_text_format_option(
+                            crate::fl!("settings-page-text-format-semantic"),
+                            PageTextFormat::Semantic,
+                            settings.ai.page_text_format,
+                            theme,
+                            cx,
+                        ))
+                        .into_any_element(),
+                ))
+                .child(
+                    div()
+                        .text_size(ui_rems(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(crate::fl!("settings-page-text-format-hint")),
+                )
+                .child(input_row(
+                    crate::fl!("settings-page-image-quality"),
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(self.page_image_quality_option(
+                            crate::fl!("settings-page-image-quality-low"),
+                            PageImageQuality::Low,
+                            settings.ai.page_image_quality,
+                            theme,
+                            cx,
+                        ))
+                        .child(self.page_image_quality_option(
+                            crate::fl!("settings-page-image-quality-medium"),
+                            PageImageQuality::Medium,
+                            settings.ai.page_image_quality,
+                            theme,
+                            cx,
+                        ))
+                        .child(self.page_image_quality_option(
+                            crate::fl!("settings-page-image-quality-high"),
+                            PageImageQuality::High,
+                            settings.ai.page_image_quality,
+                            theme,
+                            cx,
+                        ))
+                        .into_any_element(),
+                ))
+                .child(
+                    div()
+                        .text_size(ui_rems(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(crate::fl!("settings-page-image-quality-hint")),
+                )
+                .into_any_element(),
             div()
                 .flex()
                 .flex_col()

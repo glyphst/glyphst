@@ -465,6 +465,73 @@ impl AiThinkingLevel {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PageTextFormat {
+    #[default]
+    Block,
+    Semantic,
+}
+
+impl PageTextFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Semantic => "semantic",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "block" => Some(Self::Block),
+            "semantic" => Some(Self::Semantic),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PageImageQuality {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl PageImageQuality {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn max_dimension(self) -> u32 {
+        match self {
+            Self::Low => 1024,
+            Self::Medium => 1600,
+            Self::High => 2400,
+        }
+    }
+
+    pub fn jpeg_quality(self) -> u8 {
+        match self {
+            Self::Low => 65,
+            Self::Medium => 75,
+            Self::High => 85,
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AiProvider {
     #[default]
@@ -1143,6 +1210,8 @@ pub struct AiSettings {
     pub title_model: Option<ModelRef>,
     pub translation_model: Option<ModelRef>,
     pub thinking_level: AiThinkingLevel,
+    pub page_text_format: PageTextFormat,
+    pub page_image_quality: PageImageQuality,
     pub quick_ask: QuickAskSettings,
 }
 
@@ -1155,6 +1224,8 @@ impl Default for AiSettings {
             title_model: Some(ModelRef::new(provider, provider.default_title_model())),
             translation_model: Some(ModelRef::new(provider, provider.default_model())),
             thinking_level: AiThinkingLevel::Medium,
+            page_text_format: PageTextFormat::Block,
+            page_image_quality: PageImageQuality::Medium,
             quick_ask: QuickAskSettings::default(),
         }
     }
@@ -1779,6 +1850,20 @@ impl Settings {
             {
                 settings.ai.thinking_level = value;
             }
+            if let Some(value) = ai
+                .get_arg("page_text_format")
+                .and_then(KdlValue::as_string)
+                .and_then(PageTextFormat::from_str)
+            {
+                settings.ai.page_text_format = value;
+            }
+            if let Some(value) = ai
+                .get_arg("page_image_quality")
+                .and_then(KdlValue::as_string)
+                .and_then(PageImageQuality::from_str)
+            {
+                settings.ai.page_image_quality = value;
+            }
 
             if let Some(quick_ask) = ai.get("quick_ask").and_then(KdlNode::children) {
                 if let Some(value) = quick_ask.get_arg("transparency").and_then(value_to_f32) {
@@ -2065,6 +2150,20 @@ impl Settings {
             }
             if self.ai.thinking_level != AiThinkingLevel::default() {
                 push_value_node(ai_children, "thinking", self.ai.thinking_level.as_str());
+            }
+            if self.ai.page_text_format != PageTextFormat::default() {
+                push_value_node(
+                    ai_children,
+                    "page_text_format",
+                    self.ai.page_text_format.as_str(),
+                );
+            }
+            if self.ai.page_image_quality != PageImageQuality::default() {
+                push_value_node(
+                    ai_children,
+                    "page_image_quality",
+                    self.ai.page_image_quality.as_str(),
+                );
             }
             if self.ai.quick_ask != QuickAskSettings::default() {
                 let mut quick_ask = KdlNode::new("quick_ask");
@@ -2787,6 +2886,45 @@ ai {
         .unwrap();
 
         assert_eq!(settings.ai.thinking_level, AiThinkingLevel::High);
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn page_context_settings_use_expected_defaults_and_presets() {
+        let settings = parse_settings(
+            r##"
+ai {
+    page_text_format "invalid"
+    page_image_quality "invalid"
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.ai.page_text_format, PageTextFormat::Block);
+        assert_eq!(settings.ai.page_image_quality, PageImageQuality::Medium);
+        assert_eq!(PageImageQuality::Low.max_dimension(), 1024);
+        assert_eq!(PageImageQuality::Low.jpeg_quality(), 65);
+        assert_eq!(PageImageQuality::Medium.max_dimension(), 1600);
+        assert_eq!(PageImageQuality::Medium.jpeg_quality(), 75);
+        assert_eq!(PageImageQuality::High.max_dimension(), 2400);
+        assert_eq!(PageImageQuality::High.jpeg_quality(), 85);
+    }
+
+    #[test]
+    fn parses_and_exports_ai_page_context_settings() {
+        let settings = parse_settings(
+            r##"
+ai {
+    page_text_format "semantic"
+    page_image_quality "high"
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.ai.page_text_format, PageTextFormat::Semantic);
+        assert_eq!(settings.ai.page_image_quality, PageImageQuality::High);
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 

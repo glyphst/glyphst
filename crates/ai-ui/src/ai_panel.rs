@@ -1,6 +1,6 @@
-use std::{ops::Range, path::PathBuf, thread};
+use std::{collections::HashSet, ops::Range, path::PathBuf, thread};
 
-use crate::AiContextProvider;
+use crate::{AiContext, AiContextProvider, AiPageState, ResolvedPageContext};
 use anyhow::anyhow;
 use futures::{StreamExt, channel::mpsc};
 use glyphst_actions::{
@@ -9,11 +9,12 @@ use glyphst_actions::{
 };
 use glyphst_ai::ai_chat::{
     AiStreamEvent, ChatMessage, ContextBlock, DEFAULT_SESSION_TITLE, DocumentContext, MentionKind,
-    Role, TITLE_GENERATION_PROMPT, find_mention_ranges, mention_matches_query, mentioned_kinds,
-    session_title_for_prompt, stream_completion, thinking_level_description, title_from_response,
+    MentionReference, Role, TITLE_GENERATION_PROMPT, find_mention_references,
+    mention_matches_query, session_title_for_prompt, stream_completion, thinking_level_description,
+    title_from_response,
 };
 use glyphst_library::{
-    AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp,
+    AiMentionReference, AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp,
 };
 use glyphst_settings::{
     AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore, localize::tr, theme::Theme,
@@ -24,18 +25,21 @@ use glyphst_ui::{
     scrollbar::WithScrollbar as _,
 };
 use gpui::{
-    Anchor, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
+    Anchor, App, BorderStyle, Bounds, ClipboardItem, Context, Corners, CursorStyle, Edges, Element,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render,
     ScrollHandle, SharedString, Style, Task, TextRun, TextStyle, UTF16Selection, Window,
-    WrappedLine, anchored, deferred, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
+    WrappedLine, anchored, deferred, div, fill, point, prelude::*, px, quad, relative, rgb, rgba,
+    size,
 };
 
 pub const AI_PANEL_WIDTH: f32 = 360.0;
 const COMPLETION_MENU_WIDTH: f32 = 248.0;
 const COMPLETION_MENU_ROW_HEIGHT: f32 = 46.0;
 const DRAG_SELECT_THRESHOLD: f32 = 2.0;
+const MAX_PAGE_IMAGE_CONTEXTS: usize = 8;
+const MAX_PAGE_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AiPanelEvent {
@@ -62,6 +66,18 @@ enum ModelMenuEntry {
 struct MentionCompletion {
     source_range: Range<usize>,
     selected_ix: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ComposerMention {
+    reference: MentionReference,
+    range: Range<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActivePageNumberEdit {
+    mention_start: usize,
+    digits: Range<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,6 +113,7 @@ pub struct AiPanel {
     context_provider: Box<dyn AiContextProvider>,
     document_path: PathBuf,
     current_page: usize,
+    page_count: usize,
     session_id: u64,
     session_title: String,
     session_created: u64,
@@ -104,6 +121,8 @@ pub struct AiPanel {
     sessions: Vec<AiSession>,
     view: AiPanelView,
     mention_completion: Option<MentionCompletion>,
+    composer_mentions: Vec<ComposerMention>,
+    active_page_number_edit: Option<ActivePageNumberEdit>,
     last_cursor_pos: Option<GpuiPoint<Pixels>>,
     attachment_menu_open: bool,
     attachment_menu_anchor: Option<GpuiPoint<Pixels>>,
@@ -130,13 +149,23 @@ struct PrepaintState {
     cursor: Option<PaintQuad>,
     cursor_position: Option<GpuiPoint<Pixels>>,
     selections: Vec<PaintQuad>,
+    mention_quads: Vec<PaintQuad>,
+    active_number_quads: Vec<PaintQuad>,
+}
+
+#[derive(Clone, Copy)]
+struct DecorationStyle {
+    background: gpui::Hsla,
+    border: gpui::Hsla,
+    border_width: Pixels,
+    radius: Pixels,
 }
 
 struct AiPanelInit {
     previous_focus_handle: FocusHandle,
     context_provider: Box<dyn AiContextProvider>,
     document_path: PathBuf,
-    current_page: usize,
+    page_state: AiPageState,
     width: f32,
     mode: AiPanelMode,
     session_id: u64,
@@ -148,7 +177,7 @@ impl AiPanel {
         previous_focus_handle: FocusHandle,
         context_provider: impl AiContextProvider,
         document_path: PathBuf,
-        current_page: usize,
+        page_state: AiPageState,
         width: f32,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -159,7 +188,7 @@ impl AiPanel {
                 previous_focus_handle,
                 context_provider: Box::new(context_provider),
                 document_path,
-                current_page,
+                page_state,
                 width,
                 mode: AiPanelMode::Sidebar,
                 session_id,
@@ -173,7 +202,7 @@ impl AiPanel {
         previous_focus_handle: FocusHandle,
         context_provider: impl AiContextProvider,
         document_path: PathBuf,
-        current_page: usize,
+        page_state: AiPageState,
         width: f32,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -182,7 +211,7 @@ impl AiPanel {
                 previous_focus_handle,
                 context_provider: Box::new(context_provider),
                 document_path,
-                current_page,
+                page_state,
                 width,
                 mode: AiPanelMode::QuickAsk,
                 session_id: 0,
@@ -213,7 +242,8 @@ impl AiPanel {
             pending_title_task: None,
             context_provider: init.context_provider,
             document_path: init.document_path,
-            current_page: init.current_page,
+            current_page: init.page_state.current_page,
+            page_count: init.page_state.page_count,
             session_id: init.session_id,
             session_title: DEFAULT_SESSION_TITLE.to_string(),
             session_created: 0,
@@ -221,6 +251,8 @@ impl AiPanel {
             sessions: init.sessions,
             view: AiPanelView::Chat,
             mention_completion: None,
+            composer_mentions: Vec::new(),
+            active_page_number_edit: None,
             last_cursor_pos: None,
             attachment_menu_open: false,
             attachment_menu_anchor: None,
@@ -257,6 +289,9 @@ impl AiPanel {
     }
 
     fn submit(&mut self, _: &AiPanelSubmit, _: &mut Window, cx: &mut Context<Self>) {
+        if self.finish_page_number_edit(cx) {
+            return;
+        }
         if self.confirm_mention_completion(cx) {
             return;
         }
@@ -264,6 +299,9 @@ impl AiPanel {
     }
 
     fn newline(&mut self, _: &input::Newline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finish_page_number_edit(cx) {
+            return;
+        }
         if self.mode == AiPanelMode::Sidebar && self.confirm_mention_completion(cx) {
             return;
         }
@@ -281,8 +319,34 @@ impl AiPanel {
             cx.notify();
             return;
         }
+        if let Some(active) = self.active_page_number_edit.clone() {
+            let range = if self.selected_range.is_empty() {
+                let cursor = self.cursor_offset();
+                if cursor <= active.digits.start {
+                    return;
+                }
+                self.previous_boundary(cursor)..cursor
+            } else {
+                self.selected_range.clone()
+            };
+            if self.apply_page_number_edit(range, "") {
+                self.selection_reversed = false;
+                self.marked_range = None;
+                cx.notify();
+            }
+            return;
+        }
         if self.selected_range.is_empty() {
-            self.select_to(self.previous_boundary(self.cursor_offset()), cx);
+            let cursor = self.cursor_offset();
+            if let Some(mention) = self
+                .composer_mentions
+                .iter()
+                .find(|mention| mention.range.end == cursor)
+            {
+                self.selected_range = mention.range.clone();
+            } else {
+                self.select_to(self.previous_boundary(cursor), cx);
+            }
         }
         self.replace_text_in_range(None, "", window, cx);
     }
@@ -296,8 +360,34 @@ impl AiPanel {
             cx.notify();
             return;
         }
+        if let Some(active) = self.active_page_number_edit.clone() {
+            let range = if self.selected_range.is_empty() {
+                let cursor = self.cursor_offset();
+                if cursor >= active.digits.end {
+                    return;
+                }
+                cursor..self.next_boundary(cursor)
+            } else {
+                self.selected_range.clone()
+            };
+            if self.apply_page_number_edit(range, "") {
+                self.selection_reversed = false;
+                self.marked_range = None;
+                cx.notify();
+            }
+            return;
+        }
         if self.selected_range.is_empty() {
-            self.select_to(self.next_boundary(self.cursor_offset()), cx);
+            let cursor = self.cursor_offset();
+            if let Some(mention) = self
+                .composer_mentions
+                .iter()
+                .find(|mention| mention.range.start == cursor)
+            {
+                self.selected_range = mention.range.clone();
+            } else {
+                self.select_to(self.next_boundary(cursor), cx);
+            }
         }
         self.replace_text_in_range(None, "", window, cx);
     }
@@ -306,8 +396,25 @@ impl AiPanel {
         if !self.focus_handle.is_focused(window) {
             return;
         }
+        if let Some(active) = self.active_page_number_edit.clone()
+            && self.selected_range.is_empty()
+            && self.cursor_offset() <= active.digits.start
+        {
+            self.finish_page_number_edit(cx);
+            self.move_to(active.mention_start, cx);
+            return;
+        }
         if self.selected_range.is_empty() {
-            self.move_to(self.previous_boundary(self.cursor_offset()), cx);
+            let cursor = self.cursor_offset();
+            let target = self
+                .composer_mentions
+                .iter()
+                .find(|mention| mention.range.end == cursor)
+                .map_or_else(
+                    || self.previous_boundary(cursor),
+                    |mention| mention.range.start,
+                );
+            self.move_to(target, cx);
         } else {
             self.move_to(self.selected_range.start, cx);
         }
@@ -317,8 +424,21 @@ impl AiPanel {
         if !self.focus_handle.is_focused(window) {
             return;
         }
+        if let Some(active) = self.active_page_number_edit.clone()
+            && self.selected_range.is_empty()
+            && self.cursor_offset() >= active.digits.end
+        {
+            self.finish_page_number_edit(cx);
+            return;
+        }
         if self.selected_range.is_empty() {
-            self.move_to(self.next_boundary(self.selected_range.end), cx);
+            let cursor = self.selected_range.end;
+            let target = self
+                .composer_mentions
+                .iter()
+                .find(|mention| mention.range.start == cursor)
+                .map_or_else(|| self.next_boundary(cursor), |mention| mention.range.end);
+            self.move_to(target, cx);
         } else {
             self.move_to(self.selected_range.end, cx);
         }
@@ -435,7 +555,12 @@ impl AiPanel {
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace("\r\n", "\n").replace('\r', "\n");
+            let editing_page_number = self.active_page_number_edit.is_some();
             self.replace_text_in_range(None, &text, window, cx);
+            if !editing_page_number {
+                self.rebuild_composer_mentions();
+            }
+            cx.notify();
         }
     }
 
@@ -444,64 +569,117 @@ impl AiPanel {
             return;
         }
 
-        let prompt = self.content.trim().to_string();
-        if prompt.is_empty() {
+        self.finish_page_number_edit(cx);
+
+        let display_prompt = self.content.trim().to_string();
+        if display_prompt.is_empty() {
             return;
         }
+        let request_prompt = self.request_prompt();
+        let references = self.references();
 
         let settings = cx.global::<SettingsStore>().settings.ai.resolved_main();
         self.update_current_page(cx);
-        let contexts = self.context_blocks_for_prompt(&prompt, cx);
-        let document = self.document_context(cx);
+        let include_document_text = references
+            .iter()
+            .any(|reference| reference.kind == MentionKind::DocumentText);
+        let context = self.context_provider.context(include_document_text, cx);
+        let contexts = self.context_blocks_for_references(&references, context.as_ref());
+        let document = self.document_context_from(context);
         if self.mode == AiPanelMode::QuickAsk {
             self.messages.clear();
             self.markdown_views.clear();
         } else if self.messages.is_empty() {
-            self.session_title = session_title_for_prompt(&prompt);
+            self.session_title = session_title_for_prompt(&display_prompt);
         }
         if self.mode == AiPanelMode::Sidebar {
             self.content = SharedString::default();
             self.selected_range = 0..0;
+            self.composer_mentions.clear();
         } else {
-            self.content = prompt.clone().into();
-            self.selected_range = prompt.len()..prompt.len();
+            self.content = display_prompt.clone().into();
+            self.selected_range = display_prompt.len()..display_prompt.len();
+            self.rebuild_composer_mentions();
         }
         self.selection_reversed = false;
         self.marked_range = None;
         self.mention_completion = None;
+        self.active_page_number_edit = None;
         self.last_cursor_pos = None;
         self.close_composer_menus();
-        let user_prompt = prompt.clone();
-        self.messages.push(ChatMessage::user(prompt, contexts));
+        let user_prompt = display_prompt.clone();
+        self.messages.push(ChatMessage::user(
+            display_prompt,
+            request_prompt,
+            contexts,
+            references,
+        ));
         self.markdown_views
             .push(cx.new(|cx| Markdown::new(user_prompt.into(), cx)));
         self.messages.push(ChatMessage::assistant(String::new()));
         self.markdown_views
             .push(cx.new(|cx| Markdown::new(SharedString::default(), cx)));
         self.loading = true;
-        if self.mode == AiPanelMode::Sidebar {
-            self.save_current_session(cx);
-        }
         cx.notify();
 
-        let request_messages = self.messages[..self.messages.len().saturating_sub(1)].to_vec();
-        let (tx, mut rx) = mpsc::unbounded::<AiStreamEvent>();
-
-        thread::spawn(move || {
-            let mut send_event = |event| tx.unbounded_send(event).map_err(|_| anyhow!("closed"));
-            let result = stream_completion(settings, request_messages, document, &mut send_event);
-            match result {
-                Ok(()) => {
-                    let _ = send_event(AiStreamEvent::Done);
-                }
-                Err(error) if error.to_string() != "closed" => {
-                    let _ = send_event(AiStreamEvent::Error(format!("{error:#}")));
-                }
-                Err(_) => {}
+        let mut request_messages = self.messages[..self.messages.len().saturating_sub(1)].to_vec();
+        let page_references = match unresolved_page_references(&request_messages) {
+            Ok(references) => references,
+            Err(error) => {
+                self.apply_stream_event(AiStreamEvent::Error(error.to_string()), cx);
+                return;
             }
-        });
+        };
+        let resolve_task = self
+            .context_provider
+            .resolve_page_references(page_references, cx);
 
         self.pending_stream = Some(cx.spawn(async move |this, cx| {
+            let resolved = match resolve_task.await {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.apply_stream_event(AiStreamEvent::Error(format!("{error:#}")), cx);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            if let Err(error) = validate_resolved_page_contexts(&request_messages, &resolved) {
+                let _ = this.update(cx, |this, cx| {
+                    this.apply_stream_event(AiStreamEvent::Error(error.to_string()), cx);
+                    cx.notify();
+                });
+                return;
+            }
+            hydrate_page_contexts(&mut request_messages, &resolved);
+            if this
+                .update(cx, |this, cx| {
+                    hydrate_page_contexts(&mut this.messages, &resolved);
+                    cx.notify();
+                })
+                .is_err()
+            {
+                return;
+            }
+
+            let (tx, mut rx) = mpsc::unbounded::<AiStreamEvent>();
+            thread::spawn(move || {
+                let mut send_event =
+                    |event| tx.unbounded_send(event).map_err(|_| anyhow!("closed"));
+                let result =
+                    stream_completion(settings, request_messages, document, &mut send_event);
+                match result {
+                    Ok(()) => {
+                        let _ = send_event(AiStreamEvent::Done);
+                    }
+                    Err(error) if error.to_string() != "closed" => {
+                        let _ = send_event(AiStreamEvent::Error(format!("{error:#}")));
+                    }
+                    Err(_) => {}
+                }
+            });
+
             while let Some(event) = rx.next().await {
                 if this
                     .update(cx, |this, cx| {
@@ -572,7 +750,11 @@ impl AiPanel {
         };
 
         let session_id = self.session_id;
-        let mut title_messages = self.messages.clone();
+        let mut title_messages = self
+            .messages
+            .iter()
+            .map(ChatMessage::title_safe)
+            .collect::<Vec<_>>();
         title_messages.push(ChatMessage::user_text(TITLE_GENERATION_PROMPT.to_string()));
         let document = self.document_context(cx);
 
@@ -627,31 +809,35 @@ impl AiPanel {
             && self.messages[1].role == Role::Assistant
     }
 
-    fn context_blocks_for_prompt(&self, prompt: &str, cx: &mut Context<Self>) -> Vec<ContextBlock> {
-        mentioned_kinds(prompt)
-            .into_iter()
-            .map(|mention| self.resolve_mention(mention, cx))
+    fn context_blocks_for_references(
+        &self,
+        references: &[MentionReference],
+        context: Option<&AiContext>,
+    ) -> Vec<ContextBlock> {
+        references
+            .iter()
+            .filter(|reference| {
+                matches!(
+                    reference.kind,
+                    MentionKind::Selection | MentionKind::DocumentText
+                )
+            })
+            .map(|reference| self.resolve_mention(reference.kind, context))
             .collect()
     }
 
-    fn resolve_mention(&self, mention: MentionKind, cx: &mut Context<Self>) -> ContextBlock {
-        let Some(context) = self.context_provider.context(cx) else {
+    fn resolve_mention(&self, mention: MentionKind, context: Option<&AiContext>) -> ContextBlock {
+        let Some(context) = context else {
             return Self::missing_context_block(mention);
         };
 
         match mention {
-            MentionKind::CurrentPageText => ContextBlock::new(
-                mention,
-                (context.current_page > 0).then_some(context.current_page),
-                context
-                    .current_page_text
-                    .unwrap_or_else(|| tr("ai-no-current-page-text")),
-            ),
             MentionKind::Selection => ContextBlock::new(
                 mention,
                 None,
                 context
                     .selected_text
+                    .clone()
                     .unwrap_or_else(|| tr("ai-no-selected-text")),
             ),
             MentionKind::DocumentText => ContextBlock::new(
@@ -659,14 +845,17 @@ impl AiPanel {
                 None,
                 context
                     .document_text
+                    .clone()
                     .unwrap_or_else(|| tr("ai-no-document-text")),
             ),
+            MentionKind::Page | MentionKind::PageImage => Self::missing_context_block(mention),
         }
     }
 
     fn missing_context_block(mention: MentionKind) -> ContextBlock {
         let message = match mention {
-            MentionKind::CurrentPageText => tr("ai-no-current-page-text"),
+            MentionKind::Page => tr("ai-no-current-page-text"),
+            MentionKind::PageImage => "No page image is available.".to_string(),
             MentionKind::Selection => tr("ai-no-selected-text"),
             MentionKind::DocumentText => tr("ai-no-document-text"),
         };
@@ -674,6 +863,10 @@ impl AiPanel {
     }
 
     fn document_context(&self, cx: &mut Context<Self>) -> DocumentContext {
+        self.document_context_from(self.context_provider.context(false, cx))
+    }
+
+    fn document_context_from(&self, context: Option<AiContext>) -> DocumentContext {
         let mut document = DocumentContext {
             file_name: self
                 .document_path
@@ -687,7 +880,7 @@ impl AiPanel {
             has_selection: false,
         };
 
-        if let Some(context) = self.context_provider.context(cx) {
+        if let Some(context) = context {
             document.file_name = context.document_file_name.or(document.file_name);
             document.format = context.document_format;
             document.location_label = context.location_label;
@@ -700,9 +893,142 @@ impl AiPanel {
     }
 
     fn update_current_page(&mut self, cx: &mut Context<Self>) {
-        if let Some(context) = self.context_provider.context(cx) {
-            self.current_page = context.current_page;
+        if let Some(state) = self.context_provider.page_state(cx) {
+            self.current_page = state.current_page;
+            self.page_count = state.page_count;
         }
+    }
+
+    fn rebuild_composer_mentions(&mut self) {
+        self.composer_mentions = parse_composer_mentions(&self.content);
+        self.active_page_number_edit = None;
+    }
+
+    fn references(&self) -> Vec<MentionReference> {
+        let mut seen = HashSet::new();
+        self.composer_mentions
+            .iter()
+            .filter_map(|mention| seen.insert(mention.reference).then_some(mention.reference))
+            .collect()
+    }
+
+    fn request_prompt(&self) -> String {
+        request_prompt_without_mentions(&self.content, &self.composer_mentions)
+    }
+
+    fn mention_at_offset(&self, offset: usize) -> Option<&ComposerMention> {
+        self.composer_mentions
+            .iter()
+            .find(|mention| mention.range.start <= offset && offset <= mention.range.end)
+    }
+
+    fn page_digits_range(mention: &ComposerMention) -> Option<Range<usize>> {
+        if !mention.reference.kind.requires_page_number() {
+            return None;
+        }
+        let start = mention.range.start + mention.reference.kind.token().len() + 1;
+        Some(start..mention.range.end.saturating_sub(1))
+    }
+
+    fn begin_page_number_edit(&mut self, mention_start: usize, cx: &mut Context<Self>) -> bool {
+        let Some(mention) = self
+            .composer_mentions
+            .iter()
+            .find(|mention| mention.range.start == mention_start)
+        else {
+            return false;
+        };
+        let Some(digits) = Self::page_digits_range(mention) else {
+            return false;
+        };
+        self.selected_range = digits.clone();
+        self.selection_reversed = false;
+        self.active_page_number_edit = Some(ActivePageNumberEdit {
+            mention_start,
+            digits,
+        });
+        self.mention_completion = None;
+        cx.notify();
+        true
+    }
+
+    fn finish_page_number_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(active) = self.active_page_number_edit.take() else {
+            return false;
+        };
+        let page = validate_page_number(&self.content[active.digits.clone()], self.page_count);
+        let page_text = page.to_string();
+        let old_digits = active.digits.clone();
+        self.content = (self.content[..old_digits.start].to_owned()
+            + &page_text
+            + &self.content[old_digits.end..])
+            .into();
+        let new_digits = old_digits.start..old_digits.start + page_text.len();
+        let delta = page_text.len() as isize - old_digits.len() as isize;
+        adjust_mentions_for_page_number_edit(
+            &mut self.composer_mentions,
+            active.mention_start,
+            new_digits.clone(),
+            delta,
+            page,
+        );
+        let cursor = self
+            .composer_mentions
+            .iter()
+            .find(|mention| mention.range.start == active.mention_start)
+            .map_or(new_digits.end + 1, |mention| mention.range.end);
+        self.selected_range = cursor..cursor;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.update_mention_completion();
+        cx.notify();
+        true
+    }
+
+    fn apply_regular_edit(&mut self, range: Range<usize>, new_text: &str) {
+        self.content =
+            (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+        adjust_composer_mentions(&mut self.composer_mentions, &range, new_text.len());
+        self.active_page_number_edit = None;
+        let cursor = range.start + new_text.len();
+        self.selected_range = cursor..cursor;
+    }
+
+    fn apply_page_number_edit(&mut self, range: Range<usize>, new_text: &str) -> bool {
+        let Some(active) = self.active_page_number_edit.clone() else {
+            return false;
+        };
+        if range.start < active.digits.start || range.end > active.digits.end {
+            return false;
+        }
+        let filtered = new_text
+            .bytes()
+            .filter(u8::is_ascii_digit)
+            .map(char::from)
+            .collect::<String>();
+        if !new_text.is_empty() && filtered.is_empty() {
+            return true;
+        }
+        self.content =
+            (self.content[..range.start].to_owned() + &filtered + &self.content[range.end..])
+                .into();
+        let delta = filtered.len() as isize - range.len() as isize;
+        let new_digits = active.digits.start
+            ..((active.digits.end as isize + delta).max(active.digits.start as isize) as usize);
+        adjust_mentions_for_page_number_edit(
+            &mut self.composer_mentions,
+            active.mention_start,
+            new_digits.clone(),
+            delta,
+            0,
+        );
+        self.active_page_number_edit = Some(ActivePageNumberEdit {
+            mention_start: active.mention_start,
+            digits: new_digits,
+        });
+        let cursor = range.start + filtered.len();
+        self.selected_range = cursor..cursor;
+        true
     }
 
     pub fn save_current_session(&mut self, cx: &mut Context<Self>) {
@@ -738,6 +1064,12 @@ impl AiPanel {
                         },
                         content: content.clone(),
                         request_content: (request_content != content).then_some(request_content),
+                        references: message
+                            .references()
+                            .iter()
+                            .copied()
+                            .map(ai_reference_to_library)
+                            .collect(),
                     }
                 })
                 .collect(),
@@ -885,6 +1217,8 @@ impl AiPanel {
         self.selection_reversed = false;
         self.marked_range = None;
         self.mention_completion = None;
+        self.composer_mentions.clear();
+        self.active_page_number_edit = None;
         self.last_cursor_pos = None;
         self.pending_title_task = None;
         self.close_composer_menus();
@@ -923,6 +1257,13 @@ impl AiPanel {
                     AiSessionRole::Assistant => Role::Assistant,
                 };
                 ChatMessage::from_persisted(role, message.content, message.request_content)
+                    .with_references(
+                        message
+                            .references
+                            .into_iter()
+                            .map(library_reference_to_ai)
+                            .collect(),
+                    )
             })
             .collect();
         self.markdown_views = self
@@ -938,6 +1279,8 @@ impl AiPanel {
         self.selection_reversed = false;
         self.marked_range = None;
         self.mention_completion = None;
+        self.composer_mentions.clear();
+        self.active_page_number_edit = None;
         self.last_cursor_pos = None;
         self.pending_title_task = None;
         self.close_composer_menus();
@@ -975,13 +1318,7 @@ impl AiPanel {
         }
 
         let cursor = self.cursor_offset().min(self.content.len());
-        let line_start = self.content[..cursor]
-            .rfind('\n')
-            .map(|ix| ix + '\n'.len_utf8())
-            .unwrap_or(0);
-        let line = &self.content[line_start..cursor];
-        let at_offset = line.rfind('@')?;
-        Some(line_start + at_offset..cursor)
+        active_mention_range(&self.content, cursor)
     }
 
     fn mention_matches_for_range(&self, source_range: &Range<usize>) -> Vec<MentionKind> {
@@ -995,6 +1332,7 @@ impl AiPanel {
         let query = &self.content[query_start..source_range.end];
         MentionKind::ALL
             .into_iter()
+            .filter(|mention| self.page_count > 0 || !mention.requires_page_number())
             .filter(|mention| mention_matches_query(*mention, query))
             .collect()
     }
@@ -1071,59 +1409,22 @@ impl AiPanel {
         }
         self.focus_handle.focus(window, cx);
         self.close_composer_menus();
-        if mentioned_kinds(&self.content).contains(&mention) {
+        if mention.requires_page_number() && self.page_count == 0 {
+            cx.notify();
+            return;
+        }
+        if self
+            .composer_mentions
+            .iter()
+            .any(|composer_mention| composer_mention.reference.kind == mention)
+            && !mention.requires_page_number()
+        {
             cx.notify();
             return;
         }
 
         let cursor = self.cursor_offset().min(self.content.len());
-        let needs_leading_space = cursor > 0
-            && self.content[..cursor]
-                .chars()
-                .last()
-                .is_some_and(|ch| !ch.is_whitespace());
-        let needs_trailing_space = self.content[cursor..]
-            .chars()
-            .next()
-            .is_some_and(|ch| !ch.is_whitespace());
-        let mut text = String::new();
-        if needs_leading_space {
-            text.push(' ');
-        }
-        text.push_str(mention.token());
-        if needs_trailing_space || cursor == self.content.len() {
-            text.push(' ');
-        }
-        self.replace_text_in_range(None, &text, window, cx);
-    }
-
-    fn remove_attachment(&mut self, mention: MentionKind, cx: &mut Context<Self>) {
-        let mut content = self.content.to_string();
-        for (range, kind) in find_mention_ranges(&content).into_iter().rev() {
-            if kind != mention {
-                continue;
-            }
-
-            let mut end = range.end;
-            while end < content.len() {
-                let Some(ch) = content[end..].chars().next() else {
-                    break;
-                };
-                if ch == '\n' || !ch.is_whitespace() {
-                    break;
-                }
-                end += ch.len_utf8();
-            }
-            content.replace_range(range.start..end, "");
-        }
-
-        self.content = content.into();
-        let cursor = self.cursor_offset().min(self.content.len());
-        self.selected_range = cursor..cursor;
-        self.selection_reversed = false;
-        self.marked_range = None;
-        self.update_mention_completion();
-        cx.notify();
+        self.insert_mention_at_range(mention, cursor..cursor, cx);
     }
 
     fn insert_mention_at_range(
@@ -1132,12 +1433,55 @@ impl AiPanel {
         range: Range<usize>,
         cx: &mut Context<Self>,
     ) {
-        let new_text = format!("{} ", mention.token());
-        self.content =
-            (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..])
-                .into();
-        let cursor = range.start + new_text.len();
-        self.selected_range = cursor..cursor;
+        if mention.requires_page_number() {
+            self.update_current_page(cx);
+        }
+        if mention.requires_page_number() && self.page_count == 0 {
+            self.mention_completion = None;
+            cx.notify();
+            return;
+        }
+        let page = self.current_page.clamp(1, self.page_count.max(1));
+        let token = if mention.requires_page_number() {
+            MentionReference::new(mention, Some(page)).display_text()
+        } else {
+            mention.token().to_string()
+        };
+        let needs_leading_space = range.start > 0
+            && self.content[..range.start]
+                .chars()
+                .last()
+                .is_some_and(|ch| !ch.is_whitespace());
+        let needs_trailing_space = self.content[range.end..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_whitespace());
+        let mut new_text = String::new();
+        if needs_leading_space {
+            new_text.push(' ');
+        }
+        let mention_start = range.start + new_text.len();
+        new_text.push_str(&token);
+        let mention_end = range.start + new_text.len();
+        if needs_trailing_space {
+            new_text.push(' ');
+        }
+        let insertion_start = range.start;
+        self.apply_regular_edit(range, &new_text);
+        let reference =
+            MentionReference::new(mention, mention.requires_page_number().then_some(page));
+        self.composer_mentions.push(ComposerMention {
+            reference,
+            range: mention_start..mention_end,
+        });
+        self.composer_mentions
+            .sort_by_key(|composer_mention| composer_mention.range.start);
+        if mention.requires_page_number() {
+            self.begin_page_number_edit(mention_start, cx);
+        } else {
+            let cursor = insertion_start + new_text.len();
+            self.selected_range = cursor..cursor;
+        }
         self.selection_reversed = false;
         self.marked_range = None;
         self.mention_completion = None;
@@ -1154,7 +1498,40 @@ impl AiPanel {
         self.close_composer_menus();
         self.drag_origin = Some(event.position);
 
-        let offset = self.index_for_mouse_position(event.position, window);
+        let mut offset = self.index_for_mouse_position(event.position, window);
+        if self
+            .active_page_number_edit
+            .as_ref()
+            .is_some_and(|active| offset < active.digits.start || offset > active.digits.end)
+            && self.finish_page_number_edit(cx)
+        {
+            offset = self.index_for_mouse_position(event.position, window);
+        }
+        if !event.modifiers.shift
+            && let Some(mention) = self.mention_at_offset(offset).cloned()
+        {
+            if let Some(digits) = Self::page_digits_range(&mention)
+                && digits.start <= offset
+                && offset <= digits.end
+            {
+                self.begin_page_number_edit(mention.range.start, cx);
+                self.selected_range = offset..offset;
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+            let midpoint = mention.range.start + mention.range.len() / 2;
+            self.move_to(
+                if offset < midpoint {
+                    mention.range.start
+                } else {
+                    mention.range.end
+                },
+                cx,
+            );
+            cx.stop_propagation();
+            return;
+        }
         if event.modifiers.shift {
             self.select_to(offset, cx);
         } else {
@@ -1317,7 +1694,6 @@ impl AiPanel {
             )
         };
         let loading = self.loading;
-        let attached_mentions = mentioned_kinds(&self.content);
         let completion_matches = self.mention_completion_matches();
         let completion_selected = self
             .mention_completion
@@ -1398,27 +1774,21 @@ impl AiPanel {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .when(!attached_mentions.is_empty(), |this| {
-                        this.child(Self::render_attachment_chips(attached_mentions, theme, cx))
-                    })
-                    .child(
-                        div()
-                            .relative()
-                            .key_context("TextInput")
-                            .min_h(px(32.0))
-                            .px_3()
-                            .py_2()
-                            .cursor(CursorStyle::IBeam)
-                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
-                            .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
-                            .on_mouse_move(cx.listener(Self::on_mouse_move))
-                            .child(AiInputElement { panel: entity }),
-                    ),
+                div().flex().flex_col().child(
+                    div()
+                        .relative()
+                        .key_context("TextInput")
+                        .min_h(px(32.0))
+                        .px_3()
+                        .py_2()
+                        .cursor(CursorStyle::IBeam)
+                        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                        .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
+                        .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
+                        .on_mouse_move(cx.listener(Self::on_mouse_move))
+                        .child(AiInputElement { panel: entity }),
+                ),
             )
             .when(show_answer, |this| {
                 this.child(
@@ -1817,55 +2187,11 @@ impl AiPanel {
         menu
     }
 
-    fn render_attachment_chips(
-        mentions: Vec<MentionKind>,
+    fn render_attachment_menu(
+        page_count: usize,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut row = div()
-            .flex()
-            .flex_wrap()
-            .gap_1()
-            .px_2()
-            .pt_2()
-            .text_size(ui_rems(11.0));
-
-        for (mention_ix, mention) in mentions.into_iter().enumerate() {
-            row = row.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(rgb(theme.border_variant))
-                    .bg(rgba(with_alpha(theme.accent, 0x14)))
-                    .text_color(rgb(theme.text))
-                    .child(div().text_color(rgb(theme.accent)).child(mention.label()))
-                    .child(
-                        div()
-                            .id(("ai-remove-attachment", mention_ix))
-                            .text_color(rgb(theme.text_muted))
-                            .cursor_pointer()
-                            .hover(move |style| style.text_color(rgb(theme.text)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    this.remove_attachment(mention, cx);
-                                    cx.stop_propagation();
-                                }),
-                            )
-                            .child("×"),
-                    ),
-            );
-        }
-
-        row
-    }
-
-    fn render_attachment_menu(theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let mut menu = div()
             .w(px(260.0))
             .flex()
@@ -1882,7 +2208,11 @@ impl AiPanel {
                 cx.stop_propagation();
             });
 
-        for (mention_ix, mention) in MentionKind::ALL.into_iter().enumerate() {
+        for (mention_ix, mention) in MentionKind::ALL
+            .into_iter()
+            .filter(|mention| page_count > 0 || !mention.requires_page_number())
+            .enumerate()
+        {
             menu = menu.child(
                 div()
                     .id(("ai-attachment-menu-entry", mention_ix))
@@ -2234,6 +2564,12 @@ impl EntityInputHandler for AiPanel {
             }
             return;
         }
+        if self.active_page_number_edit.is_some()
+            && !new_text.is_empty()
+            && !new_text.bytes().any(|byte| byte.is_ascii_digit())
+        {
+            return;
+        }
 
         let range = range_utf16
             .as_ref()
@@ -2241,10 +2577,9 @@ impl EntityInputHandler for AiPanel {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
 
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
-        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
+        if !self.apply_page_number_edit(range.clone(), new_text) {
+            self.apply_regular_edit(range, new_text);
+        }
         self.selection_reversed = false;
         self.marked_range.take();
         self.update_mention_completion();
@@ -2268,6 +2603,12 @@ impl EntityInputHandler for AiPanel {
             }
             return;
         }
+        if self.active_page_number_edit.is_some()
+            && !new_text.is_empty()
+            && !new_text.bytes().any(|byte| byte.is_ascii_digit())
+        {
+            return;
+        }
 
         let range = range_utf16
             .as_ref()
@@ -2276,11 +2617,16 @@ impl EntityInputHandler for AiPanel {
             .unwrap_or(self.selected_range.clone());
         let selected_range_start = range.start;
 
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
+        let inserted_len = if self.active_page_number_edit.is_some() {
+            new_text.bytes().filter(u8::is_ascii_digit).count()
+        } else {
+            new_text.len()
+        };
+        if !self.apply_page_number_edit(range.clone(), new_text) {
+            self.apply_regular_edit(range.clone(), new_text);
+        }
         self.marked_range =
-            (!new_text.is_empty()).then_some(range.start..range.start + new_text.len());
+            (!new_text.is_empty()).then_some(range.start..range.start + inserted_len);
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| {
@@ -2288,7 +2634,7 @@ impl EntityInputHandler for AiPanel {
                 let end = offset_from_utf16_in_text(new_text, range_utf16.end);
                 selected_range_start + start..selected_range_start + end
             })
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+            .unwrap_or_else(|| range.start + inserted_len..range.start + inserted_len);
         self.selection_reversed = false;
         self.update_mention_completion();
         cx.notify();
@@ -2375,7 +2721,6 @@ impl Render for AiPanel {
             .as_ref()
             .map(|model_ref| ai_settings.model_label(model_ref))
             .unwrap_or_else(|| selected_model.clone());
-        let attached_mentions = mentioned_kinds(&self.content);
         let attachment_menu_open = self.attachment_menu_open;
         let attachment_menu_anchor = self.attachment_menu_anchor;
         let attachment_menu_position = attachment_menu_open
@@ -2626,9 +2971,6 @@ impl Render for AiPanel {
                         .border_t(px(1.0))
                         .border_color(rgb(theme.border))
                         .bg(rgb(theme.surface_background))
-                        .when(!attached_mentions.is_empty(), |this| {
-                            this.child(Self::render_attachment_chips(attached_mentions, theme, cx))
-                        })
                         .child(
                             div()
                                 .relative()
@@ -2863,7 +3205,7 @@ impl Render for AiPanel {
                             .position(anchor)
                             .anchor(Anchor::TopLeft)
                             .snap_to_window_with_margin(px(8.0))
-                            .child(Self::render_attachment_menu(theme, cx)),
+                            .child(Self::render_attachment_menu(self.page_count, theme, cx)),
                     )
                     .with_priority(2),
                 )
@@ -2993,6 +3335,8 @@ impl Element for AiInputElement {
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
+        let composer_mentions = input.composer_mentions.clone();
+        let active_page_number_edit = input.active_page_number_edit.clone();
         let style = window.text_style();
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let (display_text, text_color) = if content.is_empty() {
@@ -3017,6 +3361,7 @@ impl Element for AiInputElement {
                 display_text.as_ref(),
                 base_run,
                 theme,
+                &composer_mentions,
                 input.marked_range.as_ref(),
             )
         } else {
@@ -3040,6 +3385,8 @@ impl Element for AiInputElement {
                     cursor: None,
                     cursor_position: None,
                     selections: Vec::new(),
+                    mention_quads: Vec::new(),
+                    active_number_quads: Vec::new(),
                 };
             }
         };
@@ -3080,12 +3427,46 @@ impl Element for AiInputElement {
         } else {
             None
         };
+        let mut mention_quads = Vec::new();
+        for mention in &composer_mentions {
+            mention_quads.extend(decorated_range_quads(
+                &laid_out_lines,
+                &mention.range,
+                bounds,
+                line_height,
+                DecorationStyle {
+                    background: rgba(with_alpha(theme.accent, 0x18)).into(),
+                    border: rgba(with_alpha(theme.accent, 0x66)).into(),
+                    border_width: px(1.0),
+                    radius: px(4.0),
+                },
+            ));
+        }
+        let active_number_quads = active_page_number_edit
+            .as_ref()
+            .map(|active| {
+                decorated_range_quads(
+                    &laid_out_lines,
+                    &active.digits,
+                    bounds,
+                    line_height,
+                    DecorationStyle {
+                        background: rgba(with_alpha(theme.accent, 0x38)).into(),
+                        border: rgba(with_alpha(theme.accent, 0x99)).into(),
+                        border_width: px(1.0),
+                        radius: px(3.0),
+                    },
+                )
+            })
+            .unwrap_or_default();
 
         PrepaintState {
             lines: Some(laid_out_lines),
             cursor,
             cursor_position,
             selections,
+            mention_quads,
+            active_number_quads,
         }
     }
 
@@ -3106,6 +3487,12 @@ impl Element for AiInputElement {
             cx,
         );
 
+        for mention in prepaint.mention_quads.drain(..) {
+            window.paint_quad(mention);
+        }
+        for active_number in prepaint.active_number_quads.drain(..) {
+            window.paint_quad(active_number);
+        }
         for selection in prepaint.selections.drain(..) {
             window.paint_quad(selection);
         }
@@ -3150,13 +3537,13 @@ fn input_text_runs(
     text: &str,
     base_run: TextRun,
     theme: Theme,
+    composer_mentions: &[ComposerMention],
     marked_range: Option<&Range<usize>>,
 ) -> Vec<TextRun> {
-    let mention_ranges = find_mention_ranges(text);
     let mut boundaries = vec![0, text.len()];
-    for (range, _) in &mention_ranges {
-        boundaries.push(range.start);
-        boundaries.push(range.end);
+    for mention in composer_mentions {
+        boundaries.push(mention.range.start);
+        boundaries.push(mention.range.end);
     }
     if let Some(range) = marked_range {
         boundaries.push(range.start);
@@ -3174,9 +3561,9 @@ fn input_text_runs(
                 return None;
             }
 
-            let mention = mention_ranges
+            let mention = composer_mentions
                 .iter()
-                .any(|(range, _)| start >= range.start && end <= range.end);
+                .any(|mention| start >= mention.range.start && end <= mention.range.end);
             let marked = marked_range
                 .as_ref()
                 .is_some_and(|range| start >= range.start && end <= range.end);
@@ -3316,6 +3703,259 @@ fn selection_quads(
     quads
 }
 
+fn decorated_range_quads(
+    lines: &[LaidOutLine],
+    range: &Range<usize>,
+    bounds: Bounds<Pixels>,
+    line_height: Pixels,
+    style: DecorationStyle,
+) -> Vec<PaintQuad> {
+    let fragments = selection_quads(lines, range, bounds, line_height, style.background);
+    fragments
+        .into_iter()
+        .map(|fragment| {
+            let fragment_bounds = fragment.bounds;
+            quad(
+                fragment_bounds,
+                Corners::all(style.radius).clamp_radii_for_quad_size(fragment_bounds.size),
+                style.background,
+                Edges {
+                    top: style.border_width,
+                    right: style.border_width,
+                    bottom: style.border_width,
+                    left: style.border_width,
+                },
+                style.border,
+                BorderStyle::Solid,
+            )
+        })
+        .collect()
+}
+
+fn active_mention_range(text: &str, cursor: usize) -> Option<Range<usize>> {
+    let cursor = cursor.min(text.len());
+    let line_start = text[..cursor].rfind('\n').map_or(0, |ix| ix + 1);
+    let line = &text[line_start..cursor];
+    let at = line.rfind('@')?;
+    let start = line_start + at;
+    let valid_boundary = start == 0
+        || text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '"' | '\''));
+    if !valid_boundary || text[start..cursor].contains('\n') {
+        return None;
+    }
+    Some(start..cursor)
+}
+
+fn parse_composer_mentions(text: &str) -> Vec<ComposerMention> {
+    find_mention_references(text)
+        .into_iter()
+        .map(|(range, reference)| ComposerMention { reference, range })
+        .collect()
+}
+
+fn adjust_composer_mentions(
+    mentions: &mut Vec<ComposerMention>,
+    edited_range: &Range<usize>,
+    inserted_len: usize,
+) {
+    let delta = inserted_len as isize - edited_range.len() as isize;
+    mentions.retain_mut(|mention| {
+        if edited_range.end <= mention.range.start {
+            mention.range.start = (mention.range.start as isize + delta) as usize;
+            mention.range.end = (mention.range.end as isize + delta) as usize;
+            true
+        } else {
+            edited_range.start >= mention.range.end
+        }
+    });
+}
+
+fn adjust_mentions_for_page_number_edit(
+    mentions: &mut [ComposerMention],
+    mention_start: usize,
+    new_digits: Range<usize>,
+    delta: isize,
+    validated_page: usize,
+) {
+    for mention in mentions {
+        if mention.range.start == mention_start {
+            mention.range.end = (mention.range.end as isize + delta) as usize;
+            if validated_page > 0 {
+                mention.reference.page = Some(validated_page);
+            }
+        } else if mention.range.start > mention_start {
+            mention.range.start = (mention.range.start as isize + delta) as usize;
+            mention.range.end = (mention.range.end as isize + delta) as usize;
+        }
+    }
+    debug_assert!(new_digits.start <= new_digits.end);
+}
+
+fn validate_page_number(digits: &str, page_count: usize) -> usize {
+    digits
+        .parse::<usize>()
+        .unwrap_or(1)
+        .clamp(1, page_count.max(1))
+}
+
+fn request_prompt_without_mentions(text: &str, mentions: &[ComposerMention]) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for mention in mentions {
+        if mention.range.start < cursor || mention.range.end > text.len() {
+            continue;
+        }
+        result.push_str(&text[cursor..mention.range.start]);
+        cursor = mention.range.end;
+        let result_ends_with_space = result
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch == ' ' || ch == '\t');
+        if result_ends_with_space
+            && text[cursor..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == ' ' || ch == '\t')
+        {
+            while text[cursor..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == ' ' || ch == '\t')
+            {
+                cursor += text[cursor..].chars().next().unwrap().len_utf8();
+            }
+        } else if result_ends_with_space
+            && text[cursor..].chars().next().is_none_or(|ch| {
+                ch == '\n' || matches!(ch, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}')
+            })
+        {
+            while result
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch == ' ' || ch == '\t')
+            {
+                result.pop();
+            }
+        }
+    }
+    result.push_str(&text[cursor..]);
+    result.trim().to_string()
+}
+
+fn unresolved_page_references(messages: &[ChatMessage]) -> anyhow::Result<Vec<MentionReference>> {
+    let image_count = messages
+        .iter()
+        .flat_map(ChatMessage::references)
+        .filter(|reference| reference.kind == MentionKind::PageImage)
+        .count();
+    if image_count > MAX_PAGE_IMAGE_CONTEXTS {
+        return Err(anyhow!(
+            "too many page images attached: {image_count} requested, maximum is {MAX_PAGE_IMAGE_CONTEXTS}"
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let references = messages
+        .iter()
+        .flat_map(|message| {
+            message.references().iter().copied().filter(|reference| {
+                reference.kind.requires_page_number()
+                    && !message.has_resolved_page_reference(*reference)
+            })
+        })
+        .filter(|reference| seen.insert(*reference))
+        .collect::<Vec<_>>();
+    Ok(references)
+}
+
+fn validate_resolved_page_contexts(
+    messages: &[ChatMessage],
+    resolved: &[ResolvedPageContext],
+) -> anyhow::Result<()> {
+    let image_bytes = messages
+        .iter()
+        .map(ChatMessage::image_context_bytes)
+        .sum::<usize>()
+        + resolved
+            .iter()
+            .map(|context| match context {
+                ResolvedPageContext::Image(image) => {
+                    let reference = MentionReference::new(image.kind, image.page);
+                    let occurrence_count = messages
+                        .iter()
+                        .filter(|message| {
+                            message.references().contains(&reference)
+                                && !message.has_resolved_page_reference(reference)
+                        })
+                        .count();
+                    image.bytes.len() * occurrence_count
+                }
+                ResolvedPageContext::Text(_) => 0,
+            })
+            .sum::<usize>();
+    if image_bytes > MAX_PAGE_IMAGE_BYTES {
+        return Err(anyhow!(
+            "attached page images are too large: {} MiB exceeds the {} MiB limit",
+            image_bytes.div_ceil(1024 * 1024),
+            MAX_PAGE_IMAGE_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(())
+}
+
+fn hydrate_page_contexts(messages: &mut [ChatMessage], resolved: &[ResolvedPageContext]) {
+    for message in messages {
+        let references = message.references().iter().copied().collect::<HashSet<_>>();
+        for resolved in resolved {
+            match resolved {
+                ResolvedPageContext::Text(context) => {
+                    let reference = MentionReference::new(context.kind, context.page);
+                    if references.contains(&reference)
+                        && !message.has_resolved_page_reference(reference)
+                    {
+                        message.attach_context(context.clone());
+                    }
+                }
+                ResolvedPageContext::Image(image) => {
+                    let reference = MentionReference::new(image.kind, image.page);
+                    if references.contains(&reference)
+                        && !message.has_resolved_page_reference(reference)
+                    {
+                        message.attach_image(image.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn ai_reference_to_library(reference: MentionReference) -> AiMentionReference {
+    match reference.kind {
+        MentionKind::Selection => AiMentionReference::Selection,
+        MentionKind::DocumentText => AiMentionReference::DocumentText,
+        MentionKind::Page => AiMentionReference::Page {
+            page: reference.page.unwrap_or(1),
+        },
+        MentionKind::PageImage => AiMentionReference::PageImage {
+            page: reference.page.unwrap_or(1),
+        },
+    }
+}
+
+fn library_reference_to_ai(reference: AiMentionReference) -> MentionReference {
+    match reference {
+        AiMentionReference::Selection => MentionReference::new(MentionKind::Selection, None),
+        AiMentionReference::DocumentText => MentionReference::new(MentionKind::DocumentText, None),
+        AiMentionReference::Page { page } => MentionReference::new(MentionKind::Page, Some(page)),
+        AiMentionReference::PageImage { page } => {
+            MentionReference::new(MentionKind::PageImage, Some(page))
+        }
+    }
+}
+
 fn offset_from_utf16_in_text(text: &str, offset: usize) -> usize {
     let mut utf8_offset = 0;
     let mut utf16_count = 0;
@@ -3348,4 +3988,126 @@ fn offset_to_utf16_in_text(text: &str, offset: usize) -> usize {
 
 fn with_alpha(rgb: u32, alpha: u8) -> u32 {
     (rgb << 8) | u32::from(alpha)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_prompt_strips_structured_mentions_and_preserves_words() {
+        let text = "Compare @page(12) with @selection\nusing @document text.";
+        let mentions = parse_composer_mentions(text);
+        assert_eq!(
+            request_prompt_without_mentions(text, &mentions),
+            "Compare with\nusing."
+        );
+    }
+
+    #[test]
+    fn edit_adjusts_ranges_and_removes_overlapping_mentions() {
+        let mut mentions = parse_composer_mentions("@selection then @page(3)");
+        adjust_composer_mentions(&mut mentions, &(0..0), 4);
+        assert_eq!(mentions[0].range, 4..14);
+        assert_eq!(mentions[1].range, 20..28);
+
+        adjust_composer_mentions(&mut mentions, &(6..8), 1);
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].range, 19..27);
+    }
+
+    #[test]
+    fn parser_restores_only_canonical_mentions_at_valid_boundaries() {
+        let mentions =
+            parse_composer_mentions("mail@example.com @page(2) (@page-image(4)) @selection");
+        assert_eq!(
+            mentions
+                .into_iter()
+                .map(|mention| mention.reference)
+                .collect::<Vec<_>>(),
+            vec![
+                MentionReference::new(MentionKind::Page, Some(2)),
+                MentionReference::new(MentionKind::PageImage, Some(4)),
+                MentionReference::new(MentionKind::Selection, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn page_validation_defaults_and_clamps() {
+        assert_eq!(validate_page_number("", 20), 1);
+        assert_eq!(validate_page_number("0", 20), 1);
+        assert_eq!(validate_page_number("12", 20), 12);
+        assert_eq!(validate_page_number("99", 20), 20);
+    }
+
+    #[test]
+    fn mention_trigger_requires_a_boundary() {
+        assert_eq!(active_mention_range("ask @pa", 7), Some(4..7));
+        assert_eq!(active_mention_range("mail@example", 12), None);
+        assert_eq!(active_mention_range("(@page", 6), Some(1..6));
+    }
+
+    #[test]
+    fn page_resolution_skips_hydrated_references_and_limits_images() {
+        let reference = MentionReference::new(MentionKind::PageImage, Some(2));
+        let mut hydrated = ChatMessage::user(
+            "@page-image(2)".to_string(),
+            String::new(),
+            Vec::new(),
+            vec![reference],
+        );
+        hydrated.attach_image(glyphst_ai::ai_chat::ImageContext::new(
+            MentionKind::PageImage,
+            Some(2),
+            "image/jpeg",
+            vec![1, 2, 3],
+        ));
+        assert!(unresolved_page_references(&[hydrated]).unwrap().is_empty());
+
+        let messages = (1..=MAX_PAGE_IMAGE_CONTEXTS + 1)
+            .map(|page| {
+                let reference = MentionReference::new(MentionKind::PageImage, Some(page));
+                ChatMessage::user(
+                    reference.display_text(),
+                    String::new(),
+                    Vec::new(),
+                    vec![reference],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(unresolved_page_references(&messages).is_err());
+    }
+
+    #[test]
+    fn hydration_preserves_existing_page_contexts() {
+        let first = MentionReference::new(MentionKind::Page, Some(1));
+        let second = MentionReference::new(MentionKind::Page, Some(2));
+        let mut message = ChatMessage::user(
+            "@page(1) @page(2)".to_string(),
+            String::new(),
+            Vec::new(),
+            vec![first, second],
+        );
+        message.attach_context(ContextBlock::new(
+            MentionKind::Page,
+            Some(1),
+            "First".to_string(),
+        ));
+
+        hydrate_page_contexts(
+            std::slice::from_mut(&mut message),
+            &[ResolvedPageContext::Text(ContextBlock::new(
+                MentionKind::Page,
+                Some(2),
+                "Second".to_string(),
+            ))],
+        );
+
+        assert!(message.has_resolved_page_reference(first));
+        assert!(message.has_resolved_page_reference(second));
+        let request = message.request_text();
+        assert!(request.contains("First"));
+        assert!(request.contains("Second"));
+    }
 }
