@@ -895,6 +895,7 @@ pub enum AiMentionReference {
     DocumentText,
     Page { page: usize },
     PageImage { page: usize },
+    DocumentImage,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2859,6 +2860,7 @@ mod tests {
             AiMentionReference::DocumentText,
             AiMentionReference::Page { page: 4 },
             AiMentionReference::PageImage { page: 5 },
+            AiMentionReference::DocumentImage,
         ];
 
         {
@@ -2890,6 +2892,41 @@ mod tests {
         }
 
         let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn ai_mention_reference_keeps_historical_variant_encoding_compatible() {
+        #[derive(Serialize)]
+        enum HistoricalAiMentionReference {
+            Selection,
+            DocumentText,
+            Page { page: usize },
+            PageImage { page: usize },
+        }
+
+        let historical = [
+            (
+                HistoricalAiMentionReference::Selection,
+                AiMentionReference::Selection,
+            ),
+            (
+                HistoricalAiMentionReference::DocumentText,
+                AiMentionReference::DocumentText,
+            ),
+            (
+                HistoricalAiMentionReference::Page { page: 7 },
+                AiMentionReference::Page { page: 7 },
+            ),
+            (
+                HistoricalAiMentionReference::PageImage { page: 9 },
+                AiMentionReference::PageImage { page: 9 },
+            ),
+        ];
+
+        for (historical, expected) in historical {
+            let bytes = encode(&historical).unwrap();
+            assert_eq!(decode::<AiMentionReference>(&bytes).unwrap(), expected);
+        }
     }
 
     #[test]

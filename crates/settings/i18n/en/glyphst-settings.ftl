@@ -105,6 +105,7 @@ ai-ask-placeholder = Ask about this PDF…
 ai-new-chat = New chat
 ai-no-current-page-text = No current page text is available.
 ai-no-document-text = No extracted text is available for this PDF.
+ai-no-document-image = No document images are available for this PDF.
 ai-no-previous-sessions = No previous AI sessions for this PDF
 ai-no-selected-text = No selected text is currently available.
 ai-search-models-placeholder = Type to search models…
@@ -112,10 +113,13 @@ ai-select-provider-model = Select provider/model
 attach = Attach
 mention-current-page-text = Current page text
 mention-current-page-text-description = Attach text from the visible page
+mention-page-image-description = Attach a page as an image
 mention-selection = Selection
 mention-selection-description = Attach the selected PDF text
 mention-document-text = Whole PDF text
 mention-document-text-description = Attach extracted text from the PDF
+mention-document-image = Whole PDF as images
+mention-document-image-description = Attach every PDF page as an image
 
 ## Settings
 
@@ -190,6 +194,8 @@ settings-page-image-quality-low = Low
 settings-page-image-quality-medium = Medium
 settings-page-image-quality-high = High
 settings-page-image-quality-hint = Low: 1024 px / JPEG 65 · Medium: 1600 px / JPEG 75 · High: 2400 px / JPEG 85
+settings-page-image-limit = Image page limit
+settings-page-image-limit-hint = Maximum number of page images that can be attached to one AI request.
 settings-quick-ai-chat = Quick AI chat
 settings-no-enabled-provider-models = No enabled provider models
 settings-no-models-added = No models added yet.

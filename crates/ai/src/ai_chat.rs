@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use crate::settings::{AiApiStyle, AiProvider, AiThinkingLevel, ResolvedAiConfig};
 
 const MAX_CONTEXT_CHARS: usize = 12_000;
+pub const MAX_PAGE_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
 pub const DEFAULT_SESSION_TITLE: &str = "New Chat";
 pub const TITLE_GENERATION_PROMPT: &str = "Generate a concise 3-7 word title for this conversation, \
@@ -78,7 +79,14 @@ impl ImageContext {
     }
 
     fn descriptor(&self) -> String {
-        let reference = MentionReference::new(self.kind, self.page).display_text();
+        let reference = if self.kind == MentionKind::DocumentImage {
+            self.page.map_or_else(
+                || self.kind.token().to_string(),
+                |page| format!("{} page {page}", self.kind.token()),
+            )
+        } else {
+            MentionReference::new(self.kind, self.page).display_text()
+        };
         format!(
             "[Attached {reference} image, media type {}]",
             self.media_type
@@ -228,8 +236,10 @@ impl ChatMessage {
                     && context.page == reference.page
             }
             ContentPart::Image(image) => {
-                reference.kind == MentionKind::PageImage
-                    && image.kind == reference.kind
+                matches!(
+                    reference.kind,
+                    MentionKind::PageImage | MentionKind::DocumentImage
+                ) && image.kind == reference.kind
                     && image.page == reference.page
             }
             ContentPart::Text(_) => false,
@@ -305,14 +315,16 @@ pub enum MentionKind {
     PageImage,
     Selection,
     DocumentText,
+    DocumentImage,
 }
 
 impl MentionKind {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Page,
         Self::PageImage,
         Self::Selection,
         Self::DocumentText,
+        Self::DocumentImage,
     ];
 
     pub fn token(self) -> &'static str {
@@ -320,26 +332,25 @@ impl MentionKind {
             Self::Page => "@page",
             Self::PageImage => "@page-image",
             Self::Selection => "@selection",
-            Self::DocumentText => "@document text",
+            Self::DocumentText => "@document",
+            Self::DocumentImage => "@document-image",
         }
     }
 
-    pub fn label(self) -> String {
-        match self {
-            Self::Page => "Page".to_string(),
-            Self::PageImage => "Page image".to_string(),
-            Self::Selection => glyphst_settings::localize::tr("mention-selection"),
-            Self::DocumentText => glyphst_settings::localize::tr("mention-document-text"),
-        }
+    pub fn label(self) -> &'static str {
+        self.token().strip_prefix('@').unwrap_or(self.token())
     }
 
     pub fn description(self) -> String {
         match self {
-            Self::Page => "Attach text from a page".to_string(),
-            Self::PageImage => "Attach a page as an image".to_string(),
+            Self::Page => glyphst_settings::localize::tr("mention-current-page-text-description"),
+            Self::PageImage => glyphst_settings::localize::tr("mention-page-image-description"),
             Self::Selection => glyphst_settings::localize::tr("mention-selection-description"),
             Self::DocumentText => {
                 glyphst_settings::localize::tr("mention-document-text-description")
+            }
+            Self::DocumentImage => {
+                glyphst_settings::localize::tr("mention-document-image-description")
             }
         }
     }
@@ -350,11 +361,20 @@ impl MentionKind {
             Self::PageImage => "Page image".to_string(),
             Self::Selection => glyphst_settings::localize::tr("mention-selection"),
             Self::DocumentText => glyphst_settings::localize::tr("mention-document-text"),
+            Self::DocumentImage => glyphst_settings::localize::tr("mention-document-image"),
         }
     }
 
     pub fn requires_page_number(self) -> bool {
         matches!(self, Self::Page | Self::PageImage)
+    }
+
+    pub fn is_image(self) -> bool {
+        matches!(self, Self::PageImage | Self::DocumentImage)
+    }
+
+    pub fn requires_fixed_layout(self) -> bool {
+        matches!(self, Self::Page | Self::PageImage | Self::DocumentImage)
     }
 
     pub fn context_tag(self) -> &'static str {
@@ -363,15 +383,17 @@ impl MentionKind {
             Self::PageImage => "page_image",
             Self::Selection => "selection",
             Self::DocumentText => "document_text",
+            Self::DocumentImage => "document_image",
         }
     }
 
-    fn empty_context_message(self) -> String {
+    pub fn empty_context_message(self) -> String {
         match self {
             Self::Page => glyphst_settings::localize::tr("ai-no-current-page-text"),
             Self::PageImage => "No page image is available.".to_string(),
             Self::Selection => glyphst_settings::localize::tr("ai-no-selected-text"),
             Self::DocumentText => glyphst_settings::localize::tr("ai-no-document-text"),
+            Self::DocumentImage => glyphst_settings::localize::tr("ai-no-document-image"),
         }
     }
 }
@@ -781,7 +803,7 @@ pub fn system_prompt(
         sections.push(format!("Current document:\n{}", details.join("\n")));
     }
 
-    sections.push("When the user attaches @page(<page number>), @page-image(<page number>), @selection, or @document text, ground your answer in the attached context. Page numbers are 1-based. Treat attached document text and images as current and authoritative. Cite page numbers when the attached context includes them. If the answer cannot be determined from the attached context, say so directly.".to_string());
+    sections.push("When the user attaches @page(<page number>), @page-image(<page number>), @selection, @document, or @document-image, ground your answer in the attached context. Page numbers are 1-based. Treat attached document text and images as current and authoritative. Cite page numbers when the attached context includes them. If the answer cannot be determined from the attached context, say so directly.".to_string());
 
     if thinking_level != AiThinkingLevel::Off && !native_thinking {
         sections.push(format!(
@@ -916,7 +938,23 @@ pub fn find_mention_references(text: &str) -> Vec<(Range<usize>, MentionReferenc
             continue;
         }
 
-        for kind in [MentionKind::Selection, MentionKind::DocumentText] {
+        const LEGACY_DOCUMENT_TOKEN: &str = "@document text";
+        let legacy_end = start + LEGACY_DOCUMENT_TOKEN.len();
+        if text[start..].starts_with(LEGACY_DOCUMENT_TOKEN)
+            && is_mention_boundary(text[legacy_end..].chars().next())
+        {
+            ranges.push((
+                start..legacy_end,
+                MentionReference::new(MentionKind::DocumentText, None),
+            ));
+            continue;
+        }
+
+        for kind in [
+            MentionKind::Selection,
+            MentionKind::DocumentImage,
+            MentionKind::DocumentText,
+        ] {
             let token = kind.token();
             let end = start + token.len();
             if text[start..].starts_with(token) && is_mention_boundary(text[end..].chars().next()) {
@@ -1029,6 +1067,7 @@ fn escape_context(text: &str) -> String {
         "page_image",
         "selection",
         "document_text",
+        "document_image",
     ] {
         escaped = escaped.replace(&format!("</{tag}"), &format!("&lt;/{tag}"));
         escaped = escaped.replace(&format!("<{tag}"), &format!("&lt;{tag}"));
@@ -1075,13 +1114,14 @@ mod tests {
     fn parses_canonical_mentions_with_one_based_pages() {
         assert_eq!(
             mentioned_references(
-                "Compare @page(2), @page-image(12), @selection, and @document text."
+                "Compare @page(2), @page-image(12), @selection, @document, and @document-image."
             ),
             vec![
                 MentionReference::new(MentionKind::Page, Some(2)),
                 MentionReference::new(MentionKind::PageImage, Some(12)),
                 MentionReference::new(MentionKind::Selection, None),
                 MentionReference::new(MentionKind::DocumentText, None),
+                MentionReference::new(MentionKind::DocumentImage, None),
             ]
         );
         assert_eq!(
@@ -1093,6 +1133,40 @@ mod tests {
         );
         assert!(mentioned_references("@page @page(0) @page-image(x)").is_empty());
         assert!(mentioned_references("mail@selection example@page(2)").is_empty());
+    }
+
+    #[test]
+    fn parses_legacy_document_text_before_canonical_document() {
+        assert_eq!(
+            find_mention_references("Use @document text and @document."),
+            vec![
+                (
+                    4..18,
+                    MentionReference::new(MentionKind::DocumentText, None)
+                ),
+                (
+                    23..32,
+                    MentionReference::new(MentionKind::DocumentText, None)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn mention_labels_are_canonical_lowercase_keywords() {
+        assert_eq!(
+            MentionKind::ALL.map(MentionKind::label),
+            [
+                "page",
+                "page-image",
+                "selection",
+                "document",
+                "document-image",
+            ]
+        );
+        assert!(!MentionKind::Page.is_image());
+        assert!(MentionKind::PageImage.is_image());
+        assert!(MentionKind::DocumentImage.is_image());
     }
 
     #[test]
@@ -1247,16 +1321,41 @@ mod tests {
     }
 
     #[test]
-    fn provider_payloads_use_multimodal_content_arrays() {
+    fn document_images_remain_distinguishable_by_page_after_resolution() {
         let mut message = ChatMessage::user(
-            "Describe @page-image(4)".to_string(),
-            "Describe this page".to_string(),
+            "Describe @document-image".to_string(),
+            "Describe this document".to_string(),
             Vec::new(),
-            vec![MentionReference::new(MentionKind::PageImage, Some(4))],
+            vec![MentionReference::new(MentionKind::DocumentImage, None)],
         );
         message.attach_image(ImageContext::new(
-            MentionKind::PageImage,
-            Some(4),
+            MentionKind::DocumentImage,
+            Some(2),
+            "image/jpeg",
+            vec![1, 2, 3],
+        ));
+
+        assert!(message.has_resolved_page_reference(MentionReference::new(
+            MentionKind::DocumentImage,
+            Some(2),
+        )));
+        assert!(!message.has_resolved_page_reference(MentionReference::new(
+            MentionKind::DocumentImage,
+            Some(1),
+        )));
+    }
+
+    #[test]
+    fn provider_payloads_use_multimodal_content_arrays() {
+        let mut message = ChatMessage::user(
+            "Describe @document-image".to_string(),
+            "Describe this document".to_string(),
+            Vec::new(),
+            vec![MentionReference::new(MentionKind::DocumentImage, None)],
+        );
+        message.attach_image(ImageContext::new(
+            MentionKind::DocumentImage,
+            Some(1),
             "image/jpeg",
             vec![0xff, 0xd8, 0xff],
         ));
@@ -1267,7 +1366,7 @@ mod tests {
             json!([
                 {
                     "type": "text",
-                    "text": "Describe this page\n\nAttached image context:\n[Attached @page-image(4) image, media type image/jpeg]",
+                    "text": "Describe this document\n\nAttached image context:\n[Attached @document-image page 1 image, media type image/jpeg]",
                 },
                 {
                     "type": "image_url",
@@ -1282,7 +1381,7 @@ mod tests {
             json!([
                 {
                     "type": "text",
-                    "text": "Describe this page\n\nAttached image context:\n[Attached @page-image(4) image, media type image/jpeg]",
+                    "text": "Describe this document\n\nAttached image context:\n[Attached @document-image page 1 image, media type image/jpeg]",
                 },
                 {
                     "type": "image",
@@ -1393,5 +1492,7 @@ mod tests {
         assert!(prompt.contains("Pages: 42"));
         assert!(prompt.contains("Current page: 9"));
         assert!(prompt.contains("Selected text: available"));
+        assert!(prompt.contains("@document-image"));
+        assert!(!prompt.contains("@document text"));
     }
 }

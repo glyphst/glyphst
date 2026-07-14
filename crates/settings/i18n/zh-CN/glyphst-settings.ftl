@@ -97,6 +97,7 @@ ai-ask-placeholder = 询问此 PDF…
 ai-new-chat = 新建对话
 ai-no-current-page-text = 当前页面没有可用文本。
 ai-no-document-text = 此 PDF 没有可用的提取文本。
+ai-no-document-image = 此 PDF 没有可用的文档图像。
 ai-no-previous-sessions = 此 PDF 没有之前的 AI 会话
 ai-no-selected-text = 当前没有选中的文本。
 ai-search-models-placeholder = 输入以搜索模型…
@@ -104,10 +105,13 @@ ai-select-provider-model = 选择提供商/模型
 attach = 附加
 mention-current-page-text = 当前页面文本
 mention-current-page-text-description = 附加可见页面中的文本
+mention-page-image-description = 将页面作为图像附加
 mention-selection = 选区
 mention-selection-description = 附加选中的 PDF 文本
 mention-document-text = 整个 PDF 文本
 mention-document-text-description = 附加从 PDF 提取的文本
+mention-document-image = 整个 PDF 图像
+mention-document-image-description = 将 PDF 的每一页作为图像附加
 
 ## Settings
 
@@ -178,6 +182,8 @@ settings-page-image-quality-low = 低
 settings-page-image-quality-medium = 中
 settings-page-image-quality-high = 高
 settings-page-image-quality-hint = 低：1024 像素 / JPEG 65 · 中：1600 像素 / JPEG 75 · 高：2400 像素 / JPEG 85
+settings-page-image-limit = 图像页数上限
+settings-page-image-limit-hint = 单次 AI 请求最多可附加的页面图像数量。
 settings-quick-ai-chat = 快速 AI 对话
 settings-no-enabled-provider-models = 没有已启用提供商的模型
 settings-no-models-added = 尚未添加模型。

@@ -38,6 +38,7 @@ const MIN_WINDOW_OPACITY: f32 = 0.1;
 const MAX_WINDOW_OPACITY: f32 = 1.0;
 const DEFAULT_QUICK_ASK_TRANSPARENCY: f32 = 23.0 / 255.0;
 const DEFAULT_QUICK_ASK_TEXT_SIZE: f32 = 13.0;
+pub const DEFAULT_PAGE_IMAGE_LIMIT: usize = 8;
 const MIN_QUICK_ASK_TRANSPARENCY: f32 = 0.0;
 const MAX_QUICK_ASK_TRANSPARENCY: f32 = 1.0;
 const MIN_QUICK_ASK_TEXT_SIZE: f32 = 8.0;
@@ -1212,6 +1213,7 @@ pub struct AiSettings {
     pub thinking_level: AiThinkingLevel,
     pub page_text_format: PageTextFormat,
     pub page_image_quality: PageImageQuality,
+    pub page_image_limit: usize,
     pub quick_ask: QuickAskSettings,
 }
 
@@ -1226,6 +1228,7 @@ impl Default for AiSettings {
             thinking_level: AiThinkingLevel::Medium,
             page_text_format: PageTextFormat::Block,
             page_image_quality: PageImageQuality::Medium,
+            page_image_limit: DEFAULT_PAGE_IMAGE_LIMIT,
             quick_ask: QuickAskSettings::default(),
         }
     }
@@ -1233,6 +1236,7 @@ impl Default for AiSettings {
 
 impl AiSettings {
     fn sanitize(&mut self) {
+        self.page_image_limit = self.page_image_limit.max(1);
         self.quick_ask.sanitize();
 
         for (provider, config) in self.providers.iter_mut() {
@@ -1864,6 +1868,13 @@ impl Settings {
             {
                 settings.ai.page_image_quality = value;
             }
+            if let Some(value) = ai
+                .get_arg("page_image_limit")
+                .and_then(KdlValue::as_integer)
+                .and_then(|value| usize::try_from(value).ok())
+            {
+                settings.ai.page_image_limit = value;
+            }
 
             if let Some(quick_ask) = ai.get("quick_ask").and_then(KdlNode::children) {
                 if let Some(value) = quick_ask.get_arg("transparency").and_then(value_to_f32) {
@@ -2163,6 +2174,13 @@ impl Settings {
                     ai_children,
                     "page_image_quality",
                     self.ai.page_image_quality.as_str(),
+                );
+            }
+            if self.ai.page_image_limit != DEFAULT_PAGE_IMAGE_LIMIT {
+                push_value_node(
+                    ai_children,
+                    "page_image_limit",
+                    self.ai.page_image_limit as i128,
                 );
             }
             if self.ai.quick_ask != QuickAskSettings::default() {
@@ -2896,6 +2914,7 @@ ai {
 ai {
     page_text_format "invalid"
     page_image_quality "invalid"
+    page_image_limit 0
 }
 "##,
         )
@@ -2903,6 +2922,7 @@ ai {
 
         assert_eq!(settings.ai.page_text_format, PageTextFormat::Block);
         assert_eq!(settings.ai.page_image_quality, PageImageQuality::Medium);
+        assert_eq!(settings.ai.page_image_limit, 1);
         assert_eq!(PageImageQuality::Low.max_dimension(), 1024);
         assert_eq!(PageImageQuality::Low.jpeg_quality(), 65);
         assert_eq!(PageImageQuality::Medium.max_dimension(), 1600);
@@ -2918,6 +2938,7 @@ ai {
 ai {
     page_text_format "semantic"
     page_image_quality "high"
+    page_image_limit 128
 }
 "##,
         )
@@ -2925,6 +2946,26 @@ ai {
 
         assert_eq!(settings.ai.page_text_format, PageTextFormat::Semantic);
         assert_eq!(settings.ai.page_image_quality, PageImageQuality::High);
+        assert_eq!(settings.ai.page_image_limit, 128);
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn page_image_limit_defaults_to_eight_without_an_upper_clamp() {
+        assert_eq!(
+            parse_settings("").unwrap().ai.page_image_limit,
+            DEFAULT_PAGE_IMAGE_LIMIT
+        );
+
+        let settings = parse_settings(
+            r##"
+ai {
+    page_image_limit 1000000
+}
+"##,
+        )
+        .unwrap();
+        assert_eq!(settings.ai.page_image_limit, 1_000_000);
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 

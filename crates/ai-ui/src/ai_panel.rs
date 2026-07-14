@@ -1,4 +1,4 @@
-use std::{collections::HashSet, ops::Range, path::PathBuf, thread};
+use std::{collections::HashSet, ops::Range, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use crate::{AiContext, AiContextProvider, AiPageState, ResolvedPageContext};
 use anyhow::anyhow;
@@ -8,10 +8,10 @@ use glyphst_actions::{
     input,
 };
 use glyphst_ai::ai_chat::{
-    AiStreamEvent, ChatMessage, ContextBlock, DEFAULT_SESSION_TITLE, DocumentContext, MentionKind,
-    MentionReference, Role, TITLE_GENERATION_PROMPT, find_mention_references,
-    mention_matches_query, session_title_for_prompt, stream_completion, thinking_level_description,
-    title_from_response,
+    AiStreamEvent, ChatMessage, ContextBlock, DEFAULT_SESSION_TITLE, DocumentContext,
+    MAX_PAGE_IMAGE_BYTES, MentionKind, MentionReference, Role, TITLE_GENERATION_PROMPT,
+    find_mention_references, session_title_for_prompt, stream_completion,
+    thinking_level_description, title_from_response,
 };
 use glyphst_library::{
     AiMentionReference, AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp,
@@ -21,25 +21,29 @@ use glyphst_settings::{
     ui_rems,
 };
 use glyphst_ui::{
+    icons::{Icon, IconName},
     markdown::{Markdown, MarkdownElement, MarkdownStyle},
+    picker::fuzzy_match,
     scrollbar::WithScrollbar as _,
 };
 use gpui::{
     Anchor, App, BorderStyle, Bounds, ClipboardItem, Context, Corners, CursorStyle, Edges, Element,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render,
-    ScrollHandle, SharedString, Style, Task, TextRun, TextStyle, UTF16Selection, Window,
-    WrappedLine, anchored, deferred, div, fill, point, prelude::*, px, quad, relative, rgb, rgba,
-    size,
+    Focusable, FontWeight, GlobalElementId, HighlightStyle, InspectorElementId, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels,
+    Point as GpuiPoint, Render, ScrollHandle, ScrollStrategy, SharedString, Style, StyledText,
+    Task, TextRun, TextStyle, TransformationMatrix, UTF16Selection, UniformListScrollHandle,
+    Window, WrappedLine, anchored, deferred, div, fill, point, prelude::*, px, quad, relative, rgb,
+    rgba, size, uniform_list,
 };
 
 pub const AI_PANEL_WIDTH: f32 = 360.0;
-const COMPLETION_MENU_WIDTH: f32 = 248.0;
-const COMPLETION_MENU_ROW_HEIGHT: f32 = 46.0;
+const COMPLETION_MENU_MIN_WIDTH: f32 = 280.0;
+const COMPLETION_MENU_MAX_WIDTH: f32 = 540.0;
+const COMPLETION_MENU_ROW_HEIGHT: f32 = 40.0;
+const COMPLETION_MENU_VISIBLE_ROWS: usize = 8;
 const DRAG_SELECT_THRESHOLD: f32 = 2.0;
-const MAX_PAGE_IMAGE_CONTEXTS: usize = 8;
-const MAX_PAGE_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+const VALIDATION_NOTICE_DURATION: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AiPanelEvent {
@@ -56,6 +60,13 @@ struct ModelMenuRenderState {
     focused: bool,
 }
 
+#[derive(Clone, Copy)]
+struct CompletionMenuPlacement {
+    position: GpuiPoint<Pixels>,
+    anchor: Anchor,
+    width: f32,
+}
+
 #[derive(Clone)]
 enum ModelMenuEntry {
     Header(AiProvider),
@@ -69,9 +80,53 @@ struct MentionCompletion {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct MentionMatch {
+    kind: MentionKind,
+    highlights: Vec<Range<usize>>,
+    score: usize,
+    canonical_ix: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ComposerMention {
     reference: MentionReference,
     range: Range<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DisplayMention {
+    kind: MentionKind,
+    range: Range<usize>,
+    icon_range: Range<usize>,
+    number_range: Option<Range<usize>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ComposerDisplay {
+    text: String,
+    source_to_display: Vec<usize>,
+    display_to_source: Vec<usize>,
+    mentions: Vec<DisplayMention>,
+}
+
+impl ComposerDisplay {
+    fn source_offset(&self, display_offset: usize) -> usize {
+        self.display_to_source
+            .get(display_offset.min(self.display_to_source.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn display_offset(&self, source_offset: usize) -> usize {
+        self.source_to_display
+            .get(source_offset.min(self.source_to_display.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn display_range(&self, source_range: &Range<usize>) -> Range<usize> {
+        self.display_offset(source_range.start)..self.display_offset(source_range.end)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,8 +176,10 @@ pub struct AiPanel {
     sessions: Vec<AiSession>,
     view: AiPanelView,
     mention_completion: Option<MentionCompletion>,
+    mention_completion_scroll: UniformListScrollHandle,
     composer_mentions: Vec<ComposerMention>,
     active_page_number_edit: Option<ActivePageNumberEdit>,
+    last_display: Option<ComposerDisplay>,
     last_cursor_pos: Option<GpuiPoint<Pixels>>,
     attachment_menu_open: bool,
     attachment_menu_anchor: Option<GpuiPoint<Pixels>>,
@@ -133,6 +190,9 @@ pub struct AiPanel {
     thinking_menu_open: bool,
     thinking_menu_anchor: Option<GpuiPoint<Pixels>>,
     markdown_views: Vec<Entity<Markdown>>,
+    validation_notice: Option<String>,
+    validation_toast: Option<String>,
+    validation_notice_task: Option<Task<()>>,
 }
 
 struct LaidOutLine {
@@ -146,11 +206,13 @@ struct AiInputElement {
 
 struct PrepaintState {
     lines: Option<Vec<LaidOutLine>>,
+    display: ComposerDisplay,
     cursor: Option<PaintQuad>,
     cursor_position: Option<GpuiPoint<Pixels>>,
     selections: Vec<PaintQuad>,
     mention_quads: Vec<PaintQuad>,
     active_number_quads: Vec<PaintQuad>,
+    mention_icons: Vec<(Bounds<Pixels>, MentionKind)>,
 }
 
 #[derive(Clone, Copy)]
@@ -251,8 +313,10 @@ impl AiPanel {
             sessions: init.sessions,
             view: AiPanelView::Chat,
             mention_completion: None,
+            mention_completion_scroll: UniformListScrollHandle::new(),
             composer_mentions: Vec::new(),
             active_page_number_edit: None,
+            last_display: None,
             last_cursor_pos: None,
             attachment_menu_open: false,
             attachment_menu_anchor: None,
@@ -263,6 +327,9 @@ impl AiPanel {
             thinking_menu_open: false,
             thinking_menu_anchor: None,
             markdown_views: Vec::new(),
+            validation_notice: None,
+            validation_toast: None,
+            validation_notice_task: None,
         }
     }
 
@@ -270,6 +337,7 @@ impl AiPanel {
         if (self.width - width).abs() > f32::EPSILON {
             self.last_lines.clear();
             self.last_bounds = None;
+            self.last_display = None;
             self.last_cursor_pos = None;
         }
         self.width = width;
@@ -578,7 +646,6 @@ impl AiPanel {
         let request_prompt = self.request_prompt();
         let references = self.references();
 
-        let settings = cx.global::<SettingsStore>().settings.ai.resolved_main();
         self.update_current_page(cx);
         let include_document_text = references
             .iter()
@@ -586,6 +653,21 @@ impl AiPanel {
         let context = self.context_provider.context(include_document_text, cx);
         let contexts = self.context_blocks_for_references(&references, context.as_ref());
         let document = self.document_context_from(context);
+        let user_message =
+            ChatMessage::user(display_prompt.clone(), request_prompt, contexts, references);
+        let ai_settings = cx.global::<SettingsStore>().settings.ai.clone();
+        if let Err(error) = validate_composer_page_image_preflight(
+            self.mode,
+            &self.messages,
+            &user_message,
+            self.page_count,
+            ai_settings.page_image_limit,
+        ) {
+            self.show_validation_notice(error.to_string(), cx);
+            return;
+        }
+        let settings = ai_settings.resolved_main();
+
         if self.mode == AiPanelMode::QuickAsk {
             self.messages.clear();
             self.markdown_views.clear();
@@ -607,13 +689,9 @@ impl AiPanel {
         self.active_page_number_edit = None;
         self.last_cursor_pos = None;
         self.close_composer_menus();
+        self.clear_validation_notice();
         let user_prompt = display_prompt.clone();
-        self.messages.push(ChatMessage::user(
-            display_prompt,
-            request_prompt,
-            contexts,
-            references,
-        ));
+        self.messages.push(user_message);
         self.markdown_views
             .push(cx.new(|cx| Markdown::new(user_prompt.into(), cx)));
         self.messages.push(ChatMessage::assistant(String::new()));
@@ -623,13 +701,7 @@ impl AiPanel {
         cx.notify();
 
         let mut request_messages = self.messages[..self.messages.len().saturating_sub(1)].to_vec();
-        let page_references = match unresolved_page_references(&request_messages) {
-            Ok(references) => references,
-            Err(error) => {
-                self.apply_stream_event(AiStreamEvent::Error(error.to_string()), cx);
-                return;
-            }
-        };
+        let page_references = unresolved_page_references(&request_messages, self.page_count);
         let resolve_task = self
             .context_provider
             .resolve_page_references(page_references, cx);
@@ -848,18 +920,14 @@ impl AiPanel {
                     .clone()
                     .unwrap_or_else(|| tr("ai-no-document-text")),
             ),
-            MentionKind::Page | MentionKind::PageImage => Self::missing_context_block(mention),
+            MentionKind::Page | MentionKind::PageImage | MentionKind::DocumentImage => {
+                Self::missing_context_block(mention)
+            }
         }
     }
 
     fn missing_context_block(mention: MentionKind) -> ContextBlock {
-        let message = match mention {
-            MentionKind::Page => tr("ai-no-current-page-text"),
-            MentionKind::PageImage => "No page image is available.".to_string(),
-            MentionKind::Selection => tr("ai-no-selected-text"),
-            MentionKind::DocumentText => tr("ai-no-document-text"),
-        };
-        ContextBlock::new(mention, None, message)
+        ContextBlock::new(mention, None, mention.empty_context_message())
     }
 
     fn document_context(&self, cx: &mut Context<Self>) -> DocumentContext {
@@ -956,6 +1024,7 @@ impl AiPanel {
         let Some(active) = self.active_page_number_edit.take() else {
             return false;
         };
+        self.clear_validation_notice();
         let page = validate_page_number(&self.content[active.digits.clone()], self.page_count);
         let page_text = page.to_string();
         let old_digits = active.digits.clone();
@@ -980,16 +1049,21 @@ impl AiPanel {
         self.selected_range = cursor..cursor;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.last_display = None;
+        self.last_lines.clear();
         self.update_mention_completion();
         cx.notify();
         true
     }
 
     fn apply_regular_edit(&mut self, range: Range<usize>, new_text: &str) {
+        self.clear_validation_notice();
         self.content =
             (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         adjust_composer_mentions(&mut self.composer_mentions, &range, new_text.len());
         self.active_page_number_edit = None;
+        self.last_display = None;
+        self.last_lines.clear();
         let cursor = range.start + new_text.len();
         self.selected_range = cursor..cursor;
     }
@@ -1009,6 +1083,7 @@ impl AiPanel {
         if !new_text.is_empty() && filtered.is_empty() {
             return true;
         }
+        self.clear_validation_notice();
         self.content =
             (self.content[..range.start].to_owned() + &filtered + &self.content[range.end..])
                 .into();
@@ -1026,6 +1101,8 @@ impl AiPanel {
             mention_start: active.mention_start,
             digits: new_digits,
         });
+        self.last_display = None;
+        self.last_lines.clear();
         let cursor = range.start + filtered.len();
         self.selected_range = cursor..cursor;
         true
@@ -1221,6 +1298,7 @@ impl AiPanel {
         self.active_page_number_edit = None;
         self.last_cursor_pos = None;
         self.pending_title_task = None;
+        self.clear_validation_notice();
         self.close_composer_menus();
         self.view = AiPanelView::Chat;
         self.focus_handle.focus(window, cx);
@@ -1283,6 +1361,7 @@ impl AiPanel {
         self.active_page_number_edit = None;
         self.last_cursor_pos = None;
         self.pending_title_task = None;
+        self.clear_validation_notice();
         self.close_composer_menus();
         self.view = AiPanelView::Chat;
         self.focus_handle.focus(window, cx);
@@ -1310,6 +1389,8 @@ impl AiPanel {
             source_range,
             selected_ix,
         });
+        self.mention_completion_scroll
+            .scroll_to_item(selected_ix, ScrollStrategy::Nearest);
     }
 
     fn active_mention_source_range(&self) -> Option<Range<usize>> {
@@ -1321,7 +1402,7 @@ impl AiPanel {
         active_mention_range(&self.content, cursor)
     }
 
-    fn mention_matches_for_range(&self, source_range: &Range<usize>) -> Vec<MentionKind> {
+    fn mention_matches_for_range(&self, source_range: &Range<usize>) -> Vec<MentionMatch> {
         if source_range.start >= source_range.end || source_range.end > self.content.len() {
             return Vec::new();
         }
@@ -1330,14 +1411,13 @@ impl AiPanel {
             return Vec::new();
         }
         let query = &self.content[query_start..source_range.end];
-        MentionKind::ALL
+        mention_matches(query)
             .into_iter()
-            .filter(|mention| self.page_count > 0 || !mention.requires_page_number())
-            .filter(|mention| mention_matches_query(*mention, query))
+            .filter(|candidate| self.page_count > 0 || !candidate.kind.requires_fixed_layout())
             .collect()
     }
 
-    fn mention_completion_matches(&self) -> Vec<MentionKind> {
+    fn mention_completion_matches(&self) -> Vec<MentionMatch> {
         self.mention_completion
             .as_ref()
             .map(|completion| self.mention_matches_for_range(&completion.source_range))
@@ -1349,10 +1429,10 @@ impl AiPanel {
             return false;
         };
         let matches = self.mention_matches_for_range(&completion.source_range);
-        let Some(mention) = matches.get(completion.selected_ix).copied() else {
+        let Some(mention) = matches.get(completion.selected_ix) else {
             return false;
         };
-        self.insert_mention_at_range(mention, completion.source_range, cx);
+        self.insert_mention_at_range(mention.kind, completion.source_range, cx);
         true
     }
 
@@ -1369,6 +1449,8 @@ impl AiPanel {
         } else {
             completion.selected_ix - 1
         };
+        self.mention_completion_scroll
+            .scroll_to_item(completion.selected_ix, ScrollStrategy::Nearest);
         cx.notify();
         true
     }
@@ -1382,6 +1464,8 @@ impl AiPanel {
             return false;
         }
         completion.selected_ix = (completion.selected_ix + 1) % match_count;
+        self.mention_completion_scroll
+            .scroll_to_item(completion.selected_ix, ScrollStrategy::Nearest);
         cx.notify();
         true
     }
@@ -1409,7 +1493,7 @@ impl AiPanel {
         }
         self.focus_handle.focus(window, cx);
         self.close_composer_menus();
-        if mention.requires_page_number() && self.page_count == 0 {
+        if mention.requires_fixed_layout() && self.page_count == 0 {
             cx.notify();
             return;
         }
@@ -1436,7 +1520,7 @@ impl AiPanel {
         if mention.requires_page_number() {
             self.update_current_page(cx);
         }
-        if mention.requires_page_number() && self.page_count == 0 {
+        if mention.requires_fixed_layout() && self.page_count == 0 {
             self.mention_completion = None;
             cx.notify();
             return;
@@ -1671,6 +1755,48 @@ impl AiPanel {
         true
     }
 
+    fn clear_validation_notice(&mut self) {
+        self.validation_notice = None;
+        self.validation_toast = None;
+        self.validation_notice_task = None;
+    }
+
+    fn show_validation_notice(&mut self, message: String, cx: &mut Context<Self>) {
+        self.validation_notice = Some(message.clone());
+        self.validation_toast = Some(message.clone());
+        self.validation_notice_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(VALIDATION_NOTICE_DURATION)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.validation_toast.as_deref() == Some(message.as_str()) {
+                    this.validation_toast = None;
+                    this.validation_notice_task = None;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    fn render_validation_toast(message: String, theme: Theme) -> impl IntoElement {
+        div()
+            .absolute()
+            .top_2()
+            .right_2()
+            .max_w(px(420.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(theme.error))
+            .bg(rgb(theme.surface_background))
+            .px_3()
+            .py_2()
+            .shadow_sm()
+            .text_size(ui_rems(12.0))
+            .text_color(rgb(theme.error))
+            .child(message)
+    }
+
     fn render_quick_ask(
         &mut self,
         window: &mut Window,
@@ -1694,32 +1820,19 @@ impl AiPanel {
             )
         };
         let loading = self.loading;
+        let validation_toast = self.validation_toast.clone();
         let completion_matches = self.mention_completion_matches();
         let completion_selected = self
             .mention_completion
             .as_ref()
             .map(|completion| completion.selected_ix)
             .unwrap_or(0);
-        let completion_anchor = if completion_matches.is_empty() {
+        let completion_placement = if completion_matches.is_empty() {
             None
         } else {
-            self.last_bounds
-                .zip(self.last_cursor_pos)
-                .map(|(bounds, position)| {
-                    let max_left = px((self.width - COMPLETION_MENU_WIDTH - 24.0).max(0.0));
-                    let left = if position.x < px(0.0) {
-                        px(0.0)
-                    } else if position.x > max_left {
-                        max_left
-                    } else {
-                        position.x
-                    };
-                    point(
-                        bounds.origin.x + left,
-                        bounds.origin.y + position.y - px(8.0),
-                    )
-                })
+            self.completion_menu_placement(&completion_matches, window)
         };
+        let completion_scroll = self.mention_completion_scroll.clone();
         let answer = self
             .messages
             .iter()
@@ -1737,6 +1850,7 @@ impl AiPanel {
         div()
             .key_context("QuickAsk TextInput")
             .track_focus(&self.focus_handle)
+            .relative()
             .flex()
             .flex_col()
             .w_full()
@@ -1824,22 +1938,27 @@ impl AiPanel {
                         .vertical_scrollbar_for(&self.scroll_handle, window, cx),
                 )
             })
-            .when_some(completion_anchor, |this, anchor| {
+            .when_some(completion_placement, |this, placement| {
                 this.child(
                     deferred(
                         anchored()
-                            .position(anchor)
-                            .anchor(Anchor::BottomLeft)
+                            .position(placement.position)
+                            .anchor(placement.anchor)
                             .snap_to_window_with_margin(px(8.0))
                             .child(Self::render_mention_completion_menu(
                                 completion_matches,
                                 completion_selected,
+                                placement.width,
+                                completion_scroll,
                                 theme,
                                 cx,
                             )),
                     )
                     .with_priority(1),
                 )
+            })
+            .when_some(validation_toast, |this, notice| {
+                this.child(deferred(Self::render_validation_toast(notice, theme)).with_priority(3))
             })
     }
 
@@ -1868,7 +1987,13 @@ impl AiPanel {
                     .line
                     .closest_index_for_position(line_point, line_height)
                     .unwrap_or_else(|ix| ix);
-                return (laid_out.start + local_ix).min(self.content.len());
+                let display_offset = laid_out.start + local_ix;
+                return self
+                    .last_display
+                    .as_ref()
+                    .map(|display| display.source_offset(display_offset))
+                    .unwrap_or(display_offset)
+                    .min(self.content.len());
             }
             line_top += line_height_px;
         }
@@ -1877,6 +2002,11 @@ impl AiPanel {
     }
 
     fn position_for_offset(&self, offset: usize, window: &mut Window) -> Option<GpuiPoint<Pixels>> {
+        let offset = self
+            .last_display
+            .as_ref()
+            .map(|display| display.display_offset(offset))
+            .unwrap_or(offset);
         let line_height = window.line_height();
         let mut line_top = px(0.0);
         for laid_out in &self.last_lines {
@@ -2114,15 +2244,78 @@ impl AiPanel {
             .vertical_scrollbar_for(scroll_handle, window, cx)
     }
 
+    fn mention_icon(kind: MentionKind) -> IconName {
+        if kind.is_image() {
+            IconName::Image
+        } else {
+            IconName::FileText
+        }
+    }
+
+    fn completion_menu_width(matches: &[MentionMatch], available: f32) -> f32 {
+        let estimated = matches
+            .iter()
+            .map(|candidate| {
+                candidate.kind.label().chars().count()
+                    + candidate.kind.description().chars().count()
+                    + 9
+            })
+            .max()
+            .unwrap_or(0) as f32
+            * 6.5;
+        estimated
+            .clamp(COMPLETION_MENU_MIN_WIDTH, COMPLETION_MENU_MAX_WIDTH)
+            .min(available.max(0.0))
+    }
+
+    fn completion_menu_placement(
+        &self,
+        matches: &[MentionMatch],
+        window: &Window,
+    ) -> Option<CompletionMenuPlacement> {
+        let (bounds, cursor) = self.last_bounds.zip(self.last_cursor_pos)?;
+        let window_bounds = window.bounds();
+        let available_width = (window_bounds.right() - bounds.left() - px(8.0)).as_f32();
+        let width = Self::completion_menu_width(matches, available_width);
+        let max_left = (window_bounds.right() - px(width) - px(8.0)).max(window_bounds.left());
+        let left = (bounds.left() + cursor.x)
+            .min(max_left)
+            .max(window_bounds.left() + px(8.0));
+        let menu_height = px(COMPLETION_MENU_ROW_HEIGHT
+            * matches.len().min(COMPLETION_MENU_VISIBLE_ROWS) as f32
+            + 8.0);
+        let below = bounds.top() + cursor.y + window.line_height();
+        let fits_below = below + menu_height + px(8.0) <= window_bounds.bottom();
+        Some(if fits_below {
+            CompletionMenuPlacement {
+                position: point(left, below),
+                anchor: Anchor::TopLeft,
+                width,
+            }
+        } else {
+            CompletionMenuPlacement {
+                position: point(left, bounds.top() + cursor.y),
+                anchor: Anchor::BottomLeft,
+                width,
+            }
+        })
+    }
+
     fn render_mention_completion_menu(
-        matches: Vec<MentionKind>,
+        matches: Vec<MentionMatch>,
         selected_ix: usize,
+        width: f32,
+        scroll_handle: UniformListScrollHandle,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut menu = div()
+        let match_count = matches.len();
+        let list_height =
+            COMPLETION_MENU_ROW_HEIGHT * match_count.min(COMPLETION_MENU_VISIBLE_ROWS) as f32;
+        let matches = Arc::new(matches);
+        div()
             .occlude()
-            .w(px(COMPLETION_MENU_WIDTH))
+            .w(px(width))
             .flex()
             .flex_col()
             .py_1()
@@ -2132,59 +2325,101 @@ impl AiPanel {
             .bg(rgb(theme.surface_background))
             .shadow_sm()
             .overflow_hidden()
-            .text_size(ui_rems(12.0));
-
-        for (ix, mention) in matches.into_iter().enumerate() {
-            let selected = ix == selected_ix;
-            menu = menu.child(
-                div()
-                    .id(("ai-mention-completion", ix))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .h(px(COMPLETION_MENU_ROW_HEIGHT))
-                    .mx_1()
-                    .px_2()
-                    .rounded(px(4.0))
-                    .bg(if selected {
-                        rgb(theme.element_selected)
-                    } else {
-                        rgba(0x00000000)
-                    })
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.element_hover)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.insert_mention(mention, cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(if selected {
-                                theme.accent
-                            } else {
-                                theme.text_muted
-                            }))
-                            .child("@"),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_color(rgb(if selected { theme.accent } else { theme.text }))
-                            .child(mention.label()),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui_rems(11.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(mention.description()),
-                    ),
-            );
-        }
-
-        menu
+            .text_size(ui_rems(12.0))
+            .child(
+                uniform_list(
+                    "ai-mention-completions",
+                    match_count,
+                    cx.processor(move |_this, visible_range: Range<usize>, _, cx| {
+                        visible_range
+                            .filter_map(|ix| {
+                                let candidate = matches.get(ix)?.clone();
+                                let selected = ix == selected_ix;
+                                let label = candidate.kind.label();
+                                let highlights = candidate
+                                    .highlights
+                                    .iter()
+                                    .cloned()
+                                    .map(|range| {
+                                        (
+                                            range,
+                                            HighlightStyle {
+                                                color: Some(rgb(theme.match_highlight).into()),
+                                                font_weight: Some(FontWeight::BOLD),
+                                                ..Default::default()
+                                            },
+                                        )
+                                    })
+                                    .collect::<Vec<_>>();
+                                Some(
+                                    div().h(px(COMPLETION_MENU_ROW_HEIGHT)).px_1().child(
+                                        div()
+                                            .id(("ai-mention-completion", ix))
+                                            .size_full()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_2()
+                                            .rounded(px(4.0))
+                                            .bg(if selected {
+                                                rgb(theme.element_selected)
+                                            } else {
+                                                rgba(0x00000000)
+                                            })
+                                            .cursor_pointer()
+                                            .hover(move |style| style.bg(rgb(theme.element_hover)))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    this.insert_mention(candidate.kind, cx);
+                                                    cx.stop_propagation();
+                                                }),
+                                            )
+                                            .child(Icon::new(
+                                                Self::mention_icon(candidate.kind),
+                                                ui_rems(14.0),
+                                                rgb(if selected {
+                                                    theme.accent
+                                                } else {
+                                                    theme.text_muted
+                                                }),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .min_w_0()
+                                                    .gap(px(1.0))
+                                                    .child(
+                                                        div()
+                                                            .truncate()
+                                                            .text_color(rgb(if selected {
+                                                                theme.accent
+                                                            } else {
+                                                                theme.text
+                                                            }))
+                                                            .child(
+                                                                StyledText::new(label)
+                                                                    .with_highlights(highlights),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .truncate()
+                                                            .text_size(ui_rems(10.0))
+                                                            .text_color(rgb(theme.text_muted))
+                                                            .child(candidate.kind.description()),
+                                                    ),
+                                            ),
+                                    ),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .h(px(list_height))
+                .track_scroll(&scroll_handle),
+            )
     }
 
     fn render_attachment_menu(
@@ -2210,7 +2445,7 @@ impl AiPanel {
 
         for (mention_ix, mention) in MentionKind::ALL
             .into_iter()
-            .filter(|mention| page_count > 0 || !mention.requires_page_number())
+            .filter(|mention| page_count > 0 || !mention.requires_fixed_layout())
             .enumerate()
         {
             menu = menu.child(
@@ -2218,7 +2453,6 @@ impl AiPanel {
                     .id(("ai-attachment-menu-entry", mention_ix))
                     .flex()
                     .items_center()
-                    .justify_between()
                     .gap_2()
                     .px_2()
                     .py_2()
@@ -2231,24 +2465,25 @@ impl AiPanel {
                             cx.stop_propagation();
                         }),
                     )
+                    .child(Icon::new(
+                        Self::mention_icon(mention),
+                        ui_rems(14.0),
+                        rgb(theme.text_muted),
+                    ))
                     .child(
                         div()
                             .flex()
                             .flex_col()
+                            .min_w_0()
                             .gap_1()
                             .child(div().text_color(rgb(theme.text)).child(mention.label()))
                             .child(
                                 div()
+                                    .truncate()
                                     .text_size(ui_rems(11.0))
                                     .text_color(rgb(theme.text_muted))
                                     .child(mention.description()),
                             ),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui_rems(11.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(mention.token()),
                     ),
             );
         }
@@ -2748,26 +2983,14 @@ impl Render for AiPanel {
         let loading = self.loading;
         let empty_chat = self.messages.is_empty();
         let panel_width = self.width;
-        let completion_anchor = if showing_sessions || completion_matches.is_empty() {
+        let validation_notice = self.validation_notice.clone();
+        let validation_toast = self.validation_toast.clone();
+        let completion_placement = if showing_sessions || completion_matches.is_empty() {
             None
         } else {
-            self.last_bounds
-                .zip(self.last_cursor_pos)
-                .map(|(bounds, position)| {
-                    let max_left = px((self.width - COMPLETION_MENU_WIDTH - 24.0).max(0.0));
-                    let left = if position.x < px(0.0) {
-                        px(0.0)
-                    } else if position.x > max_left {
-                        max_left
-                    } else {
-                        position.x
-                    };
-                    point(
-                        bounds.origin.x + left,
-                        bounds.origin.y + position.y - px(8.0),
-                    )
-                })
+            self.completion_menu_placement(&completion_matches, window)
         };
+        let completion_scroll = self.mention_completion_scroll.clone();
 
         let mut messages = div()
             .flex()
@@ -2793,6 +3016,7 @@ impl Render for AiPanel {
         div()
             .key_context("AiPanel TextInput")
             .track_focus(&self.focus_handle)
+            .relative()
             .flex()
             .flex_col()
             .flex_none()
@@ -2978,7 +3202,11 @@ impl Render for AiPanel {
                                 .when(empty_chat, |this| this.flex_1().min_h_0())
                                 .rounded(px(6.0))
                                 .border_1()
-                                .border_color(rgb(theme.border_variant))
+                                .border_color(rgb(if validation_notice.is_some() {
+                                    theme.error
+                                } else {
+                                    theme.border_variant
+                                }))
                                 .bg(rgb(theme.tab_active_background))
                                 .px_2()
                                 .pt_2()
@@ -2994,6 +3222,15 @@ impl Render for AiPanel {
                                 .on_mouse_move(cx.listener(Self::on_mouse_move))
                                 .child(AiInputElement { panel: entity }),
                         )
+                        .when_some(validation_notice.clone(), |this, notice| {
+                            this.child(
+                                div()
+                                    .px_1()
+                                    .text_size(ui_rems(11.0))
+                                    .text_color(rgb(theme.error))
+                                    .child(notice),
+                            )
+                        })
                         .child(
                             div()
                                 .flex()
@@ -3002,7 +3239,11 @@ impl Render for AiPanel {
                                 .gap_2()
                                 .rounded(px(6.0))
                                 .border_1()
-                                .border_color(rgb(theme.border_variant))
+                                .border_color(rgb(if validation_notice.is_some() {
+                                    theme.error
+                                } else {
+                                    theme.border_variant
+                                }))
                                 .bg(rgb(theme.tab_active_background))
                                 .px_2()
                                 .pb_2()
@@ -3181,16 +3422,18 @@ impl Render for AiPanel {
                         ),
                 )
             })
-            .when_some(completion_anchor, |this, anchor| {
+            .when_some(completion_placement, |this, placement| {
                 this.child(
                     deferred(
                         anchored()
-                            .position(anchor)
-                            .anchor(Anchor::BottomLeft)
+                            .position(placement.position)
+                            .anchor(placement.anchor)
                             .snap_to_window_with_margin(px(8.0))
                             .child(Self::render_mention_completion_menu(
                                 completion_matches,
                                 completion_selected,
+                                placement.width,
+                                completion_scroll,
                                 theme,
                                 cx,
                             )),
@@ -3252,6 +3495,9 @@ impl Render for AiPanel {
                     .with_priority(2),
                 )
             })
+            .when_some(validation_toast, |this, notice| {
+                this.child(deferred(Self::render_validation_toast(notice, theme)).with_priority(3))
+            })
             .into_any_element()
     }
 }
@@ -3265,7 +3511,7 @@ impl IntoElement for AiInputElement {
 }
 
 impl Element for AiInputElement {
-    type RequestLayoutState = ();
+    type RequestLayoutState = ComposerDisplay;
     type PrepaintState = PrepaintState;
 
     fn id(&self) -> Option<ElementId> {
@@ -3287,7 +3533,8 @@ impl Element for AiInputElement {
         let content = input.content.clone();
         let empty_chat = input.mode == AiPanelMode::Sidebar && input.messages.is_empty();
         let chars_per_line = ((input.width - 32.0) / 7.0).floor().max(12.0) as usize;
-        let text = content.as_ref();
+        let display = composer_display(content.as_ref(), &input.composer_mentions);
+        let text = display.text.as_str();
         let min_lines = if input.mode == AiPanelMode::QuickAsk {
             1
         } else {
@@ -3319,7 +3566,7 @@ impl Element for AiInputElement {
         } else {
             (window.line_height() * estimated_lines as f32).into()
         };
-        (window.request_layout(style, [], cx), ())
+        (window.request_layout(style, [], cx), display)
     }
 
     fn prepaint(
@@ -3327,7 +3574,7 @@ impl Element for AiInputElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
+        layout_display: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
@@ -3339,13 +3586,21 @@ impl Element for AiInputElement {
         let active_page_number_edit = input.active_page_number_edit.clone();
         let style = window.text_style();
         let theme = cx.global::<SettingsStore>().resolved_theme;
-        let (display_text, text_color) = if content.is_empty() {
+        let (display, display_text, text_color) = if content.is_empty() {
             (
+                ComposerDisplay {
+                    text: tr("ai-ask-placeholder"),
+                    source_to_display: vec![0],
+                    display_to_source: vec![0; tr("ai-ask-placeholder").len() + 1],
+                    mentions: Vec::new(),
+                },
                 tr("ai-ask-placeholder").into(),
                 rgba(theme.placeholder_text).into(),
             )
         } else {
-            (content, style.color)
+            let display = std::mem::take(layout_display);
+            let display_text: SharedString = display.text.clone().into();
+            (display, display_text, style.color)
         };
 
         let base_run = TextRun {
@@ -3361,8 +3616,12 @@ impl Element for AiInputElement {
                 display_text.as_ref(),
                 base_run,
                 theme,
-                &composer_mentions,
-                input.marked_range.as_ref(),
+                &display.mentions,
+                input
+                    .marked_range
+                    .as_ref()
+                    .map(|range| display.display_range(range))
+                    .as_ref(),
             )
         } else {
             vec![base_run]
@@ -3382,11 +3641,13 @@ impl Element for AiInputElement {
                 eprintln!("failed to shape AI input: {error:#}");
                 return PrepaintState {
                     lines: Some(Vec::new()),
+                    display,
                     cursor: None,
                     cursor_position: None,
                     selections: Vec::new(),
                     mention_quads: Vec::new(),
                     active_number_quads: Vec::new(),
+                    mention_icons: Vec::new(),
                 };
             }
         };
@@ -3398,8 +3659,10 @@ impl Element for AiInputElement {
             laid_out_lines.push(LaidOutLine { start, line });
         }
 
+        let display_cursor = display.display_offset(cursor);
+        let display_selection = display.display_range(&selected_range);
         let cursor_position = if selected_range.is_empty() {
-            cursor_position_for_lines(&laid_out_lines, cursor, line_height)
+            cursor_position_for_lines(&laid_out_lines, display_cursor, line_height)
         } else {
             None
         };
@@ -3409,7 +3672,7 @@ impl Element for AiInputElement {
         } else {
             selection_quads(
                 &laid_out_lines,
-                &selected_range,
+                &display_selection,
                 bounds,
                 line_height,
                 rgba(theme.selection_highlight).into(),
@@ -3419,7 +3682,7 @@ impl Element for AiInputElement {
         let cursor = if input.focus_handle.is_focused(window) && selected_range.is_empty() {
             cursor_quad(
                 &laid_out_lines,
-                cursor,
+                display_cursor,
                 bounds,
                 line_height,
                 rgb(theme.accent).into(),
@@ -3428,7 +3691,7 @@ impl Element for AiInputElement {
             None
         };
         let mut mention_quads = Vec::new();
-        for mention in &composer_mentions {
+        for mention in &display.mentions {
             mention_quads.extend(decorated_range_quads(
                 &laid_out_lines,
                 &mention.range,
@@ -3442,31 +3705,63 @@ impl Element for AiInputElement {
                 },
             ));
         }
-        let active_number_quads = active_page_number_edit
-            .as_ref()
-            .map(|active| {
-                decorated_range_quads(
+        let active_number_quads = display
+            .mentions
+            .iter()
+            .filter_map(|mention| {
+                let number_range = mention.number_range.as_ref()?;
+                let active = active_page_number_edit.as_ref().is_some_and(|active| {
+                    composer_mentions.iter().any(|source_mention| {
+                        source_mention.range.start == active.mention_start
+                            && source_mention.reference.kind == mention.kind
+                            && display.display_range(&source_mention.range) == mention.range
+                    })
+                });
+                Some(decorated_range_quads(
                     &laid_out_lines,
-                    &active.digits,
+                    number_range,
                     bounds,
                     line_height,
                     DecorationStyle {
-                        background: rgba(with_alpha(theme.accent, 0x38)).into(),
-                        border: rgba(with_alpha(theme.accent, 0x99)).into(),
+                        background: rgba(with_alpha(
+                            theme.accent,
+                            if active { 0x38 } else { 0x24 },
+                        ))
+                        .into(),
+                        border: rgba(with_alpha(theme.accent, if active { 0xcc } else { 0x77 }))
+                            .into(),
                         border_width: px(1.0),
                         radius: px(3.0),
                     },
-                )
+                ))
             })
-            .unwrap_or_default();
+            .flatten()
+            .collect();
+        let mention_icons = display
+            .mentions
+            .iter()
+            .flat_map(|mention| {
+                selection_quads(
+                    &laid_out_lines,
+                    &mention.icon_range,
+                    bounds,
+                    line_height,
+                    rgba(0x00000000).into(),
+                )
+                .into_iter()
+                .map(|quad| (quad.bounds, mention.kind))
+            })
+            .collect();
 
         PrepaintState {
             lines: Some(laid_out_lines),
+            display,
             cursor,
             cursor_position,
             selections,
             mention_quads,
             active_number_quads,
+            mention_icons,
         }
     }
 
@@ -3520,6 +3815,26 @@ impl Element for AiInputElement {
             }
             y += laid_out.line.size(line_height).height;
         }
+        for (slot, kind) in prepaint.mention_icons.drain(..) {
+            let icon_size = px(12.0);
+            let icon_bounds = Bounds::new(
+                point(
+                    slot.center().x - icon_size / 2.0,
+                    slot.center().y - icon_size / 2.0,
+                ),
+                size(icon_size, icon_size),
+            );
+            if let Err(error) = window.paint_svg(
+                icon_bounds,
+                AiPanel::mention_icon(kind).path(),
+                None,
+                TransformationMatrix::default(),
+                rgb(cx.global::<SettingsStore>().resolved_theme.text_muted).into(),
+                cx,
+            ) {
+                eprintln!("failed to paint AI mention icon: {error:#}");
+            }
+        }
 
         if let Some(cursor) = prepaint.cursor.take() {
             window.paint_quad(cursor);
@@ -3528,8 +3843,153 @@ impl Element for AiInputElement {
         self.panel.update(cx, |input, _| {
             input.last_lines = lines;
             input.last_bounds = Some(bounds);
+            input.last_display = Some(std::mem::take(&mut prepaint.display));
             input.last_cursor_pos = prepaint.cursor_position;
         });
+    }
+}
+
+fn push_display_fragment(
+    text: &mut String,
+    display_to_source: &mut Vec<usize>,
+    fragment: &str,
+    source_offset: usize,
+) {
+    text.push_str(fragment);
+    display_to_source.extend(std::iter::repeat_n(source_offset, fragment.len()));
+}
+
+fn push_source_fragment(
+    text: &mut String,
+    display_to_source: &mut Vec<usize>,
+    source_to_display: &mut [usize],
+    source: &str,
+    range: Range<usize>,
+) {
+    let display_start = text.len();
+    let fragment = &source[range.clone()];
+    text.push_str(fragment);
+    for (relative_offset, ch) in fragment.char_indices() {
+        let source_offset = range.start + relative_offset;
+        let display_offset = display_start + relative_offset;
+        source_to_display[source_offset] = display_offset;
+        for byte_ix in 1..=ch.len_utf8() {
+            display_to_source.push(if byte_ix == ch.len_utf8() {
+                source_offset + ch.len_utf8()
+            } else {
+                source_offset
+            });
+        }
+    }
+    source_to_display[range.end] = text.len();
+}
+
+fn composer_display(source: &str, mentions: &[ComposerMention]) -> ComposerDisplay {
+    let mut text = String::with_capacity(source.len() + mentions.len() * 8);
+    let mut source_to_display = vec![0; source.len() + 1];
+    let mut display_to_source = vec![0];
+    let mut display_mentions = Vec::with_capacity(mentions.len());
+    let mut source_cursor = 0;
+
+    for mention in mentions {
+        if mention.range.start < source_cursor || mention.range.end > source.len() {
+            continue;
+        }
+        push_source_fragment(
+            &mut text,
+            &mut display_to_source,
+            &mut source_to_display,
+            source,
+            source_cursor..mention.range.start,
+        );
+        let display_start = text.len();
+        source_to_display[mention.range.clone()].fill(display_start);
+        push_display_fragment(
+            &mut text,
+            &mut display_to_source,
+            "\u{00a0}\u{00a0}",
+            mention.range.start,
+        );
+        let icon_start = text.len();
+        push_display_fragment(
+            &mut text,
+            &mut display_to_source,
+            "\u{00a0}\u{00a0}",
+            mention.range.start,
+        );
+        let icon_range = icon_start..text.len();
+        push_display_fragment(
+            &mut text,
+            &mut display_to_source,
+            "\u{00a0}",
+            mention.range.start,
+        );
+        push_display_fragment(
+            &mut text,
+            &mut display_to_source,
+            mention.reference.kind.label(),
+            mention.range.start,
+        );
+        push_display_fragment(
+            &mut text,
+            &mut display_to_source,
+            "\u{00a0}",
+            mention.range.start,
+        );
+
+        let number_range = AiPanel::page_digits_range(mention).map(|digits| {
+            let number_start = text.len();
+            push_display_fragment(&mut text, &mut display_to_source, "\u{00a0}", digits.start);
+            source_to_display[digits.start] = text.len();
+            push_source_fragment(
+                &mut text,
+                &mut display_to_source,
+                &mut source_to_display,
+                source,
+                digits.clone(),
+            );
+            push_display_fragment(&mut text, &mut display_to_source, "\u{00a0}", digits.end);
+            number_start..text.len()
+        });
+        push_display_fragment(
+            &mut text,
+            &mut display_to_source,
+            "\u{00a0}\u{00a0}",
+            mention.range.end,
+        );
+        source_to_display[mention.range.end] = text.len();
+        let display_end = text.len();
+        let end_mapping_start = number_range
+            .as_ref()
+            .map_or(display_start + (display_end - display_start) / 2, |range| {
+                range.end
+            });
+        display_to_source[end_mapping_start..=display_end].fill(mention.range.end);
+        display_mentions.push(DisplayMention {
+            kind: mention.reference.kind,
+            range: display_start..display_end,
+            icon_range,
+            number_range,
+        });
+        source_cursor = mention.range.end;
+    }
+    push_source_fragment(
+        &mut text,
+        &mut display_to_source,
+        &mut source_to_display,
+        source,
+        source_cursor..source.len(),
+    );
+    source_to_display[source.len()] = text.len();
+    if let Some(last) = display_to_source.last_mut() {
+        *last = source.len();
+    }
+
+    ComposerDisplay {
+        text,
+        source_to_display,
+        display_to_source,
+        mentions: display_mentions,
     }
 }
 
@@ -3537,13 +3997,17 @@ fn input_text_runs(
     text: &str,
     base_run: TextRun,
     theme: Theme,
-    composer_mentions: &[ComposerMention],
+    composer_mentions: &[DisplayMention],
     marked_range: Option<&Range<usize>>,
 ) -> Vec<TextRun> {
     let mut boundaries = vec![0, text.len()];
     for mention in composer_mentions {
         boundaries.push(mention.range.start);
         boundaries.push(mention.range.end);
+        if let Some(number_range) = &mention.number_range {
+            boundaries.push(number_range.start);
+            boundaries.push(number_range.end);
+        }
     }
     if let Some(range) = marked_range {
         boundaries.push(range.start);
@@ -3564,6 +4028,12 @@ fn input_text_runs(
             let mention = composer_mentions
                 .iter()
                 .any(|mention| start >= mention.range.start && end <= mention.range.end);
+            let number = composer_mentions.iter().any(|mention| {
+                mention
+                    .number_range
+                    .as_ref()
+                    .is_some_and(|range| start >= range.start && end <= range.end)
+            });
             let marked = marked_range
                 .as_ref()
                 .is_some_and(|range| start >= range.start && end <= range.end);
@@ -3573,6 +4043,9 @@ fn input_text_runs(
             };
             if mention {
                 run.color = rgb(theme.accent).into();
+            }
+            if number {
+                run.color = rgb(theme.text).into();
             }
             if marked {
                 run.underline = Some(gpui::UnderlineStyle {
@@ -3746,7 +4219,28 @@ fn active_mention_range(text: &str, cursor: usize) -> Option<Range<usize>> {
     if !valid_boundary || text[start..cursor].contains('\n') {
         return None;
     }
+    if text[start..cursor].chars().any(char::is_whitespace) {
+        return None;
+    }
     Some(start..cursor)
+}
+
+fn mention_matches(query: &str) -> Vec<MentionMatch> {
+    let mut matches = MentionKind::ALL
+        .into_iter()
+        .enumerate()
+        .filter_map(|(canonical_ix, kind)| {
+            let label = kind.label();
+            fuzzy_match(label, query).map(|(highlights, score)| MentionMatch {
+                kind,
+                highlights,
+                score,
+                canonical_ix,
+            })
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|candidate| (candidate.score, candidate.canonical_ix));
+    matches
 }
 
 fn parse_composer_mentions(text: &str) -> Vec<ComposerMention> {
@@ -3845,30 +4339,96 @@ fn request_prompt_without_mentions(text: &str, mentions: &[ComposerMention]) -> 
     result.trim().to_string()
 }
 
-fn unresolved_page_references(messages: &[ChatMessage]) -> anyhow::Result<Vec<MentionReference>> {
-    let image_count = messages
-        .iter()
-        .flat_map(ChatMessage::references)
-        .filter(|reference| reference.kind == MentionKind::PageImage)
-        .count();
-    if image_count > MAX_PAGE_IMAGE_CONTEXTS {
+fn validate_page_image_preflight<'a>(
+    messages: impl IntoIterator<Item = &'a ChatMessage>,
+    page_count: usize,
+    page_image_limit: usize,
+) -> anyhow::Result<()> {
+    let mut image_count = 0usize;
+    for reference in messages.into_iter().flat_map(ChatMessage::references) {
+        match reference.kind {
+            MentionKind::PageImage => image_count = image_count.saturating_add(1),
+            MentionKind::DocumentImage => {
+                if page_count == 0 {
+                    return Err(anyhow!("document images are unavailable for this document"));
+                }
+                image_count = image_count.saturating_add(page_count);
+            }
+            MentionKind::Page | MentionKind::Selection | MentionKind::DocumentText => {}
+        }
+    }
+    if image_count > page_image_limit {
         return Err(anyhow!(
-            "too many page images attached: {image_count} requested, maximum is {MAX_PAGE_IMAGE_CONTEXTS}"
+            "too many page images attached: {image_count} requested, maximum is {page_image_limit}"
         ));
     }
+    Ok(())
+}
 
+fn validate_composer_page_image_preflight(
+    mode: AiPanelMode,
+    history: &[ChatMessage],
+    pending: &ChatMessage,
+    page_count: usize,
+    page_image_limit: usize,
+) -> anyhow::Result<()> {
+    let history = if mode == AiPanelMode::QuickAsk {
+        &[][..]
+    } else {
+        history
+    };
+    validate_page_image_preflight(
+        history.iter().chain(std::iter::once(pending)),
+        page_count,
+        page_image_limit,
+    )
+}
+
+fn message_has_resolved_reference(
+    message: &ChatMessage,
+    reference: MentionReference,
+    page_count: usize,
+) -> bool {
+    if reference.kind != MentionKind::DocumentImage {
+        return message.has_resolved_page_reference(reference);
+    }
+    page_count > 0
+        && (1..=page_count).all(|page| {
+            message.has_resolved_page_reference(MentionReference::new(
+                MentionKind::DocumentImage,
+                Some(page),
+            ))
+        })
+}
+
+fn message_needs_resolved_reference(
+    message: &ChatMessage,
+    resolved_reference: MentionReference,
+) -> bool {
+    let requested = if resolved_reference.kind == MentionKind::DocumentImage {
+        MentionReference::new(MentionKind::DocumentImage, None)
+    } else {
+        resolved_reference
+    };
+    message.references().contains(&requested)
+        && !message.has_resolved_page_reference(resolved_reference)
+}
+
+fn unresolved_page_references(
+    messages: &[ChatMessage],
+    page_count: usize,
+) -> Vec<MentionReference> {
     let mut seen = HashSet::new();
-    let references = messages
+    messages
         .iter()
         .flat_map(|message| {
             message.references().iter().copied().filter(|reference| {
-                reference.kind.requires_page_number()
-                    && !message.has_resolved_page_reference(*reference)
+                reference.kind.requires_fixed_layout()
+                    && !message_has_resolved_reference(message, *reference, page_count)
             })
         })
         .filter(|reference| seen.insert(*reference))
-        .collect::<Vec<_>>();
-    Ok(references)
+        .collect()
 }
 
 fn validate_resolved_page_contexts(
@@ -3886,10 +4446,7 @@ fn validate_resolved_page_contexts(
                     let reference = MentionReference::new(image.kind, image.page);
                     let occurrence_count = messages
                         .iter()
-                        .filter(|message| {
-                            message.references().contains(&reference)
-                                && !message.has_resolved_page_reference(reference)
-                        })
+                        .filter(|message| message_needs_resolved_reference(message, reference))
                         .count();
                     image.bytes.len() * occurrence_count
                 }
@@ -3914,15 +4471,20 @@ fn hydrate_page_contexts(messages: &mut [ChatMessage], resolved: &[ResolvedPageC
                 ResolvedPageContext::Text(context) => {
                     let reference = MentionReference::new(context.kind, context.page);
                     if references.contains(&reference)
-                        && !message.has_resolved_page_reference(reference)
+                        && message_needs_resolved_reference(message, reference)
                     {
                         message.attach_context(context.clone());
                     }
                 }
                 ResolvedPageContext::Image(image) => {
                     let reference = MentionReference::new(image.kind, image.page);
-                    if references.contains(&reference)
-                        && !message.has_resolved_page_reference(reference)
+                    if (references.contains(&reference)
+                        || (reference.kind == MentionKind::DocumentImage
+                            && references.contains(&MentionReference::new(
+                                MentionKind::DocumentImage,
+                                None,
+                            ))))
+                        && message_needs_resolved_reference(message, reference)
                     {
                         message.attach_image(image.clone());
                     }
@@ -3942,6 +4504,7 @@ fn ai_reference_to_library(reference: MentionReference) -> AiMentionReference {
         MentionKind::PageImage => AiMentionReference::PageImage {
             page: reference.page.unwrap_or(1),
         },
+        MentionKind::DocumentImage => AiMentionReference::DocumentImage,
     }
 }
 
@@ -3952,6 +4515,9 @@ fn library_reference_to_ai(reference: AiMentionReference) -> MentionReference {
         AiMentionReference::Page { page } => MentionReference::new(MentionKind::Page, Some(page)),
         AiMentionReference::PageImage { page } => {
             MentionReference::new(MentionKind::PageImage, Some(page))
+        }
+        AiMentionReference::DocumentImage => {
+            MentionReference::new(MentionKind::DocumentImage, None)
         }
     }
 }
@@ -4018,8 +4584,9 @@ mod tests {
 
     #[test]
     fn parser_restores_only_canonical_mentions_at_valid_boundaries() {
-        let mentions =
-            parse_composer_mentions("mail@example.com @page(2) (@page-image(4)) @selection");
+        let mentions = parse_composer_mentions(
+            "mail@example.com @page(2) (@page-image(4)) @selection @document-image",
+        );
         assert_eq!(
             mentions
                 .into_iter()
@@ -4029,6 +4596,7 @@ mod tests {
                 MentionReference::new(MentionKind::Page, Some(2)),
                 MentionReference::new(MentionKind::PageImage, Some(4)),
                 MentionReference::new(MentionKind::Selection, None),
+                MentionReference::new(MentionKind::DocumentImage, None),
             ]
         );
     }
@@ -4046,10 +4614,37 @@ mod tests {
         assert_eq!(active_mention_range("ask @pa", 7), Some(4..7));
         assert_eq!(active_mention_range("mail@example", 12), None);
         assert_eq!(active_mention_range("(@page", 6), Some(1..6));
+        assert_eq!(active_mention_range("ask @pa now", 11), None);
+        assert_eq!(active_mention_range("ask @pa\n", 8), None);
     }
 
     #[test]
-    fn page_resolution_skips_hydrated_references_and_limits_images() {
+    fn completion_uses_canonical_order_and_fuzzy_label_matching() {
+        assert_eq!(
+            mention_matches("")
+                .into_iter()
+                .map(|candidate| candidate.kind)
+                .collect::<Vec<_>>(),
+            MentionKind::ALL
+        );
+        assert_eq!(
+            mention_matches("pi")
+                .into_iter()
+                .map(|candidate| candidate.kind)
+                .collect::<Vec<_>>(),
+            vec![MentionKind::PageImage]
+        );
+        assert_eq!(
+            mention_matches("di")
+                .into_iter()
+                .map(|candidate| candidate.kind)
+                .collect::<Vec<_>>(),
+            vec![MentionKind::DocumentImage]
+        );
+    }
+
+    #[test]
+    fn page_resolution_skips_hydrated_references() {
         let reference = MentionReference::new(MentionKind::PageImage, Some(2));
         let mut hydrated = ChatMessage::user(
             "@page-image(2)".to_string(),
@@ -4063,20 +4658,7 @@ mod tests {
             "image/jpeg",
             vec![1, 2, 3],
         ));
-        assert!(unresolved_page_references(&[hydrated]).unwrap().is_empty());
-
-        let messages = (1..=MAX_PAGE_IMAGE_CONTEXTS + 1)
-            .map(|page| {
-                let reference = MentionReference::new(MentionKind::PageImage, Some(page));
-                ChatMessage::user(
-                    reference.display_text(),
-                    String::new(),
-                    Vec::new(),
-                    vec![reference],
-                )
-            })
-            .collect::<Vec<_>>();
-        assert!(unresolved_page_references(&messages).is_err());
+        assert!(unresolved_page_references(&[hydrated], 2).is_empty());
     }
 
     #[test]
@@ -4109,5 +4691,147 @@ mod tests {
         let request = message.request_text();
         assert!(request.contains("First"));
         assert!(request.contains("Second"));
+    }
+
+    #[test]
+    fn image_preflight_counts_full_history_and_document_pages() {
+        let history = ChatMessage::user(
+            "@page-image(2)".to_string(),
+            String::new(),
+            Vec::new(),
+            vec![MentionReference::new(MentionKind::PageImage, Some(2))],
+        );
+        let prospective = ChatMessage::user(
+            "@document-image".to_string(),
+            String::new(),
+            Vec::new(),
+            vec![MentionReference::new(MentionKind::DocumentImage, None)],
+        );
+        let messages = vec![history, prospective];
+
+        assert!(validate_page_image_preflight(&messages, 3, 3).is_err());
+        assert!(validate_page_image_preflight(&messages, 3, 4).is_ok());
+        assert!(validate_page_image_preflight(&messages[1..], 0, 10).is_err());
+    }
+
+    #[test]
+    fn quick_ask_preflight_excludes_the_replaced_exchange() {
+        let history = ChatMessage::user(
+            "@page-image(1)".to_string(),
+            String::new(),
+            Vec::new(),
+            vec![MentionReference::new(MentionKind::PageImage, Some(1))],
+        );
+        let pending = ChatMessage::user(
+            "@page-image(2)".to_string(),
+            String::new(),
+            Vec::new(),
+            vec![MentionReference::new(MentionKind::PageImage, Some(2))],
+        );
+
+        assert!(
+            validate_composer_page_image_preflight(
+                AiPanelMode::QuickAsk,
+                std::slice::from_ref(&history),
+                &pending,
+                2,
+                1,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_composer_page_image_preflight(
+                AiPanelMode::Sidebar,
+                std::slice::from_ref(&history),
+                &pending,
+                2,
+                1,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn composer_display_maps_source_offsets_and_hides_canonical_syntax() {
+        let source = "α @page(12) and @selection β";
+        let mentions = parse_composer_mentions(source);
+        let display = composer_display(source, &mentions);
+
+        assert!(!display.text.contains('@'));
+        assert!(!display.text.contains('('));
+        assert!(display.text.contains("page"));
+        assert!(display.text.contains("12"));
+        assert!(display.text.contains("selection"));
+        assert_eq!(display.mentions.len(), 2);
+        assert!(display.mentions[0].number_range.is_some());
+        assert!(display.mentions[1].number_range.is_none());
+        assert_eq!(
+            display.source_offset(display.mentions[1].range.start + 1),
+            mentions[1].range.start
+        );
+        assert_eq!(
+            display.source_offset(display.mentions[1].range.end - 1),
+            mentions[1].range.end
+        );
+
+        for source_offset in [
+            0,
+            "α".len(),
+            mentions[0].range.start,
+            mentions[0].range.end,
+            source.len(),
+        ] {
+            assert_eq!(
+                display.source_offset(display.display_offset(source_offset)),
+                source_offset
+            );
+        }
+        let digits = AiPanel::page_digits_range(&mentions[0]).unwrap();
+        for source_offset in digits.start..=digits.end {
+            assert_eq!(
+                display.source_offset(display.display_offset(source_offset)),
+                source_offset
+            );
+        }
+    }
+
+    #[test]
+    fn document_image_hydration_attaches_every_resolved_page() {
+        let document_image = MentionReference::new(MentionKind::DocumentImage, None);
+        let mut message = ChatMessage::user(
+            "@document-image".to_string(),
+            String::new(),
+            Vec::new(),
+            vec![document_image],
+        );
+        hydrate_page_contexts(
+            std::slice::from_mut(&mut message),
+            &[
+                ResolvedPageContext::Image(glyphst_ai::ai_chat::ImageContext::new(
+                    MentionKind::DocumentImage,
+                    Some(1),
+                    "image/jpeg",
+                    vec![1],
+                )),
+                ResolvedPageContext::Image(glyphst_ai::ai_chat::ImageContext::new(
+                    MentionKind::DocumentImage,
+                    Some(2),
+                    "image/jpeg",
+                    vec![2],
+                )),
+            ],
+        );
+
+        assert!(message_has_resolved_reference(&message, document_image, 2));
+        assert!(unresolved_page_references(&[message], 2).is_empty());
+    }
+
+    #[test]
+    fn document_image_persistence_mapping_round_trips() {
+        let reference = MentionReference::new(MentionKind::DocumentImage, None);
+        assert_eq!(
+            library_reference_to_ai(ai_reference_to_library(reference)),
+            reference
+        );
     }
 }

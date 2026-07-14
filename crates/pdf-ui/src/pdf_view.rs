@@ -39,7 +39,9 @@ use crate::toc::{TocPalette, TocPaletteDelegate, TocPaletteEntry};
 use anyhow::{Context as _, Result, anyhow, bail};
 use arboard::{Clipboard, ImageData};
 pub use glyphst_actions::pdf_viewer::*;
-use glyphst_ai::ai_chat::{ContextBlock, ImageContext, MentionKind, MentionReference};
+use glyphst_ai::ai_chat::{
+    ContextBlock, ImageContext, MAX_PAGE_IMAGE_BYTES, MentionKind, MentionReference,
+};
 use glyphst_ai_ui::{AiContext, AiContextProvider, AiPageState, ResolvedPageContext};
 use glyphst_core::{
     DocumentCapabilities, DocumentFormat, DocumentLayout, EpubReaderPreferences, EpubTheme,
@@ -954,13 +956,6 @@ struct PageMarkdownBlock {
     bold_ratio: f32,
 }
 
-struct PageContextSource {
-    bounds: Rect,
-    width: f32,
-    height: f32,
-    display_list: DisplayList,
-}
-
 impl AiContextProvider for PdfViewAiContextProvider {
     fn context(&self, include_document_text: bool, cx: &gpui::App) -> Option<AiContext> {
         self.pdf_view
@@ -1062,8 +1057,9 @@ impl PdfView {
         }
     }
 
-    // This resolver owns only page-scoped mentions. Selection and document-text
-    // mentions are resolved synchronously by the AI panel and are ignored here.
+    // This resolver owns page-scoped mentions and expands document-image mentions.
+    // Selection and document-text mentions are resolved synchronously by the AI
+    // panel and are ignored here.
     fn prepare_page_references(
         references: Vec<MentionReference>,
         document_layout: DocumentLayout,
@@ -1071,9 +1067,7 @@ impl PdfView {
     ) -> Result<Vec<MentionReference>> {
         let page_references = references
             .into_iter()
-            .filter(|reference| {
-                matches!(reference.kind, MentionKind::Page | MentionKind::PageImage)
-            })
+            .filter(|reference| reference.kind.requires_fixed_layout())
             .collect::<Vec<_>>();
         if page_references.is_empty() {
             return Ok(Vec::new());
@@ -1085,6 +1079,20 @@ impl PdfView {
         let mut unique = Vec::with_capacity(page_references.len());
         let mut seen = HashSet::with_capacity(page_references.len());
         for reference in page_references {
+            if reference.kind == MentionKind::DocumentImage {
+                if reference.page.is_some() {
+                    bail!("{} does not accept a page number", reference.kind.token());
+                }
+                for page in 1..=page_count {
+                    let page_reference =
+                        MentionReference::new(MentionKind::DocumentImage, Some(page));
+                    if seen.insert(page_reference) {
+                        unique.push(page_reference);
+                    }
+                }
+                continue;
+            }
+
             let page = reference.page.ok_or_else(|| {
                 anyhow!("{} requires a 1-based page number", reference.kind.token())
             })?;
@@ -1136,15 +1144,23 @@ impl PdfView {
             );
         }
 
-        let mut page_sources = HashMap::new();
-        for reference in &references {
+        let mut resolved = Vec::with_capacity(references.len());
+        let mut page_groups: Vec<(usize, Vec<MentionReference>)> = Vec::new();
+        let mut page_group_indexes = HashMap::new();
+        for reference in references {
             let page_number = reference
                 .page
                 .context("validated page reference lost its page number")?;
+            let group_ix = *page_group_indexes.entry(page_number).or_insert_with(|| {
+                page_groups.push((page_number, Vec::new()));
+                page_groups.len() - 1
+            });
+            page_groups[group_ix].1.push(reference);
+        }
+
+        let mut rendered_image_bytes = 0usize;
+        for (page_number, page_references) in page_groups {
             let page_idx = page_number - 1;
-            if page_sources.contains_key(&page_idx) {
-                continue;
-            }
             let page = document
                 .load_page(page_idx as i32)
                 .with_context(|| format!("failed to load PDF page {page_number}"))?;
@@ -1161,56 +1177,59 @@ impl PdfView {
             })?;
             page.run(&device, &Matrix::IDENTITY)
                 .with_context(|| format!("failed to record PDF page {page_number}"))?;
-            page_sources.insert(
-                page_idx,
-                PageContextSource {
-                    bounds: page_bounds,
-                    width: page_width,
-                    height: page_height,
-                    display_list,
-                },
-            );
-        }
 
-        let mut resolved = Vec::with_capacity(references.len());
-        for reference in references {
-            let page_number = reference
-                .page
-                .context("validated page reference lost its page number")?;
-            let page_idx = page_number - 1;
-            let source = page_sources
-                .get(&page_idx)
-                .with_context(|| format!("PDF page {page_number} was not prepared"))?;
-            match reference.kind {
-                MentionKind::Page => {
-                    let markdown = Self::extract_page_markdown(&source.display_list, text_format)
-                        .with_context(|| {
-                        format!("failed to extract text from PDF page {page_number}")
-                    })?;
-                    resolved.push(ResolvedPageContext::Text(ContextBlock::new(
-                        MentionKind::Page,
-                        Some(page_number),
-                        markdown,
-                    )));
+            let markdown = page_references
+                .iter()
+                .any(|reference| reference.kind == MentionKind::Page)
+                .then(|| Self::extract_page_markdown(&display_list, text_format))
+                .transpose()
+                .with_context(|| format!("failed to extract text from PDF page {page_number}"))?;
+            let image_bytes = if page_references
+                .iter()
+                .any(|reference| reference.kind.is_image())
+            {
+                let bytes = Self::render_page_jpeg(
+                    &display_list,
+                    page_bounds,
+                    page_width,
+                    page_height,
+                    image_quality,
+                )
+                .with_context(|| format!("failed to render PDF page {page_number} as JPEG"))?;
+                rendered_image_bytes = rendered_image_bytes.saturating_add(bytes.len());
+                if rendered_image_bytes > MAX_PAGE_IMAGE_BYTES {
+                    bail!(
+                        "attached page images are too large: more than {} MiB",
+                        MAX_PAGE_IMAGE_BYTES / (1024 * 1024)
+                    );
                 }
-                MentionKind::PageImage => {
-                    let bytes = Self::render_page_jpeg(
-                        &source.display_list,
-                        source.bounds,
-                        source.width,
-                        source.height,
-                        image_quality,
-                    )
-                    .with_context(|| format!("failed to render PDF page {page_number} as JPEG"))?;
-                    resolved.push(ResolvedPageContext::Image(ImageContext::new(
-                        MentionKind::PageImage,
-                        Some(page_number),
-                        "image/jpeg",
-                        bytes,
-                    )));
-                }
-                MentionKind::Selection | MentionKind::DocumentText => {
-                    unreachable!("non-page references are filtered before background resolution")
+                Some(Arc::<[u8]>::from(bytes))
+            } else {
+                None
+            };
+
+            for reference in page_references {
+                match reference.kind {
+                    MentionKind::Page => {
+                        resolved.push(ResolvedPageContext::Text(ContextBlock::new(
+                            MentionKind::Page,
+                            Some(page_number),
+                            markdown.clone().unwrap_or_default(),
+                        )));
+                    }
+                    MentionKind::PageImage | MentionKind::DocumentImage => {
+                        resolved.push(ResolvedPageContext::Image(ImageContext::new(
+                            reference.kind,
+                            Some(page_number),
+                            "image/jpeg",
+                            image_bytes.clone().context("page image was not rendered")?,
+                        )));
+                    }
+                    MentionKind::Selection | MentionKind::DocumentText => {
+                        unreachable!(
+                            "non-page references are filtered before background resolution"
+                        )
+                    }
                 }
             }
         }
@@ -11805,18 +11824,30 @@ mod tests {
     fn page_reference_validation_rejects_invalid_pages_and_deduplicates_exact_refs() {
         let page = MentionReference::new(MentionKind::Page, Some(2));
         let image = MentionReference::new(MentionKind::PageImage, Some(2));
+        let document_image = MentionReference::new(MentionKind::DocumentImage, None);
         let references = PdfView::prepare_page_references(
             vec![
                 MentionReference::new(MentionKind::Selection, None),
                 page,
                 image,
+                document_image,
                 page,
+                document_image,
             ],
             DocumentLayout::Fixed,
             3,
         )
         .unwrap();
-        assert_eq!(references, vec![page, image]);
+        assert_eq!(
+            references,
+            vec![
+                page,
+                image,
+                MentionReference::new(MentionKind::DocumentImage, Some(1)),
+                MentionReference::new(MentionKind::DocumentImage, Some(2)),
+                MentionReference::new(MentionKind::DocumentImage, Some(3)),
+            ]
+        );
 
         assert!(
             PdfView::prepare_page_references(
@@ -11843,9 +11874,16 @@ mod tests {
                 .contains("page must be between 1 and 3")
             );
         }
+        let paged_document_image = MentionReference::new(MentionKind::DocumentImage, Some(1));
+        assert!(
+            PdfView::prepare_page_references(vec![paged_document_image], DocumentLayout::Fixed, 3,)
+                .unwrap_err()
+                .to_string()
+                .contains("does not accept a page number")
+        );
         assert!(
             PdfView::prepare_page_references(
-                vec![page],
+                vec![document_image],
                 DocumentLayout::Reflow(EpubLayout::default()),
                 3,
             )

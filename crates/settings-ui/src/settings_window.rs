@@ -2,9 +2,9 @@ use glyphst_actions::settings_panel::PanelClose;
 use glyphst_ai::ai_client::{AiModelInfo, list_ai_models, test_ai_connection};
 use glyphst_keymap::keybindings;
 use glyphst_settings::{
-    AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, AppLanguage, FontSettings,
-    KeymapPreset, ModelRef, PageImageQuality, PageTextFormat, ResolvedAiConfig, Settings,
-    SettingsStore, TabBarVisibility, TranslationBoxCorner, TranslationProvider,
+    AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, AppLanguage, DEFAULT_PAGE_IMAGE_LIMIT,
+    FontSettings, KeymapPreset, ModelRef, PageImageQuality, PageTextFormat, ResolvedAiConfig,
+    Settings, SettingsStore, TabBarVisibility, TranslationBoxCorner, TranslationProvider,
     TranslationProviderConfig, WindowBackgroundMode, localize, setup_ui_font,
     theme::{
         PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode, ThemeMetadata, ThemeSelection,
@@ -421,10 +421,12 @@ pub struct SettingsWindow {
     ai_model_input: Entity<SettingsTextInput>,
     ai_key_input: Entity<SettingsTextInput>,
     ai_base_url_input: Entity<SettingsTextInput>,
+    page_image_limit_input: Entity<SettingsTextInput>,
     translation_key_input: Entity<SettingsTextInput>,
     translation_base_url_input: Entity<SettingsTextInput>,
     translation_region_input: Entity<SettingsTextInput>,
     translation_settings_save_generation: Arc<AtomicU64>,
+    page_image_limit_save_generation: Arc<AtomicU64>,
     main_model_search: Entity<SettingsTextInput>,
     title_model_search: Entity<SettingsTextInput>,
     translation_model_search: Entity<SettingsTextInput>,
@@ -558,6 +560,46 @@ impl SettingsWindow {
                 cx,
             )
         });
+        let page_image_limit = cx.global::<SettingsStore>().settings.ai.page_image_limit;
+        let page_image_limit_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                page_image_limit.to_string().into(),
+                DEFAULT_PAGE_IMAGE_LIMIT.to_string().into(),
+                false,
+                cx,
+            )
+        });
+        cx.subscribe(&page_image_limit_input, |this, input, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let filtered = value
+                .chars()
+                .filter(char::is_ascii_digit)
+                .collect::<String>();
+            if filtered != value.as_ref() {
+                input.update(cx, |input, cx| {
+                    input.set_content(filtered.clone().into(), cx)
+                });
+            }
+            let Ok(limit) = filtered.parse::<usize>() else {
+                if !filtered.is_empty() {
+                    let current = cx.global::<SettingsStore>().settings.ai.page_image_limit;
+                    input.update(cx, |input, cx| {
+                        input.set_content(current.to_string().into(), cx)
+                    });
+                }
+                return;
+            };
+            let limit = limit.max(1);
+            if limit.to_string() != filtered {
+                input.update(cx, |input, cx| {
+                    input.set_content(limit.to_string().into(), cx)
+                });
+            }
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            settings.ai.page_image_limit = limit;
+            this.persist_page_image_limit_settings(settings, cx);
+        })
+        .detach();
         cx.subscribe(&ai_key_input, |this, _, event, cx| {
             let SettingsInputEvent::Changed(value) = event;
             let value = value.to_string();
@@ -837,9 +879,13 @@ impl SettingsWindow {
         .detach();
 
         cx.observe_global::<SettingsStore>(|this, cx| {
-            let (theme, system_appearance) = {
+            let (theme, system_appearance, page_image_limit) = {
                 let store = cx.global::<SettingsStore>();
-                (store.settings.theme.clone(), store.system_appearance)
+                (
+                    store.settings.theme.clone(),
+                    store.system_appearance,
+                    store.settings.ai.page_image_limit,
+                )
             };
             match &theme {
                 ThemeSelection::Static(name) => {
@@ -863,6 +909,12 @@ impl SettingsWindow {
                     });
                 }
             }
+            this.page_image_limit_input.update(cx, |input, cx| {
+                let value = page_image_limit.to_string();
+                if input.content.as_ref() != value {
+                    input.set_content(value.into(), cx);
+                }
+            });
             cx.notify();
         })
         .detach();
@@ -892,10 +944,12 @@ impl SettingsWindow {
             ai_model_input,
             ai_key_input,
             ai_base_url_input,
+            page_image_limit_input,
             translation_key_input,
             translation_base_url_input,
             translation_region_input,
             translation_settings_save_generation: Arc::new(AtomicU64::new(0)),
+            page_image_limit_save_generation: Arc::new(AtomicU64::new(0)),
             main_model_search,
             title_model_search,
             translation_model_search,
@@ -958,6 +1012,48 @@ impl SettingsWindow {
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn persist_page_image_limit_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        cx.global_mut::<SettingsStore>()
+            .set_settings_in_memory(settings);
+        self.status = None;
+        self.save_error = None;
+        let generation = self
+            .page_image_limit_save_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let save_generation = self.page_image_limit_save_generation.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+            if save_generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            let Ok(snapshot) = this.update(cx, |_, cx| {
+                cx.global::<SettingsStore>().persistence_snapshot()
+            }) else {
+                return;
+            };
+            let (path, contents) = snapshot;
+            let result = cx
+                .background_spawn(async move {
+                    SettingsStore::write_snapshot(&path, contents)
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .await;
+            if save_generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            _ = this.update(cx, |this, cx| {
+                this.save_error = result.err().map(Into::into);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.refresh_windows();
         cx.notify();
     }
 
@@ -3343,6 +3439,26 @@ impl SettingsWindow {
                         .text_size(ui_rems(12.0))
                         .text_color(rgb(theme.text_muted))
                         .child(crate::fl!("settings-page-image-quality-hint")),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .h(px(44.0))
+                        .child(
+                            div()
+                                .text_color(rgb(theme.text))
+                                .child(crate::fl!("settings-page-image-limit")),
+                        )
+                        .child(div().w(px(96.0)).child(self.page_image_limit_input.clone())),
+                )
+                .child(
+                    div()
+                        .text_size(ui_rems(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(crate::fl!("settings-page-image-limit-hint")),
                 )
                 .into_any_element(),
             div()

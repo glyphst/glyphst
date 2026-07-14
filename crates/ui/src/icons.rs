@@ -20,6 +20,8 @@ pub enum IconName {
     Copy,
     Delete,
     File,
+    FileText,
+    Image,
     Info,
     LayoutGrid,
     Menu,
@@ -38,7 +40,7 @@ pub enum IconName {
 }
 
 impl IconName {
-    fn path(self) -> SharedString {
+    pub fn path(self) -> SharedString {
         let name = match self {
             Self::AppWindow => "app-window",
             Self::ArrowUpRight => "arrow-up-right",
@@ -51,6 +53,8 @@ impl IconName {
             Self::Copy => "copy",
             Self::Delete => "delete",
             Self::File => "file",
+            Self::FileText => "file-text",
+            Self::Image => "image",
             Self::Info => "info",
             Self::LayoutGrid => "layout-grid",
             Self::Menu => "menu",
