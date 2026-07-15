@@ -1290,6 +1290,27 @@ mod tests {
     }
 
     #[test]
+    fn request_projection_emits_multiple_selection_contexts() {
+        let message = ChatMessage::user(
+            "Compare @selection and @selection".to_string(),
+            "Compare the selected passages".to_string(),
+            vec![
+                ContextBlock::new(MentionKind::Selection, None, "First passage".to_string()),
+                ContextBlock::new(MentionKind::Selection, None, "Second passage".to_string()),
+            ],
+            vec![
+                MentionReference::new(MentionKind::Selection, None),
+                MentionReference::new(MentionKind::Selection, None),
+            ],
+        );
+
+        let request = message.request_text();
+        assert_eq!(request.matches("<selection>").count(), 2);
+        assert!(request.contains("First passage"));
+        assert!(request.contains("Second passage"));
+    }
+
+    #[test]
     fn request_projection_omits_context_envelope_without_context() {
         let message = ChatMessage::user_text("Explain this".to_string());
 

@@ -27,14 +27,14 @@ use glyphst_ui::{
     scrollbar::WithScrollbar as _,
 };
 use gpui::{
-    Anchor, App, BorderStyle, Bounds, ClipboardItem, Context, Corners, CursorStyle, Edges, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, FontWeight, GlobalElementId, HighlightStyle, InspectorElementId, IntoElement,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels,
-    Point as GpuiPoint, Render, ScrollHandle, ScrollStrategy, SharedString, Style, StyledText,
-    Task, TextRun, TextStyle, TransformationMatrix, UTF16Selection, UniformListScrollHandle,
-    Window, WrappedLine, anchored, deferred, div, fill, point, prelude::*, px, quad, relative, rgb,
-    rgba, size, uniform_list,
+    Anchor, AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, Corners, CursorStyle,
+    Edges, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, FontWeight, GlobalElementId, HighlightStyle, Image, ImageFormat,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollHandle, ScrollStrategy,
+    SharedString, Style, StyledText, Task, TextRun, TextStyle, TransformationMatrix,
+    UTF16Selection, UniformListScrollHandle, Window, WrappedLine, anchored, deferred, div, fill,
+    img, point, prelude::*, px, quad, relative, rgb, rgba, size, uniform_list,
 };
 
 pub const AI_PANEL_WIDTH: f32 = 360.0;
@@ -43,6 +43,9 @@ const COMPLETION_MENU_MAX_WIDTH: f32 = 540.0;
 const COMPLETION_MENU_ROW_HEIGHT: f32 = 40.0;
 const COMPLETION_MENU_VISIBLE_ROWS: usize = 8;
 const DRAG_SELECT_THRESHOLD: f32 = 2.0;
+const MENTION_PREVIEW_WIDTH: f32 = 320.0;
+const MENTION_PREVIEW_TEXT_MAX_HEIGHT: f32 = 240.0;
+const MENTION_PREVIEW_IMAGE_HEIGHT: f32 = 220.0;
 const VALIDATION_NOTICE_DURATION: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,11 +94,13 @@ struct MentionMatch {
 struct ComposerMention {
     reference: MentionReference,
     range: Range<usize>,
+    captured_text: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DisplayMention {
     kind: MentionKind,
+    source_range: Range<usize>,
     range: Range<usize>,
     icon_range: Range<usize>,
     number_range: Option<Range<usize>>,
@@ -147,6 +152,35 @@ enum AiPanelMode {
     QuickAsk,
 }
 
+#[derive(Clone)]
+enum MentionPreviewContent {
+    Text(String),
+    Image(Arc<Image>),
+}
+
+#[derive(Clone)]
+enum MentionPreviewStatus {
+    Loading,
+    Ready(MentionPreviewContent),
+    Error(String),
+}
+
+#[derive(Clone)]
+struct MentionPreview {
+    reference: MentionReference,
+    source_range: Range<usize>,
+    position: GpuiPoint<Pixels>,
+    anchor: Anchor,
+    generation: u64,
+    status: MentionPreviewStatus,
+}
+
+#[derive(Clone)]
+struct MentionHitbox {
+    source_range: Range<usize>,
+    bounds: Bounds<Pixels>,
+}
+
 pub struct AiPanel {
     focus_handle: FocusHandle,
     previous_focus_handle: FocusHandle,
@@ -181,6 +215,10 @@ pub struct AiPanel {
     active_page_number_edit: Option<ActivePageNumberEdit>,
     last_display: Option<ComposerDisplay>,
     last_cursor_pos: Option<GpuiPoint<Pixels>>,
+    mention_hitboxes: Vec<MentionHitbox>,
+    mention_preview: Option<MentionPreview>,
+    mention_preview_generation: u64,
+    pending_mention_preview: Option<Task<()>>,
     attachment_menu_open: bool,
     attachment_menu_anchor: Option<GpuiPoint<Pixels>>,
     model_menu_open: bool,
@@ -213,6 +251,7 @@ struct PrepaintState {
     mention_quads: Vec<PaintQuad>,
     active_number_quads: Vec<PaintQuad>,
     mention_icons: Vec<(Bounds<Pixels>, MentionKind)>,
+    mention_hitboxes: Vec<MentionHitbox>,
 }
 
 #[derive(Clone, Copy)]
@@ -318,6 +357,10 @@ impl AiPanel {
             active_page_number_edit: None,
             last_display: None,
             last_cursor_pos: None,
+            mention_hitboxes: Vec::new(),
+            mention_preview: None,
+            mention_preview_generation: 0,
+            pending_mention_preview: None,
             attachment_menu_open: false,
             attachment_menu_anchor: None,
             model_menu_open: false,
@@ -339,12 +382,14 @@ impl AiPanel {
             self.last_bounds = None;
             self.last_display = None;
             self.last_cursor_pos = None;
+            self.invalidate_mention_preview();
         }
         self.width = width;
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.update_current_page(cx);
+        self.invalidate_mention_preview();
         if self.mode == AiPanelMode::Sidebar {
             self.save_current_session(cx);
         }
@@ -640,7 +685,7 @@ impl AiPanel {
             let editing_page_number = self.active_page_number_edit.is_some();
             self.replace_text_in_range(None, &text, window, cx);
             if !editing_page_number {
-                self.rebuild_composer_mentions();
+                self.rebuild_composer_mentions(cx);
             }
             cx.notify();
         }
@@ -665,7 +710,7 @@ impl AiPanel {
             .iter()
             .any(|reference| reference.kind == MentionKind::DocumentText);
         let context = self.context_provider.context(include_document_text, cx);
-        let contexts = self.context_blocks_for_references(&references, context.as_ref());
+        let contexts = self.context_blocks_for_mentions(context.as_ref());
         let document = self.document_context_from(context);
         let user_message =
             ChatMessage::user(display_prompt.clone(), request_prompt, contexts, references);
@@ -681,6 +726,7 @@ impl AiPanel {
             return;
         }
         let settings = ai_settings.resolved_main();
+        self.invalidate_mention_preview();
 
         if self.mode == AiPanelMode::QuickAsk {
             self.messages.clear();
@@ -695,7 +741,7 @@ impl AiPanel {
         } else {
             self.content = display_prompt.clone().into();
             self.selected_range = display_prompt.len()..display_prompt.len();
-            self.rebuild_composer_mentions();
+            self.rebuild_composer_mentions(cx);
         }
         self.selection_reversed = false;
         self.marked_range = None;
@@ -895,53 +941,139 @@ impl AiPanel {
             && self.messages[1].role == Role::Assistant
     }
 
-    fn context_blocks_for_references(
-        &self,
-        references: &[MentionReference],
-        context: Option<&AiContext>,
-    ) -> Vec<ContextBlock> {
-        references
-            .iter()
-            .filter(|reference| {
-                matches!(
-                    reference.kind,
-                    MentionKind::Selection | MentionKind::DocumentText
-                )
-            })
-            .map(|reference| self.resolve_mention(reference.kind, context))
-            .collect()
+    fn context_blocks_for_mentions(&self, context: Option<&AiContext>) -> Vec<ContextBlock> {
+        context_blocks_for_composer_mentions(&self.composer_mentions, context)
     }
 
-    fn resolve_mention(&self, mention: MentionKind, context: Option<&AiContext>) -> ContextBlock {
-        let Some(context) = context else {
-            return Self::missing_context_block(mention);
-        };
-
-        match mention {
-            MentionKind::Selection => ContextBlock::new(
-                mention,
-                None,
-                context
-                    .selected_text
-                    .clone()
-                    .unwrap_or_else(|| tr("ai-no-selected-text")),
-            ),
-            MentionKind::DocumentText => ContextBlock::new(
-                mention,
-                None,
-                context
-                    .document_text
-                    .clone()
-                    .unwrap_or_else(|| tr("ai-no-document-text")),
-            ),
-            MentionKind::Page | MentionKind::PageImage | MentionKind::DocumentImage => {
-                Self::missing_context_block(mention)
-            }
+    fn hide_mention_preview(&mut self, cx: &mut Context<Self>) {
+        if self.mention_preview.is_none() && self.pending_mention_preview.is_none() {
+            return;
         }
+        self.mention_preview_generation = self.mention_preview_generation.wrapping_add(1);
+        self.mention_preview = None;
+        self.pending_mention_preview = None;
+        cx.notify();
     }
 
-    fn missing_context_block(mention: MentionKind) -> ContextBlock {
-        ContextBlock::new(mention, None, mention.empty_context_message())
+    fn invalidate_mention_preview(&mut self) {
+        self.mention_preview_generation = self.mention_preview_generation.wrapping_add(1);
+        self.mention_preview = None;
+        self.pending_mention_preview = None;
+        self.mention_hitboxes.clear();
+    }
+
+    fn update_mention_preview(
+        &mut self,
+        position: GpuiPoint<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(hitbox) = self
+            .mention_hitboxes
+            .iter()
+            .find(|hitbox| hitbox.bounds.contains(&position))
+            .cloned()
+        else {
+            self.hide_mention_preview(cx);
+            return;
+        };
+        let Some(mention) = self
+            .composer_mentions
+            .iter()
+            .find(|mention| mention.range == hitbox.source_range)
+            .cloned()
+        else {
+            self.hide_mention_preview(cx);
+            return;
+        };
+        if mention.reference.kind == MentionKind::DocumentImage {
+            self.hide_mention_preview(cx);
+            return;
+        }
+
+        let available_above = hitbox.bounds.top();
+        let available_below = window.viewport_size().height - hitbox.bounds.bottom();
+        let (preview_position, preview_anchor) = if available_below >= available_above {
+            (
+                point(hitbox.bounds.left(), hitbox.bounds.bottom() + px(6.0)),
+                Anchor::TopLeft,
+            )
+        } else {
+            (
+                point(hitbox.bounds.left(), hitbox.bounds.top() - px(6.0)),
+                Anchor::BottomLeft,
+            )
+        };
+        if let Some(preview) = self.mention_preview.as_mut()
+            && preview.reference == mention.reference
+            && preview.source_range == mention.range
+        {
+            if preview.position != preview_position || preview.anchor != preview_anchor {
+                preview.position = preview_position;
+                preview.anchor = preview_anchor;
+                cx.notify();
+            }
+            return;
+        }
+
+        self.mention_preview_generation = self.mention_preview_generation.wrapping_add(1);
+        let generation = self.mention_preview_generation;
+        self.pending_mention_preview = None;
+
+        let include_document_text = mention.reference.kind == MentionKind::DocumentText;
+        let context = matches!(
+            mention.reference.kind,
+            MentionKind::Selection | MentionKind::DocumentText
+        )
+        .then(|| self.context_provider.context(include_document_text, cx))
+        .flatten();
+        if let Some(text) = mention_preview_text(&mention, context.as_ref()) {
+            self.mention_preview = Some(MentionPreview {
+                reference: mention.reference,
+                source_range: mention.range,
+                position: preview_position,
+                anchor: preview_anchor,
+                generation,
+                status: MentionPreviewStatus::Ready(MentionPreviewContent::Text(text)),
+            });
+            cx.notify();
+            return;
+        }
+
+        self.mention_preview = Some(MentionPreview {
+            reference: mention.reference,
+            source_range: mention.range.clone(),
+            position: preview_position,
+            anchor: preview_anchor,
+            generation,
+            status: MentionPreviewStatus::Loading,
+        });
+        cx.notify();
+
+        let reference = mention.reference;
+        let source_range = mention.range;
+        let resolve_task = self
+            .context_provider
+            .resolve_page_references(vec![reference], cx);
+        self.pending_mention_preview = Some(cx.spawn(async move |this, cx| {
+            let status = match resolve_task.await {
+                Ok(resolved) => preview_content_from_resolved(reference, &resolved)
+                    .map(MentionPreviewStatus::Ready)
+                    .unwrap_or_else(MentionPreviewStatus::Error),
+                Err(error) => MentionPreviewStatus::Error(format!("{error:#}")),
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.mention_preview.as_ref().is_some_and(|preview| {
+                    mention_preview_matches(preview, generation, reference, &source_range)
+                }) {
+                    if let Some(preview) = this.mention_preview.as_mut() {
+                        preview.status = status;
+                    }
+                    this.pending_mention_preview = None;
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     fn document_context(&self, cx: &mut Context<Self>) -> DocumentContext {
@@ -981,17 +1113,29 @@ impl AiPanel {
         }
     }
 
-    fn rebuild_composer_mentions(&mut self) {
-        self.composer_mentions = parse_composer_mentions(&self.content);
+    fn rebuild_composer_mentions(&mut self, cx: &mut Context<Self>) {
+        let parsed = parse_composer_mentions(&self.content);
+        let needs_selection_capture = parsed.iter().any(|mention| {
+            mention.reference.kind == MentionKind::Selection
+                && !self.composer_mentions.iter().any(|existing| {
+                    existing.reference == mention.reference && existing.range == mention.range
+                })
+        });
+        let selected_text = needs_selection_capture.then(|| self.current_selection_snapshot(cx));
+        self.composer_mentions =
+            merge_composer_mentions(parsed, &self.composer_mentions, selected_text);
         self.active_page_number_edit = None;
     }
 
+    fn current_selection_snapshot(&self, cx: &mut Context<Self>) -> String {
+        self.context_provider
+            .context(false, cx)
+            .and_then(|context| context.selected_text)
+            .unwrap_or_else(|| tr("ai-no-selected-text"))
+    }
+
     fn references(&self) -> Vec<MentionReference> {
-        let mut seen = HashSet::new();
-        self.composer_mentions
-            .iter()
-            .filter_map(|mention| seen.insert(mention.reference).then_some(mention.reference))
-            .collect()
+        references_for_composer_mentions(&self.composer_mentions)
     }
 
     fn request_prompt(&self) -> String {
@@ -1042,6 +1186,7 @@ impl AiPanel {
         let page = validate_page_number(&self.content[active.digits.clone()], self.page_count);
         let page_text = page.to_string();
         let old_digits = active.digits.clone();
+        self.invalidate_mention_preview();
         self.content = (self.content[..old_digits.start].to_owned()
             + &page_text
             + &self.content[old_digits.end..])
@@ -1072,6 +1217,7 @@ impl AiPanel {
 
     fn apply_regular_edit(&mut self, range: Range<usize>, new_text: &str) {
         self.clear_validation_notice();
+        self.invalidate_mention_preview();
         self.content =
             (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         adjust_composer_mentions(&mut self.composer_mentions, &range, new_text.len());
@@ -1098,6 +1244,7 @@ impl AiPanel {
             return true;
         }
         self.clear_validation_notice();
+        self.invalidate_mention_preview();
         self.content =
             (self.content[..range.start].to_owned() + &filtered + &self.content[range.end..])
                 .into();
@@ -1185,6 +1332,7 @@ impl AiPanel {
         self.save_current_session(cx);
         self.refresh_sessions(cx);
         self.view = AiPanelView::Sessions;
+        self.hide_mention_preview(cx);
         self.close_composer_menus();
         cx.notify();
     }
@@ -1309,6 +1457,7 @@ impl AiPanel {
         self.marked_range = None;
         self.mention_completion = None;
         self.composer_mentions.clear();
+        self.invalidate_mention_preview();
         self.active_page_number_edit = None;
         self.last_cursor_pos = None;
         self.pending_title_task = None;
@@ -1372,6 +1521,7 @@ impl AiPanel {
         self.marked_range = None;
         self.mention_completion = None;
         self.composer_mentions.clear();
+        self.invalidate_mention_preview();
         self.active_page_number_edit = None;
         self.last_cursor_pos = None;
         self.pending_title_task = None;
@@ -1511,10 +1661,11 @@ impl AiPanel {
             cx.notify();
             return;
         }
-        if self
-            .composer_mentions
-            .iter()
-            .any(|composer_mention| composer_mention.reference.kind == mention)
+        if mention != MentionKind::Selection
+            && self
+                .composer_mentions
+                .iter()
+                .any(|composer_mention| composer_mention.reference.kind == mention)
             && !mention.requires_page_number()
         {
             cx.notify();
@@ -1568,9 +1719,12 @@ impl AiPanel {
         self.apply_regular_edit(range, &new_text);
         let reference =
             MentionReference::new(mention, mention.requires_page_number().then_some(page));
+        let captured_text =
+            (mention == MentionKind::Selection).then(|| self.current_selection_snapshot(cx));
         self.composer_mentions.push(ComposerMention {
             reference,
             range: mention_start..mention_end,
+            captured_text,
         });
         self.composer_mentions
             .sort_by_key(|composer_mention| composer_mention.range.start);
@@ -1594,6 +1748,7 @@ impl AiPanel {
     ) {
         self.focus_handle.focus(window, cx);
         self.close_composer_menus();
+        self.hide_mention_preview(cx);
         self.drag_origin = Some(event.position);
 
         let mut offset = self.index_for_mouse_position(event.position, window);
@@ -1659,9 +1814,11 @@ impl AiPanel {
     ) {
         if !event.dragging() {
             self.drag_origin = None;
+            self.update_mention_preview(event.position, window, cx);
             return;
         }
 
+        self.hide_mention_preview(cx);
         let should_select = if let Some(origin) = self.drag_origin.as_ref() {
             (event.position.x - origin.x).as_f32().abs() > DRAG_SELECT_THRESHOLD
                 || (event.position.y - origin.y).as_f32().abs() > DRAG_SELECT_THRESHOLD
@@ -1811,6 +1968,71 @@ impl AiPanel {
             .child(message)
     }
 
+    fn render_mention_preview(preview: MentionPreview, theme: Theme) -> AnyElement {
+        let body = match preview.status {
+            MentionPreviewStatus::Loading => div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(px(72.0))
+                .child(Self::render_loading_indicator(theme))
+                .into_any_element(),
+            MentionPreviewStatus::Ready(MentionPreviewContent::Text(text)) => {
+                let mut content = div()
+                    .id(("ai-mention-preview-text", preview.generation))
+                    .flex()
+                    .flex_col()
+                    .max_h(px(MENTION_PREVIEW_TEXT_MAX_HEIGHT))
+                    .overflow_y_scroll()
+                    .text_size(ui_rems(12.0))
+                    .text_color(rgb(theme.text));
+                for line in text.lines() {
+                    content = content.child(
+                        div()
+                            .min_h(px(16.0))
+                            .child(if line.is_empty() { "\u{00a0}" } else { line }.to_string()),
+                    );
+                }
+                content.into_any_element()
+            }
+            MentionPreviewStatus::Ready(MentionPreviewContent::Image(image)) => div()
+                .w_full()
+                .h(px(MENTION_PREVIEW_IMAGE_HEIGHT))
+                .bg(rgb(theme.tab_active_background))
+                .child(img(image).size_full())
+                .into_any_element(),
+            MentionPreviewStatus::Error(error) => div()
+                .py_2()
+                .text_size(ui_rems(12.0))
+                .text_color(rgb(theme.error))
+                .child(error)
+                .into_any_element(),
+        };
+
+        div()
+            .occlude()
+            .w(px(MENTION_PREVIEW_WIDTH))
+            .flex()
+            .flex_col()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
+            .shadow_sm()
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b(px(1.0))
+                    .border_color(rgb(theme.border_variant))
+                    .text_size(ui_rems(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(preview.reference.display_text()),
+            )
+            .child(div().p_3().child(body))
+            .into_any_element()
+    }
+
     fn render_quick_ask(
         &mut self,
         window: &mut Window,
@@ -1835,6 +2057,7 @@ impl AiPanel {
         };
         let loading = self.loading;
         let validation_toast = self.validation_toast.clone();
+        let mention_preview = self.mention_preview.clone();
         let completion_matches = self.mention_completion_matches();
         let completion_selected = self
             .mention_completion
@@ -1904,6 +2127,7 @@ impl AiPanel {
             .child(
                 div().flex().flex_col().child(
                     div()
+                        .id("quick-ask-composer-input")
                         .relative()
                         .key_context("TextInput")
                         .min_h(px(32.0))
@@ -1915,6 +2139,11 @@ impl AiPanel {
                         .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
                         .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
                         .on_mouse_move(cx.listener(Self::on_mouse_move))
+                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            if !*hovered {
+                                this.hide_mention_preview(cx);
+                            }
+                        }))
                         .child(AiInputElement { panel: entity }),
                 ),
             )
@@ -1969,6 +2198,18 @@ impl AiPanel {
                             )),
                     )
                     .with_priority(1),
+                )
+            })
+            .when_some(mention_preview, |this, preview| {
+                this.child(
+                    deferred(
+                        anchored()
+                            .position(preview.position)
+                            .anchor(preview.anchor)
+                            .snap_to_window_with_margin(px(8.0))
+                            .child(Self::render_mention_preview(preview, theme)),
+                    )
+                    .with_priority(2),
                 )
             })
             .when_some(validation_toast, |this, notice| {
@@ -2999,6 +3240,7 @@ impl Render for AiPanel {
         let panel_width = self.width;
         let validation_notice = self.validation_notice.clone();
         let validation_toast = self.validation_toast.clone();
+        let mention_preview = self.mention_preview.clone();
         let completion_placement = if showing_sessions || completion_matches.is_empty() {
             None
         } else {
@@ -3211,6 +3453,7 @@ impl Render for AiPanel {
                         .bg(rgb(theme.surface_background))
                         .child(
                             div()
+                                .id("ai-panel-composer-input")
                                 .relative()
                                 .key_context("TextInput")
                                 .when(empty_chat, |this| this.flex_1().min_h_0())
@@ -3234,6 +3477,11 @@ impl Render for AiPanel {
                                 )
                                 .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
                                 .on_mouse_move(cx.listener(Self::on_mouse_move))
+                                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                    if !*hovered {
+                                        this.hide_mention_preview(cx);
+                                    }
+                                }))
                                 .child(AiInputElement { panel: entity }),
                         )
                         .when_some(validation_notice.clone(), |this, notice| {
@@ -3455,6 +3703,18 @@ impl Render for AiPanel {
                     .with_priority(1),
                 )
             })
+            .when_some(mention_preview, |this, preview| {
+                this.child(
+                    deferred(
+                        anchored()
+                            .position(preview.position)
+                            .anchor(preview.anchor)
+                            .snap_to_window_with_margin(px(8.0))
+                            .child(Self::render_mention_preview(preview, theme)),
+                    )
+                    .with_priority(2),
+                )
+            })
             .when_some(attachment_menu_position, |this, anchor| {
                 this.child(
                     deferred(
@@ -3662,6 +3922,7 @@ impl Element for AiInputElement {
                     mention_quads: Vec::new(),
                     active_number_quads: Vec::new(),
                     mention_icons: Vec::new(),
+                    mention_hitboxes: Vec::new(),
                 };
             }
         };
@@ -3705,8 +3966,9 @@ impl Element for AiInputElement {
             None
         };
         let mut mention_quads = Vec::new();
+        let mut mention_hitboxes = Vec::new();
         for mention in &display.mentions {
-            mention_quads.extend(decorated_range_quads(
+            let quads = decorated_range_quads(
                 &laid_out_lines,
                 &mention.range,
                 bounds,
@@ -3717,7 +3979,12 @@ impl Element for AiInputElement {
                     border_width: px(1.0),
                     radius: px(4.0),
                 },
-            ));
+            );
+            mention_hitboxes.extend(quads.iter().map(|quad| MentionHitbox {
+                source_range: mention.source_range.clone(),
+                bounds: quad.bounds,
+            }));
+            mention_quads.extend(quads);
         }
         let active_number_quads = display
             .mentions
@@ -3776,6 +4043,7 @@ impl Element for AiInputElement {
             mention_quads,
             active_number_quads,
             mention_icons,
+            mention_hitboxes,
         }
     }
 
@@ -3859,6 +4127,7 @@ impl Element for AiInputElement {
             input.last_bounds = Some(bounds);
             input.last_display = Some(std::mem::take(&mut prepaint.display));
             input.last_cursor_pos = prepaint.cursor_position;
+            input.mention_hitboxes = std::mem::take(&mut prepaint.mention_hitboxes);
         });
     }
 }
@@ -3995,6 +4264,7 @@ fn composer_display(source: &str, mentions: &[ComposerMention]) -> ComposerDispl
         display_to_source[end_mapping_start..=display_end].fill(mention.range.end);
         display_mentions.push(DisplayMention {
             kind: mention.reference.kind,
+            source_range: mention.range.clone(),
             range: display_start..display_end,
             icon_range,
             number_range,
@@ -4280,8 +4550,151 @@ fn mention_matches(query: &str) -> Vec<MentionMatch> {
 fn parse_composer_mentions(text: &str) -> Vec<ComposerMention> {
     find_mention_references(text)
         .into_iter()
-        .map(|(range, reference)| ComposerMention { reference, range })
+        .map(|(range, reference)| ComposerMention {
+            reference,
+            range,
+            captured_text: None,
+        })
         .collect()
+}
+
+fn merge_composer_mentions(
+    mut parsed: Vec<ComposerMention>,
+    existing: &[ComposerMention],
+    selected_text: Option<String>,
+) -> Vec<ComposerMention> {
+    for mention in &mut parsed {
+        if let Some(existing) = existing.iter().find(|existing| {
+            existing.reference == mention.reference && existing.range == mention.range
+        }) {
+            mention.captured_text.clone_from(&existing.captured_text);
+        } else if mention.reference.kind == MentionKind::Selection {
+            mention.captured_text.clone_from(&selected_text);
+        }
+    }
+    parsed
+}
+
+fn references_for_composer_mentions(mentions: &[ComposerMention]) -> Vec<MentionReference> {
+    let mut seen = HashSet::new();
+    mentions
+        .iter()
+        .filter_map(|mention| {
+            (mention.reference.kind == MentionKind::Selection || seen.insert(mention.reference))
+                .then_some(mention.reference)
+        })
+        .collect()
+}
+
+fn context_blocks_for_composer_mentions(
+    mentions: &[ComposerMention],
+    context: Option<&AiContext>,
+) -> Vec<ContextBlock> {
+    let mut seen = HashSet::new();
+    mentions
+        .iter()
+        .filter_map(|mention| {
+            if mention.reference.kind == MentionKind::Selection {
+                return Some(mention.captured_text.clone().map_or_else(
+                    || resolve_mention_context(MentionKind::Selection, context),
+                    |text| ContextBlock::new(MentionKind::Selection, None, text),
+                ));
+            }
+            if mention.reference.kind == MentionKind::DocumentText && seen.insert(mention.reference)
+            {
+                return Some(resolve_mention_context(MentionKind::DocumentText, context));
+            }
+            None
+        })
+        .collect()
+}
+
+fn resolve_mention_context(mention: MentionKind, context: Option<&AiContext>) -> ContextBlock {
+    let Some(context) = context else {
+        return missing_context_block(mention);
+    };
+
+    match mention {
+        MentionKind::Selection => ContextBlock::new(
+            mention,
+            None,
+            context
+                .selected_text
+                .clone()
+                .unwrap_or_else(|| tr("ai-no-selected-text")),
+        ),
+        MentionKind::DocumentText => ContextBlock::new(
+            mention,
+            None,
+            context
+                .document_text
+                .clone()
+                .unwrap_or_else(|| tr("ai-no-document-text")),
+        ),
+        MentionKind::Page | MentionKind::PageImage | MentionKind::DocumentImage => {
+            missing_context_block(mention)
+        }
+    }
+}
+
+fn missing_context_block(mention: MentionKind) -> ContextBlock {
+    ContextBlock::new(mention, None, mention.empty_context_message())
+}
+
+fn mention_preview_text(mention: &ComposerMention, context: Option<&AiContext>) -> Option<String> {
+    match mention.reference.kind {
+        MentionKind::Selection => Some(mention.captured_text.clone().map_or_else(
+            || resolve_mention_context(MentionKind::Selection, context).text,
+            |text| ContextBlock::new(MentionKind::Selection, None, text).text,
+        )),
+        MentionKind::DocumentText => {
+            Some(resolve_mention_context(MentionKind::DocumentText, context).text)
+        }
+        MentionKind::Page | MentionKind::PageImage | MentionKind::DocumentImage => None,
+    }
+}
+
+fn preview_content_from_resolved(
+    reference: MentionReference,
+    resolved: &[ResolvedPageContext],
+) -> Result<MentionPreviewContent, String> {
+    for context in resolved {
+        match context {
+            ResolvedPageContext::Text(context)
+                if context.kind == reference.kind && context.page == reference.page =>
+            {
+                return Ok(MentionPreviewContent::Text(context.text.clone()));
+            }
+            ResolvedPageContext::Image(image)
+                if image.kind == reference.kind && image.page == reference.page =>
+            {
+                let format = ImageFormat::from_mime_type(&image.media_type).ok_or_else(|| {
+                    format!("Unsupported preview image type: {}", image.media_type)
+                })?;
+                return Ok(MentionPreviewContent::Image(Arc::new(Image::from_bytes(
+                    format,
+                    image.bytes.to_vec(),
+                ))));
+            }
+            ResolvedPageContext::Text(_) | ResolvedPageContext::Image(_) => {}
+        }
+    }
+
+    Err(format!(
+        "No preview is available for {}.",
+        reference.display_text()
+    ))
+}
+
+fn mention_preview_matches(
+    preview: &MentionPreview,
+    generation: u64,
+    reference: MentionReference,
+    source_range: &Range<usize>,
+) -> bool {
+    preview.generation == generation
+        && preview.reference == reference
+        && preview.source_range == *source_range
 }
 
 fn adjust_composer_mentions(
@@ -4631,6 +5044,163 @@ mod tests {
                 MentionReference::new(MentionKind::PageImage, Some(4)),
                 MentionReference::new(MentionKind::Selection, None),
                 MentionReference::new(MentionKind::DocumentImage, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn selection_mentions_keep_distinct_snapshots_in_order() {
+        let mut existing = parse_composer_mentions("@selection");
+        existing[0].captured_text = Some("First selection".to_string());
+        adjust_composer_mentions(&mut existing, &(0..0), "prefix ".len());
+
+        let parsed = parse_composer_mentions("prefix @selection and @selection");
+        let mentions =
+            merge_composer_mentions(parsed, &existing, Some("Second selection".to_string()));
+        let references = references_for_composer_mentions(&mentions);
+        let live_context = AiContext {
+            selected_text: Some("Later selection".to_string()),
+            ..AiContext::default()
+        };
+        let contexts = context_blocks_for_composer_mentions(&mentions, Some(&live_context));
+
+        assert_eq!(
+            references,
+            vec![
+                MentionReference::new(MentionKind::Selection, None),
+                MentionReference::new(MentionKind::Selection, None),
+            ]
+        );
+        assert_eq!(
+            contexts
+                .iter()
+                .map(|context| context.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["First selection", "Second selection"]
+        );
+    }
+
+    #[test]
+    fn selection_preview_uses_the_hovered_occurrence_snapshot() {
+        let mut mentions = parse_composer_mentions("@selection and @selection");
+        mentions[0].captured_text = Some("First selection".to_string());
+        mentions[1].captured_text = Some("Second selection".to_string());
+        let live_context = AiContext {
+            selected_text: Some("Later selection".to_string()),
+            ..AiContext::default()
+        };
+
+        assert_eq!(
+            mention_preview_text(&mentions[0], Some(&live_context)).as_deref(),
+            Some("First selection")
+        );
+        assert_eq!(
+            mention_preview_text(&mentions[1], Some(&live_context)).as_deref(),
+            Some("Second selection")
+        );
+    }
+
+    #[test]
+    fn document_text_preview_uses_current_document_context() {
+        let mention = parse_composer_mentions("@document").remove(0);
+        let context = AiContext {
+            document_text: Some("Document body".to_string()),
+            ..AiContext::default()
+        };
+
+        assert_eq!(
+            mention_preview_text(&mention, Some(&context)).as_deref(),
+            Some("Document body")
+        );
+    }
+
+    #[test]
+    fn document_image_preview_is_disabled() {
+        let mention = parse_composer_mentions("@document-image").remove(0);
+        assert!(mention_preview_text(&mention, None).is_none());
+    }
+
+    #[test]
+    fn resolved_page_preview_matches_text_and_image_references() {
+        let text_reference = MentionReference::new(MentionKind::Page, Some(2));
+        let text = ResolvedPageContext::Text(ContextBlock::new(
+            MentionKind::Page,
+            Some(2),
+            "Page text".to_string(),
+        ));
+        assert!(matches!(
+            preview_content_from_resolved(text_reference, &[text]),
+            Ok(MentionPreviewContent::Text(text)) if text == "Page text"
+        ));
+
+        let image_reference = MentionReference::new(MentionKind::PageImage, Some(3));
+        let image = ResolvedPageContext::Image(glyphst_ai::ai_chat::ImageContext::new(
+            MentionKind::PageImage,
+            Some(3),
+            "image/jpeg",
+            vec![1, 2, 3],
+        ));
+        match preview_content_from_resolved(image_reference, &[image]) {
+            Ok(MentionPreviewContent::Image(image)) => {
+                assert_eq!(image.format, ImageFormat::Jpeg);
+                assert_eq!(image.bytes, vec![1, 2, 3]);
+            }
+            Ok(MentionPreviewContent::Text(_)) | Err(_) => panic!("expected image preview"),
+        }
+    }
+
+    #[test]
+    fn async_preview_results_require_matching_identity() {
+        let reference = MentionReference::new(MentionKind::Page, Some(2));
+        let preview = MentionPreview {
+            reference,
+            source_range: 4..12,
+            position: point(px(0.0), px(0.0)),
+            anchor: Anchor::TopLeft,
+            generation: 7,
+            status: MentionPreviewStatus::Loading,
+        };
+
+        assert!(mention_preview_matches(&preview, 7, reference, &(4..12)));
+        assert!(!mention_preview_matches(&preview, 8, reference, &(4..12)));
+        assert!(!mention_preview_matches(
+            &preview,
+            7,
+            MentionReference::new(MentionKind::Page, Some(3)),
+            &(4..12)
+        ));
+        assert!(!mention_preview_matches(&preview, 7, reference, &(5..13)));
+    }
+
+    #[test]
+    fn deleting_selection_mention_removes_only_its_snapshot() {
+        let mut mentions = parse_composer_mentions("@selection and @selection");
+        mentions[0].captured_text = Some("First selection".to_string());
+        mentions[1].captured_text = Some("Second selection".to_string());
+        let first_range = mentions[0].range.clone();
+
+        adjust_composer_mentions(&mut mentions, &first_range, 0);
+
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(
+            mentions[0].captured_text.as_deref(),
+            Some("Second selection")
+        );
+        assert_eq!(mentions[0].range.start, 5);
+    }
+
+    #[test]
+    fn non_selection_references_remain_deduplicated() {
+        let mentions =
+            parse_composer_mentions("@document @document @page(2) @page(2) @selection @selection");
+
+        assert_eq!(
+            references_for_composer_mentions(&mentions),
+            vec![
+                MentionReference::new(MentionKind::DocumentText, None),
+                MentionReference::new(MentionKind::Page, Some(2)),
+                MentionReference::new(MentionKind::Selection, None),
+                MentionReference::new(MentionKind::Selection, None),
             ]
         );
     }
