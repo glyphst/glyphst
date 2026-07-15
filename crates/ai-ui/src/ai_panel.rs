@@ -388,6 +388,20 @@ impl AiPanel {
             return;
         }
         if let Some(active) = self.active_page_number_edit.clone() {
+            if self.selected_range.is_empty()
+                && let Some(range) = mention_range_for_empty_page_number_backspace(
+                    &active,
+                    self.cursor_offset(),
+                    &self.composer_mentions,
+                )
+            {
+                self.apply_regular_edit(range, "");
+                self.selection_reversed = false;
+                self.marked_range = None;
+                self.update_mention_completion();
+                cx.notify();
+                return;
+            }
             let range = if self.selected_range.is_empty() {
                 let cursor = self.cursor_offset();
                 if cursor <= active.digits.start {
@@ -3884,6 +3898,20 @@ fn push_source_fragment(
     source_to_display[range.end] = text.len();
 }
 
+fn mention_range_for_empty_page_number_backspace(
+    active: &ActivePageNumberEdit,
+    cursor: usize,
+    mentions: &[ComposerMention],
+) -> Option<Range<usize>> {
+    if !active.digits.is_empty() || cursor != active.digits.start {
+        return None;
+    }
+    mentions
+        .iter()
+        .find(|mention| mention.range.start == active.mention_start)
+        .map(|mention| mention.range.clone())
+}
+
 fn composer_display(source: &str, mentions: &[ComposerMention]) -> ComposerDisplay {
     let mut text = String::with_capacity(source.len() + mentions.len() * 8);
     let mut source_to_display = vec![0; source.len() + 1];
@@ -3971,6 +3999,12 @@ fn composer_display(source: &str, mentions: &[ComposerMention]) -> ComposerDispl
             icon_range,
             number_range,
         });
+        push_display_fragment(
+            &mut text,
+            &mut display_to_source,
+            "\u{00a0}",
+            mention.range.end,
+        );
         source_cursor = mention.range.end;
     }
     push_source_fragment(
@@ -4610,6 +4644,42 @@ mod tests {
     }
 
     #[test]
+    fn empty_page_number_backspace_targets_the_whole_mention() {
+        for source in ["@page(1)", "@page-image(1)"] {
+            let mentions = parse_composer_mentions(source);
+            let digits = AiPanel::page_digits_range(&mentions[0]).unwrap();
+            let active = ActivePageNumberEdit {
+                mention_start: mentions[0].range.start,
+                digits: digits.start..digits.start,
+            };
+
+            assert_eq!(
+                mention_range_for_empty_page_number_backspace(
+                    &active,
+                    active.digits.start,
+                    &mentions,
+                ),
+                Some(mentions[0].range.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn nonempty_page_number_backspace_keeps_digit_editing_active() {
+        let mentions = parse_composer_mentions("@page(12)");
+        let digits = AiPanel::page_digits_range(&mentions[0]).unwrap();
+        let active = ActivePageNumberEdit {
+            mention_start: mentions[0].range.start,
+            digits: digits.clone(),
+        };
+
+        assert_eq!(
+            mention_range_for_empty_page_number_backspace(&active, digits.end, &mentions),
+            None
+        );
+    }
+
+    #[test]
     fn mention_trigger_requires_a_boundary() {
         assert_eq!(active_mention_range("ask @pa", 7), Some(4..7));
         assert_eq!(active_mention_range("mail@example", 12), None);
@@ -4773,6 +4843,11 @@ mod tests {
             display.source_offset(display.mentions[1].range.end - 1),
             mentions[1].range.end
         );
+        for (display_mention, mention) in display.mentions.iter().zip(&mentions) {
+            let margin = display_mention.range.end;
+            assert_eq!(&display.text[margin..margin + "\u{00a0}".len()], "\u{00a0}");
+            assert_eq!(display.source_offset(margin), mention.range.end);
+        }
 
         for source_offset in [
             0,
