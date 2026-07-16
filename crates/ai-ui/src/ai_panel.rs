@@ -1644,7 +1644,7 @@ impl AiPanel {
         }
 
         let cursor = self.cursor_offset().min(self.content.len());
-        active_mention_range(&self.content, cursor)
+        active_mention_range(&self.content, cursor, &self.composer_mentions)
     }
 
     fn mention_matches_for_range(
@@ -4694,13 +4694,18 @@ fn decorated_range_quads(
         .collect()
 }
 
-fn active_mention_range(text: &str, cursor: usize) -> Option<Range<usize>> {
+fn active_mention_range(
+    text: &str,
+    cursor: usize,
+    mentions: &[ComposerMention],
+) -> Option<Range<usize>> {
     let cursor = cursor.min(text.len());
     let line_start = text[..cursor].rfind('\n').map_or(0, |ix| ix + 1);
     let line = &text[line_start..cursor];
     let at = line.rfind('@')?;
     let start = line_start + at;
     let valid_boundary = start == 0
+        || mentions.iter().any(|mention| mention.range.end == start)
         || text[..start]
             .chars()
             .next_back()
@@ -5604,11 +5609,29 @@ mod tests {
 
     #[test]
     fn mention_trigger_requires_a_boundary() {
-        assert_eq!(active_mention_range("ask @pa", 7), Some(4..7));
-        assert_eq!(active_mention_range("mail@example", 12), None);
-        assert_eq!(active_mention_range("(@page", 6), Some(1..6));
-        assert_eq!(active_mention_range("ask @pa now", 11), None);
-        assert_eq!(active_mention_range("ask @pa\n", 8), None);
+        assert_eq!(active_mention_range("ask @pa", 7, &[]), Some(4..7));
+        assert_eq!(active_mention_range("mail@example", 12, &[]), None);
+        assert_eq!(active_mention_range("(@page", 6, &[]), Some(1..6));
+        assert_eq!(active_mention_range("ask @pa now", 11, &[]), None);
+        assert_eq!(active_mention_range("ask @pa\n", 8, &[]), None);
+    }
+
+    #[test]
+    fn mention_trigger_accepts_an_explicit_mention_boundary() {
+        let selection = parse_composer_mentions("@selection");
+        assert_eq!(
+            active_mention_range("@selection@", 11, &selection),
+            Some(10..11)
+        );
+        assert_eq!(
+            active_mention_range("@selection@pa", 13, &selection),
+            Some(10..13)
+        );
+        assert_eq!(active_mention_range("@selection@", 11, &[]), None);
+
+        let page = parse_composer_mentions("@page(12)");
+        assert_eq!(active_mention_range("@page(12)@", 10, &page), Some(9..10));
+        assert_eq!(active_mention_range("@selectionx@", 12, &selection), None);
     }
 
     #[test]
