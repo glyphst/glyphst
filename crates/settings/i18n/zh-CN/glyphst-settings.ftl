@@ -100,6 +100,7 @@ ai-no-document-text = 此 PDF 没有可用的提取文本。
 ai-no-document-image = 此 PDF 没有可用的文档图像。
 ai-no-previous-sessions = 此 PDF 没有之前的 AI 会话
 ai-no-selected-text = 当前没有选中的文本。
+ai-mention-preview-truncated = 预览仅显示前 4,000 个字符。完整的附加上下文仍会发送给 AI。
 ai-search-models-placeholder = 输入以搜索模型…
 ai-select-provider-model = 选择提供商/模型
 attach = 附加

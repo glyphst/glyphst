@@ -108,6 +108,7 @@ ai-no-document-text = No extracted text is available for this PDF.
 ai-no-document-image = No document images are available for this PDF.
 ai-no-previous-sessions = No previous AI sessions for this PDF
 ai-no-selected-text = No selected text is currently available.
+ai-mention-preview-truncated = Preview limited to 4,000 characters. The complete attached context is still sent to AI.
 ai-search-models-placeholder = Type to search models…
 ai-select-provider-model = Select provider/model
 attach = Attach
