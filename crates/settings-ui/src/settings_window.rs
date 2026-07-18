@@ -3250,6 +3250,13 @@ impl SettingsWindow {
                                 )),
                         ),
                 )
+                .child(self.toggle_row(
+                    crate::fl!("settings-copy-semantic"),
+                    settings.behavior.semantic_copy,
+                    |settings| settings.behavior.semantic_copy = !settings.behavior.semantic_copy,
+                    theme,
+                    cx,
+                ))
                 .into_any_element(),
             div()
                 .flex()

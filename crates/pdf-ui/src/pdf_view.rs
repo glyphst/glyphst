@@ -996,11 +996,19 @@ struct PdfViewAiContextProvider {
     pdf_view: gpui::WeakEntity<PdfView>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct PageMarkdownBlock {
+#[derive(Clone, Debug)]
+struct TextFormatBlock {
     lines: Vec<String>,
     average_font_size: f32,
     bold_ratio: f32,
+    layout: Option<TextFormatLayout>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TextFormatLayout {
+    page_idx: usize,
+    first_line: Rect,
+    last_line: Rect,
 }
 
 impl AiContextProvider for PdfViewAiContextProvider {
@@ -1324,7 +1332,7 @@ impl PdfView {
             if lines.iter().all(|line| line.trim().is_empty()) {
                 continue;
             }
-            blocks.push(PageMarkdownBlock {
+            blocks.push(TextFormatBlock {
                 lines,
                 average_font_size: if character_count == 0 {
                     0.0
@@ -1336,6 +1344,7 @@ impl PdfView {
                 } else {
                     bold_count as f32 / character_count as f32
                 },
+                layout: None,
             });
         }
 
@@ -1345,7 +1354,7 @@ impl PdfView {
         })
     }
 
-    fn format_block_markdown(blocks: &[PageMarkdownBlock]) -> String {
+    fn format_block_markdown(blocks: &[TextFormatBlock]) -> String {
         blocks
             .iter()
             .map(|block| {
@@ -1360,7 +1369,7 @@ impl PdfView {
             .join("\n\n")
     }
 
-    fn format_semantic_markdown(blocks: &[PageMarkdownBlock]) -> String {
+    fn format_semantic_markdown(blocks: &[TextFormatBlock]) -> String {
         let mut font_sizes = blocks
             .iter()
             .filter(|block| block.average_font_size.is_finite() && block.average_font_size > 0.0)
@@ -1394,7 +1403,7 @@ impl PdfView {
             .join("\n\n")
     }
 
-    fn semantic_heading_level(block: &PageMarkdownBlock, baseline: f32) -> Option<usize> {
+    fn semantic_heading_level(block: &TextFormatBlock, baseline: f32) -> Option<usize> {
         if baseline <= 0.0 || block.lines.len() != 1 {
             return None;
         }
@@ -1444,7 +1453,7 @@ impl PdfView {
     }
 
     fn strip_unordered_list_marker(line: &str) -> Option<&str> {
-        ["•", "◦", "▪", "‣", "-", "*", "+"]
+        ["•", "◦", "▪", "‣", "\u{f0a2}", "-", "*", "+"]
             .into_iter()
             .find_map(|marker| {
                 line.strip_prefix(marker)
@@ -5778,23 +5787,31 @@ impl PdfView {
             return None;
         }
 
-        self.text_lines[line_range]
+        Self::nearest_line_in_slice(&self.text_lines[line_range], point)
+    }
+
+    fn nearest_line_in_slice(
+        text_lines: &[TextLine],
+        point: mupdf::Point,
+    ) -> Option<(f32, usize, usize, Rect)> {
+        text_lines
             .iter()
             .filter_map(|line| {
                 let start = line.glyph_range.start;
                 let end = line.glyph_range.end.checked_sub(1)?;
                 let rect = line.bounds;
-                let dy = if point.y < rect.y0 {
-                    rect.y0 - point.y
-                } else if point.y > rect.y1 {
-                    point.y - rect.y1
-                } else {
-                    0.0
-                };
-
-                Some((dy, start, end, rect))
+                Some((
+                    Self::squared_distance_to_rect(point, rect),
+                    start,
+                    end,
+                    rect,
+                ))
             })
-            .min_by(|(left, _, _, _), (right, _, _, _)| left.total_cmp(right))
+            .min_by(|left, right| {
+                left.0
+                    .total_cmp(&right.0)
+                    .then_with(|| left.1.cmp(&right.1))
+            })
     }
 
     fn selection_bounds(&self) -> Option<(usize, usize)> {
@@ -5825,35 +5842,194 @@ impl PdfView {
         Self::text_for_glyph_range(&self.glyphs, start..end + 1)
     }
 
-    fn selected_markdown(&self) -> Option<String> {
+    fn selected_text_for_copy(&self, semantic: bool) -> Option<String> {
+        if self.view_language == PdfViewLanguage::Translated || !semantic {
+            return self.selected_text();
+        }
+
+        let blocks = self.selected_copy_blocks(true)?;
+        Self::plain_text_for_blocks(&blocks)
+    }
+
+    fn selected_markdown(&self, semantic: bool) -> Option<String> {
         if self.view_language == PdfViewLanguage::Translated {
             return self
                 .selected_text()
                 .map(|text| Self::markdown_for_plain_text(&text));
         }
 
-        let (start, end) = self.selection_bounds()?;
-        let blocks = Self::markdown_blocks_for_glyph_range(&self.glyphs, start..end + 1)?;
+        let blocks = self.selected_copy_blocks(semantic)?;
         Some(Self::format_semantic_markdown(&blocks))
+    }
+
+    fn selected_copy_blocks(&self, semantic: bool) -> Option<Vec<TextFormatBlock>> {
+        let (start, end) = self.selection_bounds()?;
+        Self::copy_blocks_for_glyph_range(&self.glyphs, start..end + 1, semantic)
+    }
+
+    fn copy_blocks_for_glyph_range(
+        glyphs: &[Glyph],
+        range: Range<usize>,
+        semantic: bool,
+    ) -> Option<Vec<TextFormatBlock>> {
+        let mut blocks = Self::text_blocks_for_glyph_range(glyphs, range)?;
+        if semantic {
+            for block in &mut blocks {
+                block.lines = Self::semantic_logical_lines(&block.lines);
+            }
+            blocks = Self::merge_semantic_text_blocks(blocks);
+        }
+        Some(blocks)
+    }
+
+    fn merge_semantic_text_blocks(blocks: Vec<TextFormatBlock>) -> Vec<TextFormatBlock> {
+        let mut merged = Vec::<TextFormatBlock>::with_capacity(blocks.len());
+
+        for mut block in blocks {
+            let can_merge = merged.last().is_some_and(|previous| {
+                Self::text_blocks_are_continuous(previous, &block)
+                    && block.lines.first().is_some_and(|line| {
+                        let line = line.trim_start();
+                        !line.is_empty()
+                            && Self::strip_unordered_list_marker(line).is_none()
+                            && Self::strip_ordered_list_marker(line).is_none()
+                    })
+            });
+
+            if can_merge {
+                let previous = merged.last_mut().unwrap();
+                if let (Some(current), Some(continuation)) =
+                    (previous.lines.last_mut(), block.lines.first())
+                {
+                    Self::append_semantic_continuation(current, continuation.trim_start());
+                }
+                previous.lines.extend(block.lines.drain(1..));
+                previous.average_font_size =
+                    (previous.average_font_size + block.average_font_size) / 2.0;
+                previous.bold_ratio = (previous.bold_ratio + block.bold_ratio) / 2.0;
+                if let (Some(previous_layout), Some(block_layout)) =
+                    (&mut previous.layout, block.layout)
+                {
+                    previous_layout.last_line = block_layout.last_line;
+                }
+            } else {
+                merged.push(block);
+            }
+        }
+
+        merged
+    }
+
+    fn text_blocks_are_continuous(left: &TextFormatBlock, right: &TextFormatBlock) -> bool {
+        let (Some(left_layout), Some(right_layout)) = (left.layout, right.layout) else {
+            return false;
+        };
+        if left_layout.page_idx != right_layout.page_idx {
+            return false;
+        }
+
+        let font_ratio = left.average_font_size.max(right.average_font_size)
+            / left
+                .average_font_size
+                .min(right.average_font_size)
+                .max(f32::EPSILON);
+        if font_ratio > 1.15 {
+            return false;
+        }
+
+        let left_rect = left_layout.last_line;
+        let right_rect = right_layout.first_line;
+        let line_height = (left_rect.y1 - left_rect.y0)
+            .max(right_rect.y1 - right_rect.y0)
+            .max(1.0);
+        let vertical_gap = right_rect.y0 - left_rect.y1;
+        if vertical_gap < -line_height * 0.25 || vertical_gap > line_height * 1.5 {
+            return false;
+        }
+
+        let horizontal_overlap = left_rect.x1.min(right_rect.x1) - left_rect.x0.max(right_rect.x0);
+        horizontal_overlap > 0.0
+    }
+
+    fn plain_text_for_blocks(blocks: &[TextFormatBlock]) -> Option<String> {
+        let mut text = String::new();
+        for (block_index, block) in blocks.iter().enumerate() {
+            if block_index > 0 {
+                text.push_str("\n\n");
+            }
+            for (line_index, line) in block.lines.iter().enumerate() {
+                if line_index > 0 {
+                    text.push('\n');
+                }
+                text.push_str(line);
+            }
+        }
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn semantic_logical_lines(lines: &[String]) -> Vec<String> {
+        let mut logical_lines = Vec::<String>::new();
+
+        for line in lines {
+            let line = line.trim_end_matches(['\r', '\n']).trim_end();
+            if line.is_empty() {
+                if logical_lines.last().is_some_and(|line| !line.is_empty()) {
+                    logical_lines.push(String::new());
+                }
+                continue;
+            }
+
+            let continuation = line.trim_start();
+            let starts_list_item = Self::strip_unordered_list_marker(continuation).is_some()
+                || Self::strip_ordered_list_marker(continuation).is_some();
+            let should_join = logical_lines
+                .last()
+                .is_some_and(|line| !line.is_empty() && !starts_list_item);
+
+            if should_join {
+                let current = logical_lines.last_mut().unwrap();
+                Self::append_semantic_continuation(current, continuation);
+            } else {
+                logical_lines.push(line.to_string());
+            }
+        }
+
+        while logical_lines.last().is_some_and(String::is_empty) {
+            logical_lines.pop();
+        }
+        logical_lines
+    }
+
+    fn append_semantic_continuation(current: &mut String, continuation: &str) {
+        let dehyphenate = current.ends_with('-')
+            && current.chars().rev().nth(1).is_some_and(Self::is_word_char)
+            && continuation.chars().next().is_some_and(Self::is_word_char);
+        if dehyphenate {
+            current.pop();
+        } else if !current.chars().last().is_some_and(char::is_whitespace) {
+            current.push(' ');
+        }
+        current.push_str(continuation);
     }
 
     fn markdown_for_plain_text(text: &str) -> String {
         let blocks = text
             .split("\n\n")
-            .map(|block| PageMarkdownBlock {
+            .map(|block| TextFormatBlock {
                 lines: block.lines().map(str::to_string).collect(),
                 average_font_size: 0.0,
                 bold_ratio: 0.0,
+                layout: None,
             })
             .filter(|block| !block.lines.is_empty())
             .collect::<Vec<_>>();
         Self::format_block_markdown(&blocks)
     }
 
-    fn markdown_blocks_for_glyph_range(
+    fn text_blocks_for_glyph_range(
         glyphs: &[Glyph],
         range: Range<usize>,
-    ) -> Option<Vec<PageMarkdownBlock>> {
+    ) -> Option<Vec<TextFormatBlock>> {
         if range.start >= range.end || range.end > glyphs.len() {
             return None;
         }
@@ -5867,23 +6043,32 @@ impl PdfView {
         let mut character_count = 0_usize;
         let mut bold_count = 0_usize;
         let mut previous_ix = None;
+        let mut page_idx = None;
+        let mut first_line_rect = None;
+        let mut last_line_rect = None;
 
         let flush_line = |lines: &mut Vec<String>, line: &mut String| {
             lines.push(std::mem::take(line));
         };
-        let flush_block = |blocks: &mut Vec<PageMarkdownBlock>,
+        let flush_block = |blocks: &mut Vec<TextFormatBlock>,
                            lines: &mut Vec<String>,
                            font_size_total: &mut f32,
                            character_count: &mut usize,
-                           bold_count: &mut usize| {
+                           bold_count: &mut usize,
+                           page_idx: &mut Option<usize>,
+                           first_line_rect: &mut Option<Rect>,
+                           last_line_rect: &mut Option<Rect>| {
             if lines.iter().all(|line| line.trim().is_empty()) {
                 lines.clear();
                 *font_size_total = 0.0;
                 *character_count = 0;
                 *bold_count = 0;
+                *page_idx = None;
+                *first_line_rect = None;
+                *last_line_rect = None;
                 return;
             }
-            blocks.push(PageMarkdownBlock {
+            blocks.push(TextFormatBlock {
                 lines: std::mem::take(lines),
                 average_font_size: if *character_count == 0 {
                     0.0
@@ -5895,10 +6080,21 @@ impl PdfView {
                 } else {
                     *bold_count as f32 / *character_count as f32
                 },
+                layout: match (*page_idx, *first_line_rect, *last_line_rect) {
+                    (Some(page_idx), Some(first_line), Some(last_line)) => Some(TextFormatLayout {
+                        page_idx,
+                        first_line,
+                        last_line,
+                    }),
+                    _ => None,
+                },
             });
             *font_size_total = 0.0;
             *character_count = 0;
             *bold_count = 0;
+            *page_idx = None;
+            *first_line_rect = None;
+            *last_line_rect = None;
         };
 
         for glyph_ix in range {
@@ -5914,6 +6110,9 @@ impl PdfView {
                         &mut font_size_total,
                         &mut character_count,
                         &mut bold_count,
+                        &mut page_idx,
+                        &mut first_line_rect,
+                        &mut last_line_rect,
                     );
                 }
                 current_block_idx = Some(glyph.block_idx);
@@ -5921,6 +6120,10 @@ impl PdfView {
             } else if current_line_idx != Some(glyph.line_idx) && current_line_idx.is_some() {
                 flush_line(&mut lines, &mut line);
             }
+
+            page_idx.get_or_insert(glyph.page_idx);
+            first_line_rect.get_or_insert(glyph.line_rect);
+            last_line_rect = Some(glyph.line_rect);
 
             if current_line_idx == Some(glyph.line_idx)
                 && let Some(previous_ix) = previous_ix
@@ -5949,6 +6152,9 @@ impl PdfView {
                 &mut font_size_total,
                 &mut character_count,
                 &mut bold_count,
+                &mut page_idx,
+                &mut first_line_rect,
+                &mut last_line_rect,
             );
         }
 
@@ -5989,9 +6195,10 @@ impl PdfView {
     }
 
     fn copy_selection_as(&self, format: CopyFormat, cx: &mut Context<Self>) {
+        let semantic = cx.global::<SettingsStore>().settings.behavior.semantic_copy;
         let text = match format {
-            CopyFormat::PlainText => self.selected_text(),
-            CopyFormat::Markdown => self.selected_markdown(),
+            CopyFormat::PlainText => self.selected_text_for_copy(semantic),
+            CopyFormat::Markdown => self.selected_markdown(semantic),
         };
         if let Some(text) = text {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -11189,6 +11396,10 @@ impl PdfView {
     }
 
     fn distance_to_rect(point: mupdf::Point, rect: Rect) -> f32 {
+        Self::squared_distance_to_rect(point, rect).sqrt()
+    }
+
+    fn squared_distance_to_rect(point: mupdf::Point, rect: Rect) -> f32 {
         let dx = if point.x < rect.x0 {
             rect.x0 - point.x
         } else if point.x > rect.x1 {
@@ -11204,7 +11415,7 @@ impl PdfView {
             0.0
         };
 
-        dx.hypot(dy)
+        dx * dx + dy * dy
     }
 
     fn with_alpha(rgb: u32, alpha: u8) -> u32 {
@@ -12014,7 +12225,7 @@ impl Render for PdfView {
 #[cfg(test)]
 mod tests {
     use super::{
-        Glyph, PageMarkdownBlock, PdfView, SearchState, TextChunk, TextIndexState, TextLine,
+        Glyph, PdfView, SearchState, TextChunk, TextFormatBlock, TextIndexState, TextLine,
         TranslationCardState, TranslationStatus, reset_translation_cards_for_document_replacement,
     };
     use glyphst_ai::ai_chat::{MentionKind, MentionReference};
@@ -12090,7 +12301,7 @@ mod tests {
     #[test]
     fn page_block_markdown_escapes_commonmark_and_preserves_spacing() {
         let blocks = vec![
-            PageMarkdownBlock {
+            TextFormatBlock {
                 lines: vec![
                     "# Heading".to_string(),
                     "literal *stars* and [link](url)".to_string(),
@@ -12098,11 +12309,13 @@ mod tests {
                 ],
                 average_font_size: 12.0,
                 bold_ratio: 0.0,
+                layout: None,
             },
-            PageMarkdownBlock {
+            TextFormatBlock {
                 lines: vec!["next_block.".to_string()],
                 average_font_size: 12.0,
                 bold_ratio: 0.0,
+                layout: None,
             },
         ];
 
@@ -12115,25 +12328,29 @@ mod tests {
     #[test]
     fn semantic_page_markdown_converts_conservative_headings_and_lists() {
         let blocks = vec![
-            PageMarkdownBlock {
+            TextFormatBlock {
                 lines: vec!["Overview".to_string()],
                 average_font_size: 24.0,
                 bold_ratio: 0.9,
+                layout: None,
             },
-            PageMarkdownBlock {
+            TextFormatBlock {
                 lines: vec!["plain *text*.".to_string()],
                 average_font_size: 12.0,
                 bold_ratio: 0.0,
+                layout: None,
             },
-            PageMarkdownBlock {
+            TextFormatBlock {
                 lines: vec!["• First *item*".to_string(), "- Second".to_string()],
                 average_font_size: 12.0,
                 bold_ratio: 0.0,
+                layout: None,
             },
-            PageMarkdownBlock {
+            TextFormatBlock {
                 lines: vec!["1) One".to_string(), "2. Two".to_string()],
                 average_font_size: 12.0,
                 bold_ratio: 0.0,
+                layout: None,
             },
         ];
 
@@ -12160,11 +12377,151 @@ mod tests {
             glyph.is_bold = true;
         }
 
-        let blocks = PdfView::markdown_blocks_for_glyph_range(&glyphs, 0..glyphs.len()).unwrap();
+        let blocks = PdfView::text_blocks_for_glyph_range(&glyphs, 0..glyphs.len()).unwrap();
 
         assert_eq!(
             PdfView::format_semantic_markdown(&blocks),
             "# Overview\n\n- First"
+        );
+    }
+
+    #[test]
+    fn semantic_copy_joins_wrapped_lines_for_plain_text_and_markdown() {
+        let mut glyphs = Vec::new();
+        for (line_idx, text) in ["Two lines in a PDF document", "can be copied as one line."]
+            .into_iter()
+            .enumerate()
+        {
+            glyphs.extend(text.chars().map(|c| {
+                let mut glyph = test_glyph(c, 0.0, 6.0);
+                glyph.line_idx = line_idx as u32;
+                glyph
+            }));
+        }
+        let semantic =
+            PdfView::copy_blocks_for_glyph_range(&glyphs, 0..glyphs.len(), true).unwrap();
+        let physical =
+            PdfView::copy_blocks_for_glyph_range(&glyphs, 0..glyphs.len(), false).unwrap();
+
+        assert_eq!(
+            PdfView::plain_text_for_blocks(&semantic).as_deref(),
+            Some("Two lines in a PDF document can be copied as one line.")
+        );
+        assert_eq!(
+            PdfView::format_semantic_markdown(&semantic),
+            "Two lines in a PDF document can be copied as one line\\."
+        );
+        assert_eq!(
+            PdfView::plain_text_for_blocks(&physical).as_deref(),
+            Some("Two lines in a PDF document\ncan be copied as one line.")
+        );
+        assert_eq!(
+            PdfView::format_semantic_markdown(&physical),
+            "Two lines in a PDF document\ncan be copied as one line\\."
+        );
+    }
+
+    #[test]
+    fn semantic_copy_joins_continuous_pdf_text_blocks() {
+        let mut glyphs = Vec::new();
+        for (block_idx, line_idx, text, line_rect) in [
+            (
+                0,
+                0,
+                "▪Message passing",
+                Rect::new(442.0, 149.0, 632.0, 172.0),
+            ),
+            (1, 1, "between nodes", Rect::new(464.0, 175.0, 616.0, 193.0)),
+        ] {
+            glyphs.extend(text.chars().map(|c| {
+                let mut glyph = test_glyph(c, line_rect.x0, line_rect.x1);
+                glyph.block_idx = block_idx;
+                glyph.line_idx = line_idx;
+                glyph.line_rect = line_rect;
+                glyph
+            }));
+        }
+
+        let blocks = PdfView::copy_blocks_for_glyph_range(&glyphs, 0..glyphs.len(), true).unwrap();
+
+        assert_eq!(
+            PdfView::plain_text_for_blocks(&blocks).as_deref(),
+            Some("▪Message passing between nodes")
+        );
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn semantic_copy_keeps_parallel_columns_separate() {
+        let mut glyphs = Vec::new();
+        for (block_idx, text, line_rect) in [
+            (0, "Shared memory", Rect::new(35.0, 149.0, 350.0, 172.0)),
+            (
+                1,
+                "Distributed memory",
+                Rect::new(442.0, 149.0, 632.0, 172.0),
+            ),
+        ] {
+            glyphs.extend(text.chars().map(|c| {
+                let mut glyph = test_glyph(c, line_rect.x0, line_rect.x1);
+                glyph.block_idx = block_idx;
+                glyph.line_idx = block_idx;
+                glyph.line_rect = line_rect;
+                glyph
+            }));
+        }
+
+        let blocks = PdfView::copy_blocks_for_glyph_range(&glyphs, 0..glyphs.len(), true).unwrap();
+
+        assert_eq!(
+            PdfView::plain_text_for_blocks(&blocks).as_deref(),
+            Some("Shared memory\n\nDistributed memory")
+        );
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn semantic_copy_dehyphenates_word_continuations_and_preserves_list_items() {
+        assert_eq!(
+            PdfView::semantic_logical_lines(&[
+                "context-aware dehyphen-".to_string(),
+                "ation".to_string(),
+                "• First item".to_string(),
+                "continuation".to_string(),
+                "• Second item".to_string(),
+            ]),
+            vec![
+                "context-aware dehyphenation",
+                "• First item continuation",
+                "• Second item",
+            ]
+        );
+        assert_eq!(
+            PdfView::semantic_logical_lines(&["-".to_string(), "value".to_string()]),
+            vec!["- value"]
+        );
+    }
+
+    #[test]
+    fn semantic_copy_preserves_text_block_boundaries() {
+        let blocks = vec![
+            TextFormatBlock {
+                lines: vec!["left block".to_string()],
+                average_font_size: 12.0,
+                bold_ratio: 0.0,
+                layout: None,
+            },
+            TextFormatBlock {
+                lines: vec!["right block".to_string()],
+                average_font_size: 12.0,
+                bold_ratio: 0.0,
+                layout: None,
+            },
+        ];
+
+        assert_eq!(
+            PdfView::plain_text_for_blocks(&blocks).as_deref(),
+            Some("left block\n\nright block")
         );
     }
 
@@ -12399,6 +12756,51 @@ mod tests {
             PdfView::glyph_line_rect(&glyph),
             Rect::new(2.0, 0.0, 7.0, 8.0)
         );
+    }
+
+    #[test]
+    fn nearest_line_uses_horizontal_distance_for_multi_column_pages() {
+        let lines = vec![
+            TextLine {
+                glyph_range: 0..10,
+                bounds: Rect::new(35.0, 148.0, 350.0, 172.0),
+            },
+            TextLine {
+                glyph_range: 10..20,
+                bounds: Rect::new(442.0, 149.0, 632.0, 172.0),
+            },
+        ];
+
+        let right_text = PdfView::nearest_line_in_slice(&lines, Point::new(600.0, 180.0)).unwrap();
+        let right_gutter =
+            PdfView::nearest_line_in_slice(&lines, Point::new(410.0, 180.0)).unwrap();
+
+        assert_eq!(right_text.1, 10);
+        assert_eq!(right_gutter.1, 10);
+    }
+
+    #[test]
+    fn nearest_line_is_stable_for_reverse_multi_column_drags() {
+        let lines = vec![
+            TextLine {
+                glyph_range: 0..10,
+                bounds: Rect::new(35.0, 148.0, 350.0, 172.0),
+            },
+            TextLine {
+                glyph_range: 10..20,
+                bounds: Rect::new(442.0, 149.0, 632.0, 172.0),
+            },
+            TextLine {
+                glyph_range: 20..30,
+                bounds: Rect::new(464.0, 175.0, 616.0, 193.0),
+            },
+        ];
+
+        let lower = PdfView::nearest_line_in_slice(&lines, Point::new(610.0, 198.0)).unwrap();
+        let upper = PdfView::nearest_line_in_slice(&lines, Point::new(620.0, 145.0)).unwrap();
+
+        assert_eq!((lower.1, upper.1), (20, 10));
+        assert_eq!((lower.1.min(upper.1), lower.2.max(upper.2)), (10, 29));
     }
 
     #[test]

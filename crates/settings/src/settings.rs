@@ -65,6 +65,7 @@ pub struct BehaviorSettings {
     pub smooth_scrolling: bool,
     pub dim_inactive_panes: bool,
     pub copy_format: CopyFormat,
+    pub semantic_copy: bool,
 }
 
 impl Default for BehaviorSettings {
@@ -75,6 +76,7 @@ impl Default for BehaviorSettings {
             smooth_scrolling: DEFAULT_SMOOTH_SCROLLING,
             dim_inactive_panes: false,
             copy_format: CopyFormat::PlainText,
+            semantic_copy: true,
         }
     }
 }
@@ -1838,13 +1840,17 @@ impl Settings {
             settings.behavior.dim_inactive_panes = value;
         }
 
-        if let Some(copy) = document.get("copy").and_then(KdlNode::children)
-            && let Some(value) = copy
+        if let Some(copy) = document.get("copy").and_then(KdlNode::children) {
+            if let Some(value) = copy
                 .get_arg("format")
                 .and_then(KdlValue::as_string)
                 .and_then(CopyFormat::from_str)
-        {
-            settings.behavior.copy_format = value;
+            {
+                settings.behavior.copy_format = value;
+            }
+            if let Some(value) = copy.get_arg("semantic").and_then(KdlValue::as_bool) {
+                settings.behavior.semantic_copy = value;
+            }
         }
 
         if let Some(window) = document.get("window").and_then(KdlNode::children) {
@@ -2140,6 +2146,7 @@ impl Settings {
         let mut copy = KdlNode::new("copy");
         let copy_children = copy.ensure_children();
         push_value_node(copy_children, "format", self.behavior.copy_format.as_str());
+        push_value_node(copy_children, "semantic", self.behavior.semantic_copy);
         document.nodes_mut().push(copy);
 
         self.theme.clone().write_to_document(&mut document);
@@ -2710,6 +2717,7 @@ window {
                 smooth_scrolling: false,
                 dim_inactive_panes: true,
                 copy_format: CopyFormat::Markdown,
+                semantic_copy: false,
             },
             theme: ThemeSelection::Static("one-dark".to_string()),
             overrides: PartialTheme {
@@ -2949,7 +2957,7 @@ ai {
     }
 
     #[test]
-    fn copy_format_defaults_to_plain_text_and_rejects_invalid_values() {
+    fn copy_settings_use_semantic_default_and_reject_invalid_format() {
         let settings = parse_settings(
             r##"
 copy {
@@ -2960,20 +2968,23 @@ copy {
         .unwrap();
 
         assert_eq!(settings.behavior.copy_format, CopyFormat::PlainText);
+        assert!(settings.behavior.semantic_copy);
     }
 
     #[test]
-    fn parses_and_exports_copy_format() {
+    fn parses_and_exports_copy_settings() {
         let settings = parse_settings(
             r##"
 copy {
     format "markdown"
+    semantic #false
 }
 "##,
         )
         .unwrap();
 
         assert_eq!(settings.behavior.copy_format, CopyFormat::Markdown);
+        assert!(!settings.behavior.semantic_copy);
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 
@@ -3505,6 +3516,7 @@ page-gap 36
                 smooth_scrolling: false,
                 dim_inactive_panes: true,
                 copy_format: CopyFormat::PlainText,
+                semantic_copy: false,
             },
             theme: ThemeSelection::Static(DEFAULT_THEME_ID.to_string()),
             overrides: PartialTheme {

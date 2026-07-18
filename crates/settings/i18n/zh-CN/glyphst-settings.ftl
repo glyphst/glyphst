@@ -134,6 +134,7 @@ settings-section-reading = EPUB 阅读
 settings-copy-format = 默认格式
 settings-copy-plain-text = 纯文本
 settings-copy-markdown = Markdown
+settings-copy-semantic = 语义化复制
 settings-reading-font-size = 默认字号
 settings-reading-line-height = 默认行高
 settings-reading-margin = 水平边距

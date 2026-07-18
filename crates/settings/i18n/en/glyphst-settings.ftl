@@ -142,6 +142,7 @@ settings-section-reading = EPUB Reading
 settings-copy-format = Default format
 settings-copy-plain-text = Plain Text
 settings-copy-markdown = Markdown
+settings-copy-semantic = Semantic copy
 settings-reading-font-size = Default font size
 settings-reading-line-height = Default line height
 settings-reading-margin = Horizontal margin
