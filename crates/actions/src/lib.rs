@@ -119,6 +119,8 @@ pub mod pdf_viewer {
             TranslateSelection,
             TogglePinnedTranslation,
             OpenTranslationSplit,
+            ToggleRegionSelection,
+            CancelRegionSelection,
         ]
     );
 }

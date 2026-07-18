@@ -265,6 +265,32 @@ impl PageRegion {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegionImageReference {
+    pub regions: Vec<PageRegion>,
+}
+
+impl RegionImageReference {
+    pub fn new(regions: impl IntoIterator<Item = PageRegion>) -> Self {
+        let mut regions = regions
+            .into_iter()
+            .map(PageRegion::normalized)
+            .collect::<Vec<_>>();
+        regions.sort_by(|left, right| {
+            left.page
+                .0
+                .cmp(&right.page.0)
+                .then_with(|| left.y0.total_cmp(&right.y0))
+                .then_with(|| left.x0.total_cmp(&right.x0))
+        });
+        Self { regions }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.regions.is_empty()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentLocation {
     pub page: PageIndex,
@@ -412,5 +438,30 @@ mod tests {
                 y1: 4.0,
             }
         );
+    }
+
+    #[test]
+    fn region_image_references_normalize_and_sort_pages() {
+        let reference = RegionImageReference::new([
+            PageRegion {
+                page: PageIndex(2),
+                x0: 8.0,
+                y0: 7.0,
+                x1: 2.0,
+                y1: 1.0,
+            },
+            PageRegion {
+                page: PageIndex(0),
+                x0: 4.0,
+                y0: 3.0,
+                x1: 1.0,
+                y1: 2.0,
+            },
+        ]);
+
+        assert_eq!(reference.regions[0].page, PageIndex(0));
+        assert_eq!(reference.regions[0].x0, 1.0);
+        assert_eq!(reference.regions[1].page, PageIndex(2));
+        assert_eq!(reference.regions[1].y0, 1.0);
     }
 }

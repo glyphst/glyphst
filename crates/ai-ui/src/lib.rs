@@ -4,6 +4,7 @@ pub mod ai_panel;
 
 use anyhow::Result;
 use glyphst_ai::ai_chat::{ContextBlock, ImageContext, MentionReference};
+use glyphst_core::RegionImageReference;
 
 pub use ai_panel::{AI_PANEL_WIDTH, AiPanel, AiPanelEvent};
 
@@ -15,6 +16,7 @@ pub struct AiContext {
     pub page_count: usize,
     pub current_page: usize,
     pub selected_text: Option<String>,
+    pub selected_region: Option<RegionImageReference>,
     pub document_text: Option<String>,
 }
 
@@ -30,6 +32,12 @@ pub enum ResolvedPageContext {
     Image(ImageContext),
 }
 
+#[derive(Clone, Debug)]
+pub struct ResolvedRegionContext {
+    pub reference: RegionImageReference,
+    pub image: ImageContext,
+}
+
 pub trait AiContextProvider: 'static {
     fn context(&self, include_document_text: bool, cx: &App) -> Option<AiContext>;
 
@@ -40,4 +48,10 @@ pub trait AiContextProvider: 'static {
         references: Vec<MentionReference>,
         cx: &App,
     ) -> Task<Result<Vec<ResolvedPageContext>>>;
+
+    fn resolve_region_references(
+        &self,
+        references: Vec<RegionImageReference>,
+        cx: &App,
+    ) -> Task<Result<Vec<ResolvedRegionContext>>>;
 }

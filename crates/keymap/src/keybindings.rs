@@ -7,15 +7,16 @@ use glyphst_actions::{
     note_editor::{NoteCancel, NoteSave},
     pane::{SplitDown, SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical},
     pdf_viewer::{
-        AddBookmark, CloseTab, CopySelection, GoToBeginning, GoToEnd, GridCursorDown,
-        GridCursorLeft, GridCursorRight, GridCursorUp, GridOverviewConfirm, JumpBackward,
-        JumpForward, NextHalfPage, NextPage, NextSearchResult, OpenBookmarks, OpenFile,
-        OpenGoToPage, OpenHistory, OpenKeybindings, OpenNewTab, OpenNotes, OpenQuickAsk,
+        AddBookmark, CancelRegionSelection, CloseTab, CopySelection, GoToBeginning, GoToEnd,
+        GridCursorDown, GridCursorLeft, GridCursorRight, GridCursorUp, GridOverviewConfirm,
+        JumpBackward, JumpForward, NextHalfPage, NextPage, NextSearchResult, OpenBookmarks,
+        OpenFile, OpenGoToPage, OpenHistory, OpenKeybindings, OpenNewTab, OpenNotes, OpenQuickAsk,
         OpenSettings, OpenTranslationSplit, PrevSearchResult, PreviousHalfPage, PreviousPage,
         Reload, ResetZoom, ScrollLineDown, ScrollLineUp, Search, SelectAll, Toc, ToggleAiPanel,
         ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview, ToggleNotes,
         TogglePinnedTranslation, TogglePresentationMode, TogglePublisherStyles,
-        ToggleThumbnailSidebar, ToggleToc, ToggleTransparency, TranslateSelection, ZoomIn, ZoomOut,
+        ToggleRegionSelection, ToggleThumbnailSidebar, ToggleToc, ToggleTransparency,
+        TranslateSelection, ZoomIn, ZoomOut,
     },
     search::{SearchInputCancel, SearchInputConfirm, SearchInputPrevious},
     settings_panel::PanelClose,
@@ -521,6 +522,7 @@ fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
     add_many::<OpenQuickAsk>(cx, bindings, &["tab"], "QuickAsk");
     add_many::<PanelClose>(cx, bindings, &["escape"], "SettingsPanel");
     add_many::<TogglePresentationMode>(cx, bindings, &["escape"], "PresentationMode");
+    add_many::<CancelRegionSelection>(cx, bindings, &["escape"], "RegionSelection");
 }
 
 fn add_many<A>(cx: &mut App, bindings: &mut Vec<KeyBinding>, keys: &[&str], context: &str)
@@ -1011,6 +1013,15 @@ fn command_specs() -> &'static [CommandSpec] {
                     &["primary-shift-l"],
                     &["primary-shift-l"],
                     &["translate", "translation"],
+                    true,
+                ),
+                spec::<ToggleRegionSelection>(
+                    "toggle-region-selection",
+                    "Toggle Region Selection",
+                    KeyBindingCategory::PdfView,
+                    &[],
+                    &[],
+                    &["region", "crop", "screenshot"],
                     true,
                 ),
                 spec::<TogglePinnedTranslation>(

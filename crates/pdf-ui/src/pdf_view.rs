@@ -42,10 +42,12 @@ pub use glyphst_actions::pdf_viewer::*;
 use glyphst_ai::ai_chat::{
     ContextBlock, ImageContext, MAX_PAGE_IMAGE_BYTES, MentionKind, MentionReference,
 };
-use glyphst_ai_ui::{AiContext, AiContextProvider, AiPageState, ResolvedPageContext};
+use glyphst_ai_ui::{
+    AiContext, AiContextProvider, AiPageState, ResolvedPageContext, ResolvedRegionContext,
+};
 use glyphst_core::{
     DocumentCapabilities, DocumentFormat, DocumentLayout, EpubReaderPreferences, EpubTheme,
-    SemanticTextAnchor,
+    PageIndex, PageRegion, RegionImageReference, SemanticTextAnchor,
 };
 use glyphst_pdf::{DocumentSnapshot, ReloadCoordinator, ReloadDisposition};
 use glyphst_translation::{LanguageCode, TranslationRequest, TranslationService};
@@ -57,12 +59,13 @@ use glyphst_ui::{
     tooltip::text_tooltip,
 };
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, AsyncApp, Bounds, ClipboardItem, Context, Corners,
-    DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, Font, FontWeight, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render,
-    RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Task,
-    TextAlign, TextRun, TextStyle, UniformListScrollHandle, Window, WrappedLine, anchored, canvas,
-    deferred, div, fill, point, prelude::*, px, rgb, rgba, size, uniform_list,
+    Anchor, Animation, AnimationExt, AnyElement, AsyncApp, BorderStyle, Bounds, ClipboardItem,
+    Context, Corners, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, Font,
+    FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement, Task, TextAlign, TextRun,
+    TextStyle, UniformListScrollHandle, Window, WrappedLine, anchored, canvas, deferred, div, fill,
+    outline, point, prelude::*, px, rgb, rgba, size, uniform_list,
 };
 use image::{Frame, RgbaImage, codecs::jpeg::JpegEncoder};
 use mupdf::text_page::{TextBlockType, TextCharFlags};
@@ -114,6 +117,8 @@ const GRID_OVERVIEW_LABEL_HEIGHT: f32 = 18.0;
 const GRID_OVERVIEW_HEADER_HEIGHT: f32 = 40.0;
 const GRID_OVERVIEW_VIEWPORT_WIDTH_EPSILON: f32 = 0.5;
 const PAGE_EXPORT_SCALE: f32 = 300.0 / 72.0;
+const MIN_REGION_SELECTION_PX: f32 = 4.0;
+const MAX_REGION_EXPORT_PIXELS: u64 = 40_000_000;
 const SIDEBAR_PAGE_NUMBER_WIDTH: f32 = 38.0;
 const INFERRED_SPACE_WIDTH_RATIO: f32 = 0.75;
 const INFERRED_SPACE_HEIGHT_RATIO: f32 = 0.20;
@@ -150,6 +155,24 @@ struct PageImageExport {
     bounds: Rect,
     width: f32,
     height: f32,
+}
+
+struct RegionImageExport {
+    display_list: Arc<DisplayList>,
+    region: PageRegion,
+}
+
+fn clear_copied_region_selection(
+    selected_region: &mut Option<RegionImageReference>,
+    context_menu_region: &mut bool,
+    copied_region: &RegionImageReference,
+) -> bool {
+    if selected_region.as_ref() != Some(copied_region) {
+        return false;
+    }
+    *selected_region = None;
+    *context_menu_region = false;
+    true
 }
 
 struct PageChunk {
@@ -511,6 +534,7 @@ struct PaintData {
     selection_highlights: Vec<Bounds<Pixels>>,
     search_highlights: Vec<Bounds<Pixels>>,
     active_search_highlights: Vec<Bounds<Pixels>>,
+    region_overlays: Vec<Bounds<Pixels>>,
 }
 
 #[derive(Clone)]
@@ -617,8 +641,15 @@ struct ContextMenuState {
     has_selection: bool,
     highlight_color: Option<HighlightColor>,
     has_note: bool,
+    has_region: bool,
     grid_overview: bool,
     copy_submenu_open: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RegionDragState {
+    anchor: mupdf::Point,
+    current: mupdf::Point,
 }
 
 #[derive(Clone)]
@@ -884,6 +915,9 @@ pub struct PdfView {
     notes: Vec<Note>,
     selected_highlight: Option<u64>,
     selection: Option<Selection>,
+    region_tool_active: bool,
+    region_drag: Option<RegionDragState>,
+    selected_region: Option<RegionImageReference>,
     translation_popup: Option<TranslationCardState>,
     pinned_translation: Option<TranslationCardState>,
     translation_popup_scroll: ScrollHandle,
@@ -983,6 +1017,7 @@ pub struct PdfView {
     context_menu_image: Option<(usize, usize)>,
     context_menu_highlight: Option<u64>,
     context_menu_note: Option<u64>,
+    context_menu_region: bool,
     context_menu_copy_submenu_open: bool,
     _image_clipboard: Option<Clipboard>,
     // Must drop after pending render tasks because they can hold document-backed display lists.
@@ -1046,6 +1081,7 @@ impl AiContextProvider for PdfViewAiContextProvider {
                     pdf_view.current_page()
                 },
                 selected_text: pdf_view.selected_text(),
+                selected_region: pdf_view.selected_region.clone(),
                 document_text: include_document_text
                     .then(|| pdf_view.document_text())
                     .flatten(),
@@ -1098,6 +1134,47 @@ impl AiContextProvider for PdfViewAiContextProvider {
             )
         })
     }
+
+    fn resolve_region_references(
+        &self,
+        references: Vec<RegionImageReference>,
+        cx: &gpui::App,
+    ) -> Task<Result<Vec<ResolvedRegionContext>>> {
+        let inputs = self
+            .pdf_view
+            .read_with(cx, |pdf_view, cx| {
+                let store = cx.global::<SettingsStore>();
+                Ok((
+                    pdf_view.document_snapshot.clone(),
+                    pdf_view.document_layout,
+                    pdf_view.page_count,
+                    store.settings.ai.page_image_quality,
+                    store.settings.ai.page_image_limit,
+                    references,
+                ))
+            })
+            .map_err(|error| anyhow!("failed to access PDF region context: {error}"))
+            .and_then(|inputs| inputs);
+
+        cx.background_spawn(async move {
+            let (
+                snapshot,
+                document_layout,
+                page_count,
+                image_quality,
+                page_image_limit,
+                references,
+            ) = inputs?;
+            PdfView::resolve_region_contexts(
+                &snapshot,
+                document_layout,
+                page_count,
+                image_quality,
+                page_image_limit,
+                references,
+            )
+        })
+    }
 }
 
 impl PdfView {
@@ -1122,7 +1199,7 @@ impl PdfView {
     ) -> Result<Vec<MentionReference>> {
         let page_references = references
             .into_iter()
-            .filter(|reference| reference.kind.requires_fixed_layout())
+            .filter(|reference| reference.kind.is_page_reference())
             .collect::<Vec<_>>();
         if page_references.is_empty() {
             return Ok(Vec::new());
@@ -1285,8 +1362,136 @@ impl PdfView {
                             "non-page references are filtered before background resolution"
                         )
                     }
+                    MentionKind::RegionImage => {
+                        unreachable!("region references use the region resolver")
+                    }
                 }
             }
+        }
+
+        Ok(resolved)
+    }
+
+    #[ztracing::instrument(skip_all, fields(reference_count = references.len()))]
+    fn resolve_region_contexts(
+        snapshot: &DocumentSnapshot,
+        document_layout: DocumentLayout,
+        expected_page_count: usize,
+        image_quality: PageImageQuality,
+        page_image_limit: usize,
+        references: Vec<RegionImageReference>,
+    ) -> Result<Vec<ResolvedRegionContext>> {
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !matches!(document_layout, DocumentLayout::Fixed) {
+            bail!("region images are unavailable for reflowable documents");
+        }
+        let region_page_count = references
+            .iter()
+            .map(|reference| reference.regions.len())
+            .sum::<usize>();
+        if region_page_count > page_image_limit {
+            bail!(
+                "too many pages attached through region images: {region_page_count} requested, maximum is {page_image_limit}"
+            );
+        }
+
+        let opened = snapshot
+            .open_with_layout(document_layout)
+            .context("failed to open document for region image context")?;
+        if opened.is_reflowable() {
+            bail!("region images are unavailable for reflowable documents");
+        }
+        let document = opened.into_inner();
+        let actual_page_count = document
+            .page_count()
+            .context("failed to read document page count for region image context")?;
+        if actual_page_count < 0 || actual_page_count as usize != expected_page_count {
+            bail!(
+                "document page count changed while resolving region images: expected {}, got {}",
+                expected_page_count,
+                actual_page_count
+            );
+        }
+
+        let mut display_lists = HashMap::<usize, Arc<DisplayList>>::new();
+        let mut page_bounds_by_index = HashMap::<usize, Rect>::new();
+        let mut resolved = Vec::with_capacity(references.len());
+        let mut total_bytes = 0usize;
+        for reference in references {
+            if reference.is_empty() {
+                bail!("PDF image region is empty");
+            }
+            let mut exports = Vec::with_capacity(reference.regions.len());
+            for region in &reference.regions {
+                let page_idx = region.page.0;
+                if page_idx >= expected_page_count {
+                    bail!("PDF image region references missing page {}", page_idx + 1);
+                }
+                let display_list = if let Some(display_list) = display_lists.get(&page_idx) {
+                    display_list.clone()
+                } else {
+                    let page = document
+                        .load_page(page_idx as i32)
+                        .with_context(|| format!("failed to load PDF page {}", page_idx + 1))?;
+                    let page_bounds = page.bounds().with_context(|| {
+                        format!("failed to read bounds for PDF page {}", page_idx + 1)
+                    })?;
+                    let display_list = DisplayList::new(page_bounds).with_context(|| {
+                        format!(
+                            "failed to create display list for PDF page {}",
+                            page_idx + 1
+                        )
+                    })?;
+                    let device = Device::from_display_list(&display_list).with_context(|| {
+                        format!(
+                            "failed to create display-list device for PDF page {}",
+                            page_idx + 1
+                        )
+                    })?;
+                    page.run(&device, &Matrix::IDENTITY)
+                        .with_context(|| format!("failed to record PDF page {}", page_idx + 1))?;
+                    let display_list = Arc::new(display_list);
+                    page_bounds_by_index.insert(page_idx, page_bounds);
+                    display_lists.insert(page_idx, display_list.clone());
+                    display_list
+                };
+                let page_bounds = page_bounds_by_index
+                    .get(&page_idx)
+                    .copied()
+                    .context("PDF page bounds were not cached")?;
+                let normalized = region.normalized();
+                if !normalized.x0.is_finite()
+                    || !normalized.y0.is_finite()
+                    || !normalized.x1.is_finite()
+                    || !normalized.y1.is_finite()
+                    || normalized.x0 < page_bounds.x0
+                    || normalized.y0 < page_bounds.y0
+                    || normalized.x1 > page_bounds.x1
+                    || normalized.y1 > page_bounds.y1
+                    || normalized.x1 <= normalized.x0
+                    || normalized.y1 <= normalized.y0
+                {
+                    bail!("PDF image region is outside page {} bounds", page_idx + 1);
+                }
+                exports.push(RegionImageExport {
+                    display_list,
+                    region: *region,
+                });
+            }
+
+            let bytes = Self::render_region_jpeg(&exports, image_quality)
+                .context("failed to render PDF image region")?;
+            total_bytes = total_bytes.saturating_add(bytes.len());
+            if total_bytes > MAX_PAGE_IMAGE_BYTES {
+                bail!(
+                    "attached page images are too large: more than {} MiB",
+                    MAX_PAGE_IMAGE_BYTES / (1024 * 1024)
+                );
+            }
+            let image = ImageContext::new_region(reference.clone(), "image/jpeg", bytes);
+            resolved.push(ResolvedRegionContext { reference, image });
         }
 
         Ok(resolved)
@@ -1772,6 +1977,9 @@ impl PdfView {
             notes: options.annotations.notes,
             selected_highlight: None,
             selection: None,
+            region_tool_active: false,
+            region_drag: None,
+            selected_region: None,
             translation_popup: None,
             pinned_translation: None,
             translation_popup_scroll: ScrollHandle::new(),
@@ -1871,6 +2079,7 @@ impl PdfView {
             context_menu_image: None,
             context_menu_highlight: None,
             context_menu_note: None,
+            context_menu_region: false,
             context_menu_copy_submenu_open: false,
             _image_clipboard: None,
             _document: document,
@@ -2204,6 +2413,10 @@ impl PdfView {
         self.search.matches.clear();
         self.search.active = None;
         self.selection = None;
+        self.region_tool_active = false;
+        self.region_drag = None;
+        self.selected_region = None;
+        self.context_menu_region = false;
         self.pending_selection_anchor = None;
         self.hovered_link = None;
         self.pending_link = None;
@@ -2418,6 +2631,9 @@ impl PdfView {
         self.pages = loaded.pages;
         self.max_page_width = loaded.max_page_width.max(1.0);
         self.content_height_doc = loaded.content_height_doc;
+        self.region_tool_active = false;
+        self.region_drag = None;
+        self.selected_region = None;
         self.glyphs.clear();
         self.text_blocks.clear();
         self.text_lines.clear();
@@ -3248,6 +3464,9 @@ impl PdfView {
             .retain(|flash| now.saturating_duration_since(flash.started_at) < DIFF_FLASH_DURATION);
         let diff_flash_overlays = self.diff_flash_overlays(now);
         let translated_text_overlays = self.translated_text_overlays(window);
+        let region_overlays = self
+            .active_region_reference()
+            .map_or_else(Vec::new, |reference| self.region_overlay_bounds(&reference));
 
         PaintData {
             pages,
@@ -3262,6 +3481,7 @@ impl PdfView {
             selection_highlights,
             search_highlights,
             active_search_highlights,
+            region_overlays,
         }
     }
 
@@ -5183,6 +5403,265 @@ impl PdfView {
         .detach();
     }
 
+    fn region_image_exports(
+        &mut self,
+        reference: &RegionImageReference,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<RegionImageExport>> {
+        reference
+            .regions
+            .iter()
+            .map(|region| {
+                let page_idx = region.page.0;
+                if page_idx >= self.pages.len() {
+                    bail!("selected region references a missing PDF page");
+                }
+                Ok(RegionImageExport {
+                    display_list: self.get_or_create_display_list(page_idx, cx)?,
+                    region: *region,
+                })
+            })
+            .collect()
+    }
+
+    fn copy_region(&mut self, cx: &mut Context<Self>) {
+        let Some(reference) = self.selected_region.clone() else {
+            return;
+        };
+        let exports = match self.region_image_exports(&reference, cx) {
+            Ok(exports) => exports,
+            Err(error) => {
+                eprintln!("failed to prepare PDF region copy: {error:#}");
+                return;
+            }
+        };
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let (width, height, rgba) =
+                        Self::rasterize_region_stack_to_rgba(&exports, PAGE_EXPORT_SCALE)?;
+                    let mut clipboard =
+                        Clipboard::new().context("failed to open clipboard for region copy")?;
+                    clipboard
+                        .set_image(ImageData {
+                            width: width as usize,
+                            height: height as usize,
+                            bytes: Cow::Owned(rgba),
+                        })
+                        .context("failed to write PDF region image to clipboard")?;
+                    Ok::<_, anyhow::Error>(clipboard)
+                })
+                .await;
+
+            if let Err(error) = this.update(cx, |this, cx| match result {
+                Ok(clipboard) => {
+                    this._image_clipboard = Some(clipboard);
+                    if clear_copied_region_selection(
+                        &mut this.selected_region,
+                        &mut this.context_menu_region,
+                        &reference,
+                    ) {
+                        cx.notify();
+                    }
+                }
+                Err(error) => eprintln!("failed to copy PDF region: {error:#}"),
+            }) {
+                eprintln!("failed to update PDF region clipboard state: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    fn save_region(&mut self, cx: &mut Context<Self>) {
+        let Some(reference) = self.selected_region.clone() else {
+            return;
+        };
+        let exports = match self.region_image_exports(&reference, cx) {
+            Ok(exports) => exports,
+            Err(error) => {
+                eprintln!("failed to prepare PDF region save: {error:#}");
+                return;
+            }
+        };
+        let first_page = reference
+            .regions
+            .first()
+            .map_or(1, |region| region.page.0 + 1);
+        let last_page = reference
+            .regions
+            .last()
+            .map_or(first_page, |region| region.page.0 + 1);
+        let suggested_name = if first_page == last_page {
+            format!("region-page-{first_page}.png")
+        } else {
+            format!("region-pages-{first_page}-{last_page}.png")
+        };
+        let directory = dirs::picture_dir()
+            .or_else(dirs::download_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+
+        cx.spawn(async move |_, cx| match dialog.await {
+            Ok(Ok(Some(path))) => {
+                let result = cx
+                    .background_spawn(async move {
+                        let (width, height, rgba) =
+                            Self::rasterize_region_stack_to_rgba(&exports, PAGE_EXPORT_SCALE)?;
+                        let image = RgbaImage::from_raw(width, height, rgba)
+                            .context("failed to create region image data")?;
+                        image
+                            .save_with_format(&path, image::ImageFormat::Png)
+                            .with_context(|| {
+                                format!("failed to save region image to {}", path.display())
+                            })
+                    })
+                    .await;
+                if let Err(error) = result {
+                    eprintln!("failed to save PDF region: {error:#}");
+                }
+            }
+            Ok(Err(error)) => eprintln!("failed to open save region dialog: {error:#}"),
+            Ok(Ok(None)) | Err(_) => {}
+        })
+        .detach();
+    }
+
+    fn rasterize_region_stack_to_rgba(
+        exports: &[RegionImageExport],
+        scale: f32,
+    ) -> Result<(u32, u32, Vec<u8>)> {
+        if exports.is_empty() || !scale.is_finite() || scale <= 0.0 {
+            bail!("PDF image region is empty");
+        }
+
+        let mut dimensions = Vec::with_capacity(exports.len());
+        let mut max_width = 1u32;
+        let mut total_height = 0u32;
+        for export in exports {
+            let region = export.region.normalized();
+            let width = ((region.x1 - region.x0) * scale).ceil().max(1.0);
+            let height = ((region.y1 - region.y0) * scale).ceil().max(1.0);
+            if width > i32::MAX as f32 || height > i32::MAX as f32 {
+                bail!("PDF image region is too large");
+            }
+            let width = width as u32;
+            let height = height as u32;
+            max_width = max_width.max(width);
+            total_height = total_height
+                .checked_add(height)
+                .context("combined region image is too tall")?;
+            dimensions.push((width, height));
+        }
+
+        let total_pixels = (max_width as u64)
+            .checked_mul(total_height as u64)
+            .context("combined region image is too large")?;
+        if total_pixels > MAX_REGION_EXPORT_PIXELS {
+            bail!(
+                "combined region image is too large: {} megapixels exceeds the {} megapixel limit",
+                total_pixels.div_ceil(1_000_000),
+                MAX_REGION_EXPORT_PIXELS / 1_000_000
+            );
+        }
+
+        let mut image =
+            RgbaImage::from_pixel(max_width, total_height, image::Rgba([255, 255, 255, 255]));
+        let mut y_offset = 0;
+        for (export, (width, height)) in exports.iter().zip(dimensions) {
+            let (_, _, rgba) = Self::rasterize_pdf_region_to_rgba(
+                export.display_list.as_ref(),
+                export.region,
+                scale,
+            )?;
+            let crop = RgbaImage::from_raw(width, height, rgba)
+                .context("failed to create region crop image data")?;
+            let x_offset = (max_width - width) / 2;
+            for y in 0..height {
+                for x in 0..width {
+                    image.put_pixel(x_offset + x, y_offset + y, *crop.get_pixel(x, y));
+                }
+            }
+            y_offset = y_offset
+                .checked_add(height)
+                .context("combined region image is too tall")?;
+        }
+
+        Ok((max_width, total_height, image.into_raw()))
+    }
+
+    fn rasterize_pdf_region_to_rgba(
+        display_list: &DisplayList,
+        region: PageRegion,
+        scale: f32,
+    ) -> Result<(u32, u32, Vec<u8>)> {
+        let region = region.normalized();
+        let width = ((region.x1 - region.x0) * scale).ceil().max(1.0);
+        let height = ((region.y1 - region.y0) * scale).ceil().max(1.0);
+        if width > i32::MAX as f32 || height > i32::MAX as f32 {
+            bail!("PDF image region is too large");
+        }
+        let width = width as i32;
+        let height = height as i32;
+        let mut pixmap = Pixmap::new_with_w_h(&Colorspace::device_rgb(), width, height, true)?;
+        pixmap.samples_mut().fill(255);
+        let matrix = Matrix::new(
+            scale,
+            0.0,
+            0.0,
+            scale,
+            -region.x0 * scale,
+            -region.y0 * scale,
+        );
+        {
+            let device = Device::from_pixmap(&pixmap)?;
+            display_list
+                .run(&device, &matrix, Rect::INF)
+                .context("failed to rasterize PDF image region")?;
+        }
+        let width = pixmap.width();
+        let height = pixmap.height();
+        let samples = pixmap.samples();
+        let expected_len = width as usize * height as usize * 4;
+        if samples.len() != expected_len || pixmap.n() != 4 {
+            bail!(
+                "unexpected region image pixmap layout: {} samples, {} components",
+                samples.len(),
+                pixmap.n()
+            );
+        }
+        Ok((width, height, samples.to_vec()))
+    }
+
+    fn render_region_jpeg(
+        exports: &[RegionImageExport],
+        quality: PageImageQuality,
+    ) -> Result<Vec<u8>> {
+        if exports.is_empty() {
+            bail!("PDF image region is empty");
+        }
+        let max_width = exports
+            .iter()
+            .map(|export| export.region.x1 - export.region.x0)
+            .fold(0.0_f32, f32::max);
+        let total_height = exports
+            .iter()
+            .map(|export| export.region.y1 - export.region.y0)
+            .sum::<f32>();
+        let scale = quality.max_dimension() as f32 / max_width.max(total_height).max(1.0);
+        let (width, height, rgba) = Self::rasterize_region_stack_to_rgba(exports, scale)?;
+        let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+        for pixel in rgba.chunks_exact(4) {
+            rgb.extend_from_slice(&pixel[..3]);
+        }
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, quality.jpeg_quality())
+            .encode(&rgb, width, height, image::ExtendedColorType::Rgb8)
+            .context("failed to encode PDF image region as JPEG")?;
+        Ok(bytes)
+    }
+
     fn export_selected_pages_as_text(
         &mut self,
         source: PageSelectionSource,
@@ -5522,6 +6001,119 @@ impl PdfView {
                 pixel[2] = ((pixel[2] as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
             }
         }
+    }
+
+    fn screen_to_document(&self, point: GpuiPoint<Pixels>) -> Option<mupdf::Point> {
+        let (page_idx, bounds) = self
+            .page_image_bounds
+            .iter()
+            .enumerate()
+            .find_map(|(page_idx, bounds)| bounds.as_ref().map(|bounds| (page_idx, bounds)))?;
+        let page = self.pages.get(page_idx)?;
+        let scale_x = bounds.size.width.as_f32() / page.width;
+        let scale_y = bounds.size.height.as_f32() / page.height;
+        if scale_x <= 0.0 || scale_y <= 0.0 {
+            return None;
+        }
+
+        let page_left = (self.max_page_width - page.width) / 2.0;
+        Some(mupdf::Point {
+            x: (page_left + (point.x.as_f32() - bounds.origin.x.as_f32()) / scale_x)
+                .clamp(0.0, self.max_page_width),
+            y: (page.offset_y + (point.y.as_f32() - bounds.origin.y.as_f32()) / scale_y)
+                .clamp(0.0, self.content_height_doc),
+        })
+    }
+
+    fn region_reference_for_drag(&self, drag: RegionDragState) -> Option<RegionImageReference> {
+        Self::region_reference_for_pages(
+            &self.pages,
+            self.max_page_width,
+            self.effective_scale(),
+            drag,
+        )
+    }
+
+    fn region_reference_for_pages(
+        pages: &[PdfPage],
+        max_page_width: f32,
+        scale: f32,
+        drag: RegionDragState,
+    ) -> Option<RegionImageReference> {
+        let x0 = drag.anchor.x.min(drag.current.x);
+        let y0 = drag.anchor.y.min(drag.current.y);
+        let x1 = drag.anchor.x.max(drag.current.x);
+        let y1 = drag.anchor.y.max(drag.current.y);
+        if (x1 - x0) * scale < MIN_REGION_SELECTION_PX
+            || (y1 - y0) * scale < MIN_REGION_SELECTION_PX
+        {
+            return None;
+        }
+
+        let start_page = pages.partition_point(|page| page.offset_y + page.height <= y0);
+        let end_page = start_page + pages[start_page..].partition_point(|page| page.offset_y < y1);
+        let regions = pages[start_page..end_page]
+            .iter()
+            .enumerate()
+            .filter_map(|(relative_page_idx, page)| {
+                let page_left = (max_page_width - page.width) / 2.0;
+                let page_right = page_left + page.width;
+                let page_bottom = page.offset_y + page.height;
+                let region_x0 = x0.max(page_left);
+                let region_y0 = y0.max(page.offset_y);
+                let region_x1 = x1.min(page_right);
+                let region_y1 = y1.min(page_bottom);
+                if region_x1 <= region_x0 || region_y1 <= region_y0 {
+                    return None;
+                }
+
+                Some(PageRegion {
+                    page: PageIndex(start_page + relative_page_idx),
+                    x0: page.bounds.x0 + region_x0 - page_left,
+                    y0: page.bounds.y0 + region_y0 - page.offset_y,
+                    x1: page.bounds.x0 + region_x1 - page_left,
+                    y1: page.bounds.y0 + region_y1 - page.offset_y,
+                })
+            })
+            .collect::<Vec<_>>();
+        let reference = RegionImageReference { regions };
+        (!reference.is_empty()).then_some(reference)
+    }
+
+    fn active_region_reference(&self) -> Option<RegionImageReference> {
+        self.region_drag
+            .and_then(|drag| self.region_reference_for_drag(drag))
+            .or_else(|| self.selected_region.clone())
+    }
+
+    fn region_overlay_bounds(&self, reference: &RegionImageReference) -> Vec<Bounds<Pixels>> {
+        reference
+            .regions
+            .iter()
+            .filter_map(|region| {
+                let image_bounds = *self.page_image_bounds.get(region.page.0)?.as_ref()?;
+                Some(self.pdf_rect_to_screen(
+                    region.page.0,
+                    Rect::new(region.x0, region.y0, region.x1, region.y1),
+                    image_bounds,
+                ))
+            })
+            .collect()
+    }
+
+    fn point_in_selected_region(&self, point: GpuiPoint<Pixels>) -> bool {
+        self.selected_region.as_ref().is_some_and(|reference| {
+            self.region_overlay_bounds(reference)
+                .iter()
+                .any(|bounds| bounds.contains(&point))
+        })
+    }
+
+    fn region_popover_position(&self) -> Option<GpuiPoint<Pixels>> {
+        self.selected_region
+            .as_ref()
+            .and_then(|reference| self.region_overlay_bounds(reference).into_iter().last())
+            .map(|bounds| point(bounds.right(), bounds.bottom() + px(6.0)))
     }
 
     fn point_in_image(&self, point: GpuiPoint<Pixels>) -> bool {
@@ -8379,7 +8971,10 @@ impl PdfView {
         self.panning = None;
         self.grid_overview_actions_position = None;
         self.thumbnail_sidebar_actions_position = None;
+        self.context_menu_region =
+            !self.grid_overview_open && self.point_in_selected_region(position);
         self.context_menu_image = if self.grid_overview_open
+            || self.context_menu_region
             || self.context_menu_highlight.is_some()
             || self.context_menu_note.is_some()
         {
@@ -8399,6 +8994,7 @@ impl PdfView {
         self.context_menu_page = None;
         self.context_menu_image = None;
         self.context_menu_highlight = None;
+        self.context_menu_region = false;
         self.context_menu_copy_submenu_open = false;
         if was_open {
             self.context_menu_note = None;
@@ -8925,6 +9521,21 @@ impl PdfView {
                 ))
                 .child(Self::context_menu_separator(theme))
             })
+            .when(state.has_region, |menu| {
+                menu.child(Self::context_menu_entry(
+                    crate::fl!("pdf-context-copy-region"),
+                    theme,
+                    |this, _, cx| this.copy_region(cx),
+                    cx,
+                ))
+                .child(Self::context_menu_entry(
+                    crate::fl!("pdf-context-save-region"),
+                    theme,
+                    |this, _, cx| this.save_region(cx),
+                    cx,
+                ))
+                .child(Self::context_menu_separator(theme))
+            })
             .when(state.has_page, |menu| {
                 menu.child(Self::context_menu_entry(
                     crate::fl!("pdf-context-save-page-as-image"),
@@ -9132,6 +9743,118 @@ impl PdfView {
             |this, window, cx| this.toggle_ai_panel(window, cx),
             cx,
         )
+    }
+
+    fn toggle_region_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.capabilities.page_export || self.grid_overview_open {
+            return;
+        }
+        self.region_tool_active = !self.region_tool_active;
+        self.region_drag = None;
+        if self.region_tool_active {
+            self.selected_region = None;
+            self.selection = None;
+            self.selected_highlight = None;
+        }
+        self.close_context_menu(cx);
+        cx.notify();
+    }
+
+    fn cancel_region_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.region_tool_active && self.region_drag.is_none() {
+            return;
+        }
+        self.region_tool_active = false;
+        self.region_drag = None;
+        cx.notify();
+    }
+
+    fn dismiss_selected_region(&mut self, cx: &mut Context<Self>) {
+        if self.selected_region.take().is_some() {
+            self.context_menu_region = false;
+            cx.notify();
+        }
+    }
+
+    fn render_region_button(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("footbar-region-selection-tooltip")
+            .child(Self::render_footbar_icon_button(
+                "footbar-region-selection",
+                IconName::Scan,
+                self.region_tool_active,
+                theme,
+                |this, _, cx| this.toggle_region_selection(cx),
+                cx,
+            ))
+            .tooltip(text_tooltip(crate::fl!("pdf-region-select-tooltip")))
+    }
+
+    fn render_region_popover(theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .occlude()
+            .flex()
+            .items_center()
+            .gap_1()
+            .p_1()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .rounded(px(6.0))
+            .bg(rgb(theme.surface_background))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                IconButton::new(
+                    "region-popover-copy",
+                    IconName::Copy,
+                    rgb(theme.text_muted),
+                    rgb(theme.element_hover),
+                )
+                .into_div()
+                .tooltip(text_tooltip(crate::fl!("pdf-context-copy-region")))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.copy_region(cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+            )
+            .child(
+                IconButton::new(
+                    "region-popover-save",
+                    IconName::Download,
+                    rgb(theme.text_muted),
+                    rgb(theme.element_hover),
+                )
+                .into_div()
+                .tooltip(text_tooltip(crate::fl!("pdf-context-save-region")))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.save_region(cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+            )
+            .child(
+                IconButton::new(
+                    "region-popover-dismiss",
+                    IconName::X,
+                    rgb(theme.text_muted),
+                    rgb(theme.element_hover),
+                )
+                .into_div()
+                .tooltip(text_tooltip(crate::fl!("pdf-region-dismiss")))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.dismiss_selected_region(cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+            )
     }
 
     fn render_epub_control(
@@ -9614,6 +10337,10 @@ impl PdfView {
 
         self.grid_overview_open = open;
         if open {
+            self.region_tool_active = false;
+            self.region_drag = None;
+            self.selected_region = None;
+            self.context_menu_region = false;
             self.grid_overview_cursor = self.current_page_index().min(self.last_page_index());
             self.scroll_grid_overview_cursor(ScrollStrategy::Center);
         } else {
@@ -11159,6 +11886,10 @@ impl PdfView {
                         this.child(self.render_thumbnail_sidebar_button(theme, cx))
                             .child(self.render_grid_overview_button(theme, cx))
                     })
+                    .when(
+                        self.capabilities.page_export && !self.grid_overview_open,
+                        |this| this.child(self.render_region_button(theme, cx)),
+                    )
                     .when(self.capabilities.reflow, |this| {
                         this.child(self.render_epub_style_button(theme, cx))
                     }),
@@ -11475,12 +12206,14 @@ impl Render for PdfView {
                     .child(Self::render_context_menu(
                         ContextMenuState {
                             has_page: self.capabilities.page_export
+                                && !self.context_menu_region
                                 && self.context_menu_page.is_some(),
                             has_image: !self.grid_overview_open
                                 && self.context_menu_image.is_some(),
                             has_selection: context_menu_has_selection,
                             highlight_color: context_menu_highlight_color,
                             has_note: context_menu_has_note,
+                            has_region: self.context_menu_region,
                             grid_overview: self.grid_overview_open,
                             copy_submenu_open: self.context_menu_copy_submenu_open,
                         },
@@ -11490,6 +12223,21 @@ impl Render for PdfView {
                     )),
             )
             .with_priority(1)
+        });
+        let region_popover = (!self.grid_overview_open
+            && self.context_menu_position.is_none()
+            && self.region_drag.is_none())
+        .then(|| self.region_popover_position())
+        .flatten()
+        .map(|position| {
+            deferred(
+                anchored()
+                    .snap_to_window_with_margin(px(8.0))
+                    .position(position)
+                    .anchor(Anchor::TopRight)
+                    .child(Self::render_region_popover(theme, cx)),
+            )
+            .with_priority(2)
         });
         let epub_style_panel = self.epub_style_panel_position.map(|position| {
             deferred(
@@ -11552,6 +12300,7 @@ impl Render for PdfView {
             .flex()
             .flex_col()
             .cursor_text()
+            .when(self.region_tool_active, |this| this.cursor_crosshair())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -11559,11 +12308,14 @@ impl Render for PdfView {
                 }),
             )
             .when(
-                self.hovered_link.is_some() || self.hovered_note.is_some(),
+                !self.region_tool_active
+                    && (self.hovered_link.is_some() || self.hovered_note.is_some()),
                 |this| this.cursor_pointer(),
             )
             .when(self.panning.is_some(), |this| this.cursor_grabbing())
-            .key_context(if self.grid_overview_open {
+            .key_context(if self.region_tool_active {
+                "PdfView RegionSelection"
+            } else if self.grid_overview_open {
                 "GridOverview"
             } else if self.is_presentation_mode() {
                 "PdfView PresentationMode"
@@ -11599,6 +12351,12 @@ impl Render for PdfView {
                 if this.capabilities.translation_split {
                     cx.emit(PdfViewEvent::OpenTranslationSplit);
                 }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRegionSelection, _, cx| {
+                this.toggle_region_selection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &CancelRegionSelection, _, cx| {
+                this.cancel_region_selection(cx);
             }))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
                 this.select_all();
@@ -11736,6 +12494,23 @@ impl Render for PdfView {
                     this.pending_link = None;
                     this.pending_selection_anchor = None;
 
+                    if this.region_tool_active {
+                        this.selection = None;
+                        this.selected_highlight = None;
+                        this.selected_region = None;
+                        this.region_drag = this
+                            .point_in_image(event.position)
+                            .then(|| this.screen_to_document(event.position))
+                            .flatten()
+                            .map(|anchor| RegionDragState {
+                                anchor,
+                                current: anchor,
+                            });
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+
                     if let Some(link_ix) = this.link_at_screen(event.position) {
                         this.selection = None;
                         this.selected_highlight = None;
@@ -11838,6 +12613,20 @@ impl Render for PdfView {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if let Some(mut drag) = this.region_drag {
+                    if !event.dragging() {
+                        this.region_drag = None;
+                        cx.notify();
+                        return;
+                    }
+                    if let Some(current) = this.screen_to_document(event.position) {
+                        drag.current = current;
+                        this.region_drag = Some(drag);
+                        cx.notify();
+                    }
+                    return;
+                }
+
                 if let Some(pan) = this.panning {
                     this.set_hovered_note(None, None, cx);
                     let scale = this.effective_scale();
@@ -11889,6 +12678,17 @@ impl Render for PdfView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                    if let Some(mut drag) = this.region_drag.take() {
+                        if let Some(current) = this.screen_to_document(event.position) {
+                            drag.current = current;
+                        }
+                        this.selected_region = this.region_reference_for_drag(drag);
+                        this.region_tool_active = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+
                     let pending_link = this.pending_link.take();
                     this.dragging = false;
                     this.pending_selection_anchor = None;
@@ -12119,6 +12919,18 @@ impl Render for PdfView {
                                                     rgba(theme.selection_highlight),
                                                 ));
                                             }
+
+                                            for region in paint_data.region_overlays {
+                                                window.paint_quad(fill(
+                                                    region,
+                                                    rgba(Self::with_alpha(theme.accent, 0x33)),
+                                                ));
+                                                window.paint_quad(outline(
+                                                    region,
+                                                    rgba(Self::with_alpha(theme.accent, 0xee)),
+                                                    BorderStyle::Solid,
+                                                ));
+                                            }
                                         },
                                     )
                                     .size_full(),
@@ -12217,6 +13029,7 @@ impl Render for PdfView {
             })
             .children(note_popup)
             .children(context_menu)
+            .children(region_popover)
             .children(epub_style_panel)
             .into_any_element()
     }
@@ -12224,12 +13037,15 @@ impl Render for PdfView {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{
-        Glyph, PdfView, SearchState, TextChunk, TextFormatBlock, TextIndexState, TextLine,
-        TranslationCardState, TranslationStatus, reset_translation_cards_for_document_replacement,
+        Glyph, PdfPage, PdfView, RegionDragState, RegionImageExport, SearchState, TextChunk,
+        TextFormatBlock, TextIndexState, TextLine, TranslationCardState, TranslationStatus,
+        clear_copied_region_selection, reset_translation_cards_for_document_replacement,
     };
     use glyphst_ai::ai_chat::{MentionKind, MentionReference};
-    use glyphst_core::{DocumentLayout, EpubLayout};
+    use glyphst_core::{DocumentLayout, EpubLayout, PageIndex, PageRegion, RegionImageReference};
     use gpui::{Modifiers, ScrollWheelEvent, point, px};
     use image::GenericImageView;
     use mupdf::{Point, Quad, Rect};
@@ -12562,6 +13378,178 @@ mod tests {
         let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
 
         assert_eq!(image.dimensions(), (512, 1024));
+    }
+
+    #[test]
+    fn region_drag_intersects_centered_pages_and_omits_gaps() {
+        let pages = vec![
+            PdfPage {
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                width: 100.0,
+                height: 100.0,
+                offset_y: 0.0,
+                glyph_range: 0..0,
+            },
+            PdfPage {
+                bounds: Rect::new(10.0, 20.0, 70.0, 120.0),
+                width: 60.0,
+                height: 100.0,
+                offset_y: 120.0,
+                glyph_range: 0..0,
+            },
+        ];
+        let reference = PdfView::region_reference_for_pages(
+            &pages,
+            100.0,
+            1.0,
+            RegionDragState {
+                anchor: Point::new(10.0, 50.0),
+                current: Point::new(90.0, 170.0),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            reference.regions,
+            vec![
+                PageRegion {
+                    page: PageIndex(0),
+                    x0: 10.0,
+                    y0: 50.0,
+                    x1: 90.0,
+                    y1: 100.0,
+                },
+                PageRegion {
+                    page: PageIndex(1),
+                    x0: 10.0,
+                    y0: 20.0,
+                    x1: 70.0,
+                    y1: 70.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn region_drag_rejects_tiny_marquees() {
+        let pages = [PdfPage {
+            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            width: 100.0,
+            height: 100.0,
+            offset_y: 0.0,
+            glyph_range: 0..0,
+        }];
+        assert!(
+            PdfView::region_reference_for_pages(
+                &pages,
+                100.0,
+                1.0,
+                RegionDragState {
+                    anchor: Point::new(10.0, 10.0),
+                    current: Point::new(12.0, 30.0),
+                },
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn successful_region_copy_clears_the_copied_selection() {
+        let copied = RegionImageReference::new([PageRegion {
+            page: PageIndex(0),
+            x0: 10.0,
+            y0: 20.0,
+            x1: 30.0,
+            y1: 40.0,
+        }]);
+        let mut selected_region = Some(copied.clone());
+        let mut context_menu_region = true;
+
+        assert!(clear_copied_region_selection(
+            &mut selected_region,
+            &mut context_menu_region,
+            &copied,
+        ));
+        assert!(selected_region.is_none());
+        assert!(!context_menu_region);
+    }
+
+    #[test]
+    fn completed_region_copy_preserves_a_newer_selection() {
+        let copied = RegionImageReference::new([PageRegion {
+            page: PageIndex(0),
+            x0: 10.0,
+            y0: 20.0,
+            x1: 30.0,
+            y1: 40.0,
+        }]);
+        let newer = RegionImageReference::new([PageRegion {
+            page: PageIndex(1),
+            x0: 50.0,
+            y0: 60.0,
+            x1: 70.0,
+            y1: 80.0,
+        }]);
+        let mut selected_region = Some(newer.clone());
+        let mut context_menu_region = true;
+
+        assert!(!clear_copied_region_selection(
+            &mut selected_region,
+            &mut context_menu_region,
+            &copied,
+        ));
+        assert_eq!(selected_region, Some(newer));
+        assert!(context_menu_region);
+    }
+
+    #[test]
+    fn region_compositor_stacks_crops_and_centers_narrow_pages() {
+        let display_list =
+            Arc::new(mupdf::DisplayList::new(Rect::new(0.0, 0.0, 100.0, 100.0)).unwrap());
+        let exports = vec![
+            RegionImageExport {
+                display_list: display_list.clone(),
+                region: PageRegion {
+                    page: PageIndex(0),
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 10.0,
+                    y1: 20.0,
+                },
+            },
+            RegionImageExport {
+                display_list,
+                region: PageRegion {
+                    page: PageIndex(1),
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 20.0,
+                    y1: 10.0,
+                },
+            },
+        ];
+
+        let (width, height, rgba) = PdfView::rasterize_region_stack_to_rgba(&exports, 2.0).unwrap();
+        assert_eq!((width, height), (40, 60));
+        assert_eq!(rgba.len(), 40 * 60 * 4);
+    }
+
+    #[test]
+    fn region_compositor_rejects_oversized_exports_before_rendering() {
+        let display_list =
+            Arc::new(mupdf::DisplayList::new(Rect::new(0.0, 0.0, 10_000.0, 5_000.0)).unwrap());
+        let exports = [RegionImageExport {
+            display_list,
+            region: PageRegion {
+                page: PageIndex(0),
+                x0: 0.0,
+                y0: 0.0,
+                x1: 10_000.0,
+                y1: 5_000.0,
+            },
+        }];
+
+        assert!(PdfView::rasterize_region_stack_to_rgba(&exports, 1.0).is_err());
     }
 
     #[test]

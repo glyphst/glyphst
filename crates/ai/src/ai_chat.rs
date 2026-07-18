@@ -2,6 +2,7 @@ use std::{collections::HashSet, io::Read as _, ops::Range, sync::Arc};
 
 use anyhow::{Context as _, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use glyphst_core::RegionImageReference;
 use serde_json::{Value, json};
 
 use crate::settings::{AiApiStyle, AiProvider, AiThinkingLevel, ResolvedAiConfig};
@@ -59,6 +60,7 @@ impl ContextBlock {
 pub struct ImageContext {
     pub kind: MentionKind,
     pub page: Option<usize>,
+    pub region: Option<Arc<RegionImageReference>>,
     pub media_type: String,
     pub bytes: Arc<[u8]>,
 }
@@ -73,13 +75,46 @@ impl ImageContext {
         Self {
             kind,
             page,
+            region: None,
+            media_type: media_type.into(),
+            bytes: bytes.into(),
+        }
+    }
+
+    pub fn new_region(
+        region: RegionImageReference,
+        media_type: impl Into<String>,
+        bytes: impl Into<Arc<[u8]>>,
+    ) -> Self {
+        Self {
+            kind: MentionKind::RegionImage,
+            page: None,
+            region: Some(Arc::new(region)),
             media_type: media_type.into(),
             bytes: bytes.into(),
         }
     }
 
     fn descriptor(&self) -> String {
-        let reference = if self.kind == MentionKind::DocumentImage {
+        let reference = if self.kind == MentionKind::RegionImage {
+            self.region.as_ref().map_or_else(
+                || self.kind.token().to_string(),
+                |region| {
+                    let mut pages = region
+                        .regions
+                        .iter()
+                        .map(|region| region.page.0 + 1)
+                        .collect::<Vec<_>>();
+                    pages.dedup();
+                    let pages = pages
+                        .into_iter()
+                        .map(|page| page.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{} pages {pages}", self.kind.token())
+                },
+            )
+        } else if self.kind == MentionKind::DocumentImage {
             self.page.map_or_else(
                 || self.kind.token().to_string(),
                 |page| format!("{} page {page}", self.kind.token()),
@@ -99,6 +134,7 @@ pub struct ChatMessage {
     pub role: Role,
     pub parts: Vec<ContentPart>,
     references: Vec<MentionReference>,
+    region_references: Vec<RegionImageReference>,
     request_prompt: Option<String>,
     request_content: Option<String>,
 }
@@ -117,6 +153,7 @@ impl ChatMessage {
             role: Role::User,
             parts,
             references,
+            region_references: Vec::new(),
             request_prompt,
             request_content: None,
         }
@@ -127,6 +164,7 @@ impl ChatMessage {
             role: Role::User,
             parts: vec![ContentPart::Text(content)],
             references: Vec::new(),
+            region_references: Vec::new(),
             request_prompt: None,
             request_content: None,
         }
@@ -137,6 +175,7 @@ impl ChatMessage {
             role: Role::Assistant,
             parts: vec![ContentPart::Text(content)],
             references: Vec::new(),
+            region_references: Vec::new(),
             request_prompt: None,
             request_content: None,
         }
@@ -150,6 +189,7 @@ impl ChatMessage {
             role,
             parts: vec![ContentPart::Text(content)],
             references: Vec::new(),
+            region_references: Vec::new(),
             request_prompt: None,
             request_content,
         }
@@ -228,6 +268,10 @@ impl ChatMessage {
         &self.references
     }
 
+    pub fn region_references(&self) -> &[RegionImageReference] {
+        &self.region_references
+    }
+
     pub fn has_resolved_page_reference(&self, reference: MentionReference) -> bool {
         self.parts.iter().any(|part| match part {
             ContentPart::Context(context) => {
@@ -261,6 +305,20 @@ impl ChatMessage {
         self
     }
 
+    pub fn with_region_references(mut self, references: Vec<RegionImageReference>) -> Self {
+        self.region_references = references;
+        self
+    }
+
+    pub fn has_resolved_region_reference(&self, reference: &RegionImageReference) -> bool {
+        self.parts.iter().any(|part| match part {
+            ContentPart::Image(image) => {
+                image.kind == MentionKind::RegionImage && image.region.as_deref() == Some(reference)
+            }
+            ContentPart::Text(_) | ContentPart::Context(_) => false,
+        })
+    }
+
     pub fn attach_context(&mut self, context: ContextBlock) {
         self.parts.push(ContentPart::Context(context));
     }
@@ -274,6 +332,7 @@ impl ChatMessage {
             role: self.role,
             parts: vec![ContentPart::Text(self.display_text())],
             references: Vec::new(),
+            region_references: Vec::new(),
             request_prompt: None,
             request_content: None,
         }
@@ -316,15 +375,17 @@ pub enum MentionKind {
     Selection,
     DocumentText,
     DocumentImage,
+    RegionImage,
 }
 
 impl MentionKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Page,
         Self::PageImage,
         Self::Selection,
         Self::DocumentText,
         Self::DocumentImage,
+        Self::RegionImage,
     ];
 
     pub fn token(self) -> &'static str {
@@ -334,6 +395,7 @@ impl MentionKind {
             Self::Selection => "@selection",
             Self::DocumentText => "@document",
             Self::DocumentImage => "@document-image",
+            Self::RegionImage => "@region-image",
         }
     }
 
@@ -352,6 +414,7 @@ impl MentionKind {
             Self::DocumentImage => {
                 glyphst_settings::localize::tr("mention-document-image-description")
             }
+            Self::RegionImage => glyphst_settings::localize::tr("mention-region-image-description"),
         }
     }
 
@@ -362,6 +425,7 @@ impl MentionKind {
             Self::Selection => glyphst_settings::localize::tr("mention-selection"),
             Self::DocumentText => glyphst_settings::localize::tr("mention-document-text"),
             Self::DocumentImage => glyphst_settings::localize::tr("mention-document-image"),
+            Self::RegionImage => glyphst_settings::localize::tr("mention-region-image"),
         }
     }
 
@@ -370,10 +434,20 @@ impl MentionKind {
     }
 
     pub fn is_image(self) -> bool {
-        matches!(self, Self::PageImage | Self::DocumentImage)
+        matches!(
+            self,
+            Self::PageImage | Self::DocumentImage | Self::RegionImage
+        )
     }
 
     pub fn requires_fixed_layout(self) -> bool {
+        matches!(
+            self,
+            Self::Page | Self::PageImage | Self::DocumentImage | Self::RegionImage
+        )
+    }
+
+    pub fn is_page_reference(self) -> bool {
         matches!(self, Self::Page | Self::PageImage | Self::DocumentImage)
     }
 
@@ -384,6 +458,7 @@ impl MentionKind {
             Self::Selection => "selection",
             Self::DocumentText => "document_text",
             Self::DocumentImage => "document_image",
+            Self::RegionImage => "region_image",
         }
     }
 
@@ -394,6 +469,7 @@ impl MentionKind {
             Self::Selection => glyphst_settings::localize::tr("ai-no-selected-text"),
             Self::DocumentText => glyphst_settings::localize::tr("ai-no-document-text"),
             Self::DocumentImage => glyphst_settings::localize::tr("ai-no-document-image"),
+            Self::RegionImage => glyphst_settings::localize::tr("ai-no-region-image"),
         }
     }
 }
@@ -803,7 +879,7 @@ pub fn system_prompt(
         sections.push(format!("Current document:\n{}", details.join("\n")));
     }
 
-    sections.push("When the user attaches @page(<page number>), @page-image(<page number>), @selection, @document, or @document-image, ground your answer in the attached context. Page numbers are 1-based. Treat attached document text and images as current and authoritative. Cite page numbers when the attached context includes them. If the answer cannot be determined from the attached context, say so directly.".to_string());
+    sections.push("When the user attaches @page(<page number>), @page-image(<page number>), @selection, @document, @document-image, or @region-image, ground your answer in the attached context. Page numbers are 1-based. Treat attached document text and images as current and authoritative. Cite page numbers when the attached context includes them. If the answer cannot be determined from the attached context, say so directly.".to_string());
 
     if thinking_level != AiThinkingLevel::Off && !native_thinking {
         sections.push(format!(
@@ -951,6 +1027,7 @@ pub fn find_mention_references(text: &str) -> Vec<(Range<usize>, MentionReferenc
         }
 
         for kind in [
+            MentionKind::RegionImage,
             MentionKind::Selection,
             MentionKind::DocumentImage,
             MentionKind::DocumentText,
@@ -1114,7 +1191,7 @@ mod tests {
     fn parses_canonical_mentions_with_one_based_pages() {
         assert_eq!(
             mentioned_references(
-                "Compare @page(2), @page-image(12), @selection, @document, and @document-image."
+                "Compare @page(2), @page-image(12), @selection, @document, @document-image, and @region-image."
             ),
             vec![
                 MentionReference::new(MentionKind::Page, Some(2)),
@@ -1122,6 +1199,7 @@ mod tests {
                 MentionReference::new(MentionKind::Selection, None),
                 MentionReference::new(MentionKind::DocumentText, None),
                 MentionReference::new(MentionKind::DocumentImage, None),
+                MentionReference::new(MentionKind::RegionImage, None),
             ]
         );
         assert_eq!(
@@ -1162,11 +1240,13 @@ mod tests {
                 "selection",
                 "document",
                 "document-image",
+                "region-image",
             ]
         );
         assert!(!MentionKind::Page.is_image());
         assert!(MentionKind::PageImage.is_image());
         assert!(MentionKind::DocumentImage.is_image());
+        assert!(MentionKind::RegionImage.is_image());
     }
 
     #[test]
@@ -1339,6 +1419,41 @@ mod tests {
         assert!(request.contains("image/jpeg"));
         assert!(!request.contains("/9j/"));
         assert!(!request.contains("base64"));
+    }
+
+    #[test]
+    fn region_images_describe_source_pages_and_remain_multimodal() {
+        let region = RegionImageReference::new([
+            glyphst_core::PageRegion {
+                page: glyphst_core::PageIndex(1),
+                x0: 1.0,
+                y0: 2.0,
+                x1: 11.0,
+                y1: 12.0,
+            },
+            glyphst_core::PageRegion {
+                page: glyphst_core::PageIndex(3),
+                x0: 3.0,
+                y0: 4.0,
+                x1: 13.0,
+                y1: 14.0,
+            },
+        ]);
+        let mut message = ChatMessage::user(
+            "Describe @region-image".to_string(),
+            "Describe this crop".to_string(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_region_references(vec![region.clone()]);
+        message.attach_image(ImageContext::new_region(
+            region,
+            "image/jpeg",
+            vec![1, 2, 3],
+        ));
+
+        assert!(message.request_text().contains("@region-image pages 2, 4"));
+        assert_eq!(build_request_messages(vec![message]).len(), 1);
     }
 
     #[test]

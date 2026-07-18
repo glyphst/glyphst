@@ -3,7 +3,9 @@ use std::{
     thread, time::Duration,
 };
 
-use crate::{AiContext, AiContextProvider, AiPageState, ResolvedPageContext};
+use crate::{
+    AiContext, AiContextProvider, AiPageState, ResolvedPageContext, ResolvedRegionContext,
+};
 use anyhow::anyhow;
 use futures::{StreamExt, channel::mpsc};
 use glyphst_actions::{
@@ -15,6 +17,7 @@ use glyphst_ai::ai_chat::{
     MAX_PAGE_IMAGE_BYTES, MentionKind, MentionReference, Role, TITLE_GENERATION_PROMPT,
     session_title_for_prompt, stream_completion, thinking_level_description, title_from_response,
 };
+use glyphst_core::RegionImageReference;
 use glyphst_library::{
     AiMentionReference, AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp,
 };
@@ -97,11 +100,33 @@ struct MentionMatch {
     canonical_ix: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct ComposerMention {
     reference: MentionReference,
     range: Range<usize>,
-    captured_text: Option<String>,
+    captured: Option<CapturedMention>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum CapturedMention {
+    Text(String),
+    Region(RegionImageReference),
+}
+
+impl ComposerMention {
+    fn captured_text(&self) -> Option<&str> {
+        match self.captured.as_ref()? {
+            CapturedMention::Text(text) => Some(text),
+            CapturedMention::Region(_) => None,
+        }
+    }
+
+    fn captured_region(&self) -> Option<&RegionImageReference> {
+        match self.captured.as_ref()? {
+            CapturedMention::Region(region) => Some(region),
+            CapturedMention::Text(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -739,6 +764,7 @@ impl AiPanel {
         }
         let request_prompt = request_prompt_without_mentions(&display_prompt, &submitted_mentions);
         let references = references_for_composer_mentions(&submitted_mentions);
+        let region_references = region_references_for_composer_mentions(&submitted_mentions);
 
         self.update_current_page(cx);
         let include_document_text = references
@@ -748,7 +774,8 @@ impl AiPanel {
         let contexts = context_blocks_for_composer_mentions(&submitted_mentions, context.as_ref());
         let document = self.document_context_from(context);
         let user_message =
-            ChatMessage::user(display_prompt.clone(), request_prompt, contexts, references);
+            ChatMessage::user(display_prompt.clone(), request_prompt, contexts, references)
+                .with_region_references(region_references);
         let ai_settings = cx.global::<SettingsStore>().settings.ai.clone();
         if let Err(error) = validate_composer_page_image_preflight(
             self.mode,
@@ -797,12 +824,16 @@ impl AiPanel {
 
         let mut request_messages = self.messages[..self.messages.len().saturating_sub(1)].to_vec();
         let page_references = unresolved_page_references(&request_messages, self.page_count);
-        let resolve_task = self
+        let region_references = unresolved_region_references(&request_messages);
+        let page_resolve_task = self
             .context_provider
             .resolve_page_references(page_references, cx);
+        let region_resolve_task = self
+            .context_provider
+            .resolve_region_references(region_references, cx);
 
         self.pending_stream = Some(cx.spawn(async move |this, cx| {
-            let resolved = match resolve_task.await {
+            let resolved_pages = match page_resolve_task.await {
                 Ok(resolved) => resolved,
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
@@ -812,17 +843,33 @@ impl AiPanel {
                     return;
                 }
             };
-            if let Err(error) = validate_resolved_page_contexts(&request_messages, &resolved) {
+            let resolved_regions = match region_resolve_task.await {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.apply_stream_event(AiStreamEvent::Error(format!("{error:#}")), cx);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            if let Err(error) = validate_resolved_image_contexts(
+                &request_messages,
+                &resolved_pages,
+                &resolved_regions,
+            ) {
                 let _ = this.update(cx, |this, cx| {
                     this.apply_stream_event(AiStreamEvent::Error(error.to_string()), cx);
                     cx.notify();
                 });
                 return;
             }
-            hydrate_page_contexts(&mut request_messages, &resolved);
+            hydrate_page_contexts(&mut request_messages, &resolved_pages);
+            hydrate_region_contexts(&mut request_messages, &resolved_regions);
             if this
                 .update(cx, |this, cx| {
-                    hydrate_page_contexts(&mut this.messages, &resolved);
+                    hydrate_page_contexts(&mut this.messages, &resolved_pages);
+                    hydrate_region_contexts(&mut this.messages, &resolved_regions);
                     cx.notify();
                 })
                 .is_err()
@@ -1158,7 +1205,44 @@ impl AiPanel {
         cx.notify();
 
         let reference = mention.reference;
-        let source_range = mention.range;
+        let source_range = mention.range.clone();
+        if reference.kind == MentionKind::RegionImage {
+            let Some(region) = mention.captured_region().cloned() else {
+                self.mention_preview = None;
+                cx.notify();
+                return;
+            };
+            let resolve_task = self
+                .context_provider
+                .resolve_region_references(vec![region.clone()], cx);
+            self.pending_mention_preview = Some(cx.spawn(async move |this, cx| {
+                let result = match resolve_task.await {
+                    Ok(resolved) => preview_content_from_resolved_region(&region, &resolved),
+                    Err(error) => Err(format!("{error:#}")),
+                };
+                let _ = this.update(cx, |this, cx| {
+                    if this.mention_preview.as_ref().is_some_and(|preview| {
+                        mention_preview_matches(preview, generation, reference, &source_range)
+                    }) {
+                        let status = result
+                            .map(|payload| {
+                                MentionPreviewStatus::Ready(Self::mention_preview_content(
+                                    reference.kind,
+                                    payload,
+                                    cx,
+                                ))
+                            })
+                            .unwrap_or_else(MentionPreviewStatus::Error);
+                        if let Some(preview) = this.mention_preview.as_mut() {
+                            preview.status = status;
+                        }
+                        this.pending_mention_preview = None;
+                        cx.notify();
+                    }
+                });
+            }));
+            return;
+        }
         let resolve_task = self
             .context_provider
             .resolve_page_references(vec![reference], cx);
@@ -1234,12 +1318,30 @@ impl AiPanel {
             .filter(|text| !text.trim().is_empty())
     }
 
-    fn has_current_selection(&self, cx: &App) -> bool {
-        self.current_selection_snapshot(cx).is_some()
+    fn current_region_snapshot(&self, cx: &App) -> Option<RegionImageReference> {
+        self.context_provider
+            .context(false, cx)
+            .and_then(|context| context.selected_region)
+            .filter(|region| !region.is_empty())
+    }
+
+    fn current_mention_availability(&self, cx: &App) -> (bool, bool) {
+        let context = self.context_provider.context(false, cx);
+        (
+            context
+                .as_ref()
+                .and_then(|context| context.selected_text.as_deref())
+                .is_some_and(|text| !text.trim().is_empty()),
+            context
+                .as_ref()
+                .and_then(|context| context.selected_region.as_ref())
+                .is_some_and(|region| !region.is_empty()),
+        )
     }
 
     fn mention_is_available(&self, mention: MentionKind, cx: &App) -> bool {
-        mention_is_available(mention, self.page_count, self.has_current_selection(cx))
+        let (has_selection, has_region) = self.current_mention_availability(cx);
+        mention_is_available(mention, self.page_count, has_selection, has_region)
     }
 
     fn mention_at_offset(&self, offset: usize) -> Option<&ComposerMention> {
@@ -1407,6 +1509,13 @@ impl AiPanel {
                             .iter()
                             .copied()
                             .map(ai_reference_to_library)
+                            .chain(
+                                message
+                                    .region_references()
+                                    .iter()
+                                    .cloned()
+                                    .map(|reference| AiMentionReference::RegionImage { reference }),
+                            )
                             .collect(),
                     }
                 })
@@ -1597,14 +1706,19 @@ impl AiPanel {
                     AiSessionRole::User => Role::User,
                     AiSessionRole::Assistant => Role::Assistant,
                 };
+                let references = message
+                    .references
+                    .iter()
+                    .filter_map(library_reference_to_ai)
+                    .collect();
+                let region_references = message
+                    .references
+                    .iter()
+                    .filter_map(library_reference_to_region)
+                    .collect();
                 ChatMessage::from_persisted(role, message.content, message.request_content)
-                    .with_references(
-                        message
-                            .references
-                            .into_iter()
-                            .map(library_reference_to_ai)
-                            .collect(),
-                    )
+                    .with_references(references)
+                    .with_region_references(region_references)
             })
             .collect();
         self.markdown_views = self
@@ -1679,9 +1793,12 @@ impl AiPanel {
             return Vec::new();
         }
         let query = &self.content[query_start..source_range.end];
+        let (has_selection, has_region) = self.current_mention_availability(cx);
         mention_matches(query)
             .into_iter()
-            .filter(|candidate| self.mention_is_available(candidate.kind, cx))
+            .filter(|candidate| {
+                mention_is_available(candidate.kind, self.page_count, has_selection, has_region)
+            })
             .collect()
     }
 
@@ -1768,7 +1885,7 @@ impl AiPanel {
             cx.notify();
             return;
         }
-        if mention != MentionKind::Selection
+        if !matches!(mention, MentionKind::Selection | MentionKind::RegionImage)
             && self
                 .composer_mentions
                 .iter()
@@ -1797,15 +1914,27 @@ impl AiPanel {
             cx.notify();
             return;
         }
-        let captured_text = if mention == MentionKind::Selection {
-            let Some(selection) = self.current_selection_snapshot(cx) else {
-                self.mention_completion = None;
-                cx.notify();
-                return;
-            };
-            Some(selection)
-        } else {
-            None
+        let captured = match mention {
+            MentionKind::Selection => {
+                let Some(selection) = self.current_selection_snapshot(cx) else {
+                    self.mention_completion = None;
+                    cx.notify();
+                    return;
+                };
+                Some(CapturedMention::Text(selection))
+            }
+            MentionKind::RegionImage => {
+                let Some(region) = self.current_region_snapshot(cx) else {
+                    self.mention_completion = None;
+                    cx.notify();
+                    return;
+                };
+                Some(CapturedMention::Region(region))
+            }
+            MentionKind::Page
+            | MentionKind::PageImage
+            | MentionKind::DocumentText
+            | MentionKind::DocumentImage => None,
         };
         let page = self.current_page.clamp(1, self.page_count.max(1));
         let token = if mention.requires_page_number() {
@@ -1824,7 +1953,7 @@ impl AiPanel {
         self.composer_mentions.push(ComposerMention {
             reference,
             range: mention_start..mention_end,
-            captured_text,
+            captured,
         });
         self.composer_mentions
             .sort_by_key(|composer_mention| composer_mention.range.start);
@@ -2927,6 +3056,7 @@ impl AiPanel {
     fn render_attachment_menu(
         page_count: usize,
         has_selection: bool,
+        has_region: bool,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -2948,7 +3078,7 @@ impl AiPanel {
 
         for (mention_ix, mention) in MentionKind::ALL
             .into_iter()
-            .filter(|mention| mention_is_available(*mention, page_count, has_selection))
+            .filter(|mention| mention_is_available(*mention, page_count, has_selection, has_region))
             .enumerate()
         {
             menu = menu.child(
@@ -3479,7 +3609,7 @@ impl Render for AiPanel {
             .as_ref()
             .map(|completion| completion.selected_ix)
             .unwrap_or(0);
-        let has_current_selection = self.has_current_selection(cx);
+        let (has_current_selection, has_current_region) = self.current_mention_availability(cx);
         let sessions = self.sessions.clone();
         let current_session_id = self.session_id;
         let session_title = self.session_title.clone();
@@ -3994,6 +4124,7 @@ impl Render for AiPanel {
                             .child(Self::render_attachment_menu(
                                 self.page_count,
                                 has_current_selection,
+                                has_current_region,
                                 theme,
                                 cx,
                             )),
@@ -4836,9 +4967,15 @@ fn mention_matches(query: &str) -> Vec<MentionMatch> {
     matches
 }
 
-fn mention_is_available(mention: MentionKind, page_count: usize, has_selection: bool) -> bool {
+fn mention_is_available(
+    mention: MentionKind,
+    page_count: usize,
+    has_selection: bool,
+    has_region: bool,
+) -> bool {
     match mention {
         MentionKind::Selection => has_selection,
+        MentionKind::RegionImage => has_region,
         MentionKind::Page | MentionKind::PageImage | MentionKind::DocumentImage => page_count > 0,
         MentionKind::DocumentText => true,
     }
@@ -4851,7 +4988,7 @@ fn parse_composer_mentions(text: &str) -> Vec<ComposerMention> {
         .map(|(range, reference)| ComposerMention {
             reference,
             range,
-            captured_text: None,
+            captured: None,
         })
         .collect()
 }
@@ -4866,9 +5003,9 @@ fn merge_composer_mentions(
         if let Some(existing) = existing.iter().find(|existing| {
             existing.reference == mention.reference && existing.range == mention.range
         }) {
-            mention.captured_text.clone_from(&existing.captured_text);
+            mention.captured.clone_from(&existing.captured);
         } else if mention.reference.kind == MentionKind::Selection {
-            mention.captured_text.clone_from(&selected_text);
+            mention.captured = selected_text.clone().map(CapturedMention::Text);
         }
     }
     parsed
@@ -4887,7 +5024,7 @@ fn trimmed_composer_content(
         .map(|mention| ComposerMention {
             reference: mention.reference,
             range: mention.range.start - trimmed_start..mention.range.end - trimmed_start,
-            captured_text: mention.captured_text.clone(),
+            captured: mention.captured.clone(),
         })
         .collect();
     (content, mentions)
@@ -4898,9 +5035,21 @@ fn references_for_composer_mentions(mentions: &[ComposerMention]) -> Vec<Mention
     mentions
         .iter()
         .filter_map(|mention| {
+            if mention.reference.kind == MentionKind::RegionImage {
+                return None;
+            }
             (mention.reference.kind == MentionKind::Selection || seen.insert(mention.reference))
                 .then_some(mention.reference)
         })
+        .collect()
+}
+
+fn region_references_for_composer_mentions(
+    mentions: &[ComposerMention],
+) -> Vec<RegionImageReference> {
+    mentions
+        .iter()
+        .filter_map(|mention| mention.captured_region().cloned())
         .collect()
 }
 
@@ -4913,9 +5062,9 @@ fn context_blocks_for_composer_mentions(
         .iter()
         .filter_map(|mention| {
             if mention.reference.kind == MentionKind::Selection {
-                return Some(mention.captured_text.clone().map_or_else(
+                return Some(mention.captured_text().map_or_else(
                     || resolve_mention_context(MentionKind::Selection, context),
-                    |text| ContextBlock::new(MentionKind::Selection, None, text),
+                    |text| ContextBlock::new(MentionKind::Selection, None, text.to_string()),
                 ));
             }
             if mention.reference.kind == MentionKind::DocumentText && seen.insert(mention.reference)
@@ -4949,9 +5098,10 @@ fn resolve_mention_context(mention: MentionKind, context: Option<&AiContext>) ->
                 .clone()
                 .unwrap_or_else(|| tr("ai-no-document-text")),
         ),
-        MentionKind::Page | MentionKind::PageImage | MentionKind::DocumentImage => {
-            missing_context_block(mention)
-        }
+        MentionKind::Page
+        | MentionKind::PageImage
+        | MentionKind::DocumentImage
+        | MentionKind::RegionImage => missing_context_block(mention),
     }
 }
 
@@ -4961,14 +5111,17 @@ fn missing_context_block(mention: MentionKind) -> ContextBlock {
 
 fn mention_preview_text(mention: &ComposerMention, context: Option<&AiContext>) -> Option<String> {
     match mention.reference.kind {
-        MentionKind::Selection => Some(mention.captured_text.clone().map_or_else(
+        MentionKind::Selection => Some(mention.captured_text().map_or_else(
             || resolve_mention_context(MentionKind::Selection, context).text,
-            |text| ContextBlock::new(MentionKind::Selection, None, text).text,
+            |text| ContextBlock::new(MentionKind::Selection, None, text.to_string()).text,
         )),
         MentionKind::DocumentText => {
             Some(resolve_mention_context(MentionKind::DocumentText, context).text)
         }
-        MentionKind::Page | MentionKind::PageImage | MentionKind::DocumentImage => None,
+        MentionKind::Page
+        | MentionKind::PageImage
+        | MentionKind::DocumentImage
+        | MentionKind::RegionImage => None,
     }
 }
 
@@ -5011,15 +5164,7 @@ fn preview_content_from_resolved(
             ResolvedPageContext::Image(image)
                 if image.kind == reference.kind && image.page == reference.page =>
             {
-                let format = ImageFormat::from_mime_type(&image.media_type).ok_or_else(|| {
-                    format!("Unsupported preview image type: {}", image.media_type)
-                })?;
-                let (width, height) = preview_image_dimensions(format, &image.bytes)?;
-                return Ok(MentionPreviewPayload::Image(MentionPreviewImage {
-                    image: Arc::new(Image::from_bytes(format, image.bytes.to_vec())),
-                    width,
-                    height,
-                }));
+                return preview_payload_from_image(image);
             }
             ResolvedPageContext::Text(_) | ResolvedPageContext::Image(_) => {}
         }
@@ -5029,6 +5174,31 @@ fn preview_content_from_resolved(
         "No preview is available for {}.",
         reference.display_text()
     ))
+}
+
+fn preview_content_from_resolved_region(
+    reference: &RegionImageReference,
+    resolved: &[ResolvedRegionContext],
+) -> Result<MentionPreviewPayload, String> {
+    let image = resolved
+        .iter()
+        .find(|context| &context.reference == reference)
+        .map(|context| &context.image)
+        .ok_or_else(|| "No preview is available for @region-image.".to_string())?;
+    preview_payload_from_image(image)
+}
+
+fn preview_payload_from_image(
+    image: &glyphst_ai::ai_chat::ImageContext,
+) -> Result<MentionPreviewPayload, String> {
+    let format = ImageFormat::from_mime_type(&image.media_type)
+        .ok_or_else(|| format!("Unsupported preview image type: {}", image.media_type))?;
+    let (width, height) = preview_image_dimensions(format, &image.bytes)?;
+    Ok(MentionPreviewPayload::Image(MentionPreviewImage {
+        image: Arc::new(Image::from_bytes(format, image.bytes.to_vec())),
+        width,
+        height,
+    }))
 }
 
 fn preview_image_dimensions(format: ImageFormat, bytes: &[u8]) -> Result<(u32, u32), String> {
@@ -5187,8 +5357,9 @@ fn validate_page_image_preflight<'a>(
     page_count: usize,
     page_image_limit: usize,
 ) -> anyhow::Result<()> {
+    let messages = messages.into_iter().collect::<Vec<_>>();
     let mut image_count = 0usize;
-    for reference in messages.into_iter().flat_map(ChatMessage::references) {
+    for reference in messages.iter().copied().flat_map(ChatMessage::references) {
         match reference.kind {
             MentionKind::PageImage => image_count = image_count.saturating_add(1),
             MentionKind::DocumentImage => {
@@ -5197,9 +5368,19 @@ fn validate_page_image_preflight<'a>(
                 }
                 image_count = image_count.saturating_add(page_count);
             }
-            MentionKind::Page | MentionKind::Selection | MentionKind::DocumentText => {}
+            MentionKind::Page
+            | MentionKind::Selection
+            | MentionKind::DocumentText
+            | MentionKind::RegionImage => {}
         }
     }
+    image_count = image_count.saturating_add(
+        messages
+            .iter()
+            .flat_map(|message| message.region_references())
+            .map(|reference| reference.regions.len())
+            .sum::<usize>(),
+    );
     if image_count > page_image_limit {
         return Err(anyhow!(
             "too many page images attached: {image_count} requested, maximum is {page_image_limit}"
@@ -5266,7 +5447,7 @@ fn unresolved_page_references(
         .iter()
         .flat_map(|message| {
             message.references().iter().copied().filter(|reference| {
-                reference.kind.requires_fixed_layout()
+                reference.kind.is_page_reference()
                     && !message_has_resolved_reference(message, *reference, page_count)
             })
         })
@@ -5274,15 +5455,38 @@ fn unresolved_page_references(
         .collect()
 }
 
-fn validate_resolved_page_contexts(
+fn unresolved_region_references(messages: &[ChatMessage]) -> Vec<RegionImageReference> {
+    let mut seen = Vec::new();
+    for message in messages {
+        for reference in message.region_references() {
+            if message_needs_resolved_region_reference(message, reference)
+                && !seen.contains(reference)
+            {
+                seen.push(reference.clone());
+            }
+        }
+    }
+    seen
+}
+
+fn message_needs_resolved_region_reference(
+    message: &ChatMessage,
+    reference: &RegionImageReference,
+) -> bool {
+    message.region_references().contains(reference)
+        && !message.has_resolved_region_reference(reference)
+}
+
+fn validate_resolved_image_contexts(
     messages: &[ChatMessage],
-    resolved: &[ResolvedPageContext],
+    resolved_pages: &[ResolvedPageContext],
+    resolved_regions: &[ResolvedRegionContext],
 ) -> anyhow::Result<()> {
     let image_bytes = messages
         .iter()
         .map(ChatMessage::image_context_bytes)
         .sum::<usize>()
-        + resolved
+        + resolved_pages
             .iter()
             .map(|context| match context {
                 ResolvedPageContext::Image(image) => {
@@ -5294,6 +5498,18 @@ fn validate_resolved_page_contexts(
                     image.bytes.len() * occurrence_count
                 }
                 ResolvedPageContext::Text(_) => 0,
+            })
+            .sum::<usize>()
+        + resolved_regions
+            .iter()
+            .map(|context| {
+                let occurrence_count = messages
+                    .iter()
+                    .filter(|message| {
+                        message_needs_resolved_region_reference(message, &context.reference)
+                    })
+                    .count();
+                context.image.bytes.len() * occurrence_count
             })
             .sum::<usize>();
     if image_bytes > MAX_PAGE_IMAGE_BYTES {
@@ -5337,6 +5553,16 @@ fn hydrate_page_contexts(messages: &mut [ChatMessage], resolved: &[ResolvedPageC
     }
 }
 
+fn hydrate_region_contexts(messages: &mut [ChatMessage], resolved: &[ResolvedRegionContext]) {
+    for message in messages {
+        for context in resolved {
+            if message_needs_resolved_region_reference(message, &context.reference) {
+                message.attach_image(context.image.clone());
+            }
+        }
+    }
+}
+
 fn ai_reference_to_library(reference: MentionReference) -> AiMentionReference {
     match reference.kind {
         MentionKind::Selection => AiMentionReference::Selection,
@@ -5348,20 +5574,39 @@ fn ai_reference_to_library(reference: MentionReference) -> AiMentionReference {
             page: reference.page.unwrap_or(1),
         },
         MentionKind::DocumentImage => AiMentionReference::DocumentImage,
+        MentionKind::RegionImage => {
+            unreachable!("region references are persisted with their geometry")
+        }
     }
 }
 
-fn library_reference_to_ai(reference: AiMentionReference) -> MentionReference {
+fn library_reference_to_ai(reference: &AiMentionReference) -> Option<MentionReference> {
     match reference {
-        AiMentionReference::Selection => MentionReference::new(MentionKind::Selection, None),
-        AiMentionReference::DocumentText => MentionReference::new(MentionKind::DocumentText, None),
-        AiMentionReference::Page { page } => MentionReference::new(MentionKind::Page, Some(page)),
+        AiMentionReference::Selection => Some(MentionReference::new(MentionKind::Selection, None)),
+        AiMentionReference::DocumentText => {
+            Some(MentionReference::new(MentionKind::DocumentText, None))
+        }
+        AiMentionReference::Page { page } => {
+            Some(MentionReference::new(MentionKind::Page, Some(*page)))
+        }
         AiMentionReference::PageImage { page } => {
-            MentionReference::new(MentionKind::PageImage, Some(page))
+            Some(MentionReference::new(MentionKind::PageImage, Some(*page)))
         }
         AiMentionReference::DocumentImage => {
-            MentionReference::new(MentionKind::DocumentImage, None)
+            Some(MentionReference::new(MentionKind::DocumentImage, None))
         }
+        AiMentionReference::RegionImage { .. } => None,
+    }
+}
+
+fn library_reference_to_region(reference: &AiMentionReference) -> Option<RegionImageReference> {
+    match reference {
+        AiMentionReference::RegionImage { reference } => Some(reference.clone()),
+        AiMentionReference::Selection
+        | AiMentionReference::DocumentText
+        | AiMentionReference::Page { .. }
+        | AiMentionReference::PageImage { .. }
+        | AiMentionReference::DocumentImage => None,
     }
 }
 
@@ -5402,6 +5647,17 @@ fn with_alpha(rgb: u32, alpha: u8) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glyphst_core::{PageIndex, PageRegion};
+
+    fn region_reference(page: usize, x0: f32) -> RegionImageReference {
+        RegionImageReference::new([PageRegion {
+            page: PageIndex(page),
+            x0,
+            y0: 2.0,
+            x1: x0 + 10.0,
+            y1: 12.0,
+        }])
+    }
 
     #[test]
     fn request_prompt_strips_structured_mentions_and_preserves_words() {
@@ -5428,7 +5684,7 @@ mod tests {
     #[test]
     fn parser_restores_only_canonical_mentions_at_valid_boundaries() {
         let mentions = parse_composer_mentions(
-            "mail@example.com @page(2) (@page-image(4)) @selection @document-image",
+            "mail@example.com @page(2) (@page-image(4)) @selection @document-image @region-image",
         );
         assert_eq!(
             mentions
@@ -5440,6 +5696,7 @@ mod tests {
                 MentionReference::new(MentionKind::PageImage, Some(4)),
                 MentionReference::new(MentionKind::Selection, None),
                 MentionReference::new(MentionKind::DocumentImage, None),
+                MentionReference::new(MentionKind::RegionImage, None),
             ]
         );
     }
@@ -5447,7 +5704,7 @@ mod tests {
     #[test]
     fn selection_mentions_keep_distinct_snapshots_in_order() {
         let mut existing = parse_composer_mentions("@selection");
-        existing[0].captured_text = Some("First selection".to_string());
+        existing[0].captured = Some(CapturedMention::Text("First selection".to_string()));
         adjust_composer_mentions(&mut existing, &(0..0), "prefix ".len());
 
         let parsed = parse_composer_mentions("prefix @selection and @selection");
@@ -5479,8 +5736,8 @@ mod tests {
     #[test]
     fn selection_preview_uses_the_hovered_occurrence_snapshot() {
         let mut mentions = parse_composer_mentions("@selection and @selection");
-        mentions[0].captured_text = Some("First selection".to_string());
-        mentions[1].captured_text = Some("Second selection".to_string());
+        mentions[0].captured = Some(CapturedMention::Text("First selection".to_string()));
+        mentions[1].captured = Some(CapturedMention::Text("Second selection".to_string()));
         let live_context = AiContext {
             selected_text: Some("Later selection".to_string()),
             ..AiContext::default()
@@ -5493,6 +5750,21 @@ mod tests {
         assert_eq!(
             mention_preview_text(&mentions[1], Some(&live_context)).as_deref(),
             Some("Second selection")
+        );
+    }
+
+    #[test]
+    fn region_mentions_keep_distinct_geometry_snapshots() {
+        let mut mentions = parse_composer_mentions("@region-image and @region-image");
+        let first = region_reference(0, 1.0);
+        let second = region_reference(2, 4.0);
+        mentions[0].captured = Some(CapturedMention::Region(first.clone()));
+        mentions[1].captured = Some(CapturedMention::Region(second.clone()));
+
+        assert!(references_for_composer_mentions(&mentions).is_empty());
+        assert_eq!(
+            region_references_for_composer_mentions(&mentions),
+            vec![first, second]
         );
     }
 
@@ -5548,6 +5820,28 @@ mod tests {
             }
             Ok(MentionPreviewPayload::Text(_)) | Err(_) => panic!("expected image preview"),
         }
+    }
+
+    #[test]
+    fn resolved_region_preview_matches_captured_geometry() {
+        let reference = region_reference(1, 3.0);
+        let mut image_bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut image_bytes)
+            .encode(&[255; 5 * 7 * 3], 5, 7, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let resolved = ResolvedRegionContext {
+            reference: reference.clone(),
+            image: glyphst_ai::ai_chat::ImageContext::new_region(
+                reference.clone(),
+                "image/jpeg",
+                image_bytes,
+            ),
+        };
+
+        assert!(matches!(
+            preview_content_from_resolved_region(&reference, &[resolved]),
+            Ok(MentionPreviewPayload::Image(image)) if (image.width, image.height) == (5, 7)
+        ));
     }
 
     #[test]
@@ -5688,17 +5982,14 @@ mod tests {
     #[test]
     fn deleting_selection_mention_removes_only_its_snapshot() {
         let mut mentions = parse_composer_mentions("@selection and @selection");
-        mentions[0].captured_text = Some("First selection".to_string());
-        mentions[1].captured_text = Some("Second selection".to_string());
+        mentions[0].captured = Some(CapturedMention::Text("First selection".to_string()));
+        mentions[1].captured = Some(CapturedMention::Text("Second selection".to_string()));
         let first_range = mentions[0].range.clone();
 
         adjust_composer_mentions(&mut mentions, &first_range, 0);
 
         assert_eq!(mentions.len(), 1);
-        assert_eq!(
-            mentions[0].captured_text.as_deref(),
-            Some("Second selection")
-        );
+        assert_eq!(mentions[0].captured_text(), Some("Second selection"));
         assert_eq!(mentions[0].range.start, 5);
     }
 
@@ -5816,11 +6107,33 @@ mod tests {
 
     #[test]
     fn selection_mentions_are_available_only_with_selected_text() {
-        assert!(!mention_is_available(MentionKind::Selection, 10, false));
-        assert!(mention_is_available(MentionKind::Selection, 0, true));
-        assert!(!mention_is_available(MentionKind::Page, 0, true));
-        assert!(mention_is_available(MentionKind::Page, 1, false));
-        assert!(mention_is_available(MentionKind::DocumentText, 0, false));
+        assert!(!mention_is_available(
+            MentionKind::Selection,
+            10,
+            false,
+            false
+        ));
+        assert!(mention_is_available(MentionKind::Selection, 0, true, false));
+        assert!(!mention_is_available(
+            MentionKind::RegionImage,
+            10,
+            false,
+            false
+        ));
+        assert!(mention_is_available(
+            MentionKind::RegionImage,
+            10,
+            false,
+            true
+        ));
+        assert!(!mention_is_available(MentionKind::Page, 0, true, true));
+        assert!(mention_is_available(MentionKind::Page, 1, false, false));
+        assert!(mention_is_available(
+            MentionKind::DocumentText,
+            0,
+            false,
+            false
+        ));
     }
 
     #[test]
@@ -5837,30 +6150,27 @@ mod tests {
     #[test]
     fn ordinary_edits_preserve_only_existing_explicit_mentions() {
         let mut mentions = parse_composer_mentions("@selection");
-        mentions[0].captured_text = Some("Selected text".to_string());
+        mentions[0].captured = Some(CapturedMention::Text("Selected text".to_string()));
 
         adjust_composer_mentions(&mut mentions, &(0..0), "@document ".len());
 
         assert_eq!(mentions.len(), 1);
         assert_eq!(mentions[0].reference.kind, MentionKind::Selection);
         assert_eq!(mentions[0].range, 10..20);
-        assert_eq!(mentions[0].captured_text.as_deref(), Some("Selected text"));
+        assert_eq!(mentions[0].captured_text(), Some("Selected text"));
     }
 
     #[test]
     fn trimmed_composer_content_rebases_explicit_mentions() {
         let source = "  Ask @selection  ";
         let mut mentions = parse_composer_mentions(source);
-        mentions[0].captured_text = Some("Selected text".to_string());
+        mentions[0].captured = Some(CapturedMention::Text("Selected text".to_string()));
 
         let (trimmed, trimmed_mentions) = trimmed_composer_content(source, &mentions);
 
         assert_eq!(trimmed, "Ask @selection");
         assert_eq!(trimmed_mentions[0].range, 4..14);
-        assert_eq!(
-            trimmed_mentions[0].captured_text.as_deref(),
-            Some("Selected text")
-        );
+        assert_eq!(trimmed_mentions[0].captured_text(), Some("Selected text"));
     }
 
     #[test]
@@ -5932,6 +6242,24 @@ mod tests {
         assert!(validate_page_image_preflight(&messages, 3, 3).is_err());
         assert!(validate_page_image_preflight(&messages, 3, 4).is_ok());
         assert!(validate_page_image_preflight(&messages[1..], 0, 10).is_err());
+    }
+
+    #[test]
+    fn image_preflight_counts_region_images() {
+        let reference = RegionImageReference::new([
+            region_reference(0, 1.0).regions[0],
+            region_reference(1, 2.0).regions[0],
+        ]);
+        let message = ChatMessage::user(
+            "@region-image".to_string(),
+            String::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_region_references(vec![reference]);
+
+        assert!(validate_page_image_preflight([&message], 2, 1).is_err());
+        assert!(validate_page_image_preflight([&message], 2, 2).is_ok());
     }
 
     #[test]
@@ -6064,8 +6392,43 @@ mod tests {
     fn document_image_persistence_mapping_round_trips() {
         let reference = MentionReference::new(MentionKind::DocumentImage, None);
         assert_eq!(
-            library_reference_to_ai(ai_reference_to_library(reference)),
-            reference
+            library_reference_to_ai(&ai_reference_to_library(reference)),
+            Some(reference)
         );
+    }
+
+    #[test]
+    fn region_hydration_and_persistence_keep_geometry() {
+        let reference = region_reference(1, 3.0);
+        let mut message = ChatMessage::user(
+            "@region-image".to_string(),
+            String::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_region_references(vec![reference.clone()]);
+        assert_eq!(
+            unresolved_region_references(std::slice::from_ref(&message)),
+            vec![reference.clone()]
+        );
+
+        hydrate_region_contexts(
+            std::slice::from_mut(&mut message),
+            &[ResolvedRegionContext {
+                reference: reference.clone(),
+                image: glyphst_ai::ai_chat::ImageContext::new_region(
+                    reference.clone(),
+                    "image/jpeg",
+                    vec![1, 2, 3],
+                ),
+            }],
+        );
+        assert!(unresolved_region_references(&[message]).is_empty());
+
+        let stored = AiMentionReference::RegionImage {
+            reference: reference.clone(),
+        };
+        assert_eq!(library_reference_to_region(&stored), Some(reference));
+        assert_eq!(library_reference_to_ai(&stored), None);
     }
 }

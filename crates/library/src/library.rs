@@ -6,7 +6,9 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow};
-pub use glyphst_core::{EpubReaderPreferences, HighlightColor, SemanticTextAnchor};
+pub use glyphst_core::{
+    EpubReaderPreferences, HighlightColor, RegionImageReference, SemanticTextAnchor,
+};
 use gpui::Global;
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -889,13 +891,14 @@ pub enum AiSessionRole {
     Assistant,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum AiMentionReference {
     Selection,
     DocumentText,
     Page { page: usize },
     PageImage { page: usize },
     DocumentImage,
+    RegionImage { reference: RegionImageReference },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2861,6 +2864,15 @@ mod tests {
             AiMentionReference::Page { page: 4 },
             AiMentionReference::PageImage { page: 5 },
             AiMentionReference::DocumentImage,
+            AiMentionReference::RegionImage {
+                reference: RegionImageReference::new([glyphst_core::PageRegion {
+                    page: glyphst_core::PageIndex(5),
+                    x0: 10.0,
+                    y0: 20.0,
+                    x1: 30.0,
+                    y1: 40.0,
+                }]),
+            },
         ];
 
         {
