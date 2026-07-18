@@ -716,6 +716,7 @@ struct SearchState {
     matches: Vec<SearchMatch>,
     active: Option<usize>,
     ignore_case: bool,
+    reveal_after_indexing: bool,
 }
 
 impl Default for SearchState {
@@ -725,7 +726,50 @@ impl Default for SearchState {
             matches: Vec::new(),
             active: None,
             ignore_case: true,
+            reveal_after_indexing: false,
         }
+    }
+}
+
+impl SearchState {
+    fn update_reveal_after_indexing(&mut self, indexing: bool) {
+        self.reveal_after_indexing = indexing && !self.query.is_empty();
+    }
+
+    fn cancel_reveal_after_indexing(&mut self) {
+        self.reveal_after_indexing = false;
+    }
+
+    fn take_reveal_after_indexing(&mut self) -> bool {
+        std::mem::take(&mut self.reveal_after_indexing)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TextIndexState {
+    #[default]
+    Pending,
+    Indexing,
+    Ready,
+    Failed,
+}
+
+impl TextIndexState {
+    fn begin(&mut self) -> bool {
+        if *self != Self::Pending {
+            return false;
+        }
+
+        *self = Self::Indexing;
+        true
+    }
+
+    fn settle(&mut self, succeeded: bool) {
+        *self = if succeeded { Self::Ready } else { Self::Failed };
+    }
+
+    fn is_pending_or_indexing(self) -> bool {
+        matches!(self, Self::Pending | Self::Indexing)
     }
 }
 
@@ -929,7 +973,7 @@ pub struct PdfView {
     diff_flashes: Vec<DiffFlash>,
     diff_pending_pages: BTreeSet<usize>,
     diff_flash_clear_task: Option<Task<()>>,
-    text_indexing: bool,
+    text_index_state: TextIndexState,
     text_indexing_task: Option<Task<()>>,
     position_save_task: Option<Task<()>>,
     context_menu_position: Option<GpuiPoint<Pixels>>,
@@ -1807,7 +1851,7 @@ impl PdfView {
             diff_flashes: Vec::new(),
             diff_pending_pages: BTreeSet::new(),
             diff_flash_clear_task: None,
-            text_indexing: false,
+            text_index_state: TextIndexState::Pending,
             text_indexing_task: None,
             position_save_task: None,
             context_menu_position: None,
@@ -2153,7 +2197,8 @@ impl PdfView {
         self.page_image_bounds = (0..self.pages.len()).map(|_| None).collect();
         self.loading = false;
         self.loading_error = None;
-        self.text_indexing = false;
+        self.text_index_state = TextIndexState::Pending;
+        self.search.cancel_reveal_after_indexing();
         self.diff_pending_pages = diff_pending_pages;
         self.grid_overview_cursor = self.grid_overview_cursor.min(self.last_page_index());
         self.thumbnail_sidebar_current_page = self
@@ -2376,6 +2421,7 @@ impl PdfView {
         self.page_image_bounds = (0..self.pages.len()).map(|_| None).collect();
         self.loading = false;
         self.loading_error = None;
+        self.text_index_state = TextIndexState::Pending;
         if let Some(page_idx) = self.presentation_page.as_mut() {
             *page_idx = (*page_idx).min(self.pages.len().saturating_sub(1));
         }
@@ -2392,17 +2438,22 @@ impl PdfView {
     fn apply_loading_error(&mut self, error: String, cx: &mut Context<Self>) {
         eprintln!("failed to load PDF pages: {error}");
         self.loading = false;
-        self.text_indexing = false;
+        self.text_index_state = TextIndexState::Failed;
+        self.search.cancel_reveal_after_indexing();
+        self.recompute_search();
         self.loading_error = Some(error);
+        self.sync_search_bar(cx);
         cx.notify();
     }
 
     fn start_text_indexing(&mut self, cx: &mut Context<Self>) {
-        if self.text_indexing_task.is_some() || self.pages.is_empty() {
+        if self.text_indexing_task.is_some()
+            || self.pages.is_empty()
+            || !self.text_index_state.begin()
+        {
             return;
         }
 
-        self.text_indexing = true;
         self.sync_search_bar(cx);
 
         let snapshot = self.document_snapshot.clone();
@@ -2649,7 +2700,7 @@ impl PdfView {
         self.page_block_ranges = loaded.page_block_ranges;
         self.invalidate_translation_document();
         self.links = loaded.links;
-        self.text_indexing = false;
+        self.text_index_state.settle(true);
         self.hovered_link = None;
         self.pending_link = None;
         self.pending_selection_anchor = None;
@@ -2671,9 +2722,10 @@ impl PdfView {
         }
         self.recompute_search();
         self.search.active = self.nearest_search_match_index();
+        let reveal_search_match = self.search.take_reveal_after_indexing();
         self.sync_search_bar(cx);
 
-        if self.search.active.is_some() {
+        if reveal_search_match && self.search.active.is_some() {
             self.record_search_jump_origin();
             self.scroll_to_active_search_match(cx);
         }
@@ -2758,7 +2810,9 @@ impl PdfView {
 
     fn apply_text_indexing_error(&mut self, error: String, cx: &mut Context<Self>) {
         eprintln!("failed to index PDF text: {error}");
-        self.text_indexing = false;
+        self.text_index_state.settle(false);
+        self.search.cancel_reveal_after_indexing();
+        self.recompute_search();
         self.sync_search_bar(cx);
         cx.notify();
     }
@@ -4354,6 +4408,7 @@ impl PdfView {
 
     fn mark_manual_navigation(&mut self) {
         self.position_from_search = false;
+        self.search.cancel_reveal_after_indexing();
     }
 
     fn jump_backward(&mut self, cx: &mut Context<Self>) {
@@ -6579,11 +6634,15 @@ impl PdfView {
 
     fn deploy_search_query(&mut self, query: SharedString, previous: bool, cx: &mut Context<Self>) {
         if query.as_ref() == self.search.query.as_ref() {
+            self.search
+                .update_reveal_after_indexing(self.text_index_state.is_pending_or_indexing());
             self.navigate_search(previous, cx);
             return;
         }
 
         self.search.query = query;
+        self.search
+            .update_reveal_after_indexing(self.text_index_state.is_pending_or_indexing());
         self.recompute_search();
         self.search.active = self.nearest_search_match_index();
         if previous
@@ -6612,6 +6671,8 @@ impl PdfView {
         }
 
         self.search.query = query;
+        self.search
+            .update_reveal_after_indexing(self.text_index_state.is_pending_or_indexing());
         self.recompute_search();
         self.search.active = self.nearest_search_match_index();
         self.sync_search_bar(cx);
@@ -6636,6 +6697,8 @@ impl PdfView {
 
         self.search.query = query;
         self.search.ignore_case = ignore_case;
+        self.search
+            .update_reveal_after_indexing(self.text_index_state.is_pending_or_indexing());
         self.recompute_search();
         self.search.active = self.nearest_search_match_index();
         self.sync_search_bar(cx);
@@ -6658,7 +6721,7 @@ impl PdfView {
         } else {
             self.search.query.as_ref().to_string()
         };
-        if needle.is_empty() || self.text_indexing {
+        if needle.is_empty() || self.text_index_state.is_pending_or_indexing() {
             return;
         }
 
@@ -6857,7 +6920,7 @@ impl PdfView {
             let active = self.search.active;
             let match_count = self.search.matches.len();
             let ignore_case = self.search.ignore_case;
-            let indexing = self.text_indexing && !query.is_empty();
+            let indexing = self.text_index_state.is_pending_or_indexing() && !query.is_empty();
             search_bar.update(cx, |search_bar, cx| {
                 search_bar.set_match_status(
                     query.clone(),
@@ -7479,7 +7542,7 @@ impl PdfView {
         let active = self.search.active;
         let match_count = self.search.matches.len();
         let ignore_case = self.search.ignore_case;
-        let indexing = self.text_indexing && !query.is_empty();
+        let indexing = self.text_index_state.is_pending_or_indexing() && !query.is_empty();
         let search_bar = cx.new(|cx| {
             SearchBar::new(
                 previous_focus_handle.clone(),
@@ -7518,6 +7581,7 @@ impl PdfView {
             self.search.query = "".into();
             self.search.matches.clear();
             self.search.active = None;
+            self.search.cancel_reveal_after_indexing();
             self.focus_handle.focus(window, cx);
             cx.notify();
         }
@@ -7840,7 +7904,7 @@ impl PdfView {
             let current_position = self.current_jump_position();
             Self::push_jump_position(&mut self.jump_back, current_position);
             self.jump_forward.clear();
-            self.position_from_search = false;
+            self.mark_manual_navigation();
             self.set_presentation_page(page_idx, cx);
             return;
         }
@@ -7855,7 +7919,7 @@ impl PdfView {
         let current_position = self.current_jump_position();
         Self::push_jump_position(&mut self.jump_back, current_position);
         self.jump_forward.clear();
-        self.position_from_search = false;
+        self.mark_manual_navigation();
         self.set_scroll_doc(scroll_x_doc, scroll_y_doc, cx);
     }
 
@@ -7880,7 +7944,7 @@ impl PdfView {
         let current_position = self.current_jump_position();
         Self::push_jump_position(&mut self.jump_back, current_position);
         self.jump_forward.clear();
-        self.position_from_search = false;
+        self.mark_manual_navigation();
         if self.capabilities.reflow && position.is_reflow() {
             self.restore_position(position);
             self.schedule_position_save(cx);
@@ -11742,8 +11806,8 @@ impl Render for PdfView {
 #[cfg(test)]
 mod tests {
     use super::{
-        Glyph, PageMarkdownBlock, PdfView, TextChunk, TextLine, TranslationCardState,
-        TranslationStatus, reset_translation_cards_for_document_replacement,
+        Glyph, PageMarkdownBlock, PdfView, SearchState, TextChunk, TextIndexState, TextLine,
+        TranslationCardState, TranslationStatus, reset_translation_cards_for_document_replacement,
     };
     use glyphst_ai::ai_chat::{MentionKind, MentionReference};
     use glyphst_core::{DocumentLayout, EpubLayout};
@@ -11754,6 +11818,65 @@ mod tests {
     #[test]
     fn page_counter_uses_generated_pages_for_any_document_format() {
         assert_eq!(PdfView::page_counter_label(3, 12), "3 / 12");
+    }
+
+    #[test]
+    fn completed_text_index_does_not_restart() {
+        let mut state = TextIndexState::Pending;
+
+        assert!(state.begin());
+        assert_eq!(state, TextIndexState::Indexing);
+        assert!(!state.begin());
+
+        state.settle(true);
+        assert_eq!(state, TextIndexState::Ready);
+        assert!(!state.begin());
+    }
+
+    #[test]
+    fn failed_text_index_does_not_retry_implicitly() {
+        let mut state = TextIndexState::Pending;
+
+        assert!(state.begin());
+        state.settle(false);
+
+        assert_eq!(state, TextIndexState::Failed);
+        assert!(!state.begin());
+    }
+
+    #[test]
+    fn search_reveal_after_indexing_is_consumed_once() {
+        let mut search = SearchState {
+            query: "needle".into(),
+            ..Default::default()
+        };
+
+        search.update_reveal_after_indexing(true);
+
+        assert!(search.take_reveal_after_indexing());
+        assert!(!search.take_reveal_after_indexing());
+    }
+
+    #[test]
+    fn manual_navigation_cancels_search_reveal_after_indexing() {
+        let mut search = SearchState {
+            query: "needle".into(),
+            ..Default::default()
+        };
+
+        search.update_reveal_after_indexing(true);
+        search.cancel_reveal_after_indexing();
+
+        assert!(!search.take_reveal_after_indexing());
+    }
+
+    #[test]
+    fn empty_search_does_not_request_reveal_after_indexing() {
+        let mut search = SearchState::default();
+
+        search.update_reveal_after_indexing(true);
+
+        assert!(!search.take_reveal_after_indexing());
     }
 
     #[test]
