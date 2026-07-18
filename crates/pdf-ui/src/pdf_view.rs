@@ -1481,9 +1481,13 @@ impl PdfView {
     ) -> Result<Vec<u8>> {
         let (width, height) =
             Self::page_image_dimensions(page_width, page_height, quality.max_dimension())?;
-        let mut pixmap =
-            Pixmap::new_with_w_h(&Colorspace::device_rgb(), width as i32, height as i32, true)
-                .context("failed to allocate page image")?;
+        let mut pixmap = Pixmap::new_with_w_h(
+            &Colorspace::device_rgb(),
+            width as i32,
+            height as i32,
+            false,
+        )
+        .context("failed to allocate page image")?;
         pixmap.samples_mut().fill(255);
 
         let zoom_x = width as f32 / page_width;
@@ -1505,8 +1509,8 @@ impl PdfView {
         }
 
         let samples = pixmap.samples();
-        let expected_len = width as usize * height as usize * 4;
-        if samples.len() != expected_len || pixmap.n() != 4 {
+        let expected_len = width as usize * height as usize * 3;
+        if samples.len() != expected_len || pixmap.n() != 3 {
             bail!(
                 "unexpected page image pixmap layout: {} samples, {} components",
                 samples.len(),
@@ -1515,7 +1519,7 @@ impl PdfView {
         }
         let mut bytes = Vec::new();
         JpegEncoder::new_with_quality(&mut bytes, quality.jpeg_quality())
-            .encode(samples, width, height, image::ExtendedColorType::Rgba8)
+            .encode(samples, width, height, image::ExtendedColorType::Rgb8)
             .context("failed to encode page image as JPEG")?;
         Ok(bytes)
     }
@@ -11744,6 +11748,7 @@ mod tests {
     use glyphst_ai::ai_chat::{MentionKind, MentionReference};
     use glyphst_core::{DocumentLayout, EpubLayout};
     use gpui::{Modifiers, ScrollWheelEvent, point, px};
+    use image::GenericImageView;
     use mupdf::{Point, Quad, Rect};
 
     #[test]
@@ -11818,6 +11823,24 @@ mod tests {
             (1024, 791)
         );
         assert!(PdfView::page_image_dimensions(0.0, 612.0, 1024).is_err());
+    }
+
+    #[test]
+    fn render_page_jpeg_encodes_rgb_pixmap() {
+        let page_bounds = Rect::new(0.0, 0.0, 10.0, 20.0);
+        let display_list = mupdf::DisplayList::new(page_bounds).unwrap();
+
+        let bytes = PdfView::render_page_jpeg(
+            &display_list,
+            page_bounds,
+            page_bounds.width(),
+            page_bounds.height(),
+            crate::settings::PageImageQuality::Low,
+        )
+        .unwrap();
+        let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
+
+        assert_eq!(image.dimensions(), (512, 1024));
     }
 
     #[test]

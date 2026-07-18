@@ -1,6 +1,6 @@
 use std::{
-    cell::Cell, collections::HashSet, ops::Range, path::PathBuf, rc::Rc, sync::Arc, thread,
-    time::Duration,
+    cell::Cell, collections::HashSet, io::Cursor, ops::Range, path::PathBuf, rc::Rc, sync::Arc,
+    thread, time::Duration,
 };
 
 use crate::{AiContext, AiContextProvider, AiPageState, ResolvedPageContext};
@@ -33,8 +33,8 @@ use gpui::{
     DispatchPhase, Edges, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId, HighlightStyle, Image,
     ImageFormat, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollHandle,
-    ScrollStrategy, SharedString, Style, StyledText, Task, TextRun, TextStyle,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point as GpuiPoint, Render,
+    ScrollHandle, ScrollStrategy, SharedString, Style, StyledText, Task, TextRun, TextStyle,
     TransformationMatrix, UTF16Selection, UniformListScrollHandle, Window, WrappedLine, anchored,
     canvas, deferred, div, fill, img, point, prelude::*, px, quad, relative, rgb, rgba, size,
     uniform_list,
@@ -50,7 +50,9 @@ const MENTION_PREVIEW_HIDE_DELAY: Duration = Duration::from_millis(150);
 const MENTION_PREVIEW_MAX_CHARS: usize = 4_000;
 const MENTION_PREVIEW_WIDTH: f32 = 320.0;
 const MENTION_PREVIEW_TEXT_MAX_HEIGHT: f32 = 240.0;
-const MENTION_PREVIEW_IMAGE_HEIGHT: f32 = 220.0;
+const MENTION_PREVIEW_WINDOW_MARGIN: f32 = 8.0;
+const MENTION_PREVIEW_BRIDGE_HEIGHT: f32 = 6.0;
+const MENTION_PREVIEW_HEADER_HEIGHT: f32 = 34.0;
 const VALIDATION_NOTICE_DURATION: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,12 +165,19 @@ enum MentionPreviewContent {
         markdown: Entity<Markdown>,
         truncated: bool,
     },
-    Image(Arc<Image>),
+    Image(MentionPreviewImage),
 }
 
 enum MentionPreviewPayload {
     Text(String),
-    Image(Arc<Image>),
+    Image(MentionPreviewImage),
+}
+
+#[derive(Clone)]
+struct MentionPreviewImage {
+    image: Arc<Image>,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Clone)]
@@ -186,6 +195,16 @@ struct MentionPreview {
     anchor: Anchor,
     generation: u64,
     status: MentionPreviewStatus,
+}
+
+#[derive(Clone)]
+struct MentionPreviewRenderOptions {
+    width: f32,
+    image_height: f32,
+    scroll_handle: ScrollHandle,
+    bounds_cell: Rc<Cell<Option<Bounds<Pixels>>>>,
+    theme: Theme,
+    base_text_style: TextStyle,
 }
 
 #[derive(Clone)]
@@ -2051,13 +2070,18 @@ impl AiPanel {
 
     fn render_mention_preview(
         preview: MentionPreview,
-        scroll_handle: ScrollHandle,
-        preview_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-        theme: Theme,
-        base_text_style: TextStyle,
+        options: MentionPreviewRenderOptions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let MentionPreviewRenderOptions {
+            width,
+            image_height,
+            scroll_handle,
+            bounds_cell,
+            theme,
+            base_text_style,
+        } = options;
         let generation = preview.generation;
         let preview_anchor = preview.anchor;
         let body = match preview.status {
@@ -2115,9 +2139,11 @@ impl AiPanel {
                 .into_any_element(),
             MentionPreviewStatus::Ready(MentionPreviewContent::Image(image)) => div()
                 .w_full()
-                .h(px(MENTION_PREVIEW_IMAGE_HEIGHT))
+                .min_w_0()
+                .h(px(image_height))
+                .overflow_hidden()
                 .bg(rgb(theme.tab_active_background))
-                .child(img(image).size_full())
+                .child(img(image.image).size_full().object_fit(ObjectFit::Contain))
                 .into_any_element(),
             MentionPreviewStatus::Error(error) => div()
                 .p_3()
@@ -2151,8 +2177,8 @@ impl AiPanel {
             )
             .child(body);
         let measure = canvas(
-            move |bounds, _window, _cx| {
-                preview_bounds.set(Some(bounds));
+            move |measured_bounds, _window, _cx| {
+                bounds_cell.set(Some(measured_bounds));
             },
             |_, _, _, _| {},
         )
@@ -2164,10 +2190,12 @@ impl AiPanel {
         div()
             .id(("ai-mention-preview-hover-region", generation))
             .relative()
-            .w(px(MENTION_PREVIEW_WIDTH))
-            .when(preview_anchor == Anchor::TopLeft, |this| this.pt(px(6.0)))
+            .w(px(width))
+            .when(preview_anchor == Anchor::TopLeft, |this| {
+                this.pt(px(MENTION_PREVIEW_BRIDGE_HEIGHT))
+            })
             .when(preview_anchor == Anchor::BottomLeft, |this| {
-                this.pb(px(6.0))
+                this.pb(px(MENTION_PREVIEW_BRIDGE_HEIGHT))
             })
             .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
                 if *hovered {
@@ -2208,6 +2236,12 @@ impl AiPanel {
         let mention_preview = self.mention_preview.clone();
         let mention_preview_scroll = self.mention_preview_scroll.clone();
         let mention_preview_bounds = self.mention_preview_bounds.clone();
+        let (mention_preview_width, mention_preview_image_height) = Self::mention_preview_size(
+            mention_preview.as_ref(),
+            self.width,
+            window.viewport_size().width.as_f32(),
+            window.viewport_size().height.as_f32(),
+        );
         let completion_matches = self.mention_completion_matches(cx);
         let completion_selected = self
             .mention_completion
@@ -2359,10 +2393,14 @@ impl AiPanel {
                             .snap_to_window_with_margin(px(8.0))
                             .child(Self::render_mention_preview(
                                 preview,
-                                mention_preview_scroll,
-                                mention_preview_bounds,
-                                theme,
-                                base_text_style,
+                                MentionPreviewRenderOptions {
+                                    width: mention_preview_width,
+                                    image_height: mention_preview_image_height,
+                                    scroll_handle: mention_preview_scroll,
+                                    bounds_cell: mention_preview_bounds,
+                                    theme,
+                                    base_text_style,
+                                },
                                 window,
                                 cx,
                             )),
@@ -2679,6 +2717,57 @@ impl AiPanel {
         estimated
             .clamp(COMPLETION_MENU_MIN_WIDTH, COMPLETION_MENU_MAX_WIDTH)
             .min(available.max(0.0))
+    }
+
+    fn mention_preview_width(panel_width: f32, viewport_width: f32) -> f32 {
+        MENTION_PREVIEW_WIDTH
+            .min(panel_width.max(0.0))
+            .min((viewport_width - MENTION_PREVIEW_WINDOW_MARGIN * 2.0).max(0.0))
+    }
+
+    fn mention_preview_size(
+        preview: Option<&MentionPreview>,
+        panel_width: f32,
+        viewport_width: f32,
+        viewport_height: f32,
+    ) -> (f32, f32) {
+        let max_width = Self::mention_preview_width(panel_width, viewport_width);
+        let Some(MentionPreview {
+            position,
+            anchor,
+            status: MentionPreviewStatus::Ready(MentionPreviewContent::Image(image)),
+            ..
+        }) = preview
+        else {
+            return (max_width, 0.0);
+        };
+        let available = match anchor {
+            Anchor::TopLeft => {
+                viewport_height - position.y.as_f32() - MENTION_PREVIEW_WINDOW_MARGIN
+            }
+            Anchor::BottomLeft => position.y.as_f32() - MENTION_PREVIEW_WINDOW_MARGIN,
+            _ => viewport_height - MENTION_PREVIEW_WINDOW_MARGIN * 2.0,
+        };
+        let max_height =
+            (available - MENTION_PREVIEW_HEADER_HEIGHT - MENTION_PREVIEW_BRIDGE_HEIGHT).max(0.0);
+        Self::mention_preview_image_size(max_width, max_height, image.width, image.height)
+    }
+
+    fn mention_preview_image_size(
+        max_width: f32,
+        max_height: f32,
+        image_width: u32,
+        image_height: u32,
+    ) -> (f32, f32) {
+        if max_width <= 0.0 || max_height <= 0.0 || image_width == 0 || image_height == 0 {
+            return (0.0, 0.0);
+        }
+        let height = max_width * image_height as f32 / image_width as f32;
+        if height <= max_height {
+            (max_width, height)
+        } else {
+            (max_width * max_height / height, max_height)
+        }
     }
 
     fn completion_menu_placement(
@@ -3403,6 +3492,12 @@ impl Render for AiPanel {
         let mention_preview = self.mention_preview.clone();
         let mention_preview_scroll = self.mention_preview_scroll.clone();
         let mention_preview_bounds = self.mention_preview_bounds.clone();
+        let (mention_preview_width, mention_preview_image_height) = Self::mention_preview_size(
+            mention_preview.as_ref(),
+            panel_width,
+            window.viewport_size().width.as_f32(),
+            window.viewport_size().height.as_f32(),
+        );
         let completion_placement = if showing_sessions || completion_matches.is_empty() {
             None
         } else {
@@ -3874,10 +3969,14 @@ impl Render for AiPanel {
                             .snap_to_window_with_margin(px(8.0))
                             .child(Self::render_mention_preview(
                                 preview,
-                                mention_preview_scroll,
-                                mention_preview_bounds,
-                                theme,
-                                base_text_style,
+                                MentionPreviewRenderOptions {
+                                    width: mention_preview_width,
+                                    image_height: mention_preview_image_height,
+                                    scroll_handle: mention_preview_scroll,
+                                    bounds_cell: mention_preview_bounds,
+                                    theme,
+                                    base_text_style,
+                                },
                                 window,
                                 cx,
                             )),
@@ -4915,10 +5014,12 @@ fn preview_content_from_resolved(
                 let format = ImageFormat::from_mime_type(&image.media_type).ok_or_else(|| {
                     format!("Unsupported preview image type: {}", image.media_type)
                 })?;
-                return Ok(MentionPreviewPayload::Image(Arc::new(Image::from_bytes(
-                    format,
-                    image.bytes.to_vec(),
-                ))));
+                let (width, height) = preview_image_dimensions(format, &image.bytes)?;
+                return Ok(MentionPreviewPayload::Image(MentionPreviewImage {
+                    image: Arc::new(Image::from_bytes(format, image.bytes.to_vec())),
+                    width,
+                    height,
+                }));
             }
             ResolvedPageContext::Text(_) | ResolvedPageContext::Image(_) => {}
         }
@@ -4928,6 +5029,23 @@ fn preview_content_from_resolved(
         "No preview is available for {}.",
         reference.display_text()
     ))
+}
+
+fn preview_image_dimensions(format: ImageFormat, bytes: &[u8]) -> Result<(u32, u32), String> {
+    let format = match format {
+        ImageFormat::Png => image::ImageFormat::Png,
+        ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+        ImageFormat::Webp => image::ImageFormat::WebP,
+        ImageFormat::Gif => image::ImageFormat::Gif,
+        ImageFormat::Svg => return Err("SVG preview dimensions are unavailable".to_string()),
+        ImageFormat::Bmp => image::ImageFormat::Bmp,
+        ImageFormat::Tiff => image::ImageFormat::Tiff,
+        ImageFormat::Ico => image::ImageFormat::Ico,
+        ImageFormat::Pnm => image::ImageFormat::Pnm,
+    };
+    image::ImageReader::with_format(Cursor::new(bytes), format)
+        .into_dimensions()
+        .map_err(|error| format!("Failed to read preview image dimensions: {error}"))
 }
 
 fn mention_preview_matches(
@@ -5412,16 +5530,21 @@ mod tests {
         ));
 
         let image_reference = MentionReference::new(MentionKind::PageImage, Some(3));
+        let mut image_bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut image_bytes)
+            .encode(&[255; 4 * 6 * 3], 4, 6, image::ExtendedColorType::Rgb8)
+            .unwrap();
         let image = ResolvedPageContext::Image(glyphst_ai::ai_chat::ImageContext::new(
             MentionKind::PageImage,
             Some(3),
             "image/jpeg",
-            vec![1, 2, 3],
+            image_bytes.clone(),
         ));
         match preview_content_from_resolved(image_reference, &[image]) {
             Ok(MentionPreviewPayload::Image(image)) => {
-                assert_eq!(image.format, ImageFormat::Jpeg);
-                assert_eq!(image.bytes, vec![1, 2, 3]);
+                assert_eq!(image.image.format, ImageFormat::Jpeg);
+                assert_eq!(image.image.bytes, image_bytes);
+                assert_eq!((image.width, image.height), (4, 6));
             }
             Ok(MentionPreviewPayload::Text(_)) | Err(_) => panic!("expected image preview"),
         }
@@ -5516,6 +5639,38 @@ mod tests {
             &mention_hitboxes,
             Some(preview_bounds),
         ));
+    }
+
+    #[test]
+    fn mention_preview_width_clamps_to_panel_and_window() {
+        assert_eq!(AiPanel::mention_preview_width(400.0, 800.0), 320.0);
+        assert_eq!(AiPanel::mention_preview_width(240.0, 800.0), 240.0);
+        assert_eq!(AiPanel::mention_preview_width(400.0, 300.0), 284.0);
+        assert_eq!(AiPanel::mention_preview_width(0.0, 10.0), 0.0);
+    }
+
+    #[test]
+    fn mention_preview_image_size_preserves_aspect_ratio() {
+        assert_eq!(
+            AiPanel::mention_preview_image_size(320.0, 640.0, 1_000, 2_000),
+            (320.0, 640.0)
+        );
+        assert_eq!(
+            AiPanel::mention_preview_image_size(320.0, 640.0, 2_000, 1_000),
+            (320.0, 160.0)
+        );
+    }
+
+    #[test]
+    fn mention_preview_image_size_shrinks_uniformly_to_available_height() {
+        assert_eq!(
+            AiPanel::mention_preview_image_size(320.0, 220.0, 1_000, 2_000),
+            (110.0, 220.0)
+        );
+        assert_eq!(
+            AiPanel::mention_preview_image_size(0.0, 220.0, 1_000, 2_000),
+            (0.0, 0.0)
+        );
     }
 
     #[test]

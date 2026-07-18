@@ -2227,6 +2227,7 @@ dependencies = [
  "glyphst-settings",
  "glyphst-ui",
  "gpui",
+ "image",
 ]
 
 [[package]]

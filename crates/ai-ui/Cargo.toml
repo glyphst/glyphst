@@ -13,3 +13,4 @@ glyphst-library = { path = "../library" }
 glyphst-settings = { path = "../settings" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
+image.workspace = true
