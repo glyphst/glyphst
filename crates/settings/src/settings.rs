@@ -64,6 +64,7 @@ pub struct BehaviorSettings {
     pub zoom_step: f32,
     pub smooth_scrolling: bool,
     pub dim_inactive_panes: bool,
+    pub copy_format: CopyFormat,
 }
 
 impl Default for BehaviorSettings {
@@ -73,6 +74,7 @@ impl Default for BehaviorSettings {
             zoom_step: DEFAULT_ZOOM_STEP,
             smooth_scrolling: DEFAULT_SMOOTH_SCROLLING,
             dim_inactive_panes: false,
+            copy_format: CopyFormat::PlainText,
         }
     }
 }
@@ -81,6 +83,30 @@ impl BehaviorSettings {
     pub fn sanitize(&mut self) {
         self.default_zoom = self.default_zoom.clamp(MIN_ZOOM_SETTING, MAX_ZOOM_SETTING);
         self.zoom_step = self.zoom_step.clamp(MIN_ZOOM_STEP, MAX_ZOOM_STEP);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CopyFormat {
+    #[default]
+    PlainText,
+    Markdown,
+}
+
+impl CopyFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PlainText => "plain_text",
+            Self::Markdown => "markdown",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "plain_text" | "plain" | "text" => Some(Self::PlainText),
+            "markdown" | "md" => Some(Self::Markdown),
+            _ => None,
+        }
     }
 }
 
@@ -1812,6 +1838,15 @@ impl Settings {
             settings.behavior.dim_inactive_panes = value;
         }
 
+        if let Some(copy) = document.get("copy").and_then(KdlNode::children)
+            && let Some(value) = copy
+                .get_arg("format")
+                .and_then(KdlValue::as_string)
+                .and_then(CopyFormat::from_str)
+        {
+            settings.behavior.copy_format = value;
+        }
+
         if let Some(window) = document.get("window").and_then(KdlNode::children) {
             if let Some(value) = window.get_arg("opacity").and_then(value_to_f32) {
                 settings.window.opacity = value;
@@ -2101,6 +2136,11 @@ impl Settings {
             self.behavior.dim_inactive_panes,
         );
         document.nodes_mut().push(panes);
+
+        let mut copy = KdlNode::new("copy");
+        let copy_children = copy.ensure_children();
+        push_value_node(copy_children, "format", self.behavior.copy_format.as_str());
+        document.nodes_mut().push(copy);
 
         self.theme.clone().write_to_document(&mut document);
         push_value_node(&mut document, "language", self.language.as_str());
@@ -2669,6 +2709,7 @@ window {
                 zoom_step: 1.2,
                 smooth_scrolling: false,
                 dim_inactive_panes: true,
+                copy_format: CopyFormat::Markdown,
             },
             theme: ThemeSelection::Static("one-dark".to_string()),
             overrides: PartialTheme {
@@ -2904,6 +2945,35 @@ ai {
         .unwrap();
 
         assert_eq!(settings.ai.thinking_level, AiThinkingLevel::High);
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn copy_format_defaults_to_plain_text_and_rejects_invalid_values() {
+        let settings = parse_settings(
+            r##"
+copy {
+    format "invalid"
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.behavior.copy_format, CopyFormat::PlainText);
+    }
+
+    #[test]
+    fn parses_and_exports_copy_format() {
+        let settings = parse_settings(
+            r##"
+copy {
+    format "markdown"
+}
+"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.behavior.copy_format, CopyFormat::Markdown);
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 
@@ -3434,6 +3504,7 @@ page-gap 36
                 zoom_step: 1.2,
                 smooth_scrolling: false,
                 dim_inactive_panes: true,
+                copy_format: CopyFormat::PlainText,
             },
             theme: ThemeSelection::Static(DEFAULT_THEME_ID.to_string()),
             overrides: PartialTheme {

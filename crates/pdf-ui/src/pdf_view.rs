@@ -30,8 +30,8 @@ use crate::picker::{Picker, PickerEvent};
 use crate::scrollbar::{ManualScrollHandle, WithScrollbar as _, uniform_list_scrollbar_for};
 use crate::search::{SearchBar, SearchEvent};
 use crate::settings::{
-    BehaviorSettings, PageImageQuality, PageTextFormat, SettingsStore, TranslationBoxCorner,
-    WindowSettings, ui_rems,
+    BehaviorSettings, CopyFormat, PageImageQuality, PageTextFormat, SettingsStore,
+    TranslationBoxCorner, WindowSettings, ui_rems,
 };
 use crate::smooth_scroll::advance_toward;
 use crate::theme::Theme;
@@ -523,6 +523,7 @@ struct Glyph {
     block_idx: u32,
     font_size: f32,
     color: u32,
+    is_bold: bool,
     inferred_space_after: bool,
 }
 
@@ -617,6 +618,7 @@ struct ContextMenuState {
     highlight_color: Option<HighlightColor>,
     has_note: bool,
     grid_overview: bool,
+    copy_submenu_open: bool,
 }
 
 #[derive(Clone)]
@@ -981,6 +983,7 @@ pub struct PdfView {
     context_menu_image: Option<(usize, usize)>,
     context_menu_highlight: Option<u64>,
     context_menu_note: Option<u64>,
+    context_menu_copy_submenu_open: bool,
     _image_clipboard: Option<Clipboard>,
     // Must drop after pending render tasks because they can hold document-backed display lists.
     _document: mupdf::Document,
@@ -1859,6 +1862,7 @@ impl PdfView {
             context_menu_image: None,
             context_menu_highlight: None,
             context_menu_note: None,
+            context_menu_copy_submenu_open: false,
             _image_clipboard: None,
             _document: document,
         };
@@ -3168,6 +3172,8 @@ impl PdfView {
                             block_idx,
                             font_size: ch.size(),
                             color: ch.argb() & 0x00ff_ffff,
+                            is_bold: ch.flags().contains(TextCharFlags::BOLD)
+                                || ch.font().is_some_and(|font| font.is_bold()),
                             inferred_space_after: false,
                         });
                     }
@@ -5819,6 +5825,136 @@ impl PdfView {
         Self::text_for_glyph_range(&self.glyphs, start..end + 1)
     }
 
+    fn selected_markdown(&self) -> Option<String> {
+        if self.view_language == PdfViewLanguage::Translated {
+            return self
+                .selected_text()
+                .map(|text| Self::markdown_for_plain_text(&text));
+        }
+
+        let (start, end) = self.selection_bounds()?;
+        let blocks = Self::markdown_blocks_for_glyph_range(&self.glyphs, start..end + 1)?;
+        Some(Self::format_semantic_markdown(&blocks))
+    }
+
+    fn markdown_for_plain_text(text: &str) -> String {
+        let blocks = text
+            .split("\n\n")
+            .map(|block| PageMarkdownBlock {
+                lines: block.lines().map(str::to_string).collect(),
+                average_font_size: 0.0,
+                bold_ratio: 0.0,
+            })
+            .filter(|block| !block.lines.is_empty())
+            .collect::<Vec<_>>();
+        Self::format_block_markdown(&blocks)
+    }
+
+    fn markdown_blocks_for_glyph_range(
+        glyphs: &[Glyph],
+        range: Range<usize>,
+    ) -> Option<Vec<PageMarkdownBlock>> {
+        if range.start >= range.end || range.end > glyphs.len() {
+            return None;
+        }
+
+        let mut blocks = Vec::new();
+        let mut current_block_idx = None;
+        let mut current_line_idx = None;
+        let mut lines = Vec::new();
+        let mut line = String::new();
+        let mut font_size_total = 0.0;
+        let mut character_count = 0_usize;
+        let mut bold_count = 0_usize;
+        let mut previous_ix = None;
+
+        let flush_line = |lines: &mut Vec<String>, line: &mut String| {
+            lines.push(std::mem::take(line));
+        };
+        let flush_block = |blocks: &mut Vec<PageMarkdownBlock>,
+                           lines: &mut Vec<String>,
+                           font_size_total: &mut f32,
+                           character_count: &mut usize,
+                           bold_count: &mut usize| {
+            if lines.iter().all(|line| line.trim().is_empty()) {
+                lines.clear();
+                *font_size_total = 0.0;
+                *character_count = 0;
+                *bold_count = 0;
+                return;
+            }
+            blocks.push(PageMarkdownBlock {
+                lines: std::mem::take(lines),
+                average_font_size: if *character_count == 0 {
+                    0.0
+                } else {
+                    *font_size_total / *character_count as f32
+                },
+                bold_ratio: if *character_count == 0 {
+                    0.0
+                } else {
+                    *bold_count as f32 / *character_count as f32
+                },
+            });
+            *font_size_total = 0.0;
+            *character_count = 0;
+            *bold_count = 0;
+        };
+
+        for glyph_ix in range {
+            let glyph = &glyphs[glyph_ix];
+            if current_block_idx != Some(glyph.block_idx) {
+                if current_line_idx.is_some() {
+                    flush_line(&mut lines, &mut line);
+                }
+                if current_block_idx.is_some() {
+                    flush_block(
+                        &mut blocks,
+                        &mut lines,
+                        &mut font_size_total,
+                        &mut character_count,
+                        &mut bold_count,
+                    );
+                }
+                current_block_idx = Some(glyph.block_idx);
+                current_line_idx = None;
+            } else if current_line_idx != Some(glyph.line_idx) && current_line_idx.is_some() {
+                flush_line(&mut lines, &mut line);
+            }
+
+            if current_line_idx == Some(glyph.line_idx)
+                && let Some(previous_ix) = previous_ix
+                && Self::has_inferred_space_between(glyphs, previous_ix, glyph_ix)
+            {
+                line.push(' ');
+            }
+
+            line.push(glyph.c);
+            if !glyph.c.is_whitespace() {
+                font_size_total += glyph.font_size.max(0.0);
+                character_count += 1;
+                bold_count += usize::from(glyph.is_bold);
+            }
+            current_line_idx = Some(glyph.line_idx);
+            previous_ix = Some(glyph_ix);
+        }
+
+        if current_line_idx.is_some() {
+            flush_line(&mut lines, &mut line);
+        }
+        if current_block_idx.is_some() {
+            flush_block(
+                &mut blocks,
+                &mut lines,
+                &mut font_size_total,
+                &mut character_count,
+                &mut bold_count,
+            );
+        }
+
+        (!blocks.is_empty()).then_some(blocks)
+    }
+
     pub(crate) fn document_text(&self) -> Option<String> {
         Self::text_for_glyph_range(&self.glyphs, 0..self.glyphs.len())
     }
@@ -5852,10 +5988,19 @@ impl PdfView {
         (!text.is_empty()).then_some(text)
     }
 
-    fn copy_selection(&self, cx: &mut Context<Self>) {
-        if let Some(text) = self.selected_text() {
+    fn copy_selection_as(&self, format: CopyFormat, cx: &mut Context<Self>) {
+        let text = match format {
+            CopyFormat::PlainText => self.selected_text(),
+            CopyFormat::Markdown => self.selected_markdown(),
+        };
+        if let Some(text) = text {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+    }
+
+    fn copy_selection(&self, cx: &mut Context<Self>) {
+        let format = cx.global::<SettingsStore>().settings.behavior.copy_format;
+        self.copy_selection_as(format, cx);
     }
 
     fn translate_selection(
@@ -8035,6 +8180,7 @@ impl PdfView {
         } else {
             self.image_at_screen(position, cx)
         };
+        self.context_menu_copy_submenu_open = false;
         self.context_menu_position = Some(position);
         window.prevent_default();
         cx.stop_propagation();
@@ -8046,6 +8192,7 @@ impl PdfView {
         self.context_menu_page = None;
         self.context_menu_image = None;
         self.context_menu_highlight = None;
+        self.context_menu_copy_submenu_open = false;
         if was_open {
             self.context_menu_note = None;
             cx.notify();
@@ -8078,6 +8225,68 @@ impl PdfView {
                 }),
             )
             .child(label)
+    }
+
+    fn context_menu_copy_entry(
+        theme: Theme,
+        copy_submenu_open: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let submenu = div()
+            .absolute()
+            .left(px(188.0))
+            .top_0()
+            .w(px(190.0))
+            .py_1()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.surface_background))
+            .child(Self::context_menu_entry(
+                crate::fl!("pdf-context-copy-plain-text"),
+                theme,
+                |this, _, cx| this.copy_selection_as(CopyFormat::PlainText, cx),
+                cx,
+            ))
+            .child(Self::context_menu_entry(
+                crate::fl!("pdf-context-copy-markdown"),
+                theme,
+                |this, _, cx| this.copy_selection_as(CopyFormat::Markdown, cx),
+                cx,
+            ));
+
+        div()
+            .relative()
+            .when(copy_submenu_open, |this| this.child(submenu))
+            .child(
+                div()
+                    .id("pdf-context-copy")
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(30.0))
+                    .px_3()
+                    .text_size(ui_rems(13.0))
+                    .text_color(rgb(theme.text))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.element_hover)))
+                    .on_hover(cx.listener(|this, hovered, _, cx| {
+                        if *hovered && !this.context_menu_copy_submenu_open {
+                            this.context_menu_copy_submenu_open = true;
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.copy_selection(cx);
+                            this.close_context_menu(cx);
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(crate::fl!("copy"))
+                    .child("›"),
+            )
     }
 
     fn context_menu_label(label: String, theme: Theme) -> impl IntoElement {
@@ -8424,7 +8633,6 @@ impl PdfView {
             .py_1()
             .border_1()
             .border_color(rgb(theme.border))
-            .overflow_hidden()
             .bg(rgb(theme.surface_background))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -8532,10 +8740,9 @@ impl PdfView {
                         },
                         cx,
                     ))
-                    .child(Self::context_menu_entry(
-                        crate::fl!("copy"),
+                    .child(Self::context_menu_copy_entry(
                         theme,
-                        |this, _, cx| this.copy_selection(cx),
+                        state.copy_submenu_open,
                         cx,
                     ))
                     .child(Self::context_menu_separator(theme))
@@ -11064,6 +11271,7 @@ impl Render for PdfView {
                             highlight_color: context_menu_highlight_color,
                             has_note: context_menu_has_note,
                             grid_overview: self.grid_overview_open,
+                            copy_submenu_open: self.context_menu_copy_submenu_open,
                         },
                         window.is_fullscreen(),
                         theme,
@@ -11936,6 +12144,39 @@ mod tests {
     }
 
     #[test]
+    fn selected_markdown_uses_glyph_boundaries_and_typography() {
+        let mut glyphs = "Overview"
+            .chars()
+            .map(|c| test_glyph(c, 0.0, 6.0))
+            .collect::<Vec<_>>();
+        glyphs.extend("• First".chars().map(|c| {
+            let mut glyph = test_glyph(c, 0.0, 6.0);
+            glyph.block_idx = 1;
+            glyph.line_idx = 1;
+            glyph
+        }));
+        for glyph in &mut glyphs[..8] {
+            glyph.font_size = 24.0;
+            glyph.is_bold = true;
+        }
+
+        let blocks = PdfView::markdown_blocks_for_glyph_range(&glyphs, 0..glyphs.len()).unwrap();
+
+        assert_eq!(
+            PdfView::format_semantic_markdown(&blocks),
+            "# Overview\n\n- First"
+        );
+    }
+
+    #[test]
+    fn plain_text_markdown_escapes_translated_text() {
+        assert_eq!(
+            PdfView::markdown_for_plain_text("literal *text*\n\nnext"),
+            "literal \\*text\\*\n\nnext"
+        );
+    }
+
+    #[test]
     fn page_image_dimensions_preserve_aspect_ratio_at_preset_edge() {
         assert_eq!(
             PdfView::page_image_dimensions(612.0, 792.0, 1600).unwrap(),
@@ -12065,6 +12306,7 @@ mod tests {
             block_idx: 0,
             font_size: 12.0,
             color: 0,
+            is_bold: false,
             inferred_space_after: false,
         }
     }

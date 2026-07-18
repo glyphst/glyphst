@@ -2,10 +2,11 @@ use glyphst_actions::settings_panel::PanelClose;
 use glyphst_ai::ai_client::{AiModelInfo, list_ai_models, test_ai_connection};
 use glyphst_keymap::keybindings;
 use glyphst_settings::{
-    AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, AppLanguage, DEFAULT_PAGE_IMAGE_LIMIT,
-    FontSettings, KeymapPreset, ModelRef, PageImageQuality, PageTextFormat, ResolvedAiConfig,
-    Settings, SettingsStore, TabBarVisibility, TranslationBoxCorner, TranslationProvider,
-    TranslationProviderConfig, WindowBackgroundMode, localize, setup_ui_font,
+    AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, AppLanguage, CopyFormat,
+    DEFAULT_PAGE_IMAGE_LIMIT, FontSettings, KeymapPreset, ModelRef, PageImageQuality,
+    PageTextFormat, ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility,
+    TranslationBoxCorner, TranslationProvider, TranslationProviderConfig, WindowBackgroundMode,
+    localize, setup_ui_font,
     theme::{
         PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode, ThemeMetadata, ThemeSelection,
         format_rgb_hex, format_rgba_hex, parse_hex_color,
@@ -179,6 +180,7 @@ enum SettingsSection {
     GeneralLanguage,
     GeneralZoom,
     GeneralScroll,
+    GeneralCopy,
     GeneralReading,
     GeneralKeymap,
     GeneralWindow,
@@ -242,9 +244,10 @@ fn visible_settings_nav_entries(ai_expanded: bool) -> impl Iterator<Item = Setti
         })
 }
 
-const GENERAL_SECTIONS: [SettingsSection; 6] = [
+const GENERAL_SECTIONS: [SettingsSection; 7] = [
     SettingsSection::GeneralLanguage,
     SettingsSection::GeneralZoom,
+    SettingsSection::GeneralCopy,
     SettingsSection::GeneralScroll,
     SettingsSection::GeneralReading,
     SettingsSection::GeneralWindow,
@@ -266,6 +269,7 @@ impl SettingsSection {
             Self::GeneralLanguage
             | Self::GeneralZoom
             | Self::GeneralScroll
+            | Self::GeneralCopy
             | Self::GeneralReading
             | Self::GeneralWindow
             | Self::GeneralTabs => SettingsTab::General,
@@ -284,6 +288,7 @@ impl SettingsSection {
             Self::GeneralLanguage => crate::fl!("settings-section-language"),
             Self::GeneralZoom => crate::fl!("settings-section-zoom"),
             Self::GeneralScroll => crate::fl!("settings-section-scroll"),
+            Self::GeneralCopy => crate::fl!("settings-section-copy"),
             Self::GeneralReading => crate::fl!("settings-section-reading"),
             Self::GeneralKeymap => crate::fl!("settings-section-keymap"),
             Self::GeneralWindow => crate::fl!("settings-section-window"),
@@ -2270,6 +2275,49 @@ impl SettingsWindow {
             .child(label)
     }
 
+    fn copy_format_option(
+        &self,
+        label: String,
+        format: CopyFormat,
+        selected_format: CopyFormat,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = format == selected_format;
+
+        div()
+            .id(format!("copy-format-{}", format.as_str()))
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(if selected {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.border_variant)
+            })
+            .bg(if selected {
+                rgb(theme.element_selected)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.change_settings(
+                        move |settings| settings.behavior.copy_format = format,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
     fn page_image_quality_option(
         &self,
         label: String,
@@ -3159,6 +3207,49 @@ impl SettingsWindow {
                     theme,
                     cx,
                 ))
+                .into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(Self::section_title(
+                    crate::fl!("settings-section-copy"),
+                    theme,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .h(px(44.0))
+                        .child(
+                            div()
+                                .text_color(rgb(theme.text))
+                                .child(crate::fl!("settings-copy-format")),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(self.copy_format_option(
+                                    crate::fl!("settings-copy-plain-text"),
+                                    CopyFormat::PlainText,
+                                    settings.behavior.copy_format,
+                                    theme,
+                                    cx,
+                                ))
+                                .child(self.copy_format_option(
+                                    crate::fl!("settings-copy-markdown"),
+                                    CopyFormat::Markdown,
+                                    settings.behavior.copy_format,
+                                    theme,
+                                    cx,
+                                )),
+                        ),
+                )
                 .into_any_element(),
             div()
                 .flex()
