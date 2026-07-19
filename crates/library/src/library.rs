@@ -44,6 +44,9 @@ const DOCUMENT_PREFERENCES_V2_TABLE: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("document_preferences_v2");
 const AI_SESSIONS_V2_MIGRATION_KEY: &str = "ai_sessions_v2";
 const AI_SESSIONS_V2_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v2");
+const AI_SESSIONS_V3_MIGRATION_KEY: &str = "ai_sessions_v3";
+const AI_SESSIONS_V3_VERSION: u8 = 3;
+const AI_SESSIONS_V3_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v3");
 const SIDEBAR_WIDTHS_KEY: &str = "sidebar_widths";
 const MAX_AI_SESSIONS: usize = 200;
 
@@ -469,6 +472,38 @@ impl From<StoredAiSessionMessageV1> for AiSessionMessage {
             content: message.content,
             request_content: message.request_content,
             references: Vec::new(),
+            occurrences: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredAiSessionMessageV2 {
+    role: AiSessionRole,
+    content: String,
+    request_content: Option<String>,
+    references: Vec<AiMentionReference>,
+}
+
+impl From<&AiSessionMessage> for StoredAiSessionMessageV2 {
+    fn from(message: &AiSessionMessage) -> Self {
+        Self {
+            role: message.role,
+            content: message.content.clone(),
+            request_content: message.request_content.clone(),
+            references: message.references.clone(),
+        }
+    }
+}
+
+impl From<StoredAiSessionMessageV2> for AiSessionMessage {
+    fn from(message: StoredAiSessionMessageV2) -> Self {
+        Self {
+            role: message.role,
+            content: message.content,
+            request_content: message.request_content,
+            references: message.references,
+            occurrences: Vec::new(),
         }
     }
 }
@@ -480,7 +515,7 @@ struct StoredAiSessionV2 {
     path: StoredPathV1,
     title: String,
     page: usize,
-    messages: Vec<AiSessionMessage>,
+    messages: Vec<StoredAiSessionMessageV2>,
     created: u64,
     updated: u64,
 }
@@ -493,7 +528,11 @@ impl From<&AiSession> for StoredAiSessionV2 {
             path: StoredPathV1::from_path(&session.path),
             title: session.title.clone(),
             page: session.page,
-            messages: session.messages.clone(),
+            messages: session
+                .messages
+                .iter()
+                .map(StoredAiSessionMessageV2::from)
+                .collect(),
             created: session.created,
             updated: session.updated,
         }
@@ -508,7 +547,94 @@ impl StoredAiSessionV2 {
             path: self.path.into_path()?,
             title: self.title,
             page: self.page,
-            messages: self.messages,
+            messages: self
+                .messages
+                .into_iter()
+                .map(AiSessionMessage::from)
+                .collect(),
+            created: self.created,
+            updated: self.updated,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredAiSessionMessageV3 {
+    role: AiSessionRole,
+    content: String,
+    request_content: Option<String>,
+    references: Vec<AiMentionReference>,
+    occurrences: Vec<AiMentionOccurrence>,
+}
+
+impl From<&AiSessionMessage> for StoredAiSessionMessageV3 {
+    fn from(message: &AiSessionMessage) -> Self {
+        Self {
+            role: message.role,
+            content: message.content.clone(),
+            request_content: message.request_content.clone(),
+            references: message.references.clone(),
+            occurrences: message.occurrences.clone(),
+        }
+    }
+}
+
+impl From<StoredAiSessionMessageV3> for AiSessionMessage {
+    fn from(message: StoredAiSessionMessageV3) -> Self {
+        Self {
+            role: message.role,
+            content: message.content,
+            request_content: message.request_content,
+            references: message.references,
+            occurrences: message.occurrences,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredAiSessionV3 {
+    version: u8,
+    id: u64,
+    path: StoredPathV1,
+    title: String,
+    page: usize,
+    messages: Vec<StoredAiSessionMessageV3>,
+    created: u64,
+    updated: u64,
+}
+
+impl From<&AiSession> for StoredAiSessionV3 {
+    fn from(session: &AiSession) -> Self {
+        Self {
+            version: AI_SESSIONS_V3_VERSION,
+            id: session.id,
+            path: StoredPathV1::from_path(&session.path),
+            title: session.title.clone(),
+            page: session.page,
+            messages: session
+                .messages
+                .iter()
+                .map(StoredAiSessionMessageV3::from)
+                .collect(),
+            created: session.created,
+            updated: session.updated,
+        }
+    }
+}
+
+impl StoredAiSessionV3 {
+    fn into_domain(self) -> Result<AiSession> {
+        require_storage_version(self.version, AI_SESSIONS_V3_VERSION)?;
+        Ok(AiSession {
+            id: self.id,
+            path: self.path.into_path()?,
+            title: self.title,
+            page: self.page,
+            messages: self
+                .messages
+                .into_iter()
+                .map(AiSessionMessage::from)
+                .collect(),
             created: self.created,
             updated: self.updated,
         })
@@ -902,11 +1028,19 @@ pub enum AiMentionReference {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiMentionOccurrence {
+    pub start: usize,
+    pub end: usize,
+    pub reference: AiMentionReference,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AiSessionMessage {
     pub role: AiSessionRole,
     pub content: String,
     pub request_content: Option<String>,
     pub references: Vec<AiMentionReference>,
+    pub occurrences: Vec<AiMentionOccurrence>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1566,8 +1700,8 @@ impl LibraryStore {
         };
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(AI_SESSIONS_V2_TABLE)?;
-            let encoded = encode(&StoredAiSessionV2::from(session))?;
+            let mut table = write_txn.open_table(AI_SESSIONS_V3_TABLE)?;
+            let encoded = encode(&StoredAiSessionV3::from(session))?;
             table.insert(session.id, encoded.as_slice())?;
             for id in removed_ids {
                 table.remove(*id)?;
@@ -1589,7 +1723,7 @@ impl LibraryStore {
             .collect::<HashSet<_>>();
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(AI_SESSIONS_V2_TABLE)?;
+            let mut table = write_txn.open_table(AI_SESSIONS_V3_TABLE)?;
             let stale_ids = table
                 .iter()?
                 .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
@@ -1986,29 +2120,48 @@ fn ensure_tables(database: &Database) -> Result<()> {
     {
         write_txn.open_table(AI_SESSIONS_V2_TABLE)?;
     }
+    {
+        write_txn.open_table(AI_SESSIONS_V3_TABLE)?;
+    }
     write_txn.commit()?;
     Ok(())
 }
 
 fn load_library(database: &Database) -> Result<Library> {
     let mut library = Library::default();
-    let (has_v1_storage, has_v2_storage, has_ai_sessions_v2) = {
+    let (has_v1_storage, has_v2_storage, has_ai_sessions_v2, has_ai_sessions_v3) = {
         let read_txn = database.begin_read()?;
         let table = read_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
         (
             table.get(STORAGE_V1_MIGRATION_KEY)?.is_some(),
             table.get(STORAGE_V2_MIGRATION_KEY)?.is_some(),
             table.get(AI_SESSIONS_V2_MIGRATION_KEY)?.is_some(),
+            table.get(AI_SESSIONS_V3_MIGRATION_KEY)?.is_some(),
         )
     };
 
     let read_txn = database.begin_read()?;
     if has_v2_storage {
-        load_storage_v2(&read_txn, &mut library, has_ai_sessions_v2)?;
+        load_storage_v2(
+            &read_txn,
+            &mut library,
+            has_ai_sessions_v2,
+            has_ai_sessions_v3,
+        )?;
     } else if has_v1_storage {
-        load_storage_v1(&read_txn, &mut library, has_ai_sessions_v2)?;
+        load_storage_v1(
+            &read_txn,
+            &mut library,
+            has_ai_sessions_v2,
+            has_ai_sessions_v3,
+        )?;
     } else {
-        load_legacy_storage(&read_txn, &mut library, has_ai_sessions_v2)?;
+        load_legacy_storage(
+            &read_txn,
+            &mut library,
+            has_ai_sessions_v2,
+            has_ai_sessions_v3,
+        )?;
     }
     drop(read_txn);
 
@@ -2022,6 +2175,9 @@ fn load_library(database: &Database) -> Result<Library> {
     if !has_ai_sessions_v2 {
         migrate_ai_sessions_v2(database, &library)?;
     }
+    if !has_ai_sessions_v3 {
+        migrate_ai_sessions_v3(database, &library)?;
+    }
     Ok(library)
 }
 
@@ -2029,6 +2185,7 @@ fn load_storage_v2(
     read_txn: &redb::ReadTransaction,
     library: &mut Library,
     has_ai_sessions_v2: bool,
+    has_ai_sessions_v3: bool,
 ) -> Result<()> {
     {
         let table = read_txn.open_table(HISTORY_V2_TABLE)?;
@@ -2087,7 +2244,7 @@ fn load_storage_v2(
             }
         }
     }
-    load_ai_sessions(read_txn, library, has_ai_sessions_v2)?;
+    load_ai_sessions(read_txn, library, has_ai_sessions_v2, has_ai_sessions_v3)?;
     load_shared_v1_storage(read_txn, library)?;
     {
         let table = read_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE)?;
@@ -2111,6 +2268,7 @@ fn load_storage_v1(
     read_txn: &redb::ReadTransaction,
     library: &mut Library,
     has_ai_sessions_v2: bool,
+    has_ai_sessions_v3: bool,
 ) -> Result<()> {
     {
         let table = read_txn.open_table(HISTORY_V1_TABLE)?;
@@ -2173,7 +2331,7 @@ fn load_storage_v1(
         }
     }
 
-    load_ai_sessions(read_txn, library, has_ai_sessions_v2)?;
+    load_ai_sessions(read_txn, library, has_ai_sessions_v2, has_ai_sessions_v3)?;
     load_shared_v1_storage(read_txn, library)?;
     {
         let table = read_txn.open_table(DOCUMENT_PREFERENCES_V1_TABLE)?;
@@ -2210,8 +2368,23 @@ fn load_ai_sessions(
     read_txn: &redb::ReadTransaction,
     library: &mut Library,
     has_ai_sessions_v2: bool,
+    has_ai_sessions_v3: bool,
 ) -> Result<()> {
-    if has_ai_sessions_v2 {
+    if has_ai_sessions_v3 {
+        let table = read_txn.open_table(AI_SESSIONS_V3_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredAiSessionV3>(value.value())
+                .and_then(StoredAiSessionV3::into_domain)
+            {
+                Ok(mut entry) => {
+                    entry.path = normalize_path(&entry.path);
+                    library.ai_sessions.push(entry);
+                }
+                Err(error) => eprintln!("failed to decode AI session: {error:#}"),
+            }
+        }
+    } else if has_ai_sessions_v2 {
         let table = read_txn.open_table(AI_SESSIONS_V2_TABLE)?;
         for entry in table.iter()? {
             let (_, value) = entry?;
@@ -2247,6 +2420,7 @@ fn load_legacy_storage(
     read_txn: &redb::ReadTransaction,
     library: &mut Library,
     has_ai_sessions_v2: bool,
+    has_ai_sessions_v3: bool,
 ) -> Result<()> {
     {
         let table = read_txn.open_table(HISTORY_TABLE)?;
@@ -2308,8 +2482,8 @@ fn load_legacy_storage(
         }
     }
 
-    if has_ai_sessions_v2 {
-        load_ai_sessions(read_txn, library, true)?;
+    if has_ai_sessions_v2 || has_ai_sessions_v3 {
+        load_ai_sessions(read_txn, library, has_ai_sessions_v2, has_ai_sessions_v3)?;
     } else {
         let table = read_txn.open_table(AI_SESSIONS_TABLE)?;
         for entry in table.iter()? {
@@ -2481,6 +2655,32 @@ fn migrate_ai_sessions_v2(database: &Database, library: &Library) -> Result<()> 
         migrations.insert(
             AI_SESSIONS_V2_MIGRATION_KEY,
             [STORAGE_V2_VERSION].as_slice(),
+        )?;
+    }
+    write_txn.commit()?;
+    Ok(())
+}
+
+fn migrate_ai_sessions_v3(database: &Database, library: &Library) -> Result<()> {
+    let write_txn = database.begin_write()?;
+    {
+        let migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        if migrations.get(AI_SESSIONS_V3_MIGRATION_KEY)?.is_some() {
+            return Ok(());
+        }
+    }
+    {
+        let mut table = write_txn.open_table(AI_SESSIONS_V3_TABLE)?;
+        for session in &library.ai_sessions {
+            let encoded = encode(&StoredAiSessionV3::from(session))?;
+            table.insert(session.id, encoded.as_slice())?;
+        }
+    }
+    {
+        let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        migrations.insert(
+            AI_SESSIONS_V3_MIGRATION_KEY,
+            [AI_SESSIONS_V3_VERSION].as_slice(),
         )?;
     }
     write_txn.commit()?;
@@ -2697,12 +2897,14 @@ mod tests {
                                 "Explain @selection\n\nAttached context".to_string(),
                             ),
                             references: Vec::new(),
+                            occurrences: Vec::new(),
                         },
                         AiSessionMessage {
                             role: AiSessionRole::Assistant,
                             content: "Explanation".to_string(),
                             request_content: None,
                             references: Vec::new(),
+                            occurrences: Vec::new(),
                         },
                     ],
                     created: 100,
@@ -2805,6 +3007,7 @@ mod tests {
             assert_eq!(sessions[0].id, stored_session.id);
             assert_eq!(sessions[0].messages.len(), 1);
             assert!(sessions[0].messages[0].references.is_empty());
+            assert!(sessions[0].messages[0].occurrences.is_empty());
         }
 
         {
@@ -2815,6 +3018,14 @@ mod tests {
                     .open_table(STORAGE_MIGRATIONS_TABLE)
                     .unwrap()
                     .get(AI_SESSIONS_V2_MIGRATION_KEY)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                read_txn
+                    .open_table(STORAGE_MIGRATIONS_TABLE)
+                    .unwrap()
+                    .get(AI_SESSIONS_V3_MIGRATION_KEY)
                     .unwrap()
                     .is_some()
             );
@@ -2844,6 +3055,19 @@ mod tests {
                     .references
                     .is_empty()
             );
+            let v3_value = read_txn
+                .open_table(AI_SESSIONS_V3_TABLE)
+                .unwrap()
+                .get(stored_session.id)
+                .unwrap()
+                .unwrap();
+            assert!(
+                decode::<StoredAiSessionV3>(v3_value.value())
+                    .unwrap()
+                    .messages[0]
+                    .occurrences
+                    .is_empty()
+            );
         }
 
         {
@@ -2855,9 +3079,119 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_v2_ai_session_mention_references_without_image_bytes() {
-        let database_path = temp_library_path("ai-session-v2-references");
-        let document_path = PathBuf::from("/tmp/v2-session.pdf");
+    fn loads_genuinely_v2_encoded_ai_session_after_domain_occurrences_are_added() {
+        #[derive(Serialize)]
+        struct HistoricalAiSessionMessageV2 {
+            role: AiSessionRole,
+            content: String,
+            request_content: Option<String>,
+            references: Vec<AiMentionReference>,
+        }
+
+        #[derive(Serialize)]
+        struct HistoricalAiSessionV2 {
+            version: u8,
+            id: u64,
+            path: StoredPathV1,
+            title: String,
+            page: usize,
+            messages: Vec<HistoricalAiSessionMessageV2>,
+            created: u64,
+            updated: u64,
+        }
+
+        let database_path = temp_library_path("ai-session-v2-compatibility");
+        let document_path = PathBuf::from("/tmp/genuine-v2-session.pdf");
+        let stored_session = HistoricalAiSessionV2 {
+            version: STORAGE_V2_VERSION,
+            id: 8,
+            path: StoredPathV1::from_path(&document_path),
+            title: "V2 session".to_string(),
+            page: 4,
+            messages: vec![HistoricalAiSessionMessageV2 {
+                role: AiSessionRole::User,
+                content: "Explain @selection twice".to_string(),
+                request_content: Some("Explain the attached selections".to_string()),
+                references: vec![AiMentionReference::Selection, AiMentionReference::Selection],
+            }],
+            created: 12,
+            updated: 13,
+        };
+
+        {
+            let database = Database::create(&database_path).unwrap();
+            ensure_tables(&database).unwrap();
+            let write_txn = database.begin_write().unwrap();
+            {
+                let mut table = write_txn.open_table(AI_SESSIONS_V2_TABLE).unwrap();
+                table
+                    .insert(
+                        stored_session.id,
+                        encode(&stored_session).unwrap().as_slice(),
+                    )
+                    .unwrap();
+            }
+            {
+                let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE).unwrap();
+                migrations
+                    .insert(
+                        STORAGE_V1_MIGRATION_KEY,
+                        [STORAGE_SCHEMA_VERSION].as_slice(),
+                    )
+                    .unwrap();
+                migrations
+                    .insert(STORAGE_V2_MIGRATION_KEY, [STORAGE_V2_VERSION].as_slice())
+                    .unwrap();
+                migrations
+                    .insert(
+                        AI_SESSIONS_V2_MIGRATION_KEY,
+                        [STORAGE_V2_VERSION].as_slice(),
+                    )
+                    .unwrap();
+            }
+            write_txn.commit().unwrap();
+        }
+
+        {
+            let store = LibraryStore::open(database_path.clone()).unwrap();
+            let sessions = store.ai_sessions_for(&document_path);
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(
+                sessions[0].messages[0].references,
+                vec![AiMentionReference::Selection, AiMentionReference::Selection]
+            );
+            assert!(sessions[0].messages[0].occurrences.is_empty());
+        }
+
+        {
+            let database = Database::open(&database_path).unwrap();
+            let read_txn = database.begin_read().unwrap();
+            assert!(
+                read_txn
+                    .open_table(STORAGE_MIGRATIONS_TABLE)
+                    .unwrap()
+                    .get(AI_SESSIONS_V3_MIGRATION_KEY)
+                    .unwrap()
+                    .is_some()
+            );
+            let v3_value = read_txn
+                .open_table(AI_SESSIONS_V3_TABLE)
+                .unwrap()
+                .get(stored_session.id)
+                .unwrap()
+                .unwrap();
+            let migrated = decode::<StoredAiSessionV3>(v3_value.value()).unwrap();
+            assert_eq!(migrated.messages[0].references.len(), 2);
+            assert!(migrated.messages[0].occurrences.is_empty());
+        }
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
+        let database_path = temp_library_path("ai-session-v3-references");
+        let document_path = PathBuf::from("/tmp/v3-session.pdf");
         let references = vec![
             AiMentionReference::Selection,
             AiMentionReference::DocumentText,
@@ -2889,6 +3223,7 @@ mod tests {
                         content: "Compare the references".to_string(),
                         request_content: Some("Compare the attached context".to_string()),
                         references: references.clone(),
+                        occurrences: Vec::new(),
                     }],
                     created: 20,
                     updated: 21,
@@ -2901,6 +3236,127 @@ mod tests {
             let sessions = store.ai_sessions_for(&document_path);
             assert_eq!(sessions.len(), 1);
             assert_eq!(sessions[0].messages[0].references, references);
+        }
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn round_trips_v3_occurrences_with_duplicate_references() {
+        let database_path = temp_library_path("ai-session-v3-duplicate-occurrences");
+        let document_path = PathBuf::from("/tmp/v3-duplicate-occurrences.pdf");
+        let reference = AiMentionReference::Selection;
+        let occurrences = vec![
+            AiMentionOccurrence {
+                start: 0,
+                end: 10,
+                reference: reference.clone(),
+            },
+            AiMentionOccurrence {
+                start: 15,
+                end: 25,
+                reference: reference.clone(),
+            },
+        ];
+
+        {
+            let mut store = LibraryStore::open(database_path.clone()).unwrap();
+            let session_id = store.next_ai_session_id();
+            store
+                .save_ai_session(AiSession {
+                    id: session_id,
+                    path: document_path.clone(),
+                    title: "Duplicate mentions".to_string(),
+                    page: 1,
+                    messages: vec![AiSessionMessage {
+                        role: AiSessionRole::User,
+                        content: "@selection and @selection".to_string(),
+                        request_content: Some("Compare the attached selections".to_string()),
+                        references: vec![reference.clone(), reference],
+                        occurrences: occurrences.clone(),
+                    }],
+                    created: 30,
+                    updated: 31,
+                })
+                .unwrap();
+        }
+
+        {
+            let store = LibraryStore::open(database_path.clone()).unwrap();
+            let sessions = store.ai_sessions_for(&document_path);
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0].messages[0].occurrences, occurrences);
+            assert_eq!(sessions[0].messages[0].references.len(), 2);
+        }
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn round_trips_v3_region_occurrence_geometry() {
+        let database_path = temp_library_path("ai-session-v3-region-geometry");
+        let document_path = PathBuf::from("/tmp/v3-region-geometry.pdf");
+        let region_reference = RegionImageReference::new([
+            glyphst_core::PageRegion {
+                page: glyphst_core::PageIndex(2),
+                x0: 10.25,
+                y0: 20.5,
+                x1: 30.75,
+                y1: 40.125,
+            },
+            glyphst_core::PageRegion {
+                page: glyphst_core::PageIndex(3),
+                x0: 1.5,
+                y0: 2.25,
+                x1: 99.5,
+                y1: 120.875,
+            },
+        ]);
+        let occurrence = AiMentionOccurrence {
+            start: 9,
+            end: 22,
+            reference: AiMentionReference::RegionImage {
+                reference: region_reference.clone(),
+            },
+        };
+
+        {
+            let mut store = LibraryStore::open(database_path.clone()).unwrap();
+            let session_id = store.next_ai_session_id();
+            store
+                .save_ai_session(AiSession {
+                    id: session_id,
+                    path: document_path.clone(),
+                    title: "Region geometry".to_string(),
+                    page: 3,
+                    messages: vec![AiSessionMessage {
+                        role: AiSessionRole::User,
+                        content: "Describe @region-image".to_string(),
+                        request_content: Some("Describe the attached image region".to_string()),
+                        references: vec![AiMentionReference::RegionImage {
+                            reference: region_reference.clone(),
+                        }],
+                        occurrences: vec![occurrence.clone()],
+                    }],
+                    created: 40,
+                    updated: 41,
+                })
+                .unwrap();
+        }
+
+        {
+            let store = LibraryStore::open(database_path.clone()).unwrap();
+            let sessions = store.ai_sessions_for(&document_path);
+            assert_eq!(
+                sessions[0].messages[0].occurrences,
+                vec![occurrence.clone()]
+            );
+            let AiMentionReference::RegionImage { reference } =
+                &sessions[0].messages[0].occurrences[0].reference
+            else {
+                panic!("expected a region image occurrence");
+            };
+            assert_eq!(reference, &region_reference);
         }
 
         let _ = fs::remove_file(database_path);
@@ -3321,6 +3777,7 @@ mod tests {
                         content: "message".to_string(),
                         request_content: None,
                         references: Vec::new(),
+                        occurrences: Vec::new(),
                     }],
                     created: 1,
                     updated: 1,
@@ -3423,6 +3880,7 @@ mod tests {
                 content: "legacy message".to_string(),
                 request_content: None,
                 references: Vec::new(),
+                occurrences: Vec::new(),
             }],
             created: 5,
             updated: 6,

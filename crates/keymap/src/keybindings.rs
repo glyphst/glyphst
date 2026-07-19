@@ -143,6 +143,45 @@ struct CommandSpec {
     build: fn() -> Box<dyn Action>,
 }
 
+struct InternalBindingSpec {
+    keystrokes: &'static str,
+    context: &'static str,
+    build: fn() -> Box<dyn Action>,
+}
+
+const AI_PROMPT_BINDINGS: &[InternalBindingSpec] = &[
+    InternalBindingSpec {
+        keystrokes: "enter",
+        context: "AiPanel",
+        build: boxed::<AiPanelSubmit>,
+    },
+    InternalBindingSpec {
+        keystrokes: "primary-enter",
+        context: "AiPanel",
+        build: boxed::<AiPanelSubmit>,
+    },
+    InternalBindingSpec {
+        keystrokes: "shift-enter",
+        context: "AiPanel",
+        build: boxed::<input::Newline>,
+    },
+    InternalBindingSpec {
+        keystrokes: "enter",
+        context: "QuickAsk",
+        build: boxed::<AiPanelSubmit>,
+    },
+    InternalBindingSpec {
+        keystrokes: "primary-enter",
+        context: "QuickAsk",
+        build: boxed::<AiPanelSubmit>,
+    },
+    InternalBindingSpec {
+        keystrokes: "shift-enter",
+        context: "QuickAsk",
+        build: boxed::<input::Newline>,
+    },
+];
+
 pub fn apply(cx: &mut App, preset: KeymapPreset, overrides: &[KeyBindingOverride]) {
     let mut bindings = Vec::new();
 
@@ -501,9 +540,9 @@ fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
         add_many::<input::SelectDown>(cx, bindings, &["shift-down"], context);
     }
     add_many::<input::Newline>(cx, bindings, &["enter"], "NoteEditor");
-    add_many::<input::Newline>(cx, bindings, &["enter", "shift-enter"], "AiPanel");
-    add_many::<input::Newline>(cx, bindings, &["shift-enter"], "QuickAsk");
+    add_internal_binding_specs(cx, bindings, AI_PROMPT_BINDINGS);
 
+    // Keep menu bindings later so completions retain precedence over prompt submission.
     add_many::<menu::Confirm>(cx, bindings, &["enter"], "Menu");
     add_many::<menu::Cancel>(cx, bindings, &["escape"], "Menu");
     add_many::<menu::SelectNext>(cx, bindings, &["down"], "Menu");
@@ -515,14 +554,30 @@ fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
     add_many::<SearchInputCancel>(cx, bindings, &["escape"], "Search");
     add_many::<NoteSave>(cx, bindings, &["primary-enter"], "NoteEditor");
     add_many::<NoteCancel>(cx, bindings, &["escape"], "NoteEditor");
-    add_many::<AiPanelSubmit>(cx, bindings, &["primary-enter"], "AiPanel");
-    add_many::<AiPanelSubmit>(cx, bindings, &["enter", "primary-enter"], "QuickAsk");
     add_many::<AiPanelClose>(cx, bindings, &["escape"], "AiPanel");
     add_many::<AiPanelClose>(cx, bindings, &["escape"], "QuickAsk");
     add_many::<OpenQuickAsk>(cx, bindings, &["tab"], "QuickAsk");
     add_many::<PanelClose>(cx, bindings, &["escape"], "SettingsPanel");
     add_many::<TogglePresentationMode>(cx, bindings, &["escape"], "PresentationMode");
     add_many::<CancelRegionSelection>(cx, bindings, &["escape"], "RegionSelection");
+}
+
+fn add_internal_binding_specs(
+    cx: &mut App,
+    bindings: &mut Vec<KeyBinding>,
+    specs: &[InternalBindingSpec],
+) {
+    for spec in specs {
+        let action = (spec.build)();
+        add_boxed_binding(
+            cx,
+            bindings,
+            action.name(),
+            spec.keystrokes,
+            action,
+            Some(spec.context),
+        );
+    }
 }
 
 fn add_many<A>(cx: &mut App, bindings: &mut Vec<KeyBinding>, keys: &[&str], context: &str)
@@ -1534,6 +1589,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{DummyKeyboardMapper, KeyContext, Keymap, Keystroke};
 
     fn assert_action_aliases<A>(aliases: &[&str])
     where
@@ -1665,5 +1721,84 @@ mod tests {
         assert_ne!(overridden.keystrokes, overridden.default_keystrokes);
         assert_eq!(overridden.keystrokes, vec!["test-override".to_string()]);
         assert_eq!(overridden.default_keystrokes, sample.default_keystrokes);
+    }
+
+    fn prompt_keymap() -> Keymap {
+        let mut bindings = AI_PROMPT_BINDINGS
+            .iter()
+            .map(|spec| {
+                KeyBinding::load(
+                    &expand_platform_keystroke(spec.keystrokes),
+                    (spec.build)(),
+                    Some(Rc::new(
+                        KeyBindingContextPredicate::parse(spec.context).unwrap(),
+                    )),
+                    false,
+                    None,
+                    &DummyKeyboardMapper,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        bindings.push(KeyBinding::new("enter", menu::Confirm, Some("Menu")));
+        let mut keymap = Keymap::default();
+        keymap.add_bindings(bindings);
+        keymap
+    }
+
+    fn first_action_for(keymap: &Keymap, keystrokes: &str, contexts: &[&str]) -> &'static str {
+        let keystrokes = expand_platform_keystroke(keystrokes);
+        let keystrokes = keystrokes
+            .split_whitespace()
+            .map(|keystroke| Keystroke::parse(keystroke).unwrap())
+            .collect::<Vec<_>>();
+        let contexts = contexts
+            .iter()
+            .map(|context| KeyContext::parse(context).unwrap())
+            .collect::<Vec<_>>();
+        let (bindings, pending) = keymap.bindings_for_input(&keystrokes, &contexts);
+
+        assert!(!pending);
+        bindings
+            .first()
+            .expect("expected matching keybinding")
+            .action()
+            .name()
+    }
+
+    #[test]
+    fn ai_prompts_use_zed_style_submit_and_newline_bindings() {
+        let keymap = prompt_keymap();
+        let submit = AiPanelSubmit::name_for_type();
+        let newline = input::Newline::name_for_type();
+
+        for context in ["AiPanel", "QuickAsk"] {
+            assert_eq!(first_action_for(&keymap, "enter", &[context]), submit);
+            assert_eq!(
+                first_action_for(&keymap, "primary-enter", &[context]),
+                submit
+            );
+            assert_eq!(
+                first_action_for(&keymap, "shift-enter", &[context]),
+                newline
+            );
+        }
+    }
+
+    #[test]
+    fn menu_confirm_keeps_precedence_over_ai_prompt_submit() {
+        let keymap = prompt_keymap();
+        let confirm = menu::Confirm::name_for_type();
+
+        for context in ["AiPanel", "QuickAsk"] {
+            assert_eq!(
+                first_action_for(&keymap, "enter", &[context, "Menu"]),
+                confirm
+            );
+            assert_eq!(
+                first_action_for(&keymap, "enter", &[&format!("{context} Menu")]),
+                confirm
+            );
+        }
     }
 }

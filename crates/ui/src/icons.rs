@@ -10,6 +10,7 @@ use gpui::{
 #[derive(Clone, Copy)]
 pub enum IconName {
     AppWindow,
+    ArrowUp,
     ArrowUpRight,
     Bot,
     CaseSensitive,
@@ -31,12 +32,15 @@ pub enum IconName {
     Pencil,
     Play,
     Plus,
+    Return,
     RotateCcw,
     Scan,
     Search,
     Settings,
     Stop,
     TableOfContents,
+    TextUnwrap,
+    TextWrap,
     TriangleAlert,
     X,
 }
@@ -45,6 +49,7 @@ impl IconName {
     pub fn path(self) -> SharedString {
         let name = match self {
             Self::AppWindow => "app-window",
+            Self::ArrowUp => "arrow-up",
             Self::ArrowUpRight => "arrow-up-right",
             Self::Bot => "bot",
             Self::CaseSensitive => "case-sensitive",
@@ -66,12 +71,15 @@ impl IconName {
             Self::Pencil => "pencil",
             Self::Play => "play",
             Self::Plus => "plus",
+            Self::Return => "return",
             Self::RotateCcw => "rotate-ccw",
             Self::Scan => "scan",
             Self::Search => "search",
             Self::Settings => "settings",
             Self::Stop => "stop",
             Self::TableOfContents => "table-of-contents",
+            Self::TextUnwrap => "text-unwrap",
+            Self::TextWrap => "text-wrap",
             Self::TriangleAlert => "triangle-alert",
             Self::X => "x",
         };

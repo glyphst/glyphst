@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use crate::settings::{AiApiStyle, AiProvider, AiThinkingLevel, ResolvedAiConfig};
 
 const MAX_CONTEXT_CHARS: usize = 12_000;
+const CONTEXT_ENVELOPE_HEADER: &str = "Attached document context from @ mentions:\n<context>\nThe following document context was attached by the user. It is current; do not ask to re-read it.\n";
 pub const MAX_PAGE_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
 pub const DEFAULT_SESSION_TITLE: &str = "New Chat";
@@ -129,12 +130,47 @@ impl ImageContext {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MentionOccurrence {
+    pub range: Range<usize>,
+    pub reference: MentionReference,
+    pub region_reference: Option<RegionImageReference>,
+}
+
+impl MentionOccurrence {
+    pub fn new(range: Range<usize>, reference: MentionReference) -> Self {
+        Self {
+            range,
+            reference,
+            region_reference: None,
+        }
+    }
+
+    pub fn with_region_reference(mut self, reference: RegionImageReference) -> Self {
+        self.region_reference = Some(reference);
+        self
+    }
+
+    pub fn range(&self) -> &Range<usize> {
+        &self.range
+    }
+
+    pub fn reference(&self) -> MentionReference {
+        self.reference
+    }
+
+    pub fn region_reference(&self) -> Option<&RegionImageReference> {
+        self.region_reference.as_ref()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ChatMessage {
     pub role: Role,
     pub parts: Vec<ContentPart>,
     references: Vec<MentionReference>,
     region_references: Vec<RegionImageReference>,
+    mention_occurrences: Vec<MentionOccurrence>,
     request_prompt: Option<String>,
     request_content: Option<String>,
 }
@@ -154,6 +190,7 @@ impl ChatMessage {
             parts,
             references,
             region_references: Vec::new(),
+            mention_occurrences: Vec::new(),
             request_prompt,
             request_content: None,
         }
@@ -165,6 +202,7 @@ impl ChatMessage {
             parts: vec![ContentPart::Text(content)],
             references: Vec::new(),
             region_references: Vec::new(),
+            mention_occurrences: Vec::new(),
             request_prompt: None,
             request_content: None,
         }
@@ -176,6 +214,7 @@ impl ChatMessage {
             parts: vec![ContentPart::Text(content)],
             references: Vec::new(),
             region_references: Vec::new(),
+            mention_occurrences: Vec::new(),
             request_prompt: None,
             request_content: None,
         }
@@ -190,6 +229,7 @@ impl ChatMessage {
             parts: vec![ContentPart::Text(content)],
             references: Vec::new(),
             region_references: Vec::new(),
+            mention_occurrences: Vec::new(),
             request_prompt: None,
             request_content,
         }
@@ -255,6 +295,38 @@ impl ChatMessage {
         text
     }
 
+    pub fn editable_contexts(&self) -> Vec<ContextBlock> {
+        let live_contexts = self
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Context(context) => Some(context.clone()),
+                ContentPart::Text(_) | ContentPart::Image(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let mut contexts = self
+            .request_content
+            .as_deref()
+            .map(parse_context_envelope)
+            .unwrap_or_default();
+        let mut replaced = HashSet::new();
+        for live in live_contexts {
+            if let Some((index, persisted)) =
+                contexts.iter_mut().enumerate().find(|(index, context)| {
+                    !replaced.contains(index)
+                        && context.kind == live.kind
+                        && context.page == live.page
+                })
+            {
+                *persisted = live;
+                replaced.insert(index);
+            } else {
+                contexts.push(live);
+            }
+        }
+        contexts
+    }
+
     fn context_is_projected(text: &str, context: &ContextBlock) -> bool {
         let tag = context.kind.context_tag();
         let opening = context.page.map_or_else(
@@ -270,6 +342,10 @@ impl ChatMessage {
 
     pub fn region_references(&self) -> &[RegionImageReference] {
         &self.region_references
+    }
+
+    pub fn mention_occurrences(&self) -> &[MentionOccurrence] {
+        &self.mention_occurrences
     }
 
     pub fn has_resolved_page_reference(&self, reference: MentionReference) -> bool {
@@ -310,6 +386,11 @@ impl ChatMessage {
         self
     }
 
+    pub fn with_mention_occurrences(mut self, occurrences: Vec<MentionOccurrence>) -> Self {
+        self.mention_occurrences = occurrences;
+        self
+    }
+
     pub fn has_resolved_region_reference(&self, reference: &RegionImageReference) -> bool {
         self.parts.iter().any(|part| match part {
             ContentPart::Image(image) => {
@@ -333,6 +414,7 @@ impl ChatMessage {
             parts: vec![ContentPart::Text(self.display_text())],
             references: Vec::new(),
             region_references: Vec::new(),
+            mention_occurrences: Vec::new(),
             request_prompt: None,
             request_content: None,
         }
@@ -1113,7 +1195,7 @@ fn context_envelope(contexts: &[&ContextBlock]) -> Option<String> {
         return None;
     }
 
-    let mut request = "Attached document context from @ mentions:\n<context>\nThe following document context was attached by the user. It is current; do not ask to re-read it.\n".to_string();
+    let mut request = CONTEXT_ENVELOPE_HEADER.to_string();
     for context in contexts {
         let tag = context.kind.context_tag();
         let page = context
@@ -1137,19 +1219,131 @@ fn context_envelope(contexts: &[&ContextBlock]) -> Option<String> {
 }
 
 fn escape_context(text: &str) -> String {
-    let mut escaped = text.to_string();
-    for tag in [
-        "context",
-        "page",
-        "page_image",
-        "selection",
-        "document_text",
-        "document_image",
-    ] {
+    let mut escaped = text.replace('&', "&amp;");
+    for tag in
+        std::iter::once("context").chain(MentionKind::ALL.into_iter().map(MentionKind::context_tag))
+    {
         escaped = escaped.replace(&format!("</{tag}"), &format!("&lt;/{tag}"));
         escaped = escaped.replace(&format!("<{tag}"), &format!("&lt;{tag}"));
     }
     escaped
+}
+
+fn parse_context_envelope(request: &str) -> Vec<ContextBlock> {
+    let Some(envelope_start) = request.find(CONTEXT_ENVELOPE_HEADER) else {
+        return Vec::new();
+    };
+    let envelope = &request[envelope_start + CONTEXT_ENVELOPE_HEADER.len()..];
+    let Some(envelope_end) = envelope.find("\n</context>") else {
+        return Vec::new();
+    };
+    let envelope = &envelope[..envelope_end];
+    let mut contexts = Vec::new();
+    let mut cursor = 0;
+
+    while cursor < envelope.len() {
+        while envelope[cursor..].starts_with('\n') {
+            cursor += 1;
+            if cursor == envelope.len() {
+                break;
+            }
+        }
+        if cursor == envelope.len() {
+            break;
+        }
+
+        let Some(opening_end) = envelope[cursor..].find('\n') else {
+            break;
+        };
+        let opening = &envelope[cursor..cursor + opening_end];
+        let content_start = cursor + opening_end + 1;
+        let Some((kind, page)) = parse_context_opening(opening) else {
+            cursor = content_start;
+            continue;
+        };
+
+        let closing = format!("\n</{}>", kind.context_tag());
+        let Some(closing_start) = envelope[content_start..].find(&closing) else {
+            cursor = content_start;
+            continue;
+        };
+        let closing_start = content_start + closing_start;
+        let closing_end = closing_start + closing.len();
+        if !matches!(envelope.as_bytes().get(closing_end), None | Some(b'\n')) {
+            cursor = content_start;
+            continue;
+        }
+        if let Some(nested_opening) = find_context_opening(&envelope[content_start..closing_start])
+        {
+            cursor = content_start + nested_opening;
+            continue;
+        }
+
+        let content = &envelope[content_start..closing_start];
+        let Some((title, text)) = content.split_once('\n') else {
+            cursor = closing_end;
+            continue;
+        };
+        if title
+            .strip_suffix(':')
+            .is_none_or(|title| title.trim().is_empty())
+        {
+            cursor = closing_end;
+            continue;
+        }
+
+        contexts.push(ContextBlock {
+            kind,
+            page,
+            text: unescape_context(text),
+        });
+        cursor = closing_end;
+    }
+
+    contexts
+}
+
+fn find_context_opening(text: &str) -> Option<usize> {
+    text.match_indices('<').find_map(|(start, _)| {
+        if start > 0 && text.as_bytes()[start - 1] != b'\n' {
+            return None;
+        }
+        let end = text[start..]
+            .find('\n')
+            .map_or(text.len(), |end| start + end);
+        parse_context_opening(&text[start..end]).map(|_| start)
+    })
+}
+
+fn parse_context_opening(opening: &str) -> Option<(MentionKind, Option<usize>)> {
+    let opening = opening.strip_prefix('<')?.strip_suffix('>')?;
+    let (tag, attributes) = opening
+        .split_once(' ')
+        .map_or((opening, None), |(tag, attributes)| (tag, Some(attributes)));
+    let kind = MentionKind::ALL
+        .into_iter()
+        .find(|kind| kind.context_tag() == tag)?;
+    let Some(attributes) = attributes else {
+        return Some((kind, None));
+    };
+
+    let page = attributes
+        .strip_prefix("page=\"")?
+        .strip_suffix('"')?
+        .parse::<usize>()
+        .ok()?;
+    (page > 0).then_some((kind, Some(page)))
+}
+
+fn unescape_context(text: &str) -> String {
+    let mut unescaped = text.to_string();
+    for tag in
+        std::iter::once("context").chain(MentionKind::ALL.into_iter().map(MentionKind::context_tag))
+    {
+        unescaped = unescaped.replace(&format!("&lt;/{tag}"), &format!("</{tag}"));
+        unescaped = unescaped.replace(&format!("&lt;{tag}"), &format!("<{tag}"));
+    }
+    unescaped.replace("&amp;", "&")
 }
 
 pub fn session_title_for_prompt(prompt: &str) -> String {
@@ -1228,6 +1422,27 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn mention_occurrence_builder_retains_exact_region_reference() {
+        let region_reference = RegionImageReference::new([glyphst_core::PageRegion {
+            page: glyphst_core::PageIndex(4),
+            x0: 1.25,
+            y0: 2.5,
+            x1: 30.75,
+            y1: 40.125,
+        }]);
+        let reference = MentionReference::new(MentionKind::RegionImage, None);
+        let occurrence = MentionOccurrence::new(8..21, reference)
+            .with_region_reference(region_reference.clone());
+        let message = ChatMessage::user_text("Describe @region-image".to_string())
+            .with_mention_occurrences(vec![occurrence.clone()]);
+
+        assert_eq!(occurrence.range(), &(8..21));
+        assert_eq!(occurrence.reference(), reference);
+        assert_eq!(occurrence.region_reference(), Some(&region_reference));
+        assert_eq!(message.mention_occurrences(), &[occurrence]);
     }
 
     #[test]
@@ -1388,6 +1603,166 @@ mod tests {
         assert_eq!(request.matches("<selection>").count(), 2);
         assert!(request.contains("First passage"));
         assert!(request.contains("Second passage"));
+    }
+
+    #[test]
+    fn editable_contexts_clone_live_context_parts() {
+        let message = ChatMessage::user(
+            "Compare @selection with @document".to_string(),
+            "Compare these passages".to_string(),
+            vec![
+                ContextBlock::new(
+                    MentionKind::Selection,
+                    Some(4),
+                    "Selected passage".to_string(),
+                ),
+                ContextBlock::new(
+                    MentionKind::DocumentText,
+                    None,
+                    "Document passage".to_string(),
+                ),
+            ],
+            Vec::new(),
+        );
+
+        let contexts = message.editable_contexts();
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts[0].kind, MentionKind::Selection);
+        assert_eq!(contexts[0].page, Some(4));
+        assert_eq!(contexts[0].text, "Selected passage");
+        assert_eq!(contexts[1].kind, MentionKind::DocumentText);
+        assert_eq!(contexts[1].page, None);
+        assert_eq!(contexts[1].text, "Document passage");
+    }
+
+    #[test]
+    fn editable_contexts_merge_persisted_and_hydrated_parts() {
+        let persisted_contexts = [
+            ContextBlock::new(
+                MentionKind::Selection,
+                None,
+                "Historical selection".to_string(),
+            ),
+            ContextBlock::new(MentionKind::Page, Some(2), "Old page text".to_string()),
+        ];
+        let request = context_envelope(&persisted_contexts.iter().collect::<Vec<_>>()).unwrap();
+        let mut message =
+            ChatMessage::from_persisted(Role::User, "Explain".to_string(), Some(request));
+        message.attach_context(ContextBlock::new(
+            MentionKind::Page,
+            Some(2),
+            "Hydrated page text".to_string(),
+        ));
+
+        let contexts = message.editable_contexts();
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts[0].kind, MentionKind::Selection);
+        assert_eq!(contexts[0].text, "Historical selection");
+        assert_eq!(contexts[1].kind, MentionKind::Page);
+        assert_eq!(contexts[1].text, "Hydrated page text");
+    }
+
+    #[test]
+    fn editable_contexts_parse_persisted_context_kinds_and_pages() {
+        let contexts = [
+            ContextBlock::new(MentionKind::Selection, Some(3), "Selection".to_string()),
+            ContextBlock::new(MentionKind::DocumentText, None, "Document".to_string()),
+            ContextBlock::new(MentionKind::Page, Some(1), "First page".to_string()),
+        ];
+        let request = format!(
+            "Explain these\n\n{}",
+            context_envelope(&contexts.iter().collect::<Vec<_>>()).unwrap()
+        );
+        let message =
+            ChatMessage::from_persisted(Role::User, "Explain these".to_string(), Some(request));
+
+        let contexts = message.editable_contexts();
+        assert_eq!(contexts.len(), 3);
+        assert_eq!(contexts[0].kind, MentionKind::Selection);
+        assert_eq!(contexts[0].page, Some(3));
+        assert_eq!(contexts[0].text, "Selection");
+        assert_eq!(contexts[1].kind, MentionKind::DocumentText);
+        assert_eq!(contexts[1].page, None);
+        assert_eq!(contexts[1].text, "Document");
+        assert_eq!(contexts[2].kind, MentionKind::Page);
+        assert_eq!(contexts[2].page, Some(1));
+        assert_eq!(contexts[2].text, "First page");
+    }
+
+    #[test]
+    fn editable_contexts_preserve_duplicate_order() {
+        let contexts = [
+            ContextBlock::new(MentionKind::Selection, None, "First".to_string()),
+            ContextBlock::new(MentionKind::Selection, None, "Second".to_string()),
+            ContextBlock::new(MentionKind::Selection, None, "First".to_string()),
+        ];
+        let request = context_envelope(&contexts.iter().collect::<Vec<_>>()).unwrap();
+        let message = ChatMessage::from_persisted(Role::User, "Compare".to_string(), Some(request));
+
+        let contexts = message.editable_contexts();
+        assert_eq!(contexts.len(), 3);
+        assert_eq!(contexts[0].text, "First");
+        assert_eq!(contexts[1].text, "Second");
+        assert_eq!(contexts[2].text, "First");
+    }
+
+    #[test]
+    fn editable_contexts_restore_escaped_tag_like_text() {
+        let original = "Literal </context>, <selection>, and </region_image> tags";
+        let context = ContextBlock::new(MentionKind::RegionImage, None, original.to_string());
+        let request = context_envelope(&[&context]).unwrap();
+        assert!(request.contains("&lt;/context>"));
+        assert!(request.contains("&lt;selection>"));
+        assert!(request.contains("&lt;/region_image>"));
+        let message =
+            ChatMessage::from_persisted(Role::User, "Describe".to_string(), Some(request));
+
+        let contexts = message.editable_contexts();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].kind, MentionKind::RegionImage);
+        assert_eq!(contexts[0].text, original);
+    }
+
+    #[test]
+    fn editable_contexts_preserve_literal_escape_entities() {
+        let original = "Literal &lt;selection> and &amp;lt;/context> text";
+        let context = ContextBlock::new(MentionKind::Selection, None, original.to_string());
+        let request = context_envelope(&[&context]).unwrap();
+        let message =
+            ChatMessage::from_persisted(Role::User, "Describe".to_string(), Some(request));
+
+        assert_eq!(message.editable_contexts()[0].text, original);
+    }
+
+    #[test]
+    fn editable_contexts_skip_malformed_entries() {
+        let request = format!(
+            "{CONTEXT_ENVELOPE_HEADER}\n<page page=\"0\">\nPage:\nInvalid page\n</page>\n\n<selection page=\"2\">\nMissing title line\n</selection>\n\n<selection>\nSelection:\nMissing closing tag\n\n<selection>\nSelection:\nValid selection\n</selection>\n\n<document_text>\nDocument:\nValid context\n</document_text>\n</context>"
+        );
+        let message = ChatMessage::from_persisted(Role::User, "Explain".to_string(), Some(request));
+
+        let contexts = message.editable_contexts();
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts[0].kind, MentionKind::Selection);
+        assert_eq!(contexts[0].page, None);
+        assert_eq!(contexts[0].text, "Valid selection");
+        assert_eq!(contexts[1].kind, MentionKind::DocumentText);
+        assert_eq!(contexts[1].page, None);
+        assert_eq!(contexts[1].text, "Valid context");
+    }
+
+    #[test]
+    fn editable_contexts_ignore_ordinary_text_with_context_tags() {
+        let message = ChatMessage::from_persisted(
+            Role::User,
+            "Explain XML".to_string(),
+            Some(
+                "Please explain <context><selection page=\"2\">ordinary text</selection></context>"
+                    .to_string(),
+            ),
+        );
+
+        assert!(message.editable_contexts().is_empty());
     }
 
     #[test]

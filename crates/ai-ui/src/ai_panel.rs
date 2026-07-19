@@ -14,33 +14,36 @@ use glyphst_actions::{
 };
 use glyphst_ai::ai_chat::{
     AiStreamEvent, ChatMessage, ContextBlock, DEFAULT_SESSION_TITLE, DocumentContext,
-    MAX_PAGE_IMAGE_BYTES, MentionKind, MentionReference, Role, TITLE_GENERATION_PROMPT,
-    session_title_for_prompt, stream_completion, thinking_level_description, title_from_response,
+    MAX_PAGE_IMAGE_BYTES, MentionKind, MentionOccurrence, MentionReference, Role,
+    TITLE_GENERATION_PROMPT, find_mention_references, session_title_for_prompt, stream_completion,
+    thinking_level_description, title_from_response,
 };
 use glyphst_core::RegionImageReference;
 use glyphst_library::{
-    AiMentionReference, AiSession, AiSessionMessage, AiSessionRole, LibraryStore, current_timestamp,
+    AiMentionOccurrence, AiMentionReference, AiSession, AiSessionMessage, AiSessionRole,
+    LibraryStore, current_timestamp,
 };
 use glyphst_settings::{
     AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore, localize::tr, theme::Theme,
     ui_rems,
 };
 use glyphst_ui::{
-    icons::{Icon, IconName},
-    markdown::{Markdown, MarkdownElement, MarkdownStyle},
+    icons::{Icon, IconButton, IconName},
+    markdown::{Markdown, MarkdownContextMenuRequest, MarkdownElement, MarkdownStyle},
     picker::fuzzy_match,
-    scrollbar::WithScrollbar as _,
+    scrollbar::{ScrollableHandle, WithScrollbar as _},
+    tooltip::text_tooltip,
 };
 use gpui::{
     Anchor, AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, Corners, CursorStyle,
     DispatchPhase, Edges, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId, HighlightStyle, Image,
-    ImageFormat, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point as GpuiPoint, Render,
-    ScrollHandle, ScrollStrategy, SharedString, Style, StyledText, Task, TextRun, TextStyle,
-    TransformationMatrix, UTF16Selection, UniformListScrollHandle, Window, WrappedLine, anchored,
-    canvas, deferred, div, fill, img, point, prelude::*, px, quad, relative, rgb, rgba, size,
-    uniform_list,
+    EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId, HighlightStyle, Hitbox,
+    HitboxBehavior, Image, ImageFormat, InspectorElementId, IntoElement, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point as GpuiPoint,
+    Render, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Style,
+    StyledText, Subscription, Task, TextRun, TextStyle, TransformationMatrix, UTF16Selection,
+    UniformListScrollHandle, Window, WrappedLine, anchored, canvas, deferred, div, fill, img,
+    point, prelude::*, px, quad, relative, rgb, rgba, size, uniform_list,
 };
 
 pub const AI_PANEL_WIDTH: f32 = 360.0;
@@ -57,6 +60,7 @@ const MENTION_PREVIEW_WINDOW_MARGIN: f32 = 8.0;
 const MENTION_PREVIEW_BRIDGE_HEIGHT: f32 = 6.0;
 const MENTION_PREVIEW_HEADER_HEIGHT: f32 = 34.0;
 const VALIDATION_NOTICE_DURATION: Duration = Duration::from_secs(4);
+const COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AiPanelEvent {
@@ -233,13 +237,103 @@ struct MentionPreviewRenderOptions {
 }
 
 #[derive(Clone)]
+struct TrackedScrollHandle {
+    handle: ScrollHandle,
+    interacted: Rc<Cell<bool>>,
+}
+
+impl ScrollableHandle for TrackedScrollHandle {
+    fn max_offset(&self) -> GpuiPoint<Pixels> {
+        self.handle.max_offset()
+    }
+
+    fn set_offset(&self, point: GpuiPoint<Pixels>) {
+        self.interacted.set(true);
+        self.handle.set_offset(point);
+    }
+
+    fn offset(&self) -> GpuiPoint<Pixels> {
+        self.handle.offset()
+    }
+
+    fn viewport(&self) -> Bounds<Pixels> {
+        self.handle.bounds()
+    }
+
+    fn drag_started(&self) {
+        self.interacted.set(true);
+    }
+}
+
+#[derive(Clone)]
 struct MentionHitbox {
     source_range: Range<usize>,
     bounds: Bounds<Pixels>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GenerationTarget {
+    id: u64,
+    assistant_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GenerationFailure {
+    assistant_index: usize,
+    message: String,
+}
+
+#[derive(Clone)]
+struct ComposerSnapshot {
+    content: SharedString,
+    selected_range: Range<usize>,
+    selection_reversed: bool,
+    marked_range: Option<Range<usize>>,
+    mentions: Vec<ComposerMention>,
+    active_page_number_edit: Option<ActivePageNumberEdit>,
+}
+
+#[derive(Clone)]
+struct EditingTurn {
+    message_index: usize,
+    saved_composer: ComposerSnapshot,
+}
+
+struct PreparedComposerMessage {
+    display_prompt: String,
+    submitted_mentions: Vec<ComposerMention>,
+    user_message: ChatMessage,
+    document: DocumentContext,
+}
+
+#[derive(Clone)]
+struct MessageContextMenu {
+    position: GpuiPoint<Pixels>,
+    message_index: usize,
+    selected_text: Option<SharedString>,
+    link_url: Option<SharedString>,
+}
+
+struct MessageRenderInput {
+    index: usize,
+    message: ChatMessage,
+    markdown: Entity<Markdown>,
+    theme: Theme,
+    panel_width: f32,
+    base_text_style: TextStyle,
+    panel: Entity<AiPanel>,
+    editing_focused: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopyFeedbackTarget {
+    Message(usize),
+    Error,
+}
+
 pub struct AiPanel {
     focus_handle: FocusHandle,
+    edit_focus_handle: FocusHandle,
     previous_focus_handle: FocusHandle,
     mode: AiPanelMode,
     messages: Vec<ChatMessage>,
@@ -255,6 +349,10 @@ pub struct AiPanel {
     scroll_handle: ScrollHandle,
     sessions_scroll: ScrollHandle,
     pending_stream: Option<Task<()>>,
+    stream_render_task: Option<Task<()>>,
+    generation_id: u64,
+    active_generation: Option<GenerationTarget>,
+    generation_failure: Option<GenerationFailure>,
     pending_title_task: Option<Task<()>>,
     context_provider: Box<dyn AiContextProvider>,
     document_path: PathBuf,
@@ -291,6 +389,16 @@ pub struct AiPanel {
     validation_notice: Option<String>,
     validation_toast: Option<String>,
     validation_notice_task: Option<Task<()>>,
+    editing_turn: Option<EditingTurn>,
+    edit_blur_subscription: Option<Subscription>,
+    copied_target: Option<CopyFeedbackTarget>,
+    copy_feedback_generation: u64,
+    copy_feedback_task: Option<Task<()>>,
+    follow_output: bool,
+    scroll_epoch: u64,
+    message_scroll_interacted: Rc<Cell<bool>>,
+    message_scroll_task: Option<Task<()>>,
+    message_context_menu: Option<MessageContextMenu>,
 }
 
 struct LaidOutLine {
@@ -300,6 +408,17 @@ struct LaidOutLine {
 
 struct AiInputElement {
     panel: Entity<AiPanel>,
+    source: AiInputSource,
+}
+
+#[derive(Clone)]
+enum AiInputSource {
+    Editor,
+    UserMessage {
+        message_index: usize,
+        content: SharedString,
+        mentions: Vec<ComposerMention>,
+    },
 }
 
 struct PrepaintState {
@@ -312,6 +431,7 @@ struct PrepaintState {
     active_number_quads: Vec<PaintQuad>,
     mention_icons: Vec<(Bounds<Pixels>, MentionKind)>,
     mention_hitboxes: Vec<MentionHitbox>,
+    hitbox: Option<Hitbox>,
 }
 
 #[derive(Clone, Copy)]
@@ -385,6 +505,7 @@ impl AiPanel {
     fn new_with_mode(init: AiPanelInit, cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            edit_focus_handle: cx.focus_handle(),
             previous_focus_handle: init.previous_focus_handle,
             mode: init.mode,
             messages: Vec::new(),
@@ -400,6 +521,10 @@ impl AiPanel {
             scroll_handle: ScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
             pending_stream: None,
+            stream_render_task: None,
+            generation_id: 0,
+            active_generation: None,
+            generation_failure: None,
             pending_title_task: None,
             context_provider: init.context_provider,
             document_path: init.document_path,
@@ -436,6 +561,16 @@ impl AiPanel {
             validation_notice: None,
             validation_toast: None,
             validation_notice_task: None,
+            editing_turn: None,
+            edit_blur_subscription: None,
+            copied_target: None,
+            copy_feedback_generation: 0,
+            copy_feedback_task: None,
+            follow_output: true,
+            scroll_epoch: 0,
+            message_scroll_interacted: Rc::new(Cell::new(false)),
+            message_scroll_task: None,
+            message_context_menu: None,
         }
     }
 
@@ -451,9 +586,13 @@ impl AiPanel {
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing_turn.is_some() {
+            self.cancel_editing(window, cx);
+        }
+        let stopped_generation = self.stop_generation(cx);
         self.update_current_page(cx);
         self.invalidate_mention_preview();
-        if self.mode == AiPanelMode::Sidebar {
+        if self.mode == AiPanelMode::Sidebar && !stopped_generation {
             self.save_current_session(cx);
         }
         self.previous_focus_handle.focus(window, cx);
@@ -461,17 +600,43 @@ impl AiPanel {
     }
 
     fn close(&mut self, _: &AiPanelClose, window: &mut Window, cx: &mut Context<Self>) {
+        if self.message_context_menu.take().is_some()
+            || self.attachment_menu_open
+            || self.model_menu_open
+            || self.thinking_menu_open
+            || self.mention_completion.is_some()
+        {
+            self.close_composer_menus();
+            self.mention_completion = None;
+            cx.notify();
+            return;
+        }
+        if self.editing_turn.is_some() {
+            self.cancel_editing(window, cx);
+            return;
+        }
+        if self.stop_generation(cx) {
+            return;
+        }
         self.dismiss(window, cx);
     }
 
-    fn submit(&mut self, _: &AiPanelSubmit, _: &mut Window, cx: &mut Context<Self>) {
+    fn submit(&mut self, _: &AiPanelSubmit, window: &mut Window, cx: &mut Context<Self>) {
         if self.finish_page_number_edit(cx) {
             return;
         }
         if self.confirm_mention_completion(cx) {
             return;
         }
-        self.send_message(cx);
+        if self.editing_turn.is_some() {
+            self.submit_edited_message(window, cx);
+        } else {
+            self.send_message(cx);
+        }
+    }
+
+    fn input_is_focused(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window) || self.edit_focus_handle.is_focused(window)
     }
 
     fn newline(&mut self, _: &input::Newline, window: &mut Window, cx: &mut Context<Self>) {
@@ -485,7 +650,7 @@ impl AiPanel {
     }
 
     fn backspace(&mut self, _: &input::Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         if self.model_menu_open {
@@ -542,7 +707,7 @@ impl AiPanel {
     }
 
     fn delete(&mut self, _: &input::Delete, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         if self.model_menu_open {
@@ -583,7 +748,7 @@ impl AiPanel {
     }
 
     fn left(&mut self, _: &input::Left, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         if let Some(active) = self.active_page_number_edit.clone()
@@ -611,7 +776,7 @@ impl AiPanel {
     }
 
     fn right(&mut self, _: &input::Right, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         if let Some(active) = self.active_page_number_edit.clone()
@@ -635,7 +800,7 @@ impl AiPanel {
     }
 
     fn up(&mut self, _: &input::Up, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         if self.select_previous_mention_completion(cx) {
@@ -645,7 +810,7 @@ impl AiPanel {
     }
 
     fn down(&mut self, _: &input::Down, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         if self.select_next_mention_completion(cx) {
@@ -655,21 +820,21 @@ impl AiPanel {
     }
 
     fn home(&mut self, _: &input::Home, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         self.move_to(self.line_start_offset(), cx);
     }
 
     fn end(&mut self, _: &input::End, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         self.move_to(self.line_end_offset(), cx);
     }
 
     fn select_all(&mut self, _: &input::SelectAll, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         self.move_to(0, cx);
@@ -677,7 +842,7 @@ impl AiPanel {
     }
 
     fn select_left(&mut self, _: &input::SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
@@ -689,49 +854,49 @@ impl AiPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
     fn select_up(&mut self, _: &input::SelectUp, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         self.move_vertically(-1, true, window, cx);
     }
 
     fn select_down(&mut self, _: &input::SelectDown, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         self.move_vertically(1, true, window, cx);
     }
 
     fn select_home(&mut self, _: &input::SelectHome, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         self.select_to(self.line_start_offset(), cx);
     }
 
     fn select_end(&mut self, _: &input::SelectEnd, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         self.select_to(self.line_end_offset(), cx);
     }
 
     fn copy(&mut self, _: &input::Copy, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         self.copy_selected_text(cx);
     }
 
     fn cut(&mut self, _: &input::Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         if self.copy_selected_text(cx) {
@@ -740,7 +905,7 @@ impl AiPanel {
     }
 
     fn paste(&mut self, _: &input::Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.input_is_focused(window) {
             return;
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
@@ -750,22 +915,118 @@ impl AiPanel {
         }
     }
 
-    fn send_message(&mut self, cx: &mut Context<Self>) {
-        if self.loading {
+    fn composer_snapshot(&self) -> ComposerSnapshot {
+        ComposerSnapshot {
+            content: self.content.clone(),
+            selected_range: self.selected_range.clone(),
+            selection_reversed: self.selection_reversed,
+            marked_range: self.marked_range.clone(),
+            mentions: self.composer_mentions.clone(),
+            active_page_number_edit: self.active_page_number_edit.clone(),
+        }
+    }
+
+    fn restore_composer_snapshot(&mut self, snapshot: ComposerSnapshot) {
+        self.content = snapshot.content;
+        self.selected_range = snapshot.selected_range;
+        self.selection_reversed = snapshot.selection_reversed;
+        self.marked_range = snapshot.marked_range;
+        self.composer_mentions = snapshot.mentions;
+        self.active_page_number_edit = snapshot.active_page_number_edit;
+        self.reset_composer_layout();
+    }
+
+    fn reset_composer_layout(&mut self) {
+        self.last_display = None;
+        self.last_lines.clear();
+        self.last_bounds = None;
+        self.last_cursor_pos = None;
+        self.mention_completion = None;
+        self.invalidate_mention_preview();
+    }
+
+    fn start_editing_message(
+        &mut self,
+        message_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cursor = self
+            .messages
+            .get(message_index)
+            .map_or(0, |message| message.display_text().len());
+        self.start_editing_message_at(message_index, cursor, 1, window, cx);
+    }
+
+    fn start_editing_message_at(
+        &mut self,
+        message_index: usize,
+        source_offset: usize,
+        click_count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.loading || self.editing_turn.is_some() || self.mode != AiPanelMode::Sidebar {
+            return;
+        }
+        let Some(message) = self.messages.get(message_index) else {
+            return;
+        };
+        if message.role != Role::User {
             return;
         }
 
-        self.finish_page_number_edit(cx);
+        let content = message.display_text();
+        let Ok(mentions) = composer_mentions_for_message(message) else {
+            self.show_validation_notice(tr("ai-edit-context-unavailable"), cx);
+            return;
+        };
+        self.editing_turn = Some(EditingTurn {
+            message_index,
+            saved_composer: self.composer_snapshot(),
+        });
+        self.content = content.clone().into();
+        self.selected_range =
+            selection_range_for_click(&content, &mentions, source_offset, click_count);
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.composer_mentions = mentions;
+        self.active_page_number_edit = None;
+        self.close_composer_menus();
+        self.clear_validation_notice();
+        self.reset_composer_layout();
+        self.edit_blur_subscription =
+            Some(cx.on_blur(&self.edit_focus_handle, window, |_, _, cx| cx.notify()));
+        self.edit_focus_handle.focus(window, cx);
+        cx.notify();
+    }
 
+    fn cancel_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(editing) = self.editing_turn.take() else {
+            return false;
+        };
+        self.edit_blur_subscription = None;
+        self.restore_composer_snapshot(editing.saved_composer);
+        self.close_composer_menus();
+        self.clear_validation_notice();
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    fn prepare_composer_message(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<PreparedComposerMessage> {
         let (display_prompt, submitted_mentions) =
             trimmed_composer_content(&self.content, &self.composer_mentions);
         if display_prompt.is_empty() {
-            return;
+            return None;
         }
+
         let request_prompt = request_prompt_without_mentions(&display_prompt, &submitted_mentions);
         let references = references_for_composer_mentions(&submitted_mentions);
         let region_references = region_references_for_composer_mentions(&submitted_mentions);
-
         self.update_current_page(cx);
         let include_document_text = references
             .iter()
@@ -773,13 +1034,52 @@ impl AiPanel {
         let context = self.context_provider.context(include_document_text, cx);
         let contexts = context_blocks_for_composer_mentions(&submitted_mentions, context.as_ref());
         let document = self.document_context_from(context);
+        let mention_occurrences = submitted_mentions
+            .iter()
+            .map(|mention| MentionOccurrence {
+                range: mention.range.clone(),
+                reference: mention.reference,
+                region_reference: match mention.captured.as_ref() {
+                    Some(CapturedMention::Region(reference)) => Some(reference.clone()),
+                    _ => None,
+                },
+            })
+            .collect();
         let user_message =
             ChatMessage::user(display_prompt.clone(), request_prompt, contexts, references)
-                .with_region_references(region_references);
+                .with_region_references(region_references)
+                .with_mention_occurrences(mention_occurrences);
+
+        Some(PreparedComposerMessage {
+            display_prompt,
+            submitted_mentions,
+            user_message,
+            document,
+        })
+    }
+
+    fn submit_edited_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.finish_page_number_edit(cx);
+
+        let Some(editing) = self.editing_turn.clone() else {
+            return;
+        };
+        let Some(PreparedComposerMessage {
+            display_prompt,
+            user_message,
+            document,
+            ..
+        }) = self.prepare_composer_message(cx)
+        else {
+            return;
+        };
         let ai_settings = cx.global::<SettingsStore>().settings.ai.clone();
         if let Err(error) = validate_composer_page_image_preflight(
             self.mode,
-            &self.messages,
+            &self.messages[..editing.message_index],
             &user_message,
             self.page_count,
             ai_settings.page_image_limit,
@@ -787,42 +1087,144 @@ impl AiPanel {
             self.show_validation_notice(error.to_string(), cx);
             return;
         }
-        let settings = ai_settings.resolved_main();
-        self.invalidate_mention_preview();
 
-        if self.mode == AiPanelMode::QuickAsk {
-            self.messages.clear();
-            self.markdown_views.clear();
-        } else if self.messages.is_empty() {
+        self.editing_turn = None;
+        self.edit_blur_subscription = None;
+        self.restore_composer_snapshot(editing.saved_composer);
+        self.pending_title_task = None;
+        self.truncate_messages(editing.message_index);
+        if editing.message_index == 0 {
             self.session_title = session_title_for_prompt(&display_prompt);
         }
-        if self.mode == AiPanelMode::Sidebar {
-            self.content = SharedString::default();
-            self.selected_range = 0..0;
-            self.composer_mentions.clear();
-        } else {
-            self.content = display_prompt.clone().into();
-            self.selected_range = display_prompt.len()..display_prompt.len();
-            self.composer_mentions = submitted_mentions;
-        }
-        self.selection_reversed = false;
-        self.marked_range = None;
-        self.mention_completion = None;
-        self.active_page_number_edit = None;
-        self.last_cursor_pos = None;
+        self.push_message(user_message, cx);
+        self.push_message(ChatMessage::assistant(String::new()), cx);
         self.close_composer_menus();
         self.clear_validation_notice();
-        let user_prompt = display_prompt.clone();
-        self.messages.push(user_message);
+        self.focus_handle.focus(window, cx);
+        self.start_generation(document, cx);
+    }
+
+    fn regenerate_from_user(&mut self, message_index: usize, cx: &mut Context<Self>) {
+        if self.loading || self.editing_turn.is_some() {
+            return;
+        }
+        if self
+            .messages
+            .get(message_index)
+            .is_none_or(|message| message.role != Role::User)
+        {
+            return;
+        }
+
+        self.update_current_page(cx);
+        let prefix_len = message_index + 1;
+        let page_image_limit = cx.global::<SettingsStore>().settings.ai.page_image_limit;
+        if let Err(error) = validate_page_image_preflight(
+            self.messages[..prefix_len].iter(),
+            self.page_count,
+            page_image_limit,
+        ) {
+            self.show_validation_notice(error.to_string(), cx);
+            return;
+        }
+
+        self.pending_title_task = None;
+        self.truncate_messages(prefix_len);
+        if message_index == 0 {
+            self.session_title =
+                session_title_for_prompt(&self.messages[message_index].display_text());
+        }
+        self.push_message(ChatMessage::assistant(String::new()), cx);
+        let document = self.document_context(cx);
+        self.start_generation(document, cx);
+    }
+
+    fn retry_assistant(&mut self, assistant_index: usize, cx: &mut Context<Self>) {
+        if self.loading || self.editing_turn.is_some() {
+            return;
+        }
+        let Some(user_index) = assistant_index.checked_sub(1) else {
+            return;
+        };
+        if self
+            .messages
+            .get(assistant_index)
+            .is_none_or(|message| message.role != Role::Assistant)
+            || self
+                .messages
+                .get(user_index)
+                .is_none_or(|message| message.role != Role::User)
+        {
+            return;
+        }
+
+        self.generation_failure = None;
+        self.regenerate_from_user(user_index, cx);
+    }
+
+    fn push_message(&mut self, message: ChatMessage, cx: &mut Context<Self>) {
+        let source = message.display_text();
+        self.messages.push(message);
         self.markdown_views
-            .push(cx.new(|cx| Markdown::new(user_prompt.into(), cx)));
-        self.messages.push(ChatMessage::assistant(String::new()));
-        self.markdown_views
-            .push(cx.new(|cx| Markdown::new(SharedString::default(), cx)));
+            .push(cx.new(|cx| Markdown::new(source.into(), cx)));
+    }
+
+    fn truncate_messages(&mut self, len: usize) {
+        self.messages.truncate(len);
+        self.markdown_views.truncate(len);
+        debug_assert_eq!(self.messages.len(), self.markdown_views.len());
+    }
+
+    fn sync_markdown(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let (Some(message), Some(markdown)) =
+            (self.messages.get(index), self.markdown_views.get(index))
+        {
+            markdown.update(cx, |markdown, cx| {
+                markdown.set_source(message.display_text().into(), cx)
+            });
+        }
+    }
+
+    fn start_generation(&mut self, document: DocumentContext, cx: &mut Context<Self>) {
+        let Some(assistant_index) = self.messages.len().checked_sub(1) else {
+            return;
+        };
+        if self
+            .messages
+            .get(assistant_index)
+            .is_none_or(|message| message.role != Role::Assistant)
+        {
+            return;
+        }
+
+        self.stream_render_task = None;
+        self.generation_id = self.generation_id.wrapping_add(1);
+        let target = GenerationTarget {
+            id: self.generation_id,
+            assistant_index,
+        };
+        self.active_generation = Some(target);
+        self.generation_failure = None;
+        self.message_context_menu = None;
         self.loading = true;
+        self.follow_output = true;
+        let user_index = assistant_index.saturating_sub(1);
+        self.scroll_handle.scroll_to_top_of_item(user_index);
+        let scroll_epoch = self.scroll_epoch;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::ZERO).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.scroll_epoch == scroll_epoch && this.follow_output {
+                    this.scroll_handle.scroll_to_top_of_item(user_index);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         cx.notify();
 
-        let mut request_messages = self.messages[..self.messages.len().saturating_sub(1)].to_vec();
+        let settings = cx.global::<SettingsStore>().settings.ai.resolved_main();
+        let mut request_messages = self.messages[..assistant_index].to_vec();
         let page_references = unresolved_page_references(&request_messages, self.page_count);
         let region_references = unresolved_region_references(&request_messages);
         let page_resolve_task = self
@@ -837,7 +1239,11 @@ impl AiPanel {
                 Ok(resolved) => resolved,
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.apply_stream_event(AiStreamEvent::Error(format!("{error:#}")), cx);
+                        this.apply_stream_event(
+                            target,
+                            AiStreamEvent::Error(format!("{error:#}")),
+                            cx,
+                        );
                         cx.notify();
                     });
                     return;
@@ -847,7 +1253,11 @@ impl AiPanel {
                 Ok(resolved) => resolved,
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.apply_stream_event(AiStreamEvent::Error(format!("{error:#}")), cx);
+                        this.apply_stream_event(
+                            target,
+                            AiStreamEvent::Error(format!("{error:#}")),
+                            cx,
+                        );
                         cx.notify();
                     });
                     return;
@@ -859,7 +1269,7 @@ impl AiPanel {
                 &resolved_regions,
             ) {
                 let _ = this.update(cx, |this, cx| {
-                    this.apply_stream_event(AiStreamEvent::Error(error.to_string()), cx);
+                    this.apply_stream_event(target, AiStreamEvent::Error(error.to_string()), cx);
                     cx.notify();
                 });
                 return;
@@ -868,6 +1278,9 @@ impl AiPanel {
             hydrate_region_contexts(&mut request_messages, &resolved_regions);
             if this
                 .update(cx, |this, cx| {
+                    if this.active_generation != Some(target) {
+                        return;
+                    }
                     hydrate_page_contexts(&mut this.messages, &resolved_pages);
                     hydrate_region_contexts(&mut this.messages, &resolved_regions);
                     cx.notify();
@@ -897,8 +1310,7 @@ impl AiPanel {
             while let Some(event) = rx.next().await {
                 if this
                     .update(cx, |this, cx| {
-                        this.apply_stream_event(event, cx);
-                        cx.notify();
+                        this.apply_stream_event(target, event, cx);
                     })
                     .is_err()
                 {
@@ -908,46 +1320,464 @@ impl AiPanel {
         }));
     }
 
-    fn apply_stream_event(&mut self, event: AiStreamEvent, cx: &mut Context<Self>) {
+    fn send_message(&mut self, cx: &mut Context<Self>) {
+        if self.loading || self.editing_turn.is_some() || self.generation_failure.is_some() {
+            return;
+        }
+
+        self.finish_page_number_edit(cx);
+
+        let Some(PreparedComposerMessage {
+            display_prompt,
+            submitted_mentions,
+            user_message,
+            document,
+        }) = self.prepare_composer_message(cx)
+        else {
+            return;
+        };
+        let ai_settings = cx.global::<SettingsStore>().settings.ai.clone();
+        if let Err(error) = validate_composer_page_image_preflight(
+            self.mode,
+            &self.messages,
+            &user_message,
+            self.page_count,
+            ai_settings.page_image_limit,
+        ) {
+            self.show_validation_notice(error.to_string(), cx);
+            return;
+        }
+        self.invalidate_mention_preview();
+
+        if self.mode == AiPanelMode::QuickAsk {
+            self.messages.clear();
+            self.markdown_views.clear();
+        } else if self.messages.is_empty() {
+            self.session_title = session_title_for_prompt(&display_prompt);
+        }
+        if self.mode == AiPanelMode::Sidebar {
+            self.content = SharedString::default();
+            self.selected_range = 0..0;
+            self.composer_mentions.clear();
+        } else {
+            self.content = display_prompt.clone().into();
+            self.selected_range = display_prompt.len()..display_prompt.len();
+            self.composer_mentions = submitted_mentions;
+        }
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.mention_completion = None;
+        self.active_page_number_edit = None;
+        self.last_cursor_pos = None;
+        self.close_composer_menus();
+        self.clear_validation_notice();
+        self.push_message(user_message, cx);
+        self.push_message(ChatMessage::assistant(String::new()), cx);
+        self.start_generation(document, cx);
+    }
+
+    fn schedule_stream_render(&mut self, target: GenerationTarget, cx: &mut Context<Self>) {
+        if self.stream_render_task.is_some() {
+            return;
+        }
+        self.stream_render_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::ZERO).await;
+            let _ = this.update(cx, |this, cx| {
+                this.stream_render_task = None;
+                if this.active_generation == Some(target) {
+                    this.sync_stream_render(target, cx);
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn sync_stream_render(&mut self, target: GenerationTarget, cx: &mut Context<Self>) {
+        self.sync_markdown(target.assistant_index, cx);
+        if self.follow_output && !self.is_near_message_bottom() {
+            self.follow_output = false;
+        }
+        if self.follow_output {
+            self.scroll_handle.scroll_to_bottom();
+        }
+    }
+
+    fn apply_stream_event(
+        &mut self,
+        target: GenerationTarget,
+        event: AiStreamEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_generation != Some(target) {
+            return;
+        }
+
         match event {
             AiStreamEvent::Delta(delta) => {
-                if let Some(message) = self.messages.last_mut() {
+                if let Some(message) = self.messages.get_mut(target.assistant_index) {
                     message.push_text(&delta);
                 }
-                self.sync_last_markdown(cx);
+                self.schedule_stream_render(target, cx);
             }
             AiStreamEvent::Error(error) => {
+                self.stream_render_task = None;
+                self.sync_stream_render(target, cx);
                 self.loading = false;
-                if let Some(message) = self.messages.last_mut() {
-                    if !message.display_text().is_empty() {
-                        message.push_text("\n\n");
-                    }
-                    message.push_text("Error: ");
-                    message.push_text(&error);
-                }
-                self.sync_last_markdown(cx);
+                self.active_generation = None;
+                self.generation_failure = Some(GenerationFailure {
+                    assistant_index: target.assistant_index,
+                    message: error,
+                });
                 self.pending_stream = None;
                 if self.mode == AiPanelMode::Sidebar {
                     self.save_current_session(cx);
                 }
+                cx.notify();
             }
             AiStreamEvent::Done => {
+                self.stream_render_task = None;
+                self.sync_stream_render(target, cx);
                 self.loading = false;
-                self.sync_last_markdown(cx);
+                self.active_generation = None;
+                self.generation_failure = None;
                 self.pending_stream = None;
                 if self.mode == AiPanelMode::Sidebar {
                     self.maybe_generate_title(cx);
                     self.save_current_session(cx);
                 }
+                cx.notify();
             }
         }
     }
 
-    fn sync_last_markdown(&mut self, cx: &mut Context<Self>) {
-        if let (Some(message), Some(md)) = (self.messages.last(), self.markdown_views.last()) {
-            let text = message.display_text();
-            md.update(cx, |md, cx| md.set_source(text.into(), cx));
+    fn stop_generation(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self.active_generation.take() else {
+            return false;
+        };
+
+        self.generation_id = self.generation_id.wrapping_add(1);
+        self.pending_stream = None;
+        self.stream_render_task = None;
+        self.loading = false;
+        self.generation_failure = None;
+
+        if self
+            .messages
+            .get(target.assistant_index)
+            .is_some_and(ChatMessage::is_display_empty)
+        {
+            self.truncate_messages(target.assistant_index);
+        } else {
+            self.sync_markdown(target.assistant_index, cx);
         }
+
+        if self.mode == AiPanelMode::Sidebar {
+            self.save_current_session(cx);
+        }
+        cx.notify();
+        true
+    }
+
+    fn show_copy_feedback(&mut self, target: CopyFeedbackTarget, cx: &mut Context<Self>) {
+        self.copy_feedback_generation = self.copy_feedback_generation.wrapping_add(1);
+        let generation = self.copy_feedback_generation;
+        self.copied_target = Some(target);
+        self.copy_feedback_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPY_FEEDBACK_DURATION).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copy_feedback_generation == generation {
+                    this.copied_target = None;
+                    this.copy_feedback_task = None;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    fn copy_message(&mut self, message_index: usize, cx: &mut Context<Self>) {
+        let Some(message) = self.messages.get(message_index) else {
+            return;
+        };
+        let text = message.display_text();
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.show_copy_feedback(CopyFeedbackTarget::Message(message_index), cx);
+    }
+
+    fn copy_generation_error(&mut self, cx: &mut Context<Self>) {
+        let Some(failure) = self.generation_failure.as_ref() else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(failure.message.clone()));
+        self.show_copy_feedback(CopyFeedbackTarget::Error, cx);
+    }
+
+    fn dismiss_generation_error(&mut self, cx: &mut Context<Self>) {
+        let Some(failure) = self.generation_failure.take() else {
+            return;
+        };
+        self.truncate_messages(failure.assistant_index);
+        if self.mode == AiPanelMode::Sidebar {
+            self.save_current_session(cx);
+        }
+        cx.notify();
+    }
+
+    fn open_message_context_menu(
+        &mut self,
+        message_index: usize,
+        request: MarkdownContextMenuRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_composer_menus();
+        self.message_context_menu = Some(MessageContextMenu {
+            position: request.position,
+            message_index,
+            selected_text: request.selected_text,
+            link_url: request.link_url,
+        });
+        window.prevent_default();
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn close_message_context_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        let was_open = self.message_context_menu.take().is_some();
+        if was_open {
+            cx.notify();
+        }
+        was_open
+    }
+
+    fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
+        self.follow_output = false;
+        self.scroll_handle.scroll_to_top_of_item(0);
+        self.close_message_context_menu(cx);
+        cx.notify();
+    }
+
+    fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.follow_output = true;
+        self.scroll_handle.scroll_to_bottom();
+        self.close_message_context_menu(cx);
+        cx.notify();
+    }
+
+    fn scroll_to_latest_user(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == Role::User)
+        else {
+            return;
+        };
+        self.follow_output = false;
+        self.scroll_handle.scroll_to_top_of_item(index);
+        self.close_message_context_menu(cx);
+        cx.notify();
+    }
+
+    fn reset_message_scroll(&mut self) {
+        self.scroll_epoch = self.scroll_epoch.wrapping_add(1);
+        self.scroll_handle = ScrollHandle::new();
+        self.follow_output = true;
+        self.message_scroll_task = None;
+    }
+
+    fn is_near_message_bottom(&self) -> bool {
+        message_scroll_distance_from_bottom(
+            self.scroll_handle.offset().y.as_f32(),
+            self.scroll_handle.max_offset().y.as_f32(),
+        ) <= 24.0
+    }
+
+    fn handle_message_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let delta_y = match event.delta {
+            ScrollDelta::Pixels(delta) => delta.y.as_f32(),
+            ScrollDelta::Lines(delta) => delta.y,
+        };
+        if delta_y > 0.0 {
+            self.follow_output = false;
+        }
+        let scroll_epoch = self.scroll_epoch;
+        self.close_message_context_menu(cx);
+        self.message_scroll_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::ZERO).await;
+            let _ = this.update(cx, |this, cx| {
+                this.message_scroll_task = None;
+                if this.scroll_epoch != scroll_epoch {
+                    return;
+                }
+                let follow_output = this.is_near_message_bottom();
+                if this.follow_output != follow_output {
+                    this.follow_output = follow_output;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn context_menu_entry(
+        id: impl Into<ElementId>,
+        label: String,
+        icon: IconName,
+        theme: Theme,
+        handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(30.0))
+            .px_3()
+            .text_size(ui_rems(13.0))
+            .text_color(rgb(theme.text))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    handler(this, window, cx);
+                    this.close_message_context_menu(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(Icon::new(icon, ui_rems(14.0), rgb(theme.text_muted)))
+            .child(label)
+            .into_any_element()
+    }
+
+    fn render_message_context_menu(
+        &self,
+        menu: MessageContextMenu,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(message) = self.messages.get(menu.message_index) else {
+            return div().into_any_element();
+        };
+        let is_user = message.role == Role::User;
+        let can_mutate = !self.loading && self.editing_turn.is_none();
+        let has_later_messages = menu.message_index + 1 < self.messages.len();
+        let copy_index = menu.message_index;
+        let edit_index = menu.message_index;
+        let regenerate_index = menu.message_index;
+        let retry_index = menu.message_index;
+
+        div()
+            .occlude()
+            .flex()
+            .flex_col()
+            .w(px(220.0))
+            .py_1()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .overflow_hidden()
+            .bg(rgb(theme.surface_background))
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_mouse_down(MouseButton::Right, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .when_some(menu.selected_text, |this, selected_text| {
+                this.child(Self::context_menu_entry(
+                    ("ai-copy-selection", copy_index),
+                    tr("ai-copy-selection"),
+                    IconName::Copy,
+                    theme,
+                    move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(selected_text.to_string()));
+                    },
+                    cx,
+                ))
+            })
+            .when_some(menu.link_url, |this, link_url| {
+                this.child(Self::context_menu_entry(
+                    ("ai-copy-link", copy_index),
+                    tr("ai-copy-link"),
+                    IconName::Copy,
+                    theme,
+                    move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(link_url.to_string()));
+                    },
+                    cx,
+                ))
+            })
+            .child(Self::context_menu_entry(
+                ("ai-copy-message", copy_index),
+                if is_user {
+                    tr("ai-copy-message")
+                } else {
+                    tr("ai-copy-response")
+                },
+                IconName::Copy,
+                theme,
+                move |this, _, cx| this.copy_message(copy_index, cx),
+                cx,
+            ))
+            .when(is_user && can_mutate, |this| {
+                this.child(Self::context_menu_entry(
+                    ("ai-edit-message", edit_index),
+                    tr("edit"),
+                    IconName::Pencil,
+                    theme,
+                    move |this, window, cx| this.start_editing_message(edit_index, window, cx),
+                    cx,
+                ))
+                .child(Self::context_menu_entry(
+                    ("ai-regenerate-message", regenerate_index),
+                    if has_later_messages {
+                        tr("ai-regenerate-from-message-warning")
+                    } else {
+                        tr("ai-regenerate-from-message")
+                    },
+                    IconName::RotateCcw,
+                    theme,
+                    move |this, _, cx| this.regenerate_from_user(regenerate_index, cx),
+                    cx,
+                ))
+            })
+            .when(!is_user && can_mutate, |this| {
+                this.child(Self::context_menu_entry(
+                    ("ai-retry-response", retry_index),
+                    if has_later_messages {
+                        tr("ai-retry-response-warning")
+                    } else {
+                        tr("ai-retry-response")
+                    },
+                    IconName::RotateCcw,
+                    theme,
+                    move |this, _, cx| this.retry_assistant(retry_index, cx),
+                    cx,
+                ))
+            })
+            .child(div().h(px(1.0)).my_1().mx_1().bg(rgb(theme.border)))
+            .child(Self::context_menu_entry(
+                "ai-scroll-top",
+                tr("ai-scroll-top"),
+                IconName::ArrowUp,
+                theme,
+                |this, _, cx| this.scroll_to_top(cx),
+                cx,
+            ))
+            .child(Self::context_menu_entry(
+                "ai-scroll-bottom",
+                tr("ai-scroll-bottom"),
+                IconName::ChevronDown,
+                theme,
+                |this, _, cx| this.scroll_to_bottom(cx),
+                cx,
+            ))
+            .into_any_element()
     }
 
     fn maybe_generate_title(&mut self, cx: &mut Context<Self>) {
@@ -1485,41 +2315,17 @@ impl AiPanel {
             self.session_created = now;
         }
         self.session_updated = now;
+        let failed_assistant = self
+            .generation_failure
+            .as_ref()
+            .map(|failure| failure.assistant_index);
 
         let session = AiSession {
             id: self.session_id,
             path: self.document_path.clone(),
             title: self.session_title.clone(),
             page: self.current_page,
-            messages: self
-                .messages
-                .iter()
-                .map(|message| {
-                    let content = message.display_text();
-                    let request_content = message.request_text();
-                    AiSessionMessage {
-                        role: match message.role {
-                            Role::User => AiSessionRole::User,
-                            Role::Assistant => AiSessionRole::Assistant,
-                        },
-                        content: content.clone(),
-                        request_content: (request_content != content).then_some(request_content),
-                        references: message
-                            .references()
-                            .iter()
-                            .copied()
-                            .map(ai_reference_to_library)
-                            .chain(
-                                message
-                                    .region_references()
-                                    .iter()
-                                    .cloned()
-                                    .map(|reference| AiMentionReference::RegionImage { reference }),
-                            )
-                            .collect(),
-                    }
-                })
-                .collect(),
+            messages: persisted_session_messages(&self.messages, failed_assistant),
             created: self.session_created,
             updated: self.session_updated,
         };
@@ -1536,11 +2342,13 @@ impl AiPanel {
             .ai_sessions_for(&self.document_path);
     }
 
-    fn show_sessions(&mut self, cx: &mut Context<Self>) {
+    fn show_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_editing(window, cx);
         self.update_current_page(cx);
         self.save_current_session(cx);
         self.refresh_sessions(cx);
         self.view = AiPanelView::Sessions;
+        self.message_context_menu = None;
         self.hide_mention_preview(cx);
         self.close_composer_menus();
         cx.notify();
@@ -1569,6 +2377,7 @@ impl AiPanel {
         if self.loading {
             return;
         }
+        self.message_context_menu = None;
         self.attachment_menu_open = !self.attachment_menu_open;
         self.attachment_menu_anchor = self
             .attachment_menu_open
@@ -1589,6 +2398,7 @@ impl AiPanel {
         if self.loading {
             return;
         }
+        self.message_context_menu = None;
         self.focus_handle.focus(window, cx);
         self.model_menu_open = !self.model_menu_open;
         self.model_menu_anchor = self
@@ -1606,6 +2416,7 @@ impl AiPanel {
         if self.loading {
             return;
         }
+        self.message_context_menu = None;
         self.thinking_menu_open = !self.thinking_menu_open;
         self.thinking_menu_anchor = self
             .thinking_menu_open
@@ -1652,6 +2463,7 @@ impl AiPanel {
         if self.loading {
             return;
         }
+        self.cancel_editing(window, cx);
         self.update_current_page(cx);
         self.save_current_session(cx);
         self.session_id = cx.global_mut::<LibraryStore>().next_ai_session_id();
@@ -1670,8 +2482,12 @@ impl AiPanel {
         self.active_page_number_edit = None;
         self.last_cursor_pos = None;
         self.pending_title_task = None;
+        self.generation_failure = None;
+        self.active_generation = None;
+        self.message_context_menu = None;
         self.clear_validation_notice();
         self.close_composer_menus();
+        self.reset_message_scroll();
         self.view = AiPanelView::Chat;
         self.focus_handle.focus(window, cx);
         self.refresh_sessions(cx);
@@ -1682,6 +2498,7 @@ impl AiPanel {
         if self.loading {
             return;
         }
+        self.cancel_editing(window, cx);
         let Some(session) = self
             .sessions
             .iter()
@@ -1716,9 +2533,15 @@ impl AiPanel {
                     .iter()
                     .filter_map(library_reference_to_region)
                     .collect();
+                let occurrences = message
+                    .occurrences
+                    .iter()
+                    .filter_map(library_occurrence_to_ai)
+                    .collect();
                 ChatMessage::from_persisted(role, message.content, message.request_content)
                     .with_references(references)
                     .with_region_references(region_references)
+                    .with_mention_occurrences(occurrences)
             })
             .collect();
         self.markdown_views = self
@@ -1739,8 +2562,12 @@ impl AiPanel {
         self.active_page_number_edit = None;
         self.last_cursor_pos = None;
         self.pending_title_task = None;
+        self.generation_failure = None;
+        self.active_generation = None;
+        self.message_context_menu = None;
         self.clear_validation_notice();
         self.close_composer_menus();
+        self.reset_message_scroll();
         self.view = AiPanelView::Chat;
         self.focus_handle.focus(window, cx);
         cx.notify();
@@ -1975,7 +2802,11 @@ impl AiPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus_handle.focus(window, cx);
+        if self.editing_turn.is_some() {
+            self.edit_focus_handle.focus(window, cx);
+        } else {
+            self.focus_handle.focus(window, cx);
+        }
         self.close_composer_menus();
         self.hide_mention_preview(cx);
         self.drag_origin = Some(event.position);
@@ -1988,6 +2819,19 @@ impl AiPanel {
             && self.finish_page_number_edit(cx)
         {
             offset = self.index_for_mouse_position(event.position, window);
+        }
+        if event.click_count >= 2 && !event.modifiers.shift {
+            self.selected_range = selection_range_for_click(
+                &self.content,
+                &self.composer_mentions,
+                offset,
+                event.click_count,
+            );
+            self.selection_reversed = false;
+            self.marked_range = None;
+            cx.notify();
+            cx.stop_propagation();
+            return;
         }
         if !event.modifiers.shift
             && let Some(mention) = self.mention_at_offset(offset).cloned()
@@ -2395,7 +3239,9 @@ impl AiPanel {
             .iter()
             .rposition(|m| m.role == Role::Assistant)
             .and_then(|ix| self.markdown_views.get(ix).cloned());
-        let show_answer = loading || !answer.is_empty();
+        let generation_failure = self.generation_failure.clone();
+        let copied_error = self.copied_target == Some(CopyFeedbackTarget::Error);
+        let show_answer = loading || !answer.is_empty() || generation_failure.is_some();
 
         div()
             .key_context("QuickAsk TextInput")
@@ -2457,9 +3303,33 @@ impl AiPanel {
                                 this.schedule_mention_preview_hide(window, cx);
                             }
                         }))
-                        .child(AiInputElement { panel: entity }),
+                        .child(AiInputElement {
+                            panel: entity,
+                            source: AiInputSource::Editor,
+                        }),
                 ),
             )
+            .when(loading, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_1()
+                        .right_2()
+                        .rounded(px(4.0))
+                        .bg(rgb(theme.surface_background))
+                        .child(Self::message_action_button(
+                            "quick-ask-stop",
+                            IconName::Stop,
+                            tr("ai-stop-generation"),
+                            theme.error,
+                            theme,
+                            |this, _, cx| {
+                                this.stop_generation(cx);
+                            },
+                            cx,
+                        )),
+                )
+            })
             .when(show_answer, |this| {
                 this.child(
                     div()
@@ -2476,7 +3346,7 @@ impl AiPanel {
                                 .overflow_y_scroll()
                                 .text_color(rgb(theme.text))
                                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                                .when(answer.is_empty(), |this| {
+                                .when(loading && answer.is_empty(), |this| {
                                     this.child(Self::render_loading_indicator(theme))
                                 })
                                 .when(!answer.is_empty(), |this| {
@@ -2489,6 +3359,15 @@ impl AiPanel {
                                             ),
                                         ))
                                     })
+                                })
+                                .when_some(generation_failure, |this, failure| {
+                                    this.child(Self::render_generation_failure_card(
+                                        failure,
+                                        copied_error,
+                                        "quick-ask-error",
+                                        theme,
+                                        cx,
+                                    ))
                                 }),
                         )
                         .vertical_scrollbar_for(&self.scroll_handle, window, cx),
@@ -2550,35 +3429,14 @@ impl AiPanel {
         let Some(bounds) = self.last_bounds else {
             return 0;
         };
-
-        let line_height = window.line_height();
-        let local = match bounds.localize(&position) {
-            Some(local) => local,
-            None if position.y < bounds.top() => return 0,
-            None => return self.content.len(),
-        };
-
-        let mut line_top = px(0.0);
-        for laid_out in &self.last_lines {
-            let line_height_px = laid_out.line.size(line_height).height;
-            if local.y <= line_top + line_height_px {
-                let line_point = point(local.x, local.y - line_top);
-                let local_ix = laid_out
-                    .line
-                    .closest_index_for_position(line_point, line_height)
-                    .unwrap_or_else(|ix| ix);
-                let display_offset = laid_out.start + local_ix;
-                return self
-                    .last_display
-                    .as_ref()
-                    .map(|display| display.source_offset(display_offset))
-                    .unwrap_or(display_offset)
-                    .min(self.content.len());
-            }
-            line_top += line_height_px;
-        }
-
-        self.content.len()
+        source_index_for_mouse_position(
+            self.content.len(),
+            bounds,
+            &self.last_lines,
+            self.last_display.as_ref(),
+            position,
+            window.line_height(),
+        )
     }
 
     fn position_for_offset(&self, offset: usize, window: &mut Window) -> Option<GpuiPoint<Pixels>> {
@@ -2639,64 +3497,382 @@ impl AiPanel {
             .unwrap_or(self.content.len())
     }
 
-    fn render_message(
-        message: ChatMessage,
-        markdown: Entity<Markdown>,
+    fn message_action_button(
+        id: impl Into<ElementId>,
+        icon: IconName,
+        tooltip: String,
+        icon_color: u32,
         theme: Theme,
-        panel_width: f32,
-        base_text_style: TextStyle,
-    ) -> impl IntoElement {
+        handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        IconButton::new(id, icon, rgb(icon_color), rgb(theme.element_hover))
+            .icon_size(ui_rems(13.0))
+            .into_div()
+            .tooltip(text_tooltip(tooltip))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    handler(this, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_message(&self, input: MessageRenderInput, cx: &mut Context<Self>) -> AnyElement {
+        let MessageRenderInput {
+            index: message_index,
+            message,
+            markdown,
+            theme,
+            panel_width,
+            base_text_style,
+            panel: entity,
+            editing_focused,
+        } = input;
         let is_user = message.role == Role::User;
-        let label = if is_user { "You" } else { "Assistant" };
         let content = message.display_text();
-        let is_loading = content.is_empty();
+        let edit_focus_handle = self.edit_focus_handle.clone();
+        let is_active_generation = self
+            .active_generation
+            .is_some_and(|target| target.assistant_index == message_index);
+        let has_failure = self
+            .generation_failure
+            .as_ref()
+            .is_some_and(|failure| failure.assistant_index == message_index);
+        let is_loading = is_active_generation && content.is_empty();
+        let editing_index = self
+            .editing_turn
+            .as_ref()
+            .map(|editing| editing.message_index);
+        let is_editing = editing_index == Some(message_index);
+        let blocked = editing_index.is_some_and(|editing| message_index > editing);
+        let can_mutate = !self.loading && editing_index.is_none();
+        let has_later_messages = message_index + 1 < self.messages.len();
+        let copied = self.copied_target == Some(CopyFeedbackTarget::Message(message_index));
         let row_width = (panel_width - 24.0).max(160.0);
-        let max_width = (row_width - 24.0).max(160.0);
+
+        let message_content = if is_user {
+            AiInputElement {
+                panel: entity.clone(),
+                source: AiInputSource::UserMessage {
+                    message_index,
+                    content: content.clone().into(),
+                    mentions: display_mentions_for_message(&message),
+                },
+            }
+            .into_any_element()
+        } else {
+            let message_entity = entity.clone();
+            MarkdownElement::new(
+                markdown,
+                MarkdownStyle::from_theme(theme, base_text_style).with_code_block_actions(true),
+            )
+            .on_context_menu(move |request, window, cx| {
+                message_entity.update(cx, |this, cx| {
+                    this.open_message_context_menu(message_index, request, window, cx);
+                });
+            })
+            .into_any_element()
+        };
+
+        let copy_icon = if copied {
+            IconName::Check
+        } else {
+            IconName::Copy
+        };
+        let copy_tooltip = if copied {
+            tr("ai-copied")
+        } else if is_user {
+            tr("ai-copy-message")
+        } else {
+            tr("ai-copy-response")
+        };
+        let copy_button = Self::message_action_button(
+            ("ai-message-copy", message_index),
+            copy_icon,
+            copy_tooltip,
+            if copied {
+                theme.success
+            } else {
+                theme.text_muted
+            },
+            theme,
+            move |this, _, cx| this.copy_message(message_index, cx),
+            cx,
+        );
+
+        let actions = if is_editing {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(Self::message_action_button(
+                    ("ai-message-cancel-edit", message_index),
+                    IconName::X,
+                    tr("cancel"),
+                    theme.error,
+                    theme,
+                    |this, window, cx| {
+                        this.cancel_editing(window, cx);
+                    },
+                    cx,
+                ))
+                .child(Self::message_action_button(
+                    ("ai-message-submit-edit", message_index),
+                    IconName::Return,
+                    tr("ai-submit-edit"),
+                    theme.text_muted,
+                    theme,
+                    |this, window, cx| this.submit_edited_message(window, cx),
+                    cx,
+                ))
+                .into_any_element()
+        } else {
+            let mut actions = div().flex().items_center().gap_1().child(copy_button);
+            if is_user && can_mutate {
+                actions = actions
+                    .child(Self::message_action_button(
+                        ("ai-message-edit", message_index),
+                        IconName::Pencil,
+                        tr("edit"),
+                        theme.text_muted,
+                        theme,
+                        move |this, window, cx| {
+                            this.start_editing_message(message_index, window, cx)
+                        },
+                        cx,
+                    ))
+                    .child(Self::message_action_button(
+                        ("ai-message-regenerate", message_index),
+                        IconName::RotateCcw,
+                        if has_later_messages {
+                            tr("ai-regenerate-from-message-warning")
+                        } else {
+                            tr("ai-regenerate-from-message")
+                        },
+                        theme.text_muted,
+                        theme,
+                        move |this, _, cx| this.regenerate_from_user(message_index, cx),
+                        cx,
+                    ));
+            } else if !is_user && can_mutate {
+                actions = actions.child(Self::message_action_button(
+                    ("ai-message-retry", message_index),
+                    IconName::RotateCcw,
+                    if has_later_messages {
+                        tr("ai-retry-response-warning")
+                    } else {
+                        tr("ai-retry-response")
+                    },
+                    theme.text_muted,
+                    theme,
+                    move |this, _, cx| this.retry_assistant(message_index, cx),
+                    cx,
+                ));
+            }
+            actions.into_any_element()
+        };
 
         div()
+            .id(("ai-message-row", message_index))
+            .group("ai-message-row")
+            .relative()
             .w(px(row_width))
             .flex()
             .flex_col()
             .gap_1()
+            .px_1()
+            .py_1()
+            .when(blocked, |this| this.opacity(0.45))
+            .when(!is_editing && !blocked, |this| {
+                this.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.open_message_context_menu(
+                            message_index,
+                            MarkdownContextMenuRequest {
+                                position: event.position,
+                                selected_text: None,
+                                link_url: None,
+                            },
+                            window,
+                            cx,
+                        );
+                    }),
+                )
+            })
             .child(
                 div()
                     .w_full()
-                    .flex()
-                    .items_center()
-                    .when(is_user, |this| this.justify_end())
-                    .text_size(ui_rems(11.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(label),
+                    .text_size(ui_rems(13.0))
+                    .text_color(rgb(theme.text))
+                    .when(is_user, |this| {
+                        this.relative()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(rgb(if is_editing {
+                                theme.border_focused
+                            } else {
+                                theme.border
+                            }))
+                            .when(is_editing && !editing_focused, |this| this.border_dashed())
+                            .bg(rgb(theme.tab_active_background))
+                            .px_2()
+                            .pt_5()
+                            .pb_3()
+                            .hover(move |style| style.border_color(rgb(theme.border_focused)))
+                    })
+                    .when(!is_user, |this| this.px_1().pt_4().pb_2())
+                    .when(is_editing, |this| {
+                        this.track_focus(&edit_focus_handle)
+                            .key_context("TextInput")
+                            .cursor(CursorStyle::IBeam)
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
+                            .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
+                            .on_mouse_move(cx.listener(Self::on_mouse_move))
+                    })
+                    .when(is_editing, |this| {
+                        this.child(AiInputElement {
+                            panel: entity.clone(),
+                            source: AiInputSource::Editor,
+                        })
+                    })
+                    .when(!is_editing && is_loading, |this| {
+                        this.child(Self::render_loading_indicator(theme))
+                    })
+                    .when(!is_editing && !is_loading && !content.is_empty(), |this| {
+                        this.child(message_content)
+                    }),
             )
             .child(
                 div()
-                    .w_full()
+                    .absolute()
+                    .top_0()
+                    .right_1()
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(rgb(theme.border_variant))
+                    .bg(rgb(theme.surface_background))
+                    .when(!is_editing, |this| {
+                        this.opacity(0.0)
+                            .group_hover("ai-message-row", |style| style.opacity(1.0))
+                    })
+                    .when(is_editing && !editing_focused, |this| this.invisible())
+                    .child(actions),
+            )
+            .when(has_failure, |this| {
+                let failure = self.generation_failure.as_ref().unwrap().clone();
+                let copied_error = self.copied_target == Some(CopyFeedbackTarget::Error);
+                this.child(Self::render_generation_failure_card(
+                    failure,
+                    copied_error,
+                    "ai-error",
+                    theme,
+                    cx,
+                ))
+            })
+            .when(blocked, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .left_0()
+                        .block_mouse_except_scroll(),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_generation_failure_card(
+        failure: GenerationFailure,
+        copied_error: bool,
+        id_prefix: &'static str,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let assistant_index = failure.assistant_index;
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgba(with_alpha(theme.error, 0x88)))
+            .bg(rgba(with_alpha(theme.error, 0x16)))
+            .p_2()
+            .text_size(ui_rems(12.0))
+            .child(
+                div()
                     .flex()
-                    .when(is_user, |this| this.justify_end())
+                    .items_start()
+                    .gap_2()
+                    .text_color(rgb(theme.error))
+                    .child(Icon::new(
+                        IconName::TriangleAlert,
+                        ui_rems(14.0),
+                        rgb(theme.error),
+                    ))
                     .child(
                         div()
-                            .max_w(px(max_width))
-                            .when(is_user, |this| {
-                                this.border_1()
-                                    .border_color(rgba(with_alpha(theme.accent, 0x55)))
-                                    .bg(rgba(with_alpha(theme.accent, 0x22)))
-                                    .px_2()
-                                    .py_1()
-                            })
-                            .when(!is_user, |this| this.px_1().py_1())
-                            .text_size(ui_rems(13.0))
+                            .flex_1()
+                            .min_w_0()
                             .text_color(rgb(theme.text))
-                            .when(is_loading, |this| {
-                                this.child(Self::render_loading_indicator(theme))
-                            })
-                            .when(!is_loading, |this| {
-                                this.child(MarkdownElement::new(
-                                    markdown,
-                                    MarkdownStyle::from_theme(theme, base_text_style),
-                                ))
-                            }),
+                            .child(failure.message),
                     ),
             )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_1()
+                    .child(Self::message_action_button(
+                        format!("{id_prefix}-copy-{assistant_index}"),
+                        if copied_error {
+                            IconName::Check
+                        } else {
+                            IconName::Copy
+                        },
+                        if copied_error {
+                            tr("ai-copied")
+                        } else {
+                            tr("ai-copy-error")
+                        },
+                        if copied_error {
+                            theme.success
+                        } else {
+                            theme.text_muted
+                        },
+                        theme,
+                        |this, _, cx| this.copy_generation_error(cx),
+                        cx,
+                    ))
+                    .child(Self::message_action_button(
+                        format!("{id_prefix}-retry-{assistant_index}"),
+                        IconName::RotateCcw,
+                        tr("ai-retry-response"),
+                        theme.text_muted,
+                        theme,
+                        move |this, _, cx| this.retry_assistant(assistant_index, cx),
+                        cx,
+                    ))
+                    .child(Self::message_action_button(
+                        format!("{id_prefix}-dismiss-{assistant_index}"),
+                        IconName::X,
+                        tr("ai-dismiss-error"),
+                        theme.text_muted,
+                        theme,
+                        |this, _, cx| this.dismiss_generation_error(cx),
+                        cx,
+                    )),
+            )
+            .into_any_element()
     }
 
     fn render_loading_indicator(theme: Theme) -> impl IntoElement {
@@ -2716,6 +3892,65 @@ impl AiPanel {
             .child(dot(0.45))
             .child(dot(0.7))
             .child(dot(1.0))
+    }
+
+    fn render_turn_footer(
+        &self,
+        assistant_index: usize,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let copied = self.copied_target == Some(CopyFeedbackTarget::Message(assistant_index));
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .opacity(0.4)
+            .hover(|style| style.opacity(1.0))
+            .child(Self::message_action_button(
+                "ai-footer-copy-response",
+                if copied {
+                    IconName::Check
+                } else {
+                    IconName::Copy
+                },
+                if copied {
+                    tr("ai-copied")
+                } else {
+                    tr("ai-copy-response")
+                },
+                if copied {
+                    theme.success
+                } else {
+                    theme.text_muted
+                },
+                theme,
+                move |this, _, cx| this.copy_message(assistant_index, cx),
+                cx,
+            ))
+            .child(Self::message_action_button(
+                "ai-footer-latest-user",
+                IconName::Return,
+                tr("ai-scroll-latest-user"),
+                theme.text_muted,
+                theme,
+                |this, _, cx| this.scroll_to_latest_user(cx),
+                cx,
+            ))
+            .child(Self::message_action_button(
+                "ai-footer-scroll-top",
+                IconName::ArrowUp,
+                tr("ai-scroll-top"),
+                theme.text_muted,
+                theme,
+                |this, _, cx| this.scroll_to_top(cx),
+                cx,
+            ))
+            .into_any_element()
     }
 
     fn render_sessions_view(
@@ -3550,6 +4785,9 @@ impl Render for AiPanel {
         if self.mode == AiPanelMode::QuickAsk {
             return self.render_quick_ask(window, cx).into_any_element();
         }
+        if self.message_scroll_interacted.replace(false) {
+            self.follow_output = self.is_near_message_bottom();
+        }
 
         let entity = cx.entity();
         let (theme, ai_settings, base_text_style) = {
@@ -3568,7 +4806,11 @@ impl Render for AiPanel {
                 base_text_style,
             )
         };
-        let can_send = !self.loading && !self.content.trim().is_empty();
+        let editing = self.editing_turn.is_some();
+        let can_send = !self.loading
+            && !editing
+            && self.generation_failure.is_none()
+            && !self.content.trim().is_empty();
         let resolved_main = ai_settings.resolved_main();
         let selected_provider = resolved_main.provider;
         let selected_model = resolved_main.model;
@@ -3619,6 +4861,9 @@ impl Render for AiPanel {
         let panel_width = self.width;
         let validation_notice = self.validation_notice.clone();
         let validation_toast = self.validation_toast.clone();
+        let message_context_menu = self.message_context_menu.clone();
+        let show_scroll_to_bottom =
+            !self.follow_output && self.scroll_handle.max_offset().y > px(0.0) && !empty_chat;
         let mention_preview = self.mention_preview.clone();
         let mention_preview_scroll = self.mention_preview_scroll.clone();
         let mention_preview_bounds = self.mention_preview_bounds.clone();
@@ -3635,26 +4880,45 @@ impl Render for AiPanel {
         };
         let completion_scroll = self.mention_completion_scroll.clone();
 
-        let mut messages = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_3()
-            .w(px((panel_width - 1.0).max(0.0)));
-        for (message, markdown) in self
+        let mut message_rows = Vec::with_capacity(self.messages.len() + 1);
+        for (message_index, (message, markdown)) in self
             .messages
             .iter()
             .zip(self.markdown_views.iter())
             .map(|(m, md)| (m.clone(), md.clone()))
+            .enumerate()
         {
-            messages = messages.child(Self::render_message(
-                message,
-                markdown,
-                theme,
-                panel_width,
-                base_text_style.clone(),
+            message_rows.push(self.render_message(
+                MessageRenderInput {
+                    index: message_index,
+                    message,
+                    markdown,
+                    theme,
+                    panel_width,
+                    base_text_style: base_text_style.clone(),
+                    panel: entity.clone(),
+                    editing_focused: self.edit_focus_handle.is_focused(window),
+                },
+                cx,
             ));
         }
+        if !loading
+            && self.generation_failure.is_none()
+            && let Some((assistant_index, _)) =
+                self.messages
+                    .iter()
+                    .enumerate()
+                    .next_back()
+                    .filter(|(_, message)| {
+                        message.role == Role::Assistant && !message.is_display_empty()
+                    })
+        {
+            message_rows.push(self.render_turn_footer(assistant_index, theme, cx));
+        }
+        let message_scroll_handle = TrackedScrollHandle {
+            handle: self.scroll_handle.clone(),
+            interacted: self.message_scroll_interacted.clone(),
+        };
 
         div()
             .key_context("AiPanel TextInput")
@@ -3669,6 +4933,9 @@ impl Render for AiPanel {
             .border_color(rgb(theme.border))
             .bg(rgb(theme.surface_background))
             .text_color(rgb(theme.text))
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                this.close_message_context_menu(cx);
+            }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
@@ -3727,81 +4994,51 @@ impl Render for AiPanel {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(
-                                div()
-                                    .id("ai-panel-new-session")
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .w(px(24.0))
-                                    .h(px(24.0))
-                                    .text_size(ui_rems(14.0))
-                                    .text_color(if loading {
-                                        rgb(theme.text_muted)
+                            .child(Self::message_action_button(
+                                "ai-panel-new-session",
+                                IconName::Plus,
+                                tr("ai-new-chat"),
+                                if loading {
+                                    theme.text_muted
+                                } else {
+                                    theme.text
+                                },
+                                theme,
+                                |this, window, cx| this.new_session(window, cx),
+                                cx,
+                            ))
+                            .child(Self::message_action_button(
+                                "ai-panel-toggle-sessions",
+                                IconName::NotebookTabs,
+                                if showing_sessions {
+                                    tr("ai-show-chat")
+                                } else {
+                                    tr("ai-show-history")
+                                },
+                                if showing_sessions {
+                                    theme.accent
+                                } else {
+                                    theme.text_muted
+                                },
+                                theme,
+                                |this, window, cx| {
+                                    if this.view == AiPanelView::Sessions {
+                                        this.show_chat(cx);
                                     } else {
-                                        rgb(theme.text)
-                                    })
-                                    .cursor_pointer()
-                                    .hover(move |style| style.bg(rgb(theme.element_hover)))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, window, cx| {
-                                            this.new_session(window, cx);
-                                            cx.stop_propagation();
-                                        }),
-                                    )
-                                    .child("+"),
-                            )
-                            .child(
-                                div()
-                                    .id("ai-panel-toggle-sessions")
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .w(px(24.0))
-                                    .h(px(24.0))
-                                    .text_size(ui_rems(14.0))
-                                    .text_color(rgb(if showing_sessions {
-                                        theme.accent
-                                    } else {
-                                        theme.text_muted
-                                    }))
-                                    .cursor_pointer()
-                                    .hover(move |style| style.bg(rgb(theme.element_hover)))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            if this.view == AiPanelView::Sessions {
-                                                this.show_chat(cx);
-                                            } else {
-                                                this.show_sessions(cx);
-                                            }
-                                            cx.stop_propagation();
-                                        }),
-                                    )
-                                    .child(if showing_sessions { "←" } else { "≡" }),
-                            )
-                            .child(
-                                div()
-                                    .id("ai-panel-close")
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .w(px(24.0))
-                                    .h(px(24.0))
-                                    .text_size(ui_rems(14.0))
-                                    .text_color(rgb(theme.text_muted))
-                                    .cursor_pointer()
-                                    .hover(move |style| style.bg(rgb(theme.element_hover)))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, window, cx| {
-                                            this.dismiss(window, cx);
-                                            cx.stop_propagation();
-                                        }),
-                                    )
-                                    .child("×"),
-                            ),
+                                        this.show_sessions(window, cx);
+                                    }
+                                },
+                                cx,
+                            ))
+                            .child(Self::message_action_button(
+                                "ai-panel-close",
+                                IconName::X,
+                                tr("ai-close-panel"),
+                                theme.text_muted,
+                                theme,
+                                |this, window, cx| this.dismiss(window, cx),
+                                cx,
+                            )),
                     ),
             )
             .when(showing_sessions, |this| {
@@ -3820,38 +5057,46 @@ impl Render for AiPanel {
                     this.child(
                         div()
                             .id("ai-panel-messages")
+                            .relative()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .p_3()
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll_handle)
-                            .child(messages)
-                            .vertical_scrollbar_for(&self.scroll_handle, window, cx),
+                            .on_scroll_wheel(cx.listener(
+                                |this, event: &ScrollWheelEvent, _, cx| {
+                                    this.handle_message_scroll(event, cx);
+                                },
+                            ))
+                            .children(message_rows)
+                            .vertical_scrollbar_for(&message_scroll_handle, window, cx),
                     )
                 })
-                .child(
+                .when(!editing, |this| {
+                    this.child(
                     div()
                         .flex()
                         .flex_col()
                         .when(empty_chat, |this| this.flex_1().min_h_0())
-                        .gap_1()
-                        .p_2()
-                        .border_t(px(1.0))
-                        .border_color(rgb(theme.border))
-                        .bg(rgb(theme.surface_background))
+                        .gap_0()
+                        .m_2()
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(rgb(if validation_notice.is_some() {
+                            theme.error
+                        } else {
+                            theme.border_variant
+                        }))
+                        .bg(rgb(theme.tab_active_background))
                         .child(
                             div()
                                 .id("ai-panel-composer-input")
                                 .relative()
                                 .key_context("TextInput")
                                 .when(empty_chat, |this| this.flex_1().min_h_0())
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(rgb(if validation_notice.is_some() {
-                                    theme.error
-                                } else {
-                                    theme.border_variant
-                                }))
-                                .bg(rgb(theme.tab_active_background))
                                 .px_2()
                                 .pt_2()
                                 .pb_1()
@@ -3869,7 +5114,10 @@ impl Render for AiPanel {
                                         this.schedule_mention_preview_hide(window, cx);
                                     }
                                 }))
-                                .child(AiInputElement { panel: entity }),
+                                .child(AiInputElement {
+                                    panel: entity.clone(),
+                                    source: AiInputSource::Editor,
+                                }),
                         )
                         .when_some(validation_notice.clone(), |this, notice| {
                             this.child(
@@ -3886,14 +5134,6 @@ impl Render for AiPanel {
                                 .items_center()
                                 .justify_between()
                                 .gap_2()
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(rgb(if validation_notice.is_some() {
-                                    theme.error
-                                } else {
-                                    theme.border_variant
-                                }))
-                                .bg(rgb(theme.tab_active_background))
                                 .px_2()
                                 .pb_2()
                                 .pt_1()
@@ -4034,9 +5274,15 @@ impl Render for AiPanel {
                                 )
                                 .child(
                                     div()
+                                        .id("ai-send-button")
+                                        .tooltip(text_tooltip(if loading {
+                                            tr("ai-stop-generation")
+                                        } else {
+                                            tr("send")
+                                        }))
                                         .flex_none()
                                         .rounded(px(4.0))
-                                        .px_3()
+                                        .px_2()
                                         .py_1()
                                         .border_1()
                                         .border_color(if can_send {
@@ -4055,21 +5301,67 @@ impl Render for AiPanel {
                                             rgb(theme.text_muted)
                                         })
                                         .cursor_pointer()
+                                        .when(loading, |this| {
+                                            this.border_color(rgb(theme.error))
+                                                .bg(rgba(with_alpha(theme.error, 0x20)))
+                                                .text_color(rgb(theme.error))
+                                        })
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener(|this, _, _, cx| {
-                                                this.send_message(cx);
+                                                if this.loading {
+                                                    this.stop_generation(cx);
+                                                } else {
+                                                    this.send_message(cx);
+                                                }
                                                 cx.stop_propagation();
                                             }),
                                         )
                                         .child(if loading {
-                                            tr("sending")
+                                            Icon::new(
+                                                IconName::Stop,
+                                                ui_rems(13.0),
+                                                rgb(theme.error),
+                                            )
+                                            .into_any_element()
                                         } else {
-                                            tr("send")
+                                            Icon::new(
+                                                IconName::ArrowUp,
+                                                ui_rems(13.0),
+                                                rgb(if can_send {
+                                                    theme.text
+                                                } else {
+                                                    theme.text_muted
+                                                }),
+                                            )
+                                            .into_any_element()
                                         }),
                                 ),
                         ),
-                )
+                    )
+                })
+                .when(show_scroll_to_bottom, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .right_3()
+                            .bottom(px(96.0))
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.surface_background))
+                            .shadow_md()
+                            .child(Self::message_action_button(
+                                "ai-scroll-to-bottom",
+                                IconName::ChevronDown,
+                                tr("ai-scroll-bottom"),
+                                theme.text_muted,
+                                theme,
+                                |this, _, cx| this.scroll_to_bottom(cx),
+                                cx,
+                            )),
+                    )
+                })
             })
             .when_some(completion_placement, |this, placement| {
                 this.child(
@@ -4174,6 +5466,18 @@ impl Render for AiPanel {
                     .with_priority(2),
                 )
             })
+            .when_some(message_context_menu, |this, menu| {
+                this.child(
+                    deferred(
+                        anchored()
+                            .position(menu.position)
+                            .anchor(Anchor::TopLeft)
+                            .snap_to_window_with_margin(px(8.0))
+                            .child(self.render_message_context_menu(menu, theme, cx)),
+                    )
+                    .with_priority(4),
+                )
+            })
             .when_some(validation_toast, |this, notice| {
                 this.child(deferred(Self::render_validation_toast(notice, theme)).with_priority(3))
             })
@@ -4209,34 +5513,49 @@ impl Element for AiInputElement {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let input = self.panel.read(cx);
-        let content = input.content.clone();
-        let empty_chat = input.mode == AiPanelMode::Sidebar && input.messages.is_empty();
+        let (content, mentions, empty_chat, min_lines, max_lines) = match &self.source {
+            AiInputSource::Editor => {
+                let empty_chat = input.mode == AiPanelMode::Sidebar && input.messages.is_empty();
+                let min_lines = if input.mode == AiPanelMode::QuickAsk {
+                    1
+                } else {
+                    3
+                };
+                let max_lines = if input.mode == AiPanelMode::QuickAsk {
+                    4
+                } else {
+                    8
+                };
+                (
+                    input.content.clone(),
+                    input.composer_mentions.clone(),
+                    empty_chat,
+                    min_lines,
+                    Some(max_lines),
+                )
+            }
+            AiInputSource::UserMessage {
+                content, mentions, ..
+            } => (content.clone(), mentions.clone(), false, 1, None),
+        };
         let chars_per_line = ((input.width - 32.0) / 7.0).floor().max(12.0) as usize;
-        let display = composer_display(content.as_ref(), &input.composer_mentions);
+        let display = composer_display(content.as_ref(), &mentions);
         let text = display.text.as_str();
-        let min_lines = if input.mode == AiPanelMode::QuickAsk {
-            1
-        } else {
-            3
-        };
-        let max_lines = if input.mode == AiPanelMode::QuickAsk {
-            4
-        } else {
-            8
-        };
         let estimated_lines = if text.is_empty() {
-            if input.mode == AiPanelMode::QuickAsk || empty_chat {
+            if min_lines == 1 || empty_chat {
                 1
             } else {
-                3
+                min_lines
             }
         } else {
             text.lines()
                 .map(|line| line.chars().count().saturating_sub(1) / chars_per_line + 1)
                 .sum::<usize>()
                 + usize::from(text.ends_with('\n'))
-        }
-        .clamp(min_lines, max_lines);
+        };
+        let estimated_lines = max_lines.map_or(estimated_lines.max(min_lines), |max_lines| {
+            estimated_lines.clamp(min_lines, max_lines)
+        });
 
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
@@ -4258,22 +5577,52 @@ impl Element for AiInputElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let input = self.panel.read(cx);
-        let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
-        let composer_mentions = input.composer_mentions.clone();
-        let active_page_number_edit = input.active_page_number_edit.clone();
+        let (
+            content,
+            selected_range,
+            cursor,
+            composer_mentions,
+            active_page_number_edit,
+            marked_range,
+            editing,
+        ) = match &self.source {
+            AiInputSource::Editor => (
+                input.content.clone(),
+                input.selected_range.clone(),
+                input.cursor_offset(),
+                input.composer_mentions.clone(),
+                input.active_page_number_edit.clone(),
+                input.marked_range.clone(),
+                true,
+            ),
+            AiInputSource::UserMessage {
+                content, mentions, ..
+            } => (
+                content.clone(),
+                0..0,
+                0,
+                mentions.clone(),
+                None,
+                None,
+                false,
+            ),
+        };
         let style = window.text_style();
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let (display, display_text, text_color) = if content.is_empty() {
+            let placeholder = if editing && input.editing_turn.is_some() {
+                tr("ai-edit-message-placeholder")
+            } else {
+                tr("ai-ask-placeholder")
+            };
             (
                 ComposerDisplay {
-                    text: tr("ai-ask-placeholder"),
+                    text: placeholder.clone(),
                     source_to_display: vec![0],
-                    display_to_source: vec![0; tr("ai-ask-placeholder").len() + 1],
+                    display_to_source: vec![0; placeholder.len() + 1],
                     mentions: Vec::new(),
                 },
-                tr("ai-ask-placeholder").into(),
+                placeholder.into(),
                 rgba(theme.placeholder_text).into(),
             )
         } else {
@@ -4290,14 +5639,13 @@ impl Element for AiInputElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if !input.content.is_empty() {
+        let runs = if !content.is_empty() {
             input_text_runs(
                 display_text.as_ref(),
                 base_run,
                 theme,
                 &display.mentions,
-                input
-                    .marked_range
+                marked_range
                     .as_ref()
                     .map(|range| display.display_range(range))
                     .as_ref(),
@@ -4328,6 +5676,8 @@ impl Element for AiInputElement {
                     active_number_quads: Vec::new(),
                     mention_icons: Vec::new(),
                     mention_hitboxes: Vec::new(),
+                    hitbox: matches!(&self.source, AiInputSource::UserMessage { .. })
+                        .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal)),
                 };
             }
         };
@@ -4341,13 +5691,13 @@ impl Element for AiInputElement {
 
         let display_cursor = display.display_offset(cursor);
         let display_selection = display.display_range(&selected_range);
-        let cursor_position = if selected_range.is_empty() {
+        let cursor_position = if editing && selected_range.is_empty() {
             cursor_position_for_lines(&laid_out_lines, display_cursor, line_height)
         } else {
             None
         };
 
-        let selections = if input.content.is_empty() || selected_range.is_empty() {
+        let selections = if !editing || content.is_empty() || selected_range.is_empty() {
             Vec::new()
         } else {
             selection_quads(
@@ -4359,7 +5709,12 @@ impl Element for AiInputElement {
             )
         };
 
-        let cursor = if input.focus_handle.is_focused(window) && selected_range.is_empty() {
+        let editor_focused = if input.editing_turn.is_some() {
+            input.edit_focus_handle.is_focused(window)
+        } else {
+            input.focus_handle.is_focused(window)
+        };
+        let cursor = if editing && editor_focused && selected_range.is_empty() {
             cursor_quad(
                 &laid_out_lines,
                 display_cursor,
@@ -4449,6 +5804,8 @@ impl Element for AiInputElement {
             active_number_quads,
             mention_icons,
             mention_hitboxes,
+            hitbox: matches!(&self.source, AiInputSource::UserMessage { .. })
+                .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal)),
         }
     }
 
@@ -4462,22 +5819,31 @@ impl Element for AiInputElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let focus_handle = self.panel.read(cx).focus_handle.clone();
-        window.handle_input(
-            &focus_handle,
-            ElementInputHandler::new(bounds, self.panel.clone()),
-            cx,
-        );
-        let panel = self.panel.clone();
-        window.on_mouse_event(
-            move |_: &MouseMoveEvent, phase: DispatchPhase, window, cx| {
-                if phase.capture() {
-                    panel.update(cx, |panel, cx| {
-                        panel.schedule_mention_preview_hide(window, cx);
-                    });
+        if matches!(&self.source, AiInputSource::Editor) {
+            let focus_handle = {
+                let input = self.panel.read(cx);
+                if input.editing_turn.is_some() {
+                    input.edit_focus_handle.clone()
+                } else {
+                    input.focus_handle.clone()
                 }
-            },
-        );
+            };
+            window.handle_input(
+                &focus_handle,
+                ElementInputHandler::new(bounds, self.panel.clone()),
+                cx,
+            );
+            let panel = self.panel.clone();
+            window.on_mouse_event(
+                move |_: &MouseMoveEvent, phase: DispatchPhase, window, cx| {
+                    if phase.capture() {
+                        panel.update(cx, |panel, cx| {
+                            panel.schedule_mention_preview_hide(window, cx);
+                        });
+                    }
+                },
+            );
+        }
 
         for mention in prepaint.mention_quads.drain(..) {
             window.paint_quad(mention);
@@ -4537,13 +5903,57 @@ impl Element for AiInputElement {
             window.paint_quad(cursor);
         }
 
-        self.panel.update(cx, |input, _| {
-            input.last_lines = lines;
-            input.last_bounds = Some(bounds);
-            input.last_display = Some(std::mem::take(&mut prepaint.display));
-            input.last_cursor_pos = prepaint.cursor_position;
-            input.mention_hitboxes = std::mem::take(&mut prepaint.mention_hitboxes);
-        });
+        match &self.source {
+            AiInputSource::Editor => {
+                self.panel.update(cx, |input, _| {
+                    input.last_lines = lines;
+                    input.last_bounds = Some(bounds);
+                    input.last_display = Some(std::mem::take(&mut prepaint.display));
+                    input.last_cursor_pos = prepaint.cursor_position;
+                    input.mention_hitboxes = std::mem::take(&mut prepaint.mention_hitboxes);
+                });
+            }
+            AiInputSource::UserMessage {
+                message_index,
+                content,
+                ..
+            } => {
+                let Some(hitbox) = prepaint.hitbox.take() else {
+                    return;
+                };
+                let panel = self.panel.clone();
+                let message_index = *message_index;
+                let content_len = content.len();
+                let display = std::mem::take(&mut prepaint.display);
+                window.on_mouse_event(
+                    move |event: &MouseDownEvent, phase: DispatchPhase, window, cx| {
+                        if phase.bubble()
+                            && event.button == MouseButton::Left
+                            && hitbox.is_hovered(window)
+                        {
+                            let source_offset = source_index_for_mouse_position(
+                                content_len,
+                                bounds,
+                                &lines,
+                                Some(&display),
+                                event.position,
+                                window.line_height(),
+                            );
+                            panel.update(cx, |panel, cx| {
+                                panel.start_editing_message_at(
+                                    message_index,
+                                    source_offset,
+                                    event.click_count,
+                                    window,
+                                    cx,
+                                );
+                            });
+                            cx.stop_propagation();
+                        }
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -4785,6 +6195,135 @@ fn line_starts(text: &str) -> impl Iterator<Item = usize> + '_ {
     )
 }
 
+fn source_index_for_mouse_position(
+    content_len: usize,
+    bounds: Bounds<Pixels>,
+    lines: &[LaidOutLine],
+    display: Option<&ComposerDisplay>,
+    position: GpuiPoint<Pixels>,
+    line_height: Pixels,
+) -> usize {
+    let local = match bounds.localize(&position) {
+        Some(local) => local,
+        None if position.y < bounds.top() => return 0,
+        None => return content_len,
+    };
+
+    let mut line_top = px(0.0);
+    for laid_out in lines {
+        let line_height_px = laid_out.line.size(line_height).height;
+        if local.y <= line_top + line_height_px {
+            let line_point = point(local.x, local.y - line_top);
+            let local_ix = laid_out
+                .line
+                .closest_index_for_position(line_point, line_height)
+                .unwrap_or_else(|ix| ix);
+            let display_offset = laid_out.start + local_ix;
+            return display
+                .map(|display| display.source_offset(display_offset))
+                .unwrap_or(display_offset)
+                .min(content_len);
+        }
+        line_top += line_height_px;
+    }
+
+    content_len
+}
+
+fn selection_range_for_click(
+    content: &str,
+    mentions: &[ComposerMention],
+    source_offset: usize,
+    click_count: usize,
+) -> Range<usize> {
+    let offset = mention_aware_source_offset(content, mentions, source_offset);
+    if click_count >= 3 {
+        let start = content[..offset]
+            .rfind('\n')
+            .map_or(0, |ix| ix + '\n'.len_utf8());
+        let end = content[offset..]
+            .find('\n')
+            .map_or(content.len(), |ix| offset + ix + '\n'.len_utf8());
+        return start..end;
+    }
+    if click_count == 2 {
+        if let Some(mention) = mentions
+            .iter()
+            .find(|mention| mention.range.start <= offset && offset <= mention.range.end)
+        {
+            return mention.range.clone();
+        }
+        return word_range_at_offset(content, offset);
+    }
+    offset..offset
+}
+
+fn mention_aware_source_offset(
+    content: &str,
+    mentions: &[ComposerMention],
+    source_offset: usize,
+) -> usize {
+    let mut offset = source_offset.min(content.len());
+    while offset > 0 && !content.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    if let Some(mention) = mentions
+        .iter()
+        .find(|mention| mention.range.start < offset && offset < mention.range.end)
+    {
+        if offset - mention.range.start < mention.range.end - offset {
+            mention.range.start
+        } else {
+            mention.range.end
+        }
+    } else {
+        offset
+    }
+}
+
+fn word_range_at_offset(content: &str, offset: usize) -> Range<usize> {
+    if content.is_empty() {
+        return 0..0;
+    }
+    let mut target = offset.min(content.len());
+    if target == content.len() {
+        target = content.char_indices().next_back().map_or(0, |(ix, _)| ix);
+    }
+    let Some(target_char) = content[target..].chars().next() else {
+        return offset..offset;
+    };
+    let target_class = word_character_class(target_char);
+    let mut start = target;
+    while let Some((previous, ch)) = content[..start].char_indices().next_back() {
+        if word_character_class(ch) != target_class {
+            break;
+        }
+        start = previous;
+    }
+    let mut end = target + target_char.len_utf8();
+    while let Some(ch) = content[end..].chars().next() {
+        if word_character_class(ch) != target_class {
+            break;
+        }
+        end += ch.len_utf8();
+    }
+    start..end
+}
+
+fn word_character_class(ch: char) -> u8 {
+    if ch.is_alphanumeric() || ch == '_' {
+        0
+    } else if ch.is_whitespace() {
+        1
+    } else {
+        2
+    }
+}
+
+fn message_scroll_distance_from_bottom(offset: f32, max_offset: f32) -> f32 {
+    (max_offset.max(0.0) + offset.min(0.0)).max(0.0)
+}
+
 fn cursor_position_for_lines(
     lines: &[LaidOutLine],
     cursor: usize,
@@ -4983,7 +6522,7 @@ fn mention_is_available(
 
 #[cfg(test)]
 fn parse_composer_mentions(text: &str) -> Vec<ComposerMention> {
-    glyphst_ai::ai_chat::find_mention_references(text)
+    find_mention_references(text)
         .into_iter()
         .map(|(range, reference)| ComposerMention {
             reference,
@@ -4991,6 +6530,170 @@ fn parse_composer_mentions(text: &str) -> Vec<ComposerMention> {
             captured: None,
         })
         .collect()
+}
+
+fn composer_mention_from_occurrence(
+    range: Range<usize>,
+    reference: MentionReference,
+    region_reference: Option<RegionImageReference>,
+    region_references: &mut Vec<RegionImageReference>,
+    contexts: &mut Vec<ContextBlock>,
+) -> Option<ComposerMention> {
+    if reference.kind == MentionKind::RegionImage {
+        let region_reference = region_reference
+            .or_else(|| (!region_references.is_empty()).then(|| region_references.remove(0)))?;
+        return Some(ComposerMention {
+            reference,
+            range,
+            captured: Some(CapturedMention::Region(region_reference)),
+        });
+    }
+
+    let captured = match reference.kind {
+        MentionKind::Selection => contexts
+            .iter()
+            .position(|context| context.kind == reference.kind && context.page == reference.page)
+            .map(|context_index| CapturedMention::Text(contexts.remove(context_index).text)),
+        MentionKind::DocumentText => contexts
+            .iter()
+            .find(|context| context.kind == reference.kind && context.page == reference.page)
+            .map(|context| CapturedMention::Text(context.text.clone())),
+        MentionKind::Page
+        | MentionKind::PageImage
+        | MentionKind::DocumentImage
+        | MentionKind::RegionImage => None,
+    };
+    Some(ComposerMention {
+        reference,
+        range,
+        captured,
+    })
+}
+
+fn display_mentions_for_message(message: &ChatMessage) -> Vec<ComposerMention> {
+    let content = message.display_text();
+    let mut mentions = message
+        .mention_occurrences()
+        .iter()
+        .filter(|occurrence| occurrence_matches_content(&content, occurrence))
+        .map(|occurrence| ComposerMention {
+            reference: occurrence.reference,
+            range: occurrence.range.clone(),
+            captured: occurrence
+                .region_reference
+                .clone()
+                .map(CapturedMention::Region),
+        })
+        .collect::<Vec<_>>();
+    mentions.sort_by_key(|mention| mention.range.start);
+    mentions
+}
+
+fn occurrence_matches_content(content: &str, occurrence: &MentionOccurrence) -> bool {
+    if occurrence.range.start >= occurrence.range.end
+        || occurrence.range.end > content.len()
+        || !content.is_char_boundary(occurrence.range.start)
+        || !content.is_char_boundary(occurrence.range.end)
+    {
+        return false;
+    }
+    let token = &content[occurrence.range.clone()];
+    find_mention_references(token).as_slice() == [(0..token.len(), occurrence.reference)].as_slice()
+}
+
+fn composer_mentions_for_message(message: &ChatMessage) -> Result<Vec<ComposerMention>, ()> {
+    let mut references = message.references().to_vec();
+    let mut region_references = message.region_references().to_vec();
+    let mut contexts = message.editable_contexts();
+    let content = message.display_text();
+    let occurrences = message.mention_occurrences();
+
+    if !occurrences.is_empty() {
+        let mut mentions = Vec::with_capacity(occurrences.len());
+        for occurrence in occurrences {
+            if !occurrence_matches_content(&content, occurrence) {
+                return Err(());
+            }
+            let Some(mention) = composer_mention_from_occurrence(
+                occurrence.range.clone(),
+                occurrence.reference,
+                occurrence.region_reference.clone(),
+                &mut region_references,
+                &mut contexts,
+            ) else {
+                return Err(());
+            };
+            mentions.push(mention);
+        }
+        return Ok(mentions);
+    }
+
+    let parsed = find_mention_references(&content);
+    let mut unique_references = references.clone();
+    unique_references.extend(
+        parsed
+            .iter()
+            .filter(|candidate| candidate.1.kind != MentionKind::RegionImage)
+            .map(|candidate| candidate.1),
+    );
+    unique_references.sort_by_key(|reference| (reference.kind as u8, reference.page));
+    unique_references.dedup();
+    for reference in unique_references {
+        let expected = references
+            .iter()
+            .filter(|candidate| **candidate == reference)
+            .count();
+        let actual = parsed
+            .iter()
+            .filter(|candidate| candidate.1 == reference)
+            .count();
+        if actual != expected {
+            return Err(());
+        }
+    }
+    if parsed
+        .iter()
+        .filter(|candidate| candidate.1.kind == MentionKind::RegionImage)
+        .count()
+        != region_references.len()
+    {
+        return Err(());
+    }
+
+    let mut mentions = Vec::new();
+    for (range, reference) in parsed {
+        if reference.kind == MentionKind::RegionImage {
+            let Some(mention) = composer_mention_from_occurrence(
+                range,
+                reference,
+                None,
+                &mut region_references,
+                &mut contexts,
+            ) else {
+                return Err(());
+            };
+            mentions.push(mention);
+            continue;
+        }
+        let Some(reference_index) = references
+            .iter()
+            .position(|candidate| *candidate == reference)
+        else {
+            continue;
+        };
+        references.remove(reference_index);
+        let Some(mention) = composer_mention_from_occurrence(
+            range,
+            reference,
+            None,
+            &mut region_references,
+            &mut contexts,
+        ) else {
+            return Err(());
+        };
+        mentions.push(mention);
+    }
+    Ok(mentions)
 }
 
 #[cfg(test)]
@@ -5069,7 +6772,10 @@ fn context_blocks_for_composer_mentions(
             }
             if mention.reference.kind == MentionKind::DocumentText && seen.insert(mention.reference)
             {
-                return Some(resolve_mention_context(MentionKind::DocumentText, context));
+                return Some(mention.captured_text().map_or_else(
+                    || resolve_mention_context(MentionKind::DocumentText, context),
+                    |text| ContextBlock::new(MentionKind::DocumentText, None, text.to_string()),
+                ));
             }
             None
         })
@@ -5563,6 +7269,47 @@ fn hydrate_region_contexts(messages: &mut [ChatMessage], resolved: &[ResolvedReg
     }
 }
 
+fn persisted_session_messages(
+    messages: &[ChatMessage],
+    excluded_index: Option<usize>,
+) -> Vec<AiSessionMessage> {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != excluded_index)
+        .map(|(_, message)| {
+            let content = message.display_text();
+            let request_content = message.request_text();
+            AiSessionMessage {
+                role: match message.role {
+                    Role::User => AiSessionRole::User,
+                    Role::Assistant => AiSessionRole::Assistant,
+                },
+                content: content.clone(),
+                request_content: (request_content != content).then_some(request_content),
+                references: message
+                    .references()
+                    .iter()
+                    .copied()
+                    .map(ai_reference_to_library)
+                    .chain(
+                        message
+                            .region_references()
+                            .iter()
+                            .cloned()
+                            .map(|reference| AiMentionReference::RegionImage { reference }),
+                    )
+                    .collect(),
+                occurrences: message
+                    .mention_occurrences()
+                    .iter()
+                    .filter_map(ai_occurrence_to_library)
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
 fn ai_reference_to_library(reference: MentionReference) -> AiMentionReference {
     match reference.kind {
         MentionKind::Selection => AiMentionReference::Selection,
@@ -5608,6 +7355,36 @@ fn library_reference_to_region(reference: &AiMentionReference) -> Option<RegionI
         | AiMentionReference::PageImage { .. }
         | AiMentionReference::DocumentImage => None,
     }
+}
+
+fn ai_occurrence_to_library(occurrence: &MentionOccurrence) -> Option<AiMentionOccurrence> {
+    let reference = if occurrence.reference.kind == MentionKind::RegionImage {
+        AiMentionReference::RegionImage {
+            reference: occurrence.region_reference.clone()?,
+        }
+    } else {
+        ai_reference_to_library(occurrence.reference)
+    };
+    Some(AiMentionOccurrence {
+        start: occurrence.range.start,
+        end: occurrence.range.end,
+        reference,
+    })
+}
+
+fn library_occurrence_to_ai(occurrence: &AiMentionOccurrence) -> Option<MentionOccurrence> {
+    let (reference, region_reference) = match &occurrence.reference {
+        AiMentionReference::RegionImage { reference } => (
+            MentionReference::new(MentionKind::RegionImage, None),
+            Some(reference.clone()),
+        ),
+        reference => (library_reference_to_ai(reference)?, None),
+    };
+    Some(MentionOccurrence {
+        range: occurrence.start..occurrence.end,
+        reference,
+        region_reference,
+    })
 }
 
 fn offset_from_utf16_in_text(text: &str, offset: usize) -> usize {
@@ -6430,5 +8207,215 @@ mod tests {
         };
         assert_eq!(library_reference_to_region(&stored), Some(reference));
         assert_eq!(library_reference_to_ai(&stored), None);
+    }
+
+    #[test]
+    fn ambiguous_persisted_mention_occurrences_are_not_editable() {
+        let message = ChatMessage::user(
+            "@selection and literal @selection".to_string(),
+            "and literal @selection".to_string(),
+            vec![ContextBlock::new(
+                MentionKind::Selection,
+                None,
+                "original selection".to_string(),
+            )],
+            vec![MentionReference::new(MentionKind::Selection, None)],
+        );
+
+        assert!(composer_mentions_for_message(&message).is_err());
+    }
+
+    #[test]
+    fn live_mention_occurrences_restore_the_exact_attached_token() {
+        let text = "literal @selection and attached @selection";
+        let ranges = find_mention_references(text);
+        let attached = ranges[1].clone();
+        let message = ChatMessage::user(
+            text.to_string(),
+            "literal @selection and attached".to_string(),
+            vec![ContextBlock::new(
+                MentionKind::Selection,
+                None,
+                "original selection".to_string(),
+            )],
+            vec![MentionReference::new(MentionKind::Selection, None)],
+        )
+        .with_mention_occurrences(vec![MentionOccurrence::new(attached.0.clone(), attached.1)]);
+
+        let mentions = composer_mentions_for_message(&message).unwrap();
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].range, attached.0);
+        assert_eq!(mentions[0].captured_text(), Some("original selection"));
+    }
+
+    #[test]
+    fn duplicate_document_occurrences_share_the_historical_snapshot() {
+        let text = "@document and @document";
+        let occurrences = find_mention_references(text)
+            .into_iter()
+            .map(|(range, reference)| MentionOccurrence::new(range, reference))
+            .collect();
+        let message = ChatMessage::user(
+            text.to_string(),
+            "and".to_string(),
+            vec![ContextBlock::new(
+                MentionKind::DocumentText,
+                None,
+                "historical document".to_string(),
+            )],
+            vec![MentionReference::new(MentionKind::DocumentText, None)],
+        )
+        .with_mention_occurrences(occurrences);
+
+        let mentions = composer_mentions_for_message(&message).unwrap();
+        assert_eq!(mentions.len(), 2);
+        assert!(
+            mentions
+                .iter()
+                .all(|mention| mention.captured_text() == Some("historical document"))
+        );
+    }
+
+    #[test]
+    fn sent_message_pills_only_use_validated_occurrences() {
+        let text = "literal @selection and attached @selection";
+        let attached = find_mention_references(text)[1].clone();
+        let reference = MentionReference::new(MentionKind::Selection, None);
+        let exact = ChatMessage::user(
+            text.to_string(),
+            "literal @selection and attached".to_string(),
+            Vec::new(),
+            vec![reference],
+        )
+        .with_mention_occurrences(vec![MentionOccurrence::new(attached.0.clone(), attached.1)]);
+        assert_eq!(
+            display_mentions_for_message(&exact)
+                .into_iter()
+                .map(|mention| mention.range)
+                .collect::<Vec<_>>(),
+            vec![attached.0]
+        );
+
+        let legacy = ChatMessage::user(
+            text.to_string(),
+            "literal @selection and attached".to_string(),
+            Vec::new(),
+            vec![reference],
+        );
+        assert!(display_mentions_for_message(&legacy).is_empty());
+    }
+
+    #[test]
+    fn sent_message_click_selection_is_utf8_and_mention_safe() {
+        let text = "écho @page(2)\nnext line";
+        let mentions = parse_composer_mentions(text);
+        assert_eq!(selection_range_for_click(text, &mentions, 1, 2), 0..5);
+
+        let mention = mentions.first().unwrap();
+        assert_eq!(
+            selection_range_for_click(text, &mentions, mention.range.start + 2, 1),
+            mention.range.start..mention.range.start
+        );
+        assert_eq!(
+            selection_range_for_click(text, &mentions, mention.range.start, 2),
+            mention.range
+        );
+
+        let second_line = text.find("next").unwrap();
+        assert_eq!(
+            selection_range_for_click(text, &mentions, second_line, 3),
+            second_line..text.len()
+        );
+    }
+
+    #[test]
+    fn persisted_occurrences_preserve_region_geometry() {
+        let reference = region_reference(2, 4.0);
+        let message =
+            ChatMessage::user("@region".to_string(), String::new(), Vec::new(), Vec::new())
+                .with_region_references(vec![reference.clone()])
+                .with_mention_occurrences(vec![
+                    MentionOccurrence::new(
+                        0..7,
+                        MentionReference::new(MentionKind::RegionImage, None),
+                    )
+                    .with_region_reference(reference.clone()),
+                ]);
+
+        let persisted = persisted_session_messages(&[message], None);
+        assert_eq!(persisted[0].occurrences.len(), 1);
+        assert_eq!(
+            library_occurrence_to_ai(&persisted[0].occurrences[0])
+                .unwrap()
+                .region_reference,
+            Some(reference)
+        );
+    }
+
+    #[test]
+    fn persisted_selection_context_is_restored_for_editing() {
+        let original = ChatMessage::user(
+            "Explain @selection".to_string(),
+            "Explain".to_string(),
+            vec![ContextBlock::new(
+                MentionKind::Selection,
+                None,
+                "historical text".to_string(),
+            )],
+            vec![MentionReference::new(MentionKind::Selection, None)],
+        );
+        let persisted = ChatMessage::from_persisted(
+            Role::User,
+            original.display_text(),
+            Some(original.request_text()),
+        )
+        .with_references(original.references().to_vec());
+
+        let mentions = composer_mentions_for_message(&persisted).unwrap();
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].captured_text(), Some("historical text"));
+    }
+
+    #[test]
+    fn failed_assistant_message_is_excluded_from_persistence() {
+        let messages = vec![
+            ChatMessage::user(
+                "Question".to_string(),
+                "Question".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            ChatMessage::assistant("Partial response".to_string()),
+        ];
+
+        let persisted = persisted_session_messages(&messages, Some(1));
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].role, AiSessionRole::User);
+        assert_eq!(persisted[0].content, "Question");
+    }
+
+    #[test]
+    fn captured_document_context_wins_during_regeneration() {
+        let mentions = [ComposerMention {
+            reference: MentionReference::new(MentionKind::DocumentText, None),
+            range: 0..9,
+            captured: Some(CapturedMention::Text("historical document".to_string())),
+        }];
+        let current = AiContext {
+            document_text: Some("new document".to_string()),
+            ..Default::default()
+        };
+
+        let contexts = context_blocks_for_composer_mentions(&mentions, Some(&current));
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].text, "historical document");
+    }
+
+    #[test]
+    fn message_scroll_distance_uses_negative_scroll_offsets() {
+        assert_eq!(message_scroll_distance_from_bottom(0.0, 300.0), 300.0);
+        assert_eq!(message_scroll_distance_from_bottom(-175.0, 300.0), 125.0);
+        assert_eq!(message_scroll_distance_from_bottom(-300.0, 300.0), 0.0);
+        assert_eq!(message_scroll_distance_from_bottom(-350.0, 300.0), 0.0);
     }
 }
