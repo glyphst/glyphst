@@ -9,10 +9,8 @@
   gnumake,
   python3,
   unzip,
-  copyDesktopItems,
   makeFontsConf,
   makeWrapper,
-  makeDesktopItem,
   alsa-lib,
   fontconfig,
   freetype,
@@ -72,7 +70,6 @@ in
 
     nativeBuildInputs = [
       clang
-      copyDesktopItems
       gnumake
       makeWrapper
       perl
@@ -113,25 +110,8 @@ in
 
     postInstall = ''
       wrapProgram $out/bin/glyphst --set FONTCONFIG_FILE ${fontsConf}
+      install -Dm644 crates/app/glyphst.desktop $out/share/applications/glyphst.desktop
     '';
-
-    desktopItems = [
-      (makeDesktopItem {
-        name = "glyphst";
-        desktopName = "Glyphst";
-        genericName = "PDF Viewer";
-        comment = "Read PDF documents";
-        exec = "glyphst %U";
-        icon = "x-office-document";
-        categories = [
-          "Office"
-          "Viewer"
-        ];
-        mimeTypes = ["application/pdf"];
-        startupNotify = true;
-        startupWMClass = "glyphst";
-      })
-    ];
 
     meta = {
       description = "A GPUI-based PDF viewer";
