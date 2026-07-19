@@ -12,11 +12,11 @@ use glyphst_actions::{
         JumpBackward, JumpForward, NextHalfPage, NextPage, NextSearchResult, OpenBookmarks,
         OpenFile, OpenGoToPage, OpenHistory, OpenKeybindings, OpenNewTab, OpenNotes, OpenQuickAsk,
         OpenSettings, OpenTranslationSplit, PrevSearchResult, PreviousHalfPage, PreviousPage,
-        Reload, ResetZoom, ScrollLineDown, ScrollLineUp, Search, SelectAll, Toc, ToggleAiPanel,
-        ToggleCommandPalette, ToggleFullScreen, ToggleGridOverview, ToggleNotes,
-        TogglePinnedTranslation, TogglePresentationMode, TogglePublisherStyles,
-        ToggleRegionSelection, ToggleThumbnailSidebar, ToggleToc, ToggleTransparency,
-        TranslateSelection, ZoomIn, ZoomOut,
+        Reload, ResetZoom, RotateClockwise, RotateCounterclockwise, ScrollLineDown, ScrollLineUp,
+        Search, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette, ToggleFullScreen,
+        ToggleGridOverview, ToggleNotes, TogglePinnedTranslation, TogglePresentationMode,
+        TogglePublisherStyles, ToggleRegionSelection, ToggleThumbnailSidebar, ToggleToc,
+        ToggleTransparency, TranslateSelection, ZoomIn, ZoomOut,
     },
     search::{SearchInputCancel, SearchInputConfirm, SearchInputPrevious},
     settings_panel::PanelClose,
@@ -1133,6 +1133,24 @@ fn command_specs() -> &'static [CommandSpec] {
                     &[],
                     true,
                 ),
+                spec::<RotateClockwise>(
+                    "rotate-clockwise",
+                    "Rotate Clockwise",
+                    KeyBindingCategory::PdfView,
+                    &["r"],
+                    &["r"],
+                    &["rotate", "rotate-cw"],
+                    true,
+                ),
+                spec::<RotateCounterclockwise>(
+                    "rotate-counterclockwise",
+                    "Rotate Counterclockwise",
+                    KeyBindingCategory::PdfView,
+                    &["shift-r"],
+                    &["shift-r"],
+                    &["rotate-ccw"],
+                    true,
+                ),
                 spec::<TogglePublisherStyles>(
                     "toggle-publisher-styles",
                     "Toggle EPUB Publisher Styles",
@@ -1147,7 +1165,7 @@ fn command_specs() -> &'static [CommandSpec] {
                     "Reload Document",
                     KeyBindingCategory::PdfView,
                     &["ctrl-r"],
-                    &["r"],
+                    &["ctrl-r"],
                     &["reload-document"],
                     true,
                 ),
@@ -1629,6 +1647,34 @@ mod tests {
             "search::SelectPrevMatch",
             "search::SelectPreviousMatch",
         ]);
+    }
+
+    #[test]
+    fn rotate_aliases_resolve_to_rotate_actions() {
+        assert_action_aliases::<RotateClockwise>(&["rotate-clockwise", "rotate", "rotate-cw"]);
+        assert_action_aliases::<RotateCounterclockwise>(&["rotate-counterclockwise", "rotate-ccw"]);
+    }
+
+    #[test]
+    fn rotate_and_reload_bindings_do_not_collide() {
+        for preset in [KeymapPreset::Modern, KeymapPreset::Vim] {
+            let rows = editable_bindings(preset, &[]);
+            let pdf_binding = |action| {
+                rows.iter()
+                    .find(|row| row.action == action && row.category == KeyBindingCategory::PdfView)
+                    .expect("PDF command binding should exist")
+            };
+
+            assert_eq!(
+                pdf_binding("rotate-clockwise").keystrokes,
+                vec!["r".to_string()]
+            );
+            assert_eq!(
+                pdf_binding("rotate-counterclockwise").keystrokes,
+                vec!["shift-r".to_string()]
+            );
+            assert_eq!(pdf_binding("reload").keystrokes, vec!["ctrl-r".to_string()]);
+        }
     }
 
     #[test]

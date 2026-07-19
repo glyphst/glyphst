@@ -46,8 +46,8 @@ use glyphst_ai_ui::{
     AiContext, AiContextProvider, AiPageState, ResolvedPageContext, ResolvedRegionContext,
 };
 use glyphst_core::{
-    DocumentCapabilities, DocumentFormat, DocumentLayout, EpubReaderPreferences, EpubTheme,
-    PageIndex, PageRegion, RegionImageReference, SemanticTextAnchor,
+    DocumentCapabilities, DocumentFormat, DocumentLayout, DocumentRotation, EpubReaderPreferences,
+    EpubTheme, PageIndex, PageRegion, RegionImageReference, SemanticTextAnchor,
 };
 use glyphst_pdf::{DocumentSnapshot, ReloadCoordinator, ReloadDisposition};
 use glyphst_translation::{LanguageCode, TranslationRequest, TranslationService};
@@ -155,11 +155,25 @@ struct PageImageExport {
     bounds: Rect,
     width: f32,
     height: f32,
+    rotation: DocumentRotation,
 }
 
 struct RegionImageExport {
     display_list: Arc<DisplayList>,
+    page_bounds: Rect,
     region: PageRegion,
+    rotation: DocumentRotation,
+}
+
+impl RegionImageExport {
+    fn view_region(&self) -> Rect {
+        let region = self.region.normalized();
+        PdfView::pdf_rect_to_view(
+            self.page_bounds,
+            self.rotation,
+            Rect::new(region.x0, region.y0, region.x1, region.y1),
+        )
+    }
 }
 
 fn clear_copied_region_selection(
@@ -226,6 +240,7 @@ struct FileSignature {
 struct RenderKey {
     doc_id: u64,
     page_idx: usize,
+    rotation: DocumentRotation,
     physical_width: u32,
     physical_height: u32,
 }
@@ -254,7 +269,7 @@ struct CachedDisplayList {
 pub struct RenderCache {
     renders: Vec<CachedRender>,
     display_lists: Vec<CachedDisplayList>,
-    protected_pages: HashSet<(u64, usize)>,
+    protected_pages: HashSet<(u64, usize, DocumentRotation)>,
     access_counter: u64,
 }
 
@@ -269,7 +284,10 @@ impl RenderCache {
         self.exact_render_index(key).is_some()
     }
 
-    fn set_protected_pages(&mut self, pages: impl IntoIterator<Item = (u64, usize)>) {
+    fn set_protected_pages(
+        &mut self,
+        pages: impl IntoIterator<Item = (u64, usize, DocumentRotation)>,
+    ) {
         self.protected_pages.clear();
         self.protected_pages.extend(pages);
     }
@@ -283,13 +301,18 @@ impl RenderCache {
         &mut self,
         doc_id: u64,
         page_idx: usize,
+        rotation: DocumentRotation,
         render_scale: f32,
     ) -> Option<Arc<RenderImage>> {
         let index = self
             .renders
             .iter()
             .enumerate()
-            .filter(|(_, cached)| cached.key.doc_id == doc_id && cached.key.page_idx == page_idx)
+            .filter(|(_, cached)| {
+                cached.key.doc_id == doc_id
+                    && cached.key.page_idx == page_idx
+                    && cached.key.rotation == rotation
+            })
             .min_by(|(_, a), (_, b)| {
                 (a.render_scale - render_scale)
                     .abs()
@@ -337,9 +360,11 @@ impl RenderCache {
                 .iter()
                 .enumerate()
                 .filter(|(_, cached)| {
-                    !self
-                        .protected_pages
-                        .contains(&(cached.key.doc_id, cached.key.page_idx))
+                    !self.protected_pages.contains(&(
+                        cached.key.doc_id,
+                        cached.key.page_idx,
+                        cached.key.rotation,
+                    ))
                 })
                 .min_by_key(|(_, cached)| cached.last_access)
                 .map(|(index, _)| index)
@@ -514,6 +539,7 @@ struct DiffRenderInput {
     page_bounds: Rect,
     page_width: f32,
     page_height: f32,
+    rotation: DocumentRotation,
 }
 
 struct DiffFlashOverlay {
@@ -586,6 +612,7 @@ pub struct LinkedViewport {
     pub page_idx: usize,
     pub y_in_page: f32,
     pub zoom: f32,
+    pub rotation: DocumentRotation,
     pub generation: u64,
 }
 
@@ -725,6 +752,7 @@ pub struct PdfOpenOptions {
     pub annotations: PdfAnnotations,
     pub target_language: String,
     pub epub_preferences: EpubReaderPreferences,
+    pub rotation: DocumentRotation,
 }
 
 pub enum PdfViewEvent {
@@ -936,6 +964,7 @@ pub struct PdfView {
     page_image_bounds: Vec<Option<Bounds<Pixels>>>,
     focus_handle: FocusHandle,
     pending_renders: Vec<PendingRender>,
+    rotation: DocumentRotation,
     zoom: f32,
     base_scale: f32,
     viewport_width: f32,
@@ -1115,6 +1144,7 @@ impl AiContextProvider for PdfViewAiContextProvider {
                     pdf_view.page_count,
                     ai_settings.page_text_format,
                     ai_settings.page_image_quality,
+                    pdf_view.rotation,
                     references,
                 ))
             })
@@ -1122,14 +1152,22 @@ impl AiContextProvider for PdfViewAiContextProvider {
             .and_then(|inputs| inputs);
 
         cx.background_spawn(async move {
-            let (snapshot, document_layout, page_count, text_format, image_quality, references) =
-                inputs?;
+            let (
+                snapshot,
+                document_layout,
+                page_count,
+                text_format,
+                image_quality,
+                rotation,
+                references,
+            ) = inputs?;
             PdfView::resolve_page_contexts(
                 &snapshot,
                 document_layout,
                 page_count,
                 text_format,
                 image_quality,
+                rotation,
                 references,
             )
         })
@@ -1150,6 +1188,7 @@ impl AiContextProvider for PdfViewAiContextProvider {
                     pdf_view.page_count,
                     store.settings.ai.page_image_quality,
                     store.settings.ai.page_image_limit,
+                    pdf_view.rotation,
                     references,
                 ))
             })
@@ -1163,6 +1202,7 @@ impl AiContextProvider for PdfViewAiContextProvider {
                 page_count,
                 image_quality,
                 page_image_limit,
+                rotation,
                 references,
             ) = inputs?;
             PdfView::resolve_region_contexts(
@@ -1171,6 +1211,7 @@ impl AiContextProvider for PdfViewAiContextProvider {
                 page_count,
                 image_quality,
                 page_image_limit,
+                rotation,
                 references,
             )
         })
@@ -1249,6 +1290,7 @@ impl PdfView {
         expected_page_count: usize,
         text_format: PageTextFormat,
         image_quality: PageImageQuality,
+        rotation: DocumentRotation,
         references: Vec<MentionReference>,
     ) -> Result<Vec<ResolvedPageContext>> {
         if references.is_empty() {
@@ -1326,6 +1368,7 @@ impl PdfView {
                     page_width,
                     page_height,
                     image_quality,
+                    rotation,
                 )
                 .with_context(|| format!("failed to render PDF page {page_number} as JPEG"))?;
                 rendered_image_bytes = rendered_image_bytes.saturating_add(bytes.len());
@@ -1379,6 +1422,7 @@ impl PdfView {
         expected_page_count: usize,
         image_quality: PageImageQuality,
         page_image_limit: usize,
+        rotation: DocumentRotation,
         references: Vec<RegionImageReference>,
     ) -> Result<Vec<ResolvedRegionContext>> {
         if references.is_empty() {
@@ -1477,7 +1521,9 @@ impl PdfView {
                 }
                 exports.push(RegionImageExport {
                     display_list,
+                    page_bounds,
                     region: *region,
+                    rotation,
                 });
             }
 
@@ -1739,9 +1785,12 @@ impl PdfView {
         page_width: f32,
         page_height: f32,
         quality: PageImageQuality,
+        rotation: DocumentRotation,
     ) -> Result<Vec<u8>> {
+        let (display_width, display_height) =
+            Self::rotated_dimensions(page_width, page_height, rotation);
         let (width, height) =
-            Self::page_image_dimensions(page_width, page_height, quality.max_dimension())?;
+            Self::page_image_dimensions(display_width, display_height, quality.max_dimension())?;
         let mut pixmap = Pixmap::new_with_w_h(
             &Colorspace::device_rgb(),
             width as i32,
@@ -1751,15 +1800,14 @@ impl PdfView {
         .context("failed to allocate page image")?;
         pixmap.samples_mut().fill(255);
 
-        let zoom_x = width as f32 / page_width;
-        let zoom_y = height as f32 / page_height;
-        let matrix = Matrix::new(
+        let zoom_x = width as f32 / display_width;
+        let zoom_y = height as f32 / display_height;
+        let matrix = Self::render_matrix(
+            page_bounds,
+            rotation,
             zoom_x,
-            0.0,
-            0.0,
             zoom_y,
-            -page_bounds.x0 * zoom_x,
-            -page_bounds.y0 * zoom_y,
+            mupdf::Point { x: 0.0, y: 0.0 },
         );
         {
             let device =
@@ -1882,6 +1930,11 @@ impl PdfView {
         let opened_document = document_snapshot.open_with_layout(requested_layout)?;
         let capabilities = opened_document.capabilities();
         let document_layout = opened_document.layout();
+        let rotation = if capabilities.reflow {
+            DocumentRotation::default()
+        } else {
+            options.rotation
+        };
         if format == DocumentFormat::Epub
             && let Ok(title) = opened_document.inner().metadata(mupdf::MetadataName::Title)
             && !title.trim().is_empty()
@@ -1998,6 +2051,7 @@ impl PdfView {
             page_image_bounds,
             focus_handle,
             pending_renders: Vec::new(),
+            rotation,
             zoom: behavior.default_zoom,
             base_scale: 1.0,
             viewport_width: 0.0,
@@ -2401,8 +2455,7 @@ impl PdfView {
         }
         self.toc_sidebar_entries_dirty = true;
         self.pages = reload.loaded.pages;
-        self.max_page_width = reload.loaded.max_page_width.max(1.0);
-        self.content_height_doc = reload.loaded.content_height_doc;
+        self.recompute_layout(cx.global::<SettingsStore>().resolved_theme.page_gap);
         self.glyphs.clear();
         self.text_blocks.clear();
         self.text_lines.clear();
@@ -2629,8 +2682,7 @@ impl PdfView {
 
     fn apply_loaded_pages(&mut self, loaded: LoadedPages, cx: &mut Context<Self>) {
         self.pages = loaded.pages;
-        self.max_page_width = loaded.max_page_width.max(1.0);
-        self.content_height_doc = loaded.content_height_doc;
+        self.recompute_layout(cx.global::<SettingsStore>().resolved_theme.page_gap);
         self.region_tool_active = false;
         self.region_drag = None;
         self.selected_region = None;
@@ -3637,12 +3689,13 @@ impl PdfView {
     }
 
     fn presentation_scale_for_page(&self, page_idx: usize) -> f32 {
-        let Some(page) = self.pages.get(page_idx) else {
+        if self.pages.get(page_idx).is_none() {
             return self.effective_scale();
-        };
+        }
 
-        let width_scale = self.viewport_width / page.width.max(1.0);
-        let height_scale = self.viewport_height / page.height.max(1.0);
+        let (page_width, page_height) = self.page_dimensions(page_idx);
+        let width_scale = self.viewport_width / page_width.max(1.0);
+        let height_scale = self.viewport_height / page_height.max(1.0);
         width_scale.min(height_scale).max(0.001)
     }
 
@@ -3652,9 +3705,9 @@ impl PdfView {
         bounds: Bounds<Pixels>,
         scale: f32,
     ) -> Bounds<Pixels> {
-        let page = &self.pages[page_idx];
-        let image_width = px(page.width * scale);
-        let image_height = px(page.height * scale);
+        let (page_width, page_height) = self.page_dimensions(page_idx);
+        let image_width = px(page_width * scale);
+        let image_height = px(page_height * scale);
         let origin = point(
             bounds.origin.x + (bounds.size.width - image_width) / 2.0,
             bounds.origin.y + (bounds.size.height - image_height) / 2.0,
@@ -3687,7 +3740,7 @@ impl PdfView {
 
         let doc_id = self.doc_id;
         cx.global_mut::<RenderCache>()
-            .set_protected_pages([(doc_id, page_idx)]);
+            .set_protected_pages([(doc_id, page_idx, self.rotation)]);
 
         for adjacent_page in [
             page_idx.checked_sub(1),
@@ -3773,7 +3826,7 @@ impl PdfView {
         cx.global_mut::<RenderCache>().set_protected_pages(
             visible_page_renders
                 .iter()
-                .map(|(page_idx, _, _)| (doc_id, *page_idx)),
+                .map(|(page_idx, _, key)| (doc_id, *page_idx, key.rotation)),
         );
 
         if let (Some((first, _, _)), Some((last, _, _))) =
@@ -3818,8 +3871,9 @@ impl PdfView {
         scale: f32,
     ) -> Bounds<Pixels> {
         let page = &self.pages[page_idx];
-        let image_width = px(page.width * scale);
-        let image_height = px(page.height * scale);
+        let (page_width, page_height) = self.page_dimensions(page_idx);
+        let image_width = px(page_width * scale);
+        let image_height = px(page_height * scale);
         let origin = point(
             bounds.origin.x + (bounds.size.width - image_width) / 2.0
                 - px(self.scroll_x_doc * scale),
@@ -3863,6 +3917,7 @@ impl PdfView {
         RenderKey {
             doc_id: self.doc_id,
             page_idx,
+            rotation: self.rotation,
             physical_width: (requested_width * texture_scale)
                 .round()
                 .clamp(1.0, max_dimension) as u32,
@@ -3897,6 +3952,88 @@ impl PdfView {
         (self.base_scale * self.zoom).max(0.001)
     }
 
+    fn rotated_dimensions(width: f32, height: f32, rotation: DocumentRotation) -> (f32, f32) {
+        if rotation.swaps_width_and_height() {
+            (height, width)
+        } else {
+            (width, height)
+        }
+    }
+
+    fn page_dimensions_for(page: &PdfPage, rotation: DocumentRotation) -> (f32, f32) {
+        Self::rotated_dimensions(page.width, page.height, rotation)
+    }
+
+    fn page_dimensions(&self, page_idx: usize) -> (f32, f32) {
+        Self::page_dimensions_for(&self.pages[page_idx], self.rotation)
+    }
+
+    fn page_to_view_matrix(page_bounds: Rect, rotation: DocumentRotation) -> Matrix {
+        Self::render_matrix(
+            page_bounds,
+            rotation,
+            1.0,
+            1.0,
+            mupdf::Point { x: 0.0, y: 0.0 },
+        )
+    }
+
+    fn pdf_point_to_view(
+        page_bounds: Rect,
+        rotation: DocumentRotation,
+        point: mupdf::Point,
+    ) -> mupdf::Point {
+        point.transform(&Self::page_to_view_matrix(page_bounds, rotation))
+    }
+
+    fn view_point_to_pdf(
+        page_bounds: Rect,
+        rotation: DocumentRotation,
+        point: mupdf::Point,
+    ) -> mupdf::Point {
+        let inverse = Self::page_to_view_matrix(page_bounds, rotation)
+            .invert()
+            .expect("document rotation matrix is invertible");
+        point.transform(&inverse)
+    }
+
+    fn pdf_rect_to_view(page_bounds: Rect, rotation: DocumentRotation, rect: Rect) -> Rect {
+        rect.transform(&Self::page_to_view_matrix(page_bounds, rotation))
+    }
+
+    fn view_rect_to_pdf(page_bounds: Rect, rotation: DocumentRotation, rect: Rect) -> Rect {
+        let inverse = Self::page_to_view_matrix(page_bounds, rotation)
+            .invert()
+            .expect("document rotation matrix is invertible");
+        rect.transform(&inverse)
+    }
+
+    fn render_matrix(
+        page_bounds: Rect,
+        rotation: DocumentRotation,
+        scale_x: f32,
+        scale_y: f32,
+        view_origin: mupdf::Point,
+    ) -> Matrix {
+        let width = page_bounds.x1 - page_bounds.x0;
+        let height = page_bounds.y1 - page_bounds.y0;
+        let (a, b, c, d, tx, ty) = match rotation.quarter_turns() {
+            0 => (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+            1 => (0.0, 1.0, -1.0, 0.0, height, 0.0),
+            2 => (-1.0, 0.0, 0.0, -1.0, width, height),
+            3 => (0.0, -1.0, 1.0, 0.0, 0.0, width),
+            _ => unreachable!("document rotation is normalized"),
+        };
+        Matrix::new(
+            a * scale_x,
+            b * scale_y,
+            c * scale_x,
+            d * scale_y,
+            (tx - a * page_bounds.x0 - c * page_bounds.y0 - view_origin.x) * scale_x,
+            (ty - b * page_bounds.x0 - d * page_bounds.y0 - view_origin.y) * scale_y,
+        )
+    }
+
     fn max_scroll_y_doc(&self) -> f32 {
         let viewport_height_doc = self.viewport_height / self.effective_scale();
         (self.content_height_doc - viewport_height_doc).max(0.0)
@@ -3909,12 +4046,20 @@ impl PdfView {
 
     fn recompute_layout(&mut self, page_gap: f32) {
         let mut offset_y = 0.0;
+        let mut max_page_width = 0.0_f32;
         for page in &mut self.pages {
+            let (width, height) = Self::page_dimensions_for(page, self.rotation);
             page.offset_y = offset_y;
-            offset_y += page.height + page_gap;
+            offset_y += height + page_gap;
+            max_page_width = max_page_width.max(width);
         }
 
-        self.content_height_doc = offset_y - page_gap;
+        self.max_page_width = max_page_width.max(1.0);
+        self.content_height_doc = if self.pages.is_empty() {
+            0.0
+        } else {
+            offset_y - page_gap
+        };
         self.clamp_scroll();
     }
 
@@ -4459,15 +4604,95 @@ impl PdfView {
         cx.notify();
     }
 
-    pub fn apply_linked_viewport(&mut self, viewport: LinkedViewport, cx: &mut Context<Self>) {
-        let Some(page) = self.pages.get(viewport.page_idx) else {
-            return;
+    fn viewport_center_pdf_anchor(&self) -> Option<(usize, mupdf::Point)> {
+        if self.pages.is_empty() {
+            return None;
+        }
+        let scale = self.effective_scale();
+        let center_y = self.target_scroll_y_doc + self.viewport_height / (2.0 * scale);
+        let page_idx = self.page_index_for_doc_y(center_y);
+        let page = self.pages.get(page_idx)?;
+        let (page_width, page_height) = self.page_dimensions(page_idx);
+        let point = mupdf::Point {
+            x: (page_width / 2.0 + self.target_scroll_x_doc).clamp(0.0, page_width),
+            y: (center_y - page.offset_y).clamp(0.0, page_height),
         };
+        Some((
+            page_idx,
+            Self::view_point_to_pdf(page.bounds, self.rotation, point),
+        ))
+    }
+
+    fn set_rotation_state(&mut self, rotation: DocumentRotation, cx: &mut Context<Self>) {
+        if self.rotation == rotation || self.capabilities.reflow {
+            return;
+        }
+        self.rotation = rotation;
+        self.pending_renders.clear();
+        self.page_image_bounds.fill(None);
+        self.diff_flashes.clear();
+        self.diff_pending_pages.clear();
+        self.translated_text_layouts.clear();
+        self.region_drag = None;
+        self.context_menu_position = None;
+        self.jump_back.clear();
+        self.jump_forward.clear();
+        let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
+        self.recompute_layout(page_gap);
+        self.base_scale = self.viewport_width.max(1.0) / self.max_page_width.max(1.0);
+        cx.notify();
+    }
+
+    fn rotate_to(&mut self, rotation: DocumentRotation, cx: &mut Context<Self>) {
+        if self.rotation == rotation || self.capabilities.reflow {
+            return;
+        }
+        let anchor = self.viewport_center_pdf_anchor();
+        self.set_rotation_state(rotation, cx);
+        if !self.is_presentation_mode()
+            && let Some((page_idx, source_point)) = anchor
+            && let Some(page) = self.pages.get(page_idx)
+        {
+            let point = Self::pdf_point_to_view(page.bounds, self.rotation, source_point);
+            let (page_width, _) = self.page_dimensions(page_idx);
+            let scale = self.effective_scale();
+            self.scroll_x_doc = point.x - page_width / 2.0;
+            self.scroll_y_doc = page.offset_y + point.y - self.viewport_height / (2.0 * scale);
+            self.target_scroll_x_doc = self.scroll_x_doc;
+            self.target_scroll_y_doc = self.scroll_y_doc;
+            self.clamp_scroll();
+        }
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .set_document_rotation(&self.path, self.rotation)
+        {
+            eprintln!("failed to save document rotation: {error:#}");
+        }
+        self.schedule_position_save(cx);
+        self.emit_linked_viewport(cx);
+        cx.notify();
+    }
+
+    fn rotate_clockwise(&mut self, cx: &mut Context<Self>) {
+        self.rotate_to(self.rotation.clockwise(), cx);
+    }
+
+    fn rotate_counterclockwise(&mut self, cx: &mut Context<Self>) {
+        self.rotate_to(self.rotation.counterclockwise(), cx);
+    }
+
+    pub fn apply_linked_viewport(&mut self, viewport: LinkedViewport, cx: &mut Context<Self>) {
+        if self.pages.get(viewport.page_idx).is_none() {
+            return;
+        }
         self.suppress_linked_events = true;
+        self.set_rotation_state(viewport.rotation, cx);
         self.zoom = viewport.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        let page = &self.pages[viewport.page_idx];
+        let (_, page_height) = self.page_dimensions(viewport.page_idx);
         self.set_scroll_doc(
             self.scroll_x_doc,
-            page.offset_y + viewport.y_in_page.max(0.0).min(page.height),
+            page.offset_y + viewport.y_in_page.max(0.0).min(page_height),
             cx,
         );
         self.suppress_linked_events = false;
@@ -4499,10 +4724,12 @@ impl PdfView {
         self.linked_viewport_generation = self.linked_viewport_generation.wrapping_add(1);
         let page_idx = self.page_index_for_scroll_y(self.target_scroll_y_doc);
         let page = &self.pages[page_idx];
+        let (_, page_height) = self.page_dimensions(page_idx);
         cx.emit(PdfViewEvent::ViewportChanged(LinkedViewport {
             page_idx,
-            y_in_page: (self.target_scroll_y_doc - page.offset_y).clamp(0.0, page.height),
+            y_in_page: (self.target_scroll_y_doc - page.offset_y).clamp(0.0, page_height),
             zoom: self.zoom,
+            rotation: self.rotation,
             generation: self.linked_viewport_generation,
         }));
     }
@@ -4691,21 +4918,22 @@ impl PdfView {
             return Some(image);
         }
 
-        if !self
-            .pending_renders
-            .iter()
-            .any(|pending| pending.key.page_idx == key.page_idx)
-        {
+        if !self.pending_renders.iter().any(|pending| {
+            pending.key.page_idx == key.page_idx && pending.key.rotation == key.rotation
+        }) {
             self.start_background_render(key, cx);
         }
-        let render_scale = key.physical_width as f32 / self.pages[key.page_idx].width;
+        let (page_width, _) = self.page_dimensions(key.page_idx);
+        let render_scale = key.physical_width as f32 / page_width;
         let render_cache = cx.global_mut::<RenderCache>();
-        if let Some(image) = render_cache.scaled_render(self.doc_id, key.page_idx, render_scale) {
+        if let Some(image) =
+            render_cache.scaled_render(self.doc_id, key.page_idx, key.rotation, render_scale)
+        {
             return Some(image);
         }
 
         self.previous_doc_id.and_then(|previous_doc_id| {
-            render_cache.scaled_render(previous_doc_id, key.page_idx, render_scale)
+            render_cache.scaled_render(previous_doc_id, key.page_idx, key.rotation, render_scale)
         })
     }
 
@@ -4715,7 +4943,8 @@ impl PdfView {
         image: Arc<RenderImage>,
         cx: &mut Context<Self>,
     ) {
-        let render_scale = key.physical_width as f32 / self.pages[key.page_idx].width;
+        let (page_width, _) = self.page_dimensions(key.page_idx);
+        let render_scale = key.physical_width as f32 / page_width;
         let removed_images = cx
             .global_mut::<RenderCache>()
             .insert_render(key, render_scale, image);
@@ -4749,11 +4978,9 @@ impl PdfView {
     }
 
     fn start_background_render(&mut self, key: RenderKey, cx: &mut Context<Self>) {
-        if self
-            .pending_renders
-            .iter()
-            .any(|pending| pending.key == key)
-        {
+        if self.pending_renders.iter().any(|pending| {
+            pending.key.page_idx == key.page_idx && pending.key.rotation == key.rotation
+        }) {
             return;
         }
         self.pending_renders
@@ -4761,8 +4988,9 @@ impl PdfView {
 
         let page = &self.pages[key.page_idx];
         let page_bounds = page.bounds;
-        let page_width = page.width;
-        let page_height = page.height;
+        let source_page_width = page.width;
+        let source_page_height = page.height;
+        let (page_width, page_height) = Self::page_dimensions_for(page, key.rotation);
         let display_list = match self.get_or_create_display_list(key.page_idx, cx) {
             Ok(display_list) => display_list,
             Err(error) => {
@@ -4777,8 +5005,9 @@ impl PdfView {
                     Self::render_page(
                         &display_list,
                         page_bounds,
-                        page_width,
-                        page_height,
+                        source_page_width,
+                        source_page_height,
+                        key.rotation,
                         key.physical_width,
                         key.physical_height,
                     )
@@ -4807,6 +5036,7 @@ impl PdfView {
                                         page_bounds,
                                         page_width,
                                         page_height,
+                                        rotation: key.rotation,
                                     },
                                     previous_image,
                                     image,
@@ -4839,11 +5069,12 @@ impl PdfView {
             doc_id: previous_doc_id,
             ..key
         };
-        let render_scale = key.physical_width as f32 / self.pages[key.page_idx].width;
+        let (page_width, _) = self.page_dimensions(key.page_idx);
+        let render_scale = key.physical_width as f32 / page_width;
         let render_cache = cx.global_mut::<RenderCache>();
-        render_cache
-            .render(previous_key)
-            .or_else(|| render_cache.scaled_render(previous_doc_id, key.page_idx, render_scale))
+        render_cache.render(previous_key).or_else(|| {
+            render_cache.scaled_render(previous_doc_id, key.page_idx, key.rotation, render_scale)
+        })
     }
 
     fn start_diff_flash_task(
@@ -4859,7 +5090,7 @@ impl PdfView {
                     Self::diff_render_images(
                         &previous_image,
                         &image,
-                        input.page_bounds,
+                        Rect::new(0.0, 0.0, input.page_width, input.page_height),
                         input.page_width,
                         input.page_height,
                         input.key.physical_width,
@@ -4874,12 +5105,14 @@ impl PdfView {
 
             let update_result = this.update(cx, |this, cx| {
                 let started_at = Instant::now();
-                this.diff_flashes
-                    .extend(rects.into_iter().map(|rect| DiffFlash {
+                this.diff_flashes.extend(rects.into_iter().map(|rect| {
+                    let rect = Self::view_rect_to_pdf(input.page_bounds, input.rotation, rect);
+                    DiffFlash {
                         page_idx: input.key.page_idx,
                         rect,
                         started_at,
-                    }));
+                    }
+                }));
                 this.arm_diff_flash_clear(cx);
                 cx.notify();
             });
@@ -4896,11 +5129,14 @@ impl PdfView {
     fn render_page(
         display_list: &DisplayList,
         page_bounds: Rect,
-        page_width: f32,
-        page_height: f32,
+        source_page_width: f32,
+        source_page_height: f32,
+        rotation: DocumentRotation,
         physical_width: u32,
         physical_height: u32,
     ) -> Result<Arc<RenderImage>> {
+        let (page_width, page_height) =
+            Self::rotated_dimensions(source_page_width, source_page_height, rotation);
         let zoom_x = physical_width as f32 / page_width;
         let zoom_y = physical_height as f32 / page_height;
         let physical_width = physical_width as i32;
@@ -4914,13 +5150,12 @@ impl PdfView {
         )?;
         pixmap.samples_mut().fill(255);
 
-        let matrix = Matrix::new(
+        let matrix = Self::render_matrix(
+            page_bounds,
+            rotation,
             zoom_x,
-            0.0,
-            0.0,
             zoom_y,
-            -page_bounds.x0 * zoom_x,
-            -page_bounds.y0 * zoom_y,
+            mupdf::Point { x: 0.0, y: 0.0 },
         );
         {
             let device = Device::from_pixmap(&pixmap)?;
@@ -5365,6 +5600,7 @@ impl PdfView {
         let page_bounds = page.bounds;
         let page_width = page.width;
         let page_height = page.height;
+        let rotation = self.rotation;
         let display_list = match self.get_or_create_display_list(page_idx, cx) {
             Ok(display_list) => display_list,
             Err(error) => {
@@ -5388,6 +5624,7 @@ impl PdfView {
                             page_bounds,
                             page_width,
                             page_height,
+                            rotation,
                             path,
                         )
                     })
@@ -5418,7 +5655,9 @@ impl PdfView {
                 }
                 Ok(RegionImageExport {
                     display_list: self.get_or_create_display_list(page_idx, cx)?,
+                    page_bounds: self.pages[page_idx].bounds,
                     region: *region,
+                    rotation: self.rotation,
                 })
             })
             .collect()
@@ -5540,9 +5779,9 @@ impl PdfView {
         let mut max_width = 1u32;
         let mut total_height = 0u32;
         for export in exports {
-            let region = export.region.normalized();
-            let width = ((region.x1 - region.x0) * scale).ceil().max(1.0);
-            let height = ((region.y1 - region.y0) * scale).ceil().max(1.0);
+            let view_region = export.view_region();
+            let width = ((view_region.x1 - view_region.x0) * scale).ceil().max(1.0);
+            let height = ((view_region.y1 - view_region.y0) * scale).ceil().max(1.0);
             if width > i32::MAX as f32 || height > i32::MAX as f32 {
                 bail!("PDF image region is too large");
             }
@@ -5570,11 +5809,7 @@ impl PdfView {
             RgbaImage::from_pixel(max_width, total_height, image::Rgba([255, 255, 255, 255]));
         let mut y_offset = 0;
         for (export, (width, height)) in exports.iter().zip(dimensions) {
-            let (_, _, rgba) = Self::rasterize_pdf_region_to_rgba(
-                export.display_list.as_ref(),
-                export.region,
-                scale,
-            )?;
+            let (_, _, rgba) = Self::rasterize_pdf_region_to_rgba(export, scale)?;
             let crop = RgbaImage::from_raw(width, height, rgba)
                 .context("failed to create region crop image data")?;
             let x_offset = (max_width - width) / 2;
@@ -5592,13 +5827,12 @@ impl PdfView {
     }
 
     fn rasterize_pdf_region_to_rgba(
-        display_list: &DisplayList,
-        region: PageRegion,
+        export: &RegionImageExport,
         scale: f32,
     ) -> Result<(u32, u32, Vec<u8>)> {
-        let region = region.normalized();
-        let width = ((region.x1 - region.x0) * scale).ceil().max(1.0);
-        let height = ((region.y1 - region.y0) * scale).ceil().max(1.0);
+        let view_region = export.view_region();
+        let width = ((view_region.x1 - view_region.x0) * scale).ceil().max(1.0);
+        let height = ((view_region.y1 - view_region.y0) * scale).ceil().max(1.0);
         if width > i32::MAX as f32 || height > i32::MAX as f32 {
             bail!("PDF image region is too large");
         }
@@ -5606,17 +5840,20 @@ impl PdfView {
         let height = height as i32;
         let mut pixmap = Pixmap::new_with_w_h(&Colorspace::device_rgb(), width, height, true)?;
         pixmap.samples_mut().fill(255);
-        let matrix = Matrix::new(
+        let matrix = Self::render_matrix(
+            export.page_bounds,
+            export.rotation,
             scale,
-            0.0,
-            0.0,
             scale,
-            -region.x0 * scale,
-            -region.y0 * scale,
+            mupdf::Point {
+                x: view_region.x0,
+                y: view_region.y0,
+            },
         );
         {
             let device = Device::from_pixmap(&pixmap)?;
-            display_list
+            export
+                .display_list
                 .run(&device, &matrix, Rect::INF)
                 .context("failed to rasterize PDF image region")?;
         }
@@ -5643,11 +5880,13 @@ impl PdfView {
         }
         let max_width = exports
             .iter()
-            .map(|export| export.region.x1 - export.region.x0)
+            .map(RegionImageExport::view_region)
+            .map(|rect| rect.x1 - rect.x0)
             .fold(0.0_f32, f32::max);
         let total_height = exports
             .iter()
-            .map(|export| export.region.y1 - export.region.y0)
+            .map(RegionImageExport::view_region)
+            .map(|rect| rect.y1 - rect.y0)
             .sum::<f32>();
         let scale = quality.max_dimension() as f32 / max_width.max(total_height).max(1.0);
         let (width, height, rgba) = Self::rasterize_region_stack_to_rgba(exports, scale)?;
@@ -5725,6 +5964,7 @@ impl PdfView {
         }
 
         let mut export_pages = Vec::with_capacity(page_indices.len());
+        let rotation = self.rotation;
         for page_idx in page_indices {
             let Some(page) = self.pages.get(page_idx) else {
                 continue;
@@ -5745,6 +5985,7 @@ impl PdfView {
                 bounds,
                 width,
                 height,
+                rotation,
             });
         }
 
@@ -5829,6 +6070,7 @@ impl PdfView {
                 page.bounds,
                 page.width,
                 page.height,
+                page.rotation,
             )?;
             max_width = max_width.max(width);
             total_height = total_height
@@ -5873,10 +6115,16 @@ impl PdfView {
         page_bounds: Rect,
         page_width: f32,
         page_height: f32,
+        rotation: DocumentRotation,
         path: PathBuf,
     ) -> Result<()> {
-        let (width, height, rgba) =
-            Self::rasterize_page_to_rgba(&display_list, page_bounds, page_width, page_height)?;
+        let (width, height, rgba) = Self::rasterize_page_to_rgba(
+            &display_list,
+            page_bounds,
+            page_width,
+            page_height,
+            rotation,
+        )?;
         let image =
             RgbaImage::from_raw(width, height, rgba).context("failed to create page image data")?;
         image
@@ -5890,9 +6138,12 @@ impl PdfView {
         page_bounds: Rect,
         page_width: f32,
         page_height: f32,
+        rotation: DocumentRotation,
     ) -> Result<(u32, u32, Vec<u8>)> {
-        let physical_width = (page_width * PAGE_EXPORT_SCALE).ceil().max(1.0);
-        let physical_height = (page_height * PAGE_EXPORT_SCALE).ceil().max(1.0);
+        let (display_width, display_height) =
+            Self::rotated_dimensions(page_width, page_height, rotation);
+        let physical_width = (display_width * PAGE_EXPORT_SCALE).ceil().max(1.0);
+        let physical_height = (display_height * PAGE_EXPORT_SCALE).ceil().max(1.0);
         if physical_width > i32::MAX as f32 || physical_height > i32::MAX as f32 {
             bail!("PDF page is too large to export as an image");
         }
@@ -5907,15 +6158,14 @@ impl PdfView {
         )?;
         pixmap.samples_mut().fill(255);
 
-        let zoom_x = physical_width / page_width.max(1.0);
-        let zoom_y = physical_height / page_height.max(1.0);
-        let matrix = Matrix::new(
+        let zoom_x = physical_width / display_width.max(1.0);
+        let zoom_y = physical_height / display_height.max(1.0);
+        let matrix = Self::render_matrix(
+            page_bounds,
+            rotation,
             zoom_x,
-            0.0,
-            0.0,
             zoom_y,
-            -page_bounds.x0 * zoom_x,
-            -page_bounds.y0 * zoom_y,
+            mupdf::Point { x: 0.0, y: 0.0 },
         );
         {
             let device = Device::from_pixmap(&pixmap)?;
@@ -6010,13 +6260,14 @@ impl PdfView {
             .enumerate()
             .find_map(|(page_idx, bounds)| bounds.as_ref().map(|bounds| (page_idx, bounds)))?;
         let page = self.pages.get(page_idx)?;
-        let scale_x = bounds.size.width.as_f32() / page.width;
-        let scale_y = bounds.size.height.as_f32() / page.height;
+        let (page_width, page_height) = self.page_dimensions(page_idx);
+        let scale_x = bounds.size.width.as_f32() / page_width;
+        let scale_y = bounds.size.height.as_f32() / page_height;
         if scale_x <= 0.0 || scale_y <= 0.0 {
             return None;
         }
 
-        let page_left = (self.max_page_width - page.width) / 2.0;
+        let page_left = (self.max_page_width - page_width) / 2.0;
         Some(mupdf::Point {
             x: (page_left + (point.x.as_f32() - bounds.origin.x.as_f32()) / scale_x)
                 .clamp(0.0, self.max_page_width),
@@ -6030,6 +6281,7 @@ impl PdfView {
             &self.pages,
             self.max_page_width,
             self.effective_scale(),
+            self.rotation,
             drag,
         )
     }
@@ -6038,6 +6290,7 @@ impl PdfView {
         pages: &[PdfPage],
         max_page_width: f32,
         scale: f32,
+        rotation: DocumentRotation,
         drag: RegionDragState,
     ) -> Option<RegionImageReference> {
         let x0 = drag.anchor.x.min(drag.current.x);
@@ -6050,15 +6303,17 @@ impl PdfView {
             return None;
         }
 
-        let start_page = pages.partition_point(|page| page.offset_y + page.height <= y0);
+        let display_height = |page: &PdfPage| Self::page_dimensions_for(page, rotation).1;
+        let start_page = pages.partition_point(|page| page.offset_y + display_height(page) <= y0);
         let end_page = start_page + pages[start_page..].partition_point(|page| page.offset_y < y1);
         let regions = pages[start_page..end_page]
             .iter()
             .enumerate()
             .filter_map(|(relative_page_idx, page)| {
-                let page_left = (max_page_width - page.width) / 2.0;
-                let page_right = page_left + page.width;
-                let page_bottom = page.offset_y + page.height;
+                let (page_width, page_height) = Self::page_dimensions_for(page, rotation);
+                let page_left = (max_page_width - page_width) / 2.0;
+                let page_right = page_left + page_width;
+                let page_bottom = page.offset_y + page_height;
                 let region_x0 = x0.max(page_left);
                 let region_y0 = y0.max(page.offset_y);
                 let region_x1 = x1.min(page_right);
@@ -6067,12 +6322,22 @@ impl PdfView {
                     return None;
                 }
 
+                let source_rect = Self::view_rect_to_pdf(
+                    page.bounds,
+                    rotation,
+                    Rect::new(
+                        region_x0 - page_left,
+                        region_y0 - page.offset_y,
+                        region_x1 - page_left,
+                        region_y1 - page.offset_y,
+                    ),
+                );
                 Some(PageRegion {
                     page: PageIndex(start_page + relative_page_idx),
-                    x0: page.bounds.x0 + region_x0 - page_left,
-                    y0: page.bounds.y0 + region_y0 - page.offset_y,
-                    x1: page.bounds.x0 + region_x1 - page_left,
-                    y1: page.bounds.y0 + region_y1 - page.offset_y,
+                    x0: source_rect.x0,
+                    y0: source_rect.y0,
+                    x1: source_rect.x1,
+                    y1: source_rect.y1,
                 })
             })
             .collect::<Vec<_>>();
@@ -6140,16 +6405,21 @@ impl PdfView {
     fn screen_to_pdf(&self, page_idx: usize, point: GpuiPoint<Pixels>) -> Option<mupdf::Point> {
         let bounds = self.page_image_bounds.get(page_idx)?.as_ref()?;
         let page = &self.pages[page_idx];
-        let scale_x = bounds.size.width.as_f32() / page.width;
-        let scale_y = bounds.size.height.as_f32() / page.height;
+        let (page_width, page_height) = self.page_dimensions(page_idx);
+        let scale_x = bounds.size.width.as_f32() / page_width;
+        let scale_y = bounds.size.height.as_f32() / page_height;
         if scale_x <= 0.0 || scale_y <= 0.0 {
             return None;
         }
 
-        Some(mupdf::Point {
-            x: (point.x.as_f32() - bounds.origin.x.as_f32()) / scale_x + page.bounds.x0,
-            y: (point.y.as_f32() - bounds.origin.y.as_f32()) / scale_y + page.bounds.y0,
-        })
+        Some(Self::view_point_to_pdf(
+            page.bounds,
+            self.rotation,
+            mupdf::Point {
+                x: (point.x.as_f32() - bounds.origin.x.as_f32()) / scale_x,
+                y: (point.y.as_f32() - bounds.origin.y.as_f32()) / scale_y,
+            },
+        ))
     }
 
     fn glyph_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<usize> {
@@ -6274,9 +6544,9 @@ impl PdfView {
     fn nearby_glyph_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<usize> {
         let page_idx = self.page_at_screen(point)?;
         let bounds = self.page_image_bounds.get(page_idx)?.as_ref()?;
-        let page = &self.pages[page_idx];
-        let scale = (bounds.size.width.as_f32() / page.width)
-            .min(bounds.size.height.as_f32() / page.height);
+        let (page_width, page_height) = self.page_dimensions(page_idx);
+        let scale = (bounds.size.width.as_f32() / page_width)
+            .min(bounds.size.height.as_f32() / page_height);
         if scale <= 0.0 {
             return None;
         }
@@ -8853,12 +9123,28 @@ impl PdfView {
             return;
         }
 
-        let scroll_y_doc = target_top
-            .map(|top| page.offset_y + top - page.bounds.y0)
-            .unwrap_or(page.offset_y);
-        let scroll_x_doc = target_left
-            .map(|left| left - page.bounds.x0 - page.width / 2.0)
-            .unwrap_or(self.scroll_x_doc);
+        let (page_width, _) = self.page_dimensions(page_idx);
+        let target_point = Self::pdf_point_to_view(
+            page.bounds,
+            self.rotation,
+            mupdf::Point {
+                x: target_left.unwrap_or(page.bounds.x0 + page.width / 2.0),
+                y: target_top.unwrap_or(page.bounds.y0),
+            },
+        );
+        let swapped = self.rotation.swaps_width_and_height();
+        let scroll_y_doc =
+            if (swapped && target_left.is_some()) || (!swapped && target_top.is_some()) {
+                page.offset_y + target_point.y
+            } else {
+                page.offset_y
+            };
+        let scroll_x_doc =
+            if (swapped && target_top.is_some()) || (!swapped && target_left.is_some()) {
+                target_point.x - page_width / 2.0
+            } else {
+                self.scroll_x_doc
+            };
 
         let current_position = self.current_jump_position();
         Self::push_jump_position(&mut self.jump_back, current_position);
@@ -10455,9 +10741,10 @@ impl PdfView {
             + THUMBNAIL_SIDEBAR_ROW_PADDING_Y
     }
 
-    fn grid_overview_thumbnail_size(page: &PdfPage, zoom: f32) -> (f32, f32) {
-        let page_width = page.width.max(1.0);
-        let page_height = page.height.max(1.0);
+    fn grid_overview_thumbnail_size(&self, page_idx: usize, zoom: f32) -> (f32, f32) {
+        let (page_width, page_height) = self.page_dimensions(page_idx);
+        let page_width = page_width.max(1.0);
+        let page_height = page_height.max(1.0);
         let scale = (Self::grid_overview_thumbnail_max_width(zoom) / page_width)
             .min(Self::grid_overview_thumbnail_max_height(zoom) / page_height)
             .max(0.001);
@@ -10609,9 +10896,9 @@ impl PdfView {
 
                                         visible_range
                                             .filter_map(|page_idx| {
-                                                let page = this.pages.get(page_idx)?;
+                                                this.pages.get(page_idx)?;
                                                 let (thumbnail_width, thumbnail_height) =
-                                                    Self::grid_overview_thumbnail_size(page, zoom);
+                                                    this.grid_overview_thumbnail_size(page_idx, zoom);
                                                 let current = page_idx == current_page;
                                                 let selected = this
                                                     .thumbnail_sidebar_selection
@@ -11014,7 +11301,8 @@ impl PdfView {
                                 let protect_cols = this.grid_overview_cols.max(1);
                                 let protect_page_count = this.pages.len();
                                 let protect_doc_id = this.doc_id;
-                                let protected: Vec<(u64, usize)> = visible_range
+                                let protect_rotation = this.rotation;
+                                let protected: Vec<(u64, usize, DocumentRotation)> = visible_range
                                     .clone()
                                     .flat_map(|row_ix| {
                                         let start = row_ix * protect_cols;
@@ -11022,7 +11310,9 @@ impl PdfView {
                                             ((row_ix + 1) * protect_cols).min(protect_page_count);
                                         start..end
                                     })
-                                    .map(|page_idx| (protect_doc_id, page_idx))
+                                    .map(|page_idx| {
+                                        (protect_doc_id, page_idx, protect_rotation)
+                                    })
                                     .collect();
                                 cx.global_mut::<RenderCache>().set_protected_pages(protected);
 
@@ -11045,9 +11335,9 @@ impl PdfView {
 
                                         for col_ix in 0..cols {
                                             let page_idx = row_ix * cols + col_ix;
-                                            if let Some(page) = this.pages.get(page_idx) {
+                                            if page_idx < this.pages.len() {
                                                 let (thumbnail_width, thumbnail_height) =
-                                                    Self::grid_overview_thumbnail_size(page, zoom);
+                                                    this.grid_overview_thumbnail_size(page_idx, zoom);
                                                 let current = page_idx == current_page;
                                                 let selecting = this.grid_overview_selecting;
                                                 let selected = this
@@ -12077,12 +12367,14 @@ impl PdfView {
         image_bounds: Bounds<Pixels>,
     ) -> Bounds<Pixels> {
         let page = &self.pages[page_idx];
-        let scale_x = image_bounds.size.width.as_f32() / page.width;
-        let scale_y = image_bounds.size.height.as_f32() / page.height;
-        let x0 = image_bounds.origin.x.as_f32() + (rect.x0 - page.bounds.x0) * scale_x;
-        let y0 = image_bounds.origin.y.as_f32() + (rect.y0 - page.bounds.y0) * scale_y;
-        let x1 = image_bounds.origin.x.as_f32() + (rect.x1 - page.bounds.x0) * scale_x;
-        let y1 = image_bounds.origin.y.as_f32() + (rect.y1 - page.bounds.y0) * scale_y;
+        let (page_width, page_height) = self.page_dimensions(page_idx);
+        let scale_x = image_bounds.size.width.as_f32() / page_width;
+        let scale_y = image_bounds.size.height.as_f32() / page_height;
+        let rect = Self::pdf_rect_to_view(page.bounds, self.rotation, rect);
+        let x0 = image_bounds.origin.x.as_f32() + rect.x0 * scale_x;
+        let y0 = image_bounds.origin.y.as_f32() + rect.y0 * scale_y;
+        let x1 = image_bounds.origin.x.as_f32() + rect.x1 * scale_x;
+        let y1 = image_bounds.origin.y.as_f32() + rect.y1 * scale_y;
 
         Bounds::new(
             point(px(x0), px(y0)),
@@ -12370,6 +12662,12 @@ impl Render for PdfView {
             }))
             .on_action(cx.listener(|this, _: &ResetZoom, _, cx| {
                 this.reset_zoom(cx);
+            }))
+            .on_action(cx.listener(|this, _: &RotateClockwise, _, cx| {
+                this.rotate_clockwise(cx);
+            }))
+            .on_action(cx.listener(|this, _: &RotateCounterclockwise, _, cx| {
+                this.rotate_counterclockwise(cx);
             }))
             .on_action(cx.listener(|this, _: &Reload, _, cx| {
                 this.request_reload(cx);
@@ -13040,15 +13338,19 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        Glyph, PdfPage, PdfView, RegionDragState, RegionImageExport, SearchState, TextChunk,
-        TextFormatBlock, TextIndexState, TextLine, TranslationCardState, TranslationStatus,
-        clear_copied_region_selection, reset_translation_cards_for_document_replacement,
+        Glyph, PdfPage, PdfView, RegionDragState, RegionImageExport, RenderCache, RenderKey,
+        SearchState, TextChunk, TextFormatBlock, TextIndexState, TextLine, TranslationCardState,
+        TranslationStatus, clear_copied_region_selection,
+        reset_translation_cards_for_document_replacement,
     };
     use glyphst_ai::ai_chat::{MentionKind, MentionReference};
-    use glyphst_core::{DocumentLayout, EpubLayout, PageIndex, PageRegion, RegionImageReference};
+    use glyphst_core::{
+        DocumentLayout, DocumentRotation, EpubLayout, PageIndex, PageRegion, RegionImageReference,
+    };
     use gpui::{Modifiers, ScrollWheelEvent, point, px};
-    use image::GenericImageView;
+    use image::{Frame, GenericImageView, RgbaImage};
     use mupdf::{Point, Quad, Rect};
+    use smallvec::smallvec;
 
     #[test]
     fn page_counter_uses_generated_pages_for_any_document_format() {
@@ -13373,11 +13675,103 @@ mod tests {
             page_bounds.width(),
             page_bounds.height(),
             crate::settings::PageImageQuality::Low,
+            DocumentRotation::Degrees0,
         )
         .unwrap();
         let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
 
         assert_eq!(image.dimensions(), (512, 1024));
+    }
+
+    #[test]
+    fn rotated_page_jpeg_swaps_image_dimensions() {
+        let page_bounds = Rect::new(0.0, 0.0, 10.0, 20.0);
+        let display_list = mupdf::DisplayList::new(page_bounds).unwrap();
+
+        let bytes = PdfView::render_page_jpeg(
+            &display_list,
+            page_bounds,
+            page_bounds.width(),
+            page_bounds.height(),
+            crate::settings::PageImageQuality::Low,
+            DocumentRotation::Degrees90,
+        )
+        .unwrap();
+        let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
+
+        assert_eq!(image.dimensions(), (1024, 512));
+    }
+
+    #[test]
+    fn rotation_point_and_rect_transforms_round_trip() {
+        let page_bounds = Rect::new(10.0, 20.0, 110.0, 220.0);
+        let point = mupdf::Point { x: 35.0, y: 70.0 };
+        let rect = Rect::new(20.0, 40.0, 60.0, 100.0);
+
+        for rotation in [
+            DocumentRotation::Degrees0,
+            DocumentRotation::Degrees90,
+            DocumentRotation::Degrees180,
+            DocumentRotation::Degrees270,
+        ] {
+            let view_point = PdfView::pdf_point_to_view(page_bounds, rotation, point);
+            let restored = PdfView::view_point_to_pdf(page_bounds, rotation, view_point);
+            assert!((restored.x - point.x).abs() < 0.001);
+            assert!((restored.y - point.y).abs() < 0.001);
+
+            let view_rect = PdfView::pdf_rect_to_view(page_bounds, rotation, rect);
+            let restored = PdfView::view_rect_to_pdf(page_bounds, rotation, view_rect);
+            assert!((restored.x0 - rect.x0).abs() < 0.001);
+            assert!((restored.y0 - rect.y0).abs() < 0.001);
+            assert!((restored.x1 - rect.x1).abs() < 0.001);
+            assert!((restored.y1 - rect.y1).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn rotation_render_matrix_matches_view_transform() {
+        let page_bounds = Rect::new(10.0, 20.0, 110.0, 220.0);
+        let point = mupdf::Point { x: 35.0, y: 70.0 };
+        let view_origin = mupdf::Point { x: 5.0, y: 7.0 };
+
+        for rotation in [
+            DocumentRotation::Degrees0,
+            DocumentRotation::Degrees90,
+            DocumentRotation::Degrees180,
+            DocumentRotation::Degrees270,
+        ] {
+            let matrix = PdfView::render_matrix(page_bounds, rotation, 2.0, 3.0, view_origin);
+            let transformed = matrix.transform_xy(point.x, point.y);
+            let view_point = PdfView::pdf_point_to_view(page_bounds, rotation, point);
+            assert!((transformed.0 - (view_point.x - view_origin.x) * 2.0).abs() < 0.001);
+            assert!((transformed.1 - (view_point.y - view_origin.y) * 3.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn render_cache_protects_only_the_visible_rotation() {
+        let unrotated = RenderKey {
+            doc_id: 1,
+            page_idx: 0,
+            rotation: DocumentRotation::Degrees0,
+            physical_width: 8192,
+            physical_height: 8192,
+        };
+        let rotated = RenderKey {
+            rotation: DocumentRotation::Degrees90,
+            ..unrotated
+        };
+        let image = Arc::new(gpui::RenderImage::new(smallvec![Frame::new(
+            RgbaImage::new(1, 1),
+        )]));
+        let mut cache = RenderCache::new();
+        cache.set_protected_pages([(1, 0, DocumentRotation::Degrees90)]);
+
+        cache.insert_render(unrotated, 1.0, image.clone());
+        cache.insert_render(rotated, 1.0, image);
+
+        assert!(cache.render(unrotated).is_none());
+        assert!(cache.render(rotated).is_some());
     }
 
     #[test]
@@ -13402,6 +13796,7 @@ mod tests {
             &pages,
             100.0,
             1.0,
+            DocumentRotation::Degrees0,
             RegionDragState {
                 anchor: Point::new(10.0, 50.0),
                 current: Point::new(90.0, 170.0),
@@ -13444,12 +13839,46 @@ mod tests {
                 &pages,
                 100.0,
                 1.0,
+                DocumentRotation::Degrees0,
                 RegionDragState {
                     anchor: Point::new(10.0, 10.0),
                     current: Point::new(12.0, 30.0),
                 },
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn rotated_region_drag_maps_back_to_pdf_coordinates() {
+        let pages = [PdfPage {
+            bounds: Rect::new(10.0, 20.0, 110.0, 220.0),
+            width: 100.0,
+            height: 200.0,
+            offset_y: 0.0,
+            glyph_range: 0..0,
+        }];
+        let reference = PdfView::region_reference_for_pages(
+            &pages,
+            200.0,
+            1.0,
+            DocumentRotation::Degrees90,
+            RegionDragState {
+                anchor: Point::new(20.0, 10.0),
+                current: Point::new(80.0, 50.0),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            reference.regions,
+            vec![PageRegion {
+                page: PageIndex(0),
+                x0: 20.0,
+                y0: 140.0,
+                x1: 60.0,
+                y1: 200.0,
+            }]
         );
     }
 
@@ -13504,11 +13933,12 @@ mod tests {
 
     #[test]
     fn region_compositor_stacks_crops_and_centers_narrow_pages() {
-        let display_list =
-            Arc::new(mupdf::DisplayList::new(Rect::new(0.0, 0.0, 100.0, 100.0)).unwrap());
+        let page_bounds = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let display_list = Arc::new(mupdf::DisplayList::new(page_bounds).unwrap());
         let exports = vec![
             RegionImageExport {
                 display_list: display_list.clone(),
+                page_bounds,
                 region: PageRegion {
                     page: PageIndex(0),
                     x0: 0.0,
@@ -13516,9 +13946,11 @@ mod tests {
                     x1: 10.0,
                     y1: 20.0,
                 },
+                rotation: DocumentRotation::Degrees0,
             },
             RegionImageExport {
                 display_list,
+                page_bounds,
                 region: PageRegion {
                     page: PageIndex(1),
                     x0: 0.0,
@@ -13526,6 +13958,7 @@ mod tests {
                     x1: 20.0,
                     y1: 10.0,
                 },
+                rotation: DocumentRotation::Degrees0,
             },
         ];
 
@@ -13536,10 +13969,11 @@ mod tests {
 
     #[test]
     fn region_compositor_rejects_oversized_exports_before_rendering() {
-        let display_list =
-            Arc::new(mupdf::DisplayList::new(Rect::new(0.0, 0.0, 10_000.0, 5_000.0)).unwrap());
+        let page_bounds = Rect::new(0.0, 0.0, 10_000.0, 5_000.0);
+        let display_list = Arc::new(mupdf::DisplayList::new(page_bounds).unwrap());
         let exports = [RegionImageExport {
             display_list,
+            page_bounds,
             region: PageRegion {
                 page: PageIndex(0),
                 x0: 0.0,
@@ -13547,9 +13981,30 @@ mod tests {
                 x1: 10_000.0,
                 y1: 5_000.0,
             },
+            rotation: DocumentRotation::Degrees0,
         }];
 
         assert!(PdfView::rasterize_region_stack_to_rgba(&exports, 1.0).is_err());
+    }
+
+    #[test]
+    fn rotated_region_compositor_swaps_crop_dimensions() {
+        let page_bounds = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let exports = [RegionImageExport {
+            display_list: Arc::new(mupdf::DisplayList::new(page_bounds).unwrap()),
+            page_bounds,
+            region: PageRegion {
+                page: PageIndex(0),
+                x0: 0.0,
+                y0: 0.0,
+                x1: 10.0,
+                y1: 20.0,
+            },
+            rotation: DocumentRotation::Degrees90,
+        }];
+
+        let (width, height, _) = PdfView::rasterize_region_stack_to_rgba(&exports, 2.0).unwrap();
+        assert_eq!((width, height), (40, 20));
     }
 
     #[test]

@@ -553,6 +553,7 @@ impl Pane {
             .global::<LibraryStore>()
             .epub_reader_preferences(&path)
             .unwrap_or_else(|| cx.global::<SettingsStore>().settings.reading);
+        let rotation = cx.global::<LibraryStore>().document_rotation(&path);
         let mut pdf_view = PdfView::open(
             &path,
             self.focus_handle.clone(),
@@ -565,6 +566,7 @@ impl Pane {
                 annotations,
                 target_language,
                 epub_preferences,
+                rotation,
             },
         )?;
         let pdf_view = cx.new(|cx| {

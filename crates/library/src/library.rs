@@ -7,7 +7,8 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow};
 pub use glyphst_core::{
-    EpubReaderPreferences, HighlightColor, RegionImageReference, SemanticTextAnchor,
+    DocumentRotation, EpubReaderPreferences, HighlightColor, RegionImageReference,
+    SemanticTextAnchor,
 };
 use gpui::Global;
 use redb::{Database, ReadableTable, TableDefinition};
@@ -42,6 +43,10 @@ const HIGHLIGHTS_V2_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("h
 const NOTES_V2_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("notes_v2");
 const DOCUMENT_PREFERENCES_V2_TABLE: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("document_preferences_v2");
+const DOCUMENT_PREFERENCES_V3_MIGRATION_KEY: &str = "document_preferences_v3";
+const DOCUMENT_PREFERENCES_V3_VERSION: u8 = 3;
+const DOCUMENT_PREFERENCES_V3_TABLE: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("document_preferences_v3");
 const AI_SESSIONS_V2_MIGRATION_KEY: &str = "ai_sessions_v2";
 const AI_SESSIONS_V2_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v2");
 const AI_SESSIONS_V3_MIGRATION_KEY: &str = "ai_sessions_v3";
@@ -687,6 +692,7 @@ impl StoredDocumentPreferencesV1 {
             path: self.path.into_path()?,
             target_language: self.target_language,
             epub: None,
+            rotation: DocumentRotation::default(),
         })
     }
 }
@@ -873,6 +879,40 @@ impl StoredDocumentPreferencesV2 {
             path: self.path.into_path()?,
             target_language: self.target_language,
             epub: self.epub,
+            rotation: DocumentRotation::default(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredDocumentPreferencesV3 {
+    version: u8,
+    path: StoredPathV1,
+    target_language: String,
+    epub: Option<EpubReaderPreferences>,
+    rotation: DocumentRotation,
+}
+
+impl From<&DocumentPreferences> for StoredDocumentPreferencesV3 {
+    fn from(preferences: &DocumentPreferences) -> Self {
+        Self {
+            version: DOCUMENT_PREFERENCES_V3_VERSION,
+            path: StoredPathV1::from_path(&preferences.path),
+            target_language: preferences.target_language.clone(),
+            epub: preferences.epub,
+            rotation: preferences.rotation,
+        }
+    }
+}
+
+impl StoredDocumentPreferencesV3 {
+    fn into_domain(self) -> Result<DocumentPreferences> {
+        require_storage_version(self.version, DOCUMENT_PREFERENCES_V3_VERSION)?;
+        Ok(DocumentPreferences {
+            path: self.path.into_path()?,
+            target_language: self.target_language,
+            epub: self.epub,
+            rotation: self.rotation,
         })
     }
 }
@@ -1067,6 +1107,15 @@ pub struct DocumentPreferences {
     pub path: PathBuf,
     pub target_language: String,
     pub epub: Option<EpubReaderPreferences>,
+    pub rotation: DocumentRotation,
+}
+
+impl DocumentPreferences {
+    fn is_empty(&self) -> bool {
+        self.target_language.is_empty()
+            && self.epub.is_none()
+            && self.rotation == DocumentRotation::default()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1173,6 +1222,62 @@ impl LibraryStore {
             .and_then(|preferences| preferences.epub)
     }
 
+    pub fn document_rotation(&self, path: &Path) -> DocumentRotation {
+        let path = normalize_path(path);
+        self.library
+            .document_preferences
+            .iter()
+            .find(|preferences| preferences.path == path)
+            .map(|preferences| preferences.rotation)
+            .unwrap_or_default()
+    }
+
+    fn update_document_preferences(
+        &mut self,
+        path: &Path,
+        update: impl FnOnce(&mut DocumentPreferences),
+    ) -> Result<()> {
+        let path = normalize_path(path);
+        let existing_index = self
+            .library
+            .document_preferences
+            .iter()
+            .position(|preferences| preferences.path == path);
+        let mut preferences = existing_index
+            .map(|index| self.library.document_preferences[index].clone())
+            .unwrap_or_else(|| DocumentPreferences {
+                path: path.clone(),
+                target_language: String::new(),
+                epub: None,
+                rotation: DocumentRotation::default(),
+            });
+        let previous = preferences.clone();
+        update(&mut preferences);
+        if preferences == previous {
+            return Ok(());
+        }
+        if preferences.is_empty() {
+            if let Some(index) = existing_index {
+                self.delete_document_preferences(&path)?;
+                self.library.document_preferences.remove(index);
+            }
+            return Ok(());
+        }
+
+        self.write_document_preferences(&preferences)?;
+        if let Some(index) = existing_index {
+            self.library.document_preferences[index] = preferences;
+        } else {
+            let index = self
+                .library
+                .document_preferences
+                .binary_search_by(|existing| existing.path.cmp(&path))
+                .unwrap_or_else(|index| index);
+            self.library.document_preferences.insert(index, preferences);
+        }
+        Ok(())
+    }
+
     pub fn set_document_target_language(
         &mut self,
         path: &Path,
@@ -1183,32 +1288,9 @@ impl LibraryStore {
         if target_language.is_empty() {
             return Err(anyhow!("document target language cannot be empty"));
         }
-        let epub = self
-            .library
-            .document_preferences
-            .iter()
-            .find(|preferences| preferences.path == path)
-            .and_then(|preferences| preferences.epub);
-        let preferences = DocumentPreferences {
-            path: path.clone(),
-            target_language,
-            epub,
-        };
-        self.write_document_preferences(&preferences)?;
-        if let Some(existing) = self
-            .library
-            .document_preferences
-            .iter_mut()
-            .find(|existing| existing.path == path)
-        {
-            *existing = preferences;
-        } else {
-            self.library.document_preferences.push(preferences);
-            self.library
-                .document_preferences
-                .sort_by(|left, right| left.path.cmp(&right.path));
-        }
-        Ok(())
+        self.update_document_preferences(&path, |preferences| {
+            preferences.target_language = target_language;
+        })
     }
 
     pub fn set_epub_reader_preferences(
@@ -1216,61 +1298,22 @@ impl LibraryStore {
         path: &Path,
         preferences: EpubReaderPreferences,
     ) -> Result<()> {
-        let path = normalize_path(path);
         let preferences = preferences.sanitized();
-        let target_language = self
-            .library
-            .document_preferences
-            .iter()
-            .find(|existing| existing.path == path)
-            .map(|existing| existing.target_language.clone())
-            .unwrap_or_default();
-        let document_preferences = DocumentPreferences {
-            path: path.clone(),
-            target_language,
-            epub: Some(preferences),
-        };
-        self.write_document_preferences(&document_preferences)?;
-        if let Some(existing) = self
-            .library
-            .document_preferences
-            .iter_mut()
-            .find(|existing| existing.path == path)
-        {
-            *existing = document_preferences;
-        } else {
-            self.library.document_preferences.push(document_preferences);
-            self.library
-                .document_preferences
-                .sort_by(|left, right| left.path.cmp(&right.path));
-        }
-        Ok(())
+        self.update_document_preferences(path, |document_preferences| {
+            document_preferences.epub = Some(preferences);
+        })
+    }
+
+    pub fn set_document_rotation(&mut self, path: &Path, rotation: DocumentRotation) -> Result<()> {
+        self.update_document_preferences(path, |preferences| {
+            preferences.rotation = rotation;
+        })
     }
 
     pub fn clear_epub_reader_preferences(&mut self, path: &Path) -> Result<()> {
-        let path = normalize_path(path);
-        let Some(index) = self
-            .library
-            .document_preferences
-            .iter()
-            .position(|preferences| preferences.path == path)
-        else {
-            return Ok(());
-        };
-        if self.library.document_preferences[index].epub.is_none() {
-            return Ok(());
-        }
-
-        let mut preferences = self.library.document_preferences[index].clone();
-        preferences.epub = None;
-        if preferences.target_language.is_empty() {
-            self.delete_document_preferences(&path)?;
-            self.library.document_preferences.remove(index);
-            return Ok(());
-        }
-        self.write_document_preferences(&preferences)?;
-        self.library.document_preferences[index] = preferences;
-        Ok(())
+        self.update_document_preferences(path, |preferences| {
+            preferences.epub = None;
+        })
     }
 
     pub fn remove_missing_history_entries(&mut self) -> Result<bool> {
@@ -1756,10 +1799,10 @@ impl LibraryStore {
             return Err(anyhow!("document library database is unavailable"));
         };
         let key = history_key(&preferences.path);
-        let encoded = encode(&StoredDocumentPreferencesV2::from(preferences))?;
+        let encoded = encode(&StoredDocumentPreferencesV3::from(preferences))?;
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE)?;
+            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V3_TABLE)?;
             table.insert(key.as_slice(), encoded.as_slice())?;
         }
         write_txn.commit()?;
@@ -1773,7 +1816,7 @@ impl LibraryStore {
         let key = history_key(path);
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE)?;
+            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V3_TABLE)?;
             table.remove(key.as_slice())?;
         }
         write_txn.commit()?;
@@ -2005,7 +2048,9 @@ impl Library {
             preferences.target_language = preferences.target_language.trim().to_ascii_lowercase();
             preferences.epub = preferences.epub.map(EpubReaderPreferences::sanitized);
             !preferences.path.as_os_str().is_empty()
-                && (!preferences.target_language.is_empty() || preferences.epub.is_some())
+                && (!preferences.target_language.is_empty()
+                    || preferences.epub.is_some()
+                    || preferences.rotation != DocumentRotation::default())
         });
         self.document_preferences
             .sort_by(|left, right| left.path.cmp(&right.path));
@@ -2118,6 +2163,9 @@ fn ensure_tables(database: &Database) -> Result<()> {
         write_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE)?;
     }
     {
+        write_txn.open_table(DOCUMENT_PREFERENCES_V3_TABLE)?;
+    }
+    {
         write_txn.open_table(AI_SESSIONS_V2_TABLE)?;
     }
     {
@@ -2129,12 +2177,19 @@ fn ensure_tables(database: &Database) -> Result<()> {
 
 fn load_library(database: &Database) -> Result<Library> {
     let mut library = Library::default();
-    let (has_v1_storage, has_v2_storage, has_ai_sessions_v2, has_ai_sessions_v3) = {
+    let (
+        has_v1_storage,
+        has_v2_storage,
+        has_document_preferences_v3,
+        has_ai_sessions_v2,
+        has_ai_sessions_v3,
+    ) = {
         let read_txn = database.begin_read()?;
         let table = read_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
         (
             table.get(STORAGE_V1_MIGRATION_KEY)?.is_some(),
             table.get(STORAGE_V2_MIGRATION_KEY)?.is_some(),
+            table.get(DOCUMENT_PREFERENCES_V3_MIGRATION_KEY)?.is_some(),
             table.get(AI_SESSIONS_V2_MIGRATION_KEY)?.is_some(),
             table.get(AI_SESSIONS_V3_MIGRATION_KEY)?.is_some(),
         )
@@ -2163,6 +2218,13 @@ fn load_library(database: &Database) -> Result<Library> {
             has_ai_sessions_v3,
         )?;
     }
+    load_document_preferences(
+        &read_txn,
+        &mut library,
+        has_document_preferences_v3,
+        has_v2_storage,
+        has_v1_storage,
+    )?;
     drop(read_txn);
 
     library.sanitize();
@@ -2171,6 +2233,9 @@ fn load_library(database: &Database) -> Result<Library> {
     }
     if !has_v2_storage {
         migrate_storage_v2(database, &library)?;
+    }
+    if !has_document_preferences_v3 {
+        migrate_document_preferences_v3(database, &library)?;
     }
     if !has_ai_sessions_v2 {
         migrate_ai_sessions_v2(database, &library)?;
@@ -2246,21 +2311,6 @@ fn load_storage_v2(
     }
     load_ai_sessions(read_txn, library, has_ai_sessions_v2, has_ai_sessions_v3)?;
     load_shared_v1_storage(read_txn, library)?;
-    {
-        let table = read_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE)?;
-        for entry in table.iter()? {
-            let (_, value) = entry?;
-            match decode::<StoredDocumentPreferencesV2>(value.value())
-                .and_then(StoredDocumentPreferencesV2::into_domain)
-            {
-                Ok(mut preferences) => {
-                    preferences.path = normalize_path(&preferences.path);
-                    library.document_preferences.push(preferences);
-                }
-                Err(error) => eprintln!("failed to decode document preferences: {error:#}"),
-            }
-        }
-    }
     Ok(())
 }
 
@@ -2333,7 +2383,45 @@ fn load_storage_v1(
 
     load_ai_sessions(read_txn, library, has_ai_sessions_v2, has_ai_sessions_v3)?;
     load_shared_v1_storage(read_txn, library)?;
-    {
+    Ok(())
+}
+
+fn load_document_preferences(
+    read_txn: &redb::ReadTransaction,
+    library: &mut Library,
+    has_v3: bool,
+    has_v2: bool,
+    has_v1: bool,
+) -> Result<()> {
+    if has_v3 {
+        let table = read_txn.open_table(DOCUMENT_PREFERENCES_V3_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredDocumentPreferencesV3>(value.value())
+                .and_then(StoredDocumentPreferencesV3::into_domain)
+            {
+                Ok(mut preferences) => {
+                    preferences.path = normalize_path(&preferences.path);
+                    library.document_preferences.push(preferences);
+                }
+                Err(error) => eprintln!("failed to decode document preferences: {error:#}"),
+            }
+        }
+    } else if has_v2 {
+        let table = read_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredDocumentPreferencesV2>(value.value())
+                .and_then(StoredDocumentPreferencesV2::into_domain)
+            {
+                Ok(mut preferences) => {
+                    preferences.path = normalize_path(&preferences.path);
+                    library.document_preferences.push(preferences);
+                }
+                Err(error) => eprintln!("failed to decode document preferences: {error:#}"),
+            }
+        }
+    } else if has_v1 {
         let table = read_txn.open_table(DOCUMENT_PREFERENCES_V1_TABLE)?;
         for entry in table.iter()? {
             let (_, value) = entry?;
@@ -2630,6 +2718,36 @@ fn migrate_storage_v2(database: &Database, library: &Library) -> Result<()> {
     {
         let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
         migrations.insert(STORAGE_V2_MIGRATION_KEY, [STORAGE_V2_VERSION].as_slice())?;
+    }
+    write_txn.commit()?;
+    Ok(())
+}
+
+fn migrate_document_preferences_v3(database: &Database, library: &Library) -> Result<()> {
+    let write_txn = database.begin_write()?;
+    {
+        let migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        if migrations
+            .get(DOCUMENT_PREFERENCES_V3_MIGRATION_KEY)?
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
+    {
+        let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V3_TABLE)?;
+        for preferences in &library.document_preferences {
+            let key = history_key(&preferences.path);
+            let encoded = encode(&StoredDocumentPreferencesV3::from(preferences))?;
+            table.insert(key.as_slice(), encoded.as_slice())?;
+        }
+    }
+    {
+        let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        migrations.insert(
+            DOCUMENT_PREFERENCES_V3_MIGRATION_KEY,
+            [DOCUMENT_PREFERENCES_V3_VERSION].as_slice(),
+        )?;
     }
     write_txn.commit()?;
     Ok(())
@@ -3501,6 +3619,18 @@ mod tests {
         );
         assert_eq!(store.epub_reader_preferences(document_path), None);
 
+        let rotation_error = store
+            .set_document_rotation(document_path, DocumentRotation::Degrees90)
+            .unwrap_err();
+        assert_eq!(
+            rotation_error.to_string(),
+            "document library database is unavailable"
+        );
+        assert_eq!(
+            store.document_rotation(document_path),
+            DocumentRotation::default()
+        );
+
         store
             .library
             .document_preferences
@@ -3508,6 +3638,7 @@ mod tests {
                 path: normalize_path(document_path),
                 target_language: "ja".to_string(),
                 epub: Some(preferences),
+                rotation: DocumentRotation::default(),
             });
         let clear_error = store
             .clear_epub_reader_preferences(document_path)
@@ -3563,6 +3694,205 @@ mod tests {
                 store.document_target_language(document_path).as_deref(),
                 Some("ja")
             );
+        }
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn preference_setters_preserve_other_document_fields() {
+        let database_path = temp_library_path("preference-field-preservation");
+        let document_path = Path::new("/tmp/preference-fields.epub");
+        let rotation_only_path = Path::new("/tmp/rotation-only.epub");
+        let preferences = EpubReaderPreferences {
+            font_size: 19.0,
+            line_height: 1.7,
+            horizontal_margin: 40.0,
+            max_content_width: 680.0,
+            theme: glyphst_core::EpubTheme::Sepia,
+            use_publisher_styles: false,
+        };
+
+        {
+            let mut store = LibraryStore::open(database_path.clone()).unwrap();
+            store
+                .set_document_rotation(document_path, DocumentRotation::Degrees90)
+                .unwrap();
+            store
+                .set_epub_reader_preferences(document_path, preferences)
+                .unwrap();
+            assert_eq!(
+                store.document_rotation(document_path),
+                DocumentRotation::Degrees90
+            );
+
+            store
+                .set_document_target_language(document_path, "JA")
+                .unwrap();
+            assert_eq!(
+                store.epub_reader_preferences(document_path),
+                Some(preferences)
+            );
+            assert_eq!(
+                store.document_rotation(document_path),
+                DocumentRotation::Degrees90
+            );
+
+            store.clear_epub_reader_preferences(document_path).unwrap();
+            assert_eq!(
+                store.document_target_language(document_path).as_deref(),
+                Some("ja")
+            );
+            assert_eq!(
+                store.document_rotation(document_path),
+                DocumentRotation::Degrees90
+            );
+
+            store
+                .set_document_rotation(rotation_only_path, DocumentRotation::Degrees180)
+                .unwrap();
+            store
+                .set_epub_reader_preferences(rotation_only_path, preferences)
+                .unwrap();
+            store
+                .clear_epub_reader_preferences(rotation_only_path)
+                .unwrap();
+            assert_eq!(
+                store.document_rotation(rotation_only_path),
+                DocumentRotation::Degrees180
+            );
+            assert_eq!(store.epub_reader_preferences(rotation_only_path), None);
+        }
+
+        {
+            let store = LibraryStore::open(database_path.clone()).unwrap();
+            assert_eq!(
+                store.document_target_language(document_path).as_deref(),
+                Some("ja")
+            );
+            assert_eq!(
+                store.document_rotation(document_path),
+                DocumentRotation::Degrees90
+            );
+            assert_eq!(
+                store.document_rotation(rotation_only_path),
+                DocumentRotation::Degrees180
+            );
+        }
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn persists_document_rotation_round_trip() {
+        let database_path = temp_library_path("document-rotation-round-trip");
+        let document_path = Path::new("/tmp/rotated.pdf");
+
+        {
+            let mut store = LibraryStore::open(database_path.clone()).unwrap();
+            store
+                .set_document_rotation(document_path, DocumentRotation::Degrees270)
+                .unwrap();
+            assert_eq!(
+                store.document_rotation(document_path),
+                DocumentRotation::Degrees270
+            );
+        }
+
+        {
+            let store = LibraryStore::open(database_path.clone()).unwrap();
+            assert_eq!(
+                store.document_rotation(document_path),
+                DocumentRotation::Degrees270
+            );
+        }
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn migrates_v2_document_preferences_with_default_rotation() {
+        let database_path = temp_library_path("document-preferences-v2-migration");
+        let document_path = PathBuf::from("/tmp/v2-preferences.epub");
+        let epub = EpubReaderPreferences {
+            font_size: 19.0,
+            line_height: 1.7,
+            horizontal_margin: 40.0,
+            max_content_width: 680.0,
+            theme: glyphst_core::EpubTheme::Sepia,
+            use_publisher_styles: false,
+        };
+        let stored_preferences = StoredDocumentPreferencesV2 {
+            version: STORAGE_V2_VERSION,
+            path: StoredPathV1::from_path(&document_path),
+            target_language: "ja".to_string(),
+            epub: Some(epub),
+        };
+
+        {
+            let database = Database::create(&database_path).unwrap();
+            ensure_tables(&database).unwrap();
+            let write_txn = database.begin_write().unwrap();
+            {
+                let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE).unwrap();
+                let key = history_key(&document_path);
+                table
+                    .insert(
+                        key.as_slice(),
+                        encode(&stored_preferences).unwrap().as_slice(),
+                    )
+                    .unwrap();
+            }
+            {
+                let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE).unwrap();
+                migrations
+                    .insert(
+                        STORAGE_V1_MIGRATION_KEY,
+                        [STORAGE_SCHEMA_VERSION].as_slice(),
+                    )
+                    .unwrap();
+                migrations
+                    .insert(STORAGE_V2_MIGRATION_KEY, [STORAGE_V2_VERSION].as_slice())
+                    .unwrap();
+            }
+            write_txn.commit().unwrap();
+        }
+
+        {
+            let store = LibraryStore::open(database_path.clone()).unwrap();
+            assert_eq!(
+                store.document_target_language(&document_path).as_deref(),
+                Some("ja")
+            );
+            assert_eq!(store.epub_reader_preferences(&document_path), Some(epub));
+            assert_eq!(
+                store.document_rotation(&document_path),
+                DocumentRotation::default()
+            );
+        }
+
+        {
+            let database = Database::open(&database_path).unwrap();
+            let read_txn = database.begin_read().unwrap();
+            assert!(
+                read_txn
+                    .open_table(STORAGE_MIGRATIONS_TABLE)
+                    .unwrap()
+                    .get(DOCUMENT_PREFERENCES_V3_MIGRATION_KEY)
+                    .unwrap()
+                    .is_some()
+            );
+            let key = history_key(&document_path);
+            let value = read_txn
+                .open_table(DOCUMENT_PREFERENCES_V3_TABLE)
+                .unwrap()
+                .get(key.as_slice())
+                .unwrap()
+                .unwrap();
+            let migrated = decode::<StoredDocumentPreferencesV3>(value.value()).unwrap();
+            assert_eq!(migrated.target_language, "ja");
+            assert_eq!(migrated.epub, Some(epub));
+            assert_eq!(migrated.rotation, DocumentRotation::default());
         }
 
         let _ = fs::remove_file(database_path);
@@ -3711,6 +4041,7 @@ mod tests {
             path: entry.path.clone(),
             target_language: "ja".to_string(),
             epub: None,
+            rotation: DocumentRotation::default(),
         };
         assert_eq!(
             decode::<StoredDocumentPreferencesV1>(

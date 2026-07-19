@@ -33,6 +33,48 @@ impl DocumentFormat {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DocumentRotation {
+    #[default]
+    Degrees0,
+    Degrees90,
+    Degrees180,
+    Degrees270,
+}
+
+impl DocumentRotation {
+    pub const fn clockwise(self) -> Self {
+        match self {
+            Self::Degrees0 => Self::Degrees90,
+            Self::Degrees90 => Self::Degrees180,
+            Self::Degrees180 => Self::Degrees270,
+            Self::Degrees270 => Self::Degrees0,
+        }
+    }
+
+    pub const fn counterclockwise(self) -> Self {
+        match self {
+            Self::Degrees0 => Self::Degrees270,
+            Self::Degrees90 => Self::Degrees0,
+            Self::Degrees180 => Self::Degrees90,
+            Self::Degrees270 => Self::Degrees180,
+        }
+    }
+
+    pub const fn quarter_turns(self) -> u8 {
+        match self {
+            Self::Degrees0 => 0,
+            Self::Degrees90 => 1,
+            Self::Degrees180 => 2,
+            Self::Degrees270 => 3,
+        }
+    }
+
+    pub const fn swaps_width_and_height(self) -> bool {
+        matches!(self, Self::Degrees90 | Self::Degrees270)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DocumentCapabilities {
     pub reflow: bool,
@@ -363,6 +405,51 @@ mod tests {
             Some(DocumentFormat::Epub)
         );
         assert_eq!(DocumentFormat::from_extension("txt"), None);
+    }
+
+    #[test]
+    fn document_rotation_cycles_in_both_directions() {
+        assert_eq!(DocumentRotation::default().quarter_turns(), 0);
+        assert_eq!(
+            DocumentRotation::Degrees0.clockwise(),
+            DocumentRotation::Degrees90
+        );
+        assert_eq!(
+            DocumentRotation::Degrees90.clockwise(),
+            DocumentRotation::Degrees180
+        );
+        assert_eq!(
+            DocumentRotation::Degrees180.clockwise(),
+            DocumentRotation::Degrees270
+        );
+        assert_eq!(
+            DocumentRotation::Degrees270.clockwise(),
+            DocumentRotation::Degrees0
+        );
+        assert_eq!(
+            DocumentRotation::Degrees0.counterclockwise(),
+            DocumentRotation::Degrees270
+        );
+        assert_eq!(
+            DocumentRotation::Degrees270.counterclockwise(),
+            DocumentRotation::Degrees180
+        );
+        assert_eq!(
+            DocumentRotation::Degrees180.counterclockwise(),
+            DocumentRotation::Degrees90
+        );
+        assert_eq!(
+            DocumentRotation::Degrees90.counterclockwise(),
+            DocumentRotation::Degrees0
+        );
+    }
+
+    #[test]
+    fn quarter_turn_rotation_reports_dimension_swaps() {
+        assert!(!DocumentRotation::Degrees0.swaps_width_and_height());
+        assert!(DocumentRotation::Degrees90.swaps_width_and_height());
+        assert!(!DocumentRotation::Degrees180.swaps_width_and_height());
+        assert!(DocumentRotation::Degrees270.swaps_width_and_height());
     }
 
     #[test]
