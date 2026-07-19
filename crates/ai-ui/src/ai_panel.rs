@@ -218,12 +218,20 @@ enum MentionPreviewStatus {
 
 #[derive(Clone)]
 struct MentionPreview {
+    source: MentionPreviewSource,
     reference: MentionReference,
     source_range: Range<usize>,
+    trigger_bounds: Bounds<Pixels>,
     position: GpuiPoint<Pixels>,
     anchor: Anchor,
     generation: u64,
     status: MentionPreviewStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MentionPreviewSource {
+    Composer,
+    Message(usize),
 }
 
 #[derive(Clone)]
@@ -269,6 +277,13 @@ impl ScrollableHandle for TrackedScrollHandle {
 struct MentionHitbox {
     source_range: Range<usize>,
     bounds: Bounds<Pixels>,
+}
+
+#[derive(Clone)]
+struct MessageMentionHitbox {
+    message_index: usize,
+    hitbox: MentionHitbox,
+    mention: ComposerMention,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -371,6 +386,7 @@ pub struct AiPanel {
     last_display: Option<ComposerDisplay>,
     last_cursor_pos: Option<GpuiPoint<Pixels>>,
     mention_hitboxes: Vec<MentionHitbox>,
+    message_mention_hitboxes: Vec<MessageMentionHitbox>,
     mention_preview: Option<MentionPreview>,
     mention_preview_generation: u64,
     pending_mention_preview: Option<Task<()>>,
@@ -413,12 +429,31 @@ struct AiInputElement {
 
 #[derive(Clone)]
 enum AiInputSource {
-    Editor,
+    Composer,
+    EditedMessage,
     UserMessage {
         message_index: usize,
         content: SharedString,
         mentions: Vec<ComposerMention>,
     },
+}
+
+fn input_line_constraints(
+    mode: AiPanelMode,
+    source: &AiInputSource,
+    messages_empty: bool,
+) -> (bool, usize, Option<usize>) {
+    match source {
+        AiInputSource::Composer => {
+            let empty_chat = mode == AiPanelMode::Sidebar && messages_empty;
+            if mode == AiPanelMode::QuickAsk {
+                (empty_chat, 1, Some(4))
+            } else {
+                (empty_chat, 3, Some(8))
+            }
+        }
+        AiInputSource::EditedMessage | AiInputSource::UserMessage { .. } => (false, 1, None),
+    }
 }
 
 struct PrepaintState {
@@ -543,6 +578,7 @@ impl AiPanel {
             last_display: None,
             last_cursor_pos: None,
             mention_hitboxes: Vec::new(),
+            message_mention_hitboxes: Vec::new(),
             mention_preview: None,
             mention_preview_generation: 0,
             pending_mention_preview: None,
@@ -1862,8 +1898,7 @@ impl AiPanel {
             window.mouse_position(),
             self.mention_preview
                 .as_ref()
-                .map(|preview| &preview.source_range),
-            &self.mention_hitboxes,
+                .map(|preview| preview.trigger_bounds),
             self.mention_preview_bounds.get(),
         )
     }
@@ -1938,25 +1973,12 @@ impl AiPanel {
 
     fn update_mention_preview(
         &mut self,
-        position: GpuiPoint<Pixels>,
+        source: MentionPreviewSource,
+        hovered: Option<(MentionHitbox, ComposerMention)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(hitbox) = self
-            .mention_hitboxes
-            .iter()
-            .find(|hitbox| hitbox.bounds.contains(&position))
-            .cloned()
-        else {
-            self.schedule_mention_preview_hide(window, cx);
-            return;
-        };
-        let Some(mention) = self
-            .composer_mentions
-            .iter()
-            .find(|mention| mention.range == hitbox.source_range)
-            .cloned()
-        else {
+        let Some((hitbox, mention)) = hovered else {
             self.schedule_mention_preview_hide(window, cx);
             return;
         };
@@ -1980,9 +2002,11 @@ impl AiPanel {
             )
         };
         if let Some(preview) = self.mention_preview.as_mut()
+            && preview.source == source
             && preview.reference == mention.reference
             && preview.source_range == mention.range
         {
+            preview.trigger_bounds = hitbox.bounds;
             if preview.position != preview_position || preview.anchor != preview_anchor {
                 preview.position = preview_position;
                 preview.anchor = preview_anchor;
@@ -1996,17 +2020,23 @@ impl AiPanel {
         self.pending_mention_preview = None;
         self.mention_preview_bounds.set(None);
 
-        let include_document_text = mention.reference.kind == MentionKind::DocumentText;
-        let context = matches!(
-            mention.reference.kind,
-            MentionKind::Selection | MentionKind::DocumentText
-        )
-        .then(|| self.context_provider.context(include_document_text, cx))
-        .flatten();
+        let context = if mention.captured_text().is_some() {
+            None
+        } else {
+            let include_document_text = mention.reference.kind == MentionKind::DocumentText;
+            matches!(
+                mention.reference.kind,
+                MentionKind::Selection | MentionKind::DocumentText
+            )
+            .then(|| self.context_provider.context(include_document_text, cx))
+            .flatten()
+        };
         if let Some(text) = mention_preview_text(&mention, context.as_ref()) {
             self.mention_preview = Some(MentionPreview {
+                source,
                 reference: mention.reference,
                 source_range: mention.range,
+                trigger_bounds: hitbox.bounds,
                 position: preview_position,
                 anchor: preview_anchor,
                 generation,
@@ -2023,8 +2053,10 @@ impl AiPanel {
         }
 
         self.mention_preview = Some(MentionPreview {
+            source,
             reference: mention.reference,
             source_range: mention.range.clone(),
+            trigger_bounds: hitbox.bounds,
             position: preview_position,
             anchor: preview_anchor,
             generation,
@@ -2052,7 +2084,13 @@ impl AiPanel {
                 };
                 let _ = this.update(cx, |this, cx| {
                     if this.mention_preview.as_ref().is_some_and(|preview| {
-                        mention_preview_matches(preview, generation, reference, &source_range)
+                        mention_preview_matches(
+                            preview,
+                            source,
+                            generation,
+                            reference,
+                            &source_range,
+                        )
                     }) {
                         let status = result
                             .map(|payload| {
@@ -2083,7 +2121,7 @@ impl AiPanel {
             };
             let _ = this.update(cx, |this, cx| {
                 if this.mention_preview.as_ref().is_some_and(|preview| {
-                    mention_preview_matches(preview, generation, reference, &source_range)
+                    mention_preview_matches(preview, source, generation, reference, &source_range)
                 }) {
                     let status = result
                         .map(|payload| {
@@ -2879,6 +2917,29 @@ impl AiPanel {
         self.cancel_selection(cx);
     }
 
+    fn on_message_edit_mouse_down_out(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .mention_preview_bounds
+            .get()
+            .is_some_and(|bounds| bounds.contains(&event.position))
+        {
+            return;
+        }
+        let completion_matches = self.mention_completion_matches(cx);
+        if self
+            .completion_menu_bounds(&completion_matches, window)
+            .is_some_and(|bounds| bounds.contains(&event.position))
+        {
+            return;
+        }
+        self.cancel_editing(window, cx);
+    }
+
     fn on_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
@@ -2887,7 +2948,25 @@ impl AiPanel {
     ) {
         if !event.dragging() {
             self.drag_origin = None;
-            self.update_mention_preview(event.position, window, cx);
+            let source = self
+                .editing_turn
+                .as_ref()
+                .map_or(MentionPreviewSource::Composer, |editing| {
+                    MentionPreviewSource::Message(editing.message_index)
+                });
+            let hovered = self
+                .mention_hitboxes
+                .iter()
+                .find(|hitbox| hitbox.bounds.contains(&event.position))
+                .cloned()
+                .and_then(|hitbox| {
+                    self.composer_mentions
+                        .iter()
+                        .find(|mention| mention.range == hitbox.source_range)
+                        .cloned()
+                        .map(|mention| (hitbox, mention))
+                });
+            self.update_mention_preview(source, hovered, window, cx);
             return;
         }
 
@@ -2902,6 +2981,41 @@ impl AiPanel {
         if should_select {
             self.select_to(self.index_for_mouse_position(event.position, window), cx);
             cx.stop_propagation();
+        }
+    }
+
+    fn on_panel_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.dragging() {
+            return;
+        }
+        let hovered = self
+            .message_mention_hitboxes
+            .iter()
+            .find(|target| target.hitbox.bounds.contains(&event.position))
+            .cloned()
+            .map(|target| {
+                let source = MentionPreviewSource::Message(target.message_index);
+                let hovered = (target.hitbox, target.mention);
+                let hovered = if let Some(message) = self.messages.get(target.message_index) {
+                    historical_preview_mention(message, hovered)
+                } else {
+                    hovered
+                };
+                (source, hovered)
+            });
+        if let Some((source, hovered)) = hovered {
+            self.update_mention_preview(source, Some(hovered), window, cx);
+        } else if self
+            .mention_preview
+            .as_ref()
+            .is_some_and(|preview| matches!(preview.source, MentionPreviewSource::Message(_)))
+        {
+            self.schedule_mention_preview_hide(window, cx);
         }
     }
 
@@ -3305,7 +3419,7 @@ impl AiPanel {
                         }))
                         .child(AiInputElement {
                             panel: entity,
-                            source: AiInputSource::Editor,
+                            source: AiInputSource::Composer,
                         }),
                 ),
             )
@@ -3684,8 +3798,12 @@ impl AiPanel {
             .flex_col()
             .gap_1()
             .px_1()
-            .py_1()
+            .when(is_user, |this| this.pt_2().pb_3())
+            .when(!is_user, |this| this.py_1())
             .when(blocked, |this| this.opacity(0.45))
+            .when(is_editing, |this| {
+                this.on_mouse_down_out(cx.listener(Self::on_message_edit_mouse_down_out))
+            })
             .when(!is_editing && !blocked, |this| {
                 this.on_mouse_down(
                     MouseButton::Right,
@@ -3720,7 +3838,7 @@ impl AiPanel {
                             .when(is_editing && !editing_focused, |this| this.border_dashed())
                             .bg(rgb(theme.tab_active_background))
                             .px_2()
-                            .pt_5()
+                            .py_3()
                             .pb_3()
                             .hover(move |style| style.border_color(rgb(theme.border_focused)))
                     })
@@ -3738,7 +3856,7 @@ impl AiPanel {
                     .when(is_editing, |this| {
                         this.child(AiInputElement {
                             panel: entity.clone(),
-                            source: AiInputSource::Editor,
+                            source: AiInputSource::EditedMessage,
                         })
                     })
                     .when(!is_editing && is_loading, |this| {
@@ -3751,8 +3869,8 @@ impl AiPanel {
             .child(
                 div()
                     .absolute()
-                    .top_0()
-                    .right_1()
+                    .top(if is_user { px(-6.0) } else { px(0.0) })
+                    .right_3()
                     .rounded(px(4.0))
                     .border_1()
                     .border_color(rgb(theme.border_variant))
@@ -4165,6 +4283,29 @@ impl AiPanel {
                 width,
             }
         })
+    }
+
+    fn completion_menu_bounds(
+        &self,
+        matches: &[MentionMatch],
+        window: &Window,
+    ) -> Option<Bounds<Pixels>> {
+        if matches.is_empty() {
+            return None;
+        }
+        let placement = self.completion_menu_placement(matches, window)?;
+        let height = px(COMPLETION_MENU_ROW_HEIGHT
+            * matches.len().min(COMPLETION_MENU_VISIBLE_ROWS) as f32
+            + 8.0);
+        let top = match placement.anchor {
+            Anchor::TopLeft => placement.position.y,
+            Anchor::BottomLeft => placement.position.y - height,
+            _ => return None,
+        };
+        Some(Bounds::new(
+            point(placement.position.x, top),
+            size(px(placement.width), height),
+        ))
     }
 
     fn render_mention_completion_menu(
@@ -4782,6 +4923,7 @@ impl Focusable for AiPanel {
 
 impl Render for AiPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.message_mention_hitboxes.clear();
         if self.mode == AiPanelMode::QuickAsk {
             return self.render_quick_ask(window, cx).into_any_element();
         }
@@ -4936,6 +5078,7 @@ impl Render for AiPanel {
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
                 this.close_message_context_menu(cx);
             }))
+            .on_mouse_move(cx.listener(Self::on_panel_mouse_move))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
@@ -5056,310 +5199,360 @@ impl Render for AiPanel {
                 this.when(!empty_chat, |this| {
                     this.child(
                         div()
-                            .id("ai-panel-messages")
                             .relative()
                             .flex()
                             .flex_col()
-                            .gap_3()
-                            .p_3()
                             .flex_1()
                             .min_h_0()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll_handle)
-                            .on_scroll_wheel(cx.listener(
-                                |this, event: &ScrollWheelEvent, _, cx| {
-                                    this.handle_message_scroll(event, cx);
-                                },
-                            ))
-                            .children(message_rows)
-                            .vertical_scrollbar_for(&message_scroll_handle, window, cx),
+                            .child(
+                                div()
+                                    .id("ai-panel-messages")
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0()
+                                    .p_3()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.scroll_handle)
+                                    .on_scroll_wheel(cx.listener(
+                                        |this, event: &ScrollWheelEvent, _, cx| {
+                                            this.handle_message_scroll(event, cx);
+                                        },
+                                    ))
+                                    .children(message_rows),
+                            )
+                            .vertical_scrollbar_for(&message_scroll_handle, window, cx)
+                            .when(show_scroll_to_bottom, |this| {
+                                this.child(
+                                    div()
+                                        .occlude()
+                                        .absolute()
+                                        .right_3()
+                                        .bottom_2()
+                                        .rounded(px(6.0))
+                                        .border_1()
+                                        .border_color(rgb(theme.border))
+                                        .bg(rgb(theme.surface_background))
+                                        .shadow_md()
+                                        .child(Self::message_action_button(
+                                            "ai-scroll-to-bottom",
+                                            IconName::ChevronDown,
+                                            tr("ai-scroll-bottom"),
+                                            theme.text_muted,
+                                            theme,
+                                            |this, _, cx| this.scroll_to_bottom(cx),
+                                            cx,
+                                        )),
+                                )
+                            }),
                     )
                 })
                 .when(!editing, |this| {
                     this.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .when(empty_chat, |this| this.flex_1().min_h_0())
-                        .gap_0()
-                        .m_2()
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(rgb(if validation_notice.is_some() {
-                            theme.error
-                        } else {
-                            theme.border_variant
-                        }))
-                        .bg(rgb(theme.tab_active_background))
-                        .child(
-                            div()
-                                .id("ai-panel-composer-input")
-                                .relative()
-                                .key_context("TextInput")
-                                .when(empty_chat, |this| this.flex_1().min_h_0())
-                                .px_2()
-                                .pt_2()
-                                .pb_1()
-                                .cursor(CursorStyle::IBeam)
-                                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                                .on_mouse_up_out(
-                                    MouseButton::Left,
-                                    cx.listener(Self::on_mouse_up_out),
-                                )
-                                .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
-                                .on_mouse_move(cx.listener(Self::on_mouse_move))
-                                .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
-                                    if !*hovered {
-                                        this.schedule_mention_preview_hide(window, cx);
-                                    }
-                                }))
-                                .child(AiInputElement {
-                                    panel: entity.clone(),
-                                    source: AiInputSource::Editor,
-                                }),
-                        )
-                        .when_some(validation_notice.clone(), |this, notice| {
-                            this.child(
-                                div()
-                                    .px_1()
-                                    .text_size(ui_rems(11.0))
-                                    .text_color(rgb(theme.error))
-                                    .child(notice),
-                            )
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .px_2()
-                                .pb_2()
-                                .pt_1()
-                                .text_size(ui_rems(11.0))
-                                .text_color(rgb(theme.text_muted))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex_wrap()
-                                        .items_center()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .id("ai-attachment-menu-button")
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .px_2()
-                                                .py_1()
-                                                .rounded(px(4.0))
-                                                .text_size(ui_rems(11.0))
-                                                .text_color(rgb(if attachment_menu_open {
-                                                    theme.accent
-                                                } else {
-                                                    theme.text_muted
-                                                }))
-                                                .cursor_pointer()
-                                                .hover(move |style| {
-                                                    style.bg(rgb(theme.element_hover))
-                                                })
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(
-                                                        |this,
-                                                         event: &MouseDownEvent,
-                                                         _,
-                                                         cx| {
-                                                        this.toggle_attachment_menu(
-                                                            event.position,
-                                                            cx,
-                                                        );
-                                                        cx.stop_propagation();
-                                                    }),
-                                                )
-                                                .child("+")
-                                                .child(tr("attach")),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("ai-model-menu-button")
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .px_2()
-                                                .py_1()
-                                                .rounded(px(4.0))
-                                                .text_color(rgb(if model_menu_open {
-                                                    theme.accent
-                                                } else {
-                                                    theme.text_muted
-                                                }))
-                                                .cursor_pointer()
-                                                .hover(move |style| {
-                                                    style.bg(rgb(theme.element_hover))
-                                                })
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(
-                                                        |this,
-                                                         event: &MouseDownEvent,
-                                                         window,
-                                                         cx| {
-                                                        this.toggle_model_menu(
-                                                            event.position,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                        cx.stop_propagation();
-                                                    }),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .max_w(px(96.0))
-                                                        .truncate()
-                                                        .child(model_label),
-                                                )
-                                                .child(if model_menu_open { "⌃" } else { "⌄" }),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("ai-thinking-menu-button")
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .px_2()
-                                                .py_1()
-                                                .rounded(px(4.0))
-                                                .text_color(rgb(
-                                                    if thinking_menu_open
-                                                        || selected_thinking_level
-                                                            != AiThinkingLevel::Off
-                                                    {
-                                                        theme.accent
-                                                    } else {
-                                                        theme.text_muted
-                                                    },
-                                                ))
-                                                .cursor_pointer()
-                                                .hover(move |style| {
-                                                    style.bg(rgb(theme.element_hover))
-                                                })
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(
-                                                        |this,
-                                                         event: &MouseDownEvent,
-                                                         _,
-                                                         cx| {
-                                                        this.toggle_thinking_menu(
-                                                            event.position,
-                                                            cx,
-                                                        );
-                                                        cx.stop_propagation();
-                                                    }),
-                                                )
-                                                .child(format!(
-                                                    "Think {}",
-                                                    selected_thinking_level.label()
-                                                ))
-                                                .child(if thinking_menu_open {
-                                                    "⌃"
-                                                } else {
-                                                    "⌄"
-                                                }),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .id("ai-send-button")
-                                        .tooltip(text_tooltip(if loading {
-                                            tr("ai-stop-generation")
-                                        } else {
-                                            tr("send")
-                                        }))
-                                        .flex_none()
-                                        .rounded(px(4.0))
-                                        .px_2()
-                                        .py_1()
-                                        .border_1()
-                                        .border_color(if can_send {
-                                            rgb(theme.accent)
-                                        } else {
-                                            rgb(theme.border_variant)
-                                        })
-                                        .bg(if can_send {
-                                            rgba(with_alpha(theme.accent, 0x22))
-                                        } else {
-                                            rgb(theme.surface_background)
-                                        })
-                                        .text_color(if can_send {
-                                            rgb(theme.text)
-                                        } else {
-                                            rgb(theme.text_muted)
-                                        })
-                                        .cursor_pointer()
-                                        .when(loading, |this| {
-                                            this.border_color(rgb(theme.error))
-                                                .bg(rgba(with_alpha(theme.error, 0x20)))
-                                                .text_color(rgb(theme.error))
-                                        })
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _, cx| {
-                                                if this.loading {
-                                                    this.stop_generation(cx);
-                                                } else {
-                                                    this.send_message(cx);
-                                                }
-                                                cx.stop_propagation();
-                                            }),
-                                        )
-                                        .child(if loading {
-                                            Icon::new(
-                                                IconName::Stop,
-                                                ui_rems(13.0),
-                                                rgb(theme.error),
-                                            )
-                                            .into_any_element()
-                                        } else {
-                                            Icon::new(
-                                                IconName::ArrowUp,
-                                                ui_rems(13.0),
-                                                rgb(if can_send {
-                                                    theme.text
-                                                } else {
-                                                    theme.text_muted
-                                                }),
-                                            )
-                                            .into_any_element()
-                                        }),
-                                ),
-                        ),
-                    )
-                })
-                .when(show_scroll_to_bottom, |this| {
-                    this.child(
                         div()
-                            .absolute()
-                            .right_3()
-                            .bottom(px(96.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .bg(rgb(theme.surface_background))
-                            .shadow_md()
-                            .child(Self::message_action_button(
-                                "ai-scroll-to-bottom",
-                                IconName::ChevronDown,
-                                tr("ai-scroll-bottom"),
-                                theme.text_muted,
-                                theme,
-                                |this, _, cx| this.scroll_to_bottom(cx),
-                                cx,
-                            )),
+                            .flex()
+                            .flex_col()
+                            .py_2()
+                            .bg(rgb(theme.tab_active_background))
+                            .when(empty_chat, |this| this.flex_1().min_h_0())
+                            .when(!empty_chat, |this| {
+                                this.border_t(px(1.0)).border_color(rgb(theme.border))
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .px_2()
+                                    .when(empty_chat, |this| this.flex_1().min_h_0())
+                                    .child(
+                                        div()
+                                            .id("ai-panel-composer-input")
+                                            .relative()
+                                            .w_full()
+                                            .min_h_0()
+                                            .pt_1()
+                                            .pr_2()
+                                            .key_context("TextInput")
+                                            .when(empty_chat, |this| this.flex_1())
+                                            .cursor(CursorStyle::IBeam)
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(Self::on_mouse_down),
+                                            )
+                                            .on_mouse_up(
+                                                MouseButton::Left,
+                                                cx.listener(Self::on_mouse_up),
+                                            )
+                                            .on_mouse_up_out(
+                                                MouseButton::Left,
+                                                cx.listener(Self::on_mouse_up_out),
+                                            )
+                                            .on_mouse_down_out(
+                                                cx.listener(Self::on_mouse_down_out),
+                                            )
+                                            .on_mouse_move(cx.listener(Self::on_mouse_move))
+                                            .on_hover(cx.listener(
+                                                |this, hovered: &bool, window, cx| {
+                                                    if !*hovered {
+                                                        this.schedule_mention_preview_hide(
+                                                            window, cx,
+                                                        );
+                                                    }
+                                                },
+                                            ))
+                                            .child(AiInputElement {
+                                                panel: entity.clone(),
+                                                source: AiInputSource::Composer,
+                                            }),
+                                    )
+                                    .when_some(validation_notice.clone(), |this, notice| {
+                                        this.child(
+                                            div()
+                                                .text_size(ui_rems(11.0))
+                                                .text_color(rgb(theme.error))
+                                                .child(notice),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .w_full()
+                                            .flex_none()
+                                            .flex_wrap()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .text_size(ui_rems(11.0))
+                                            .text_color(rgb(theme.text_muted))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_0p5()
+                                                    .child(
+                                                        IconButton::new(
+                                                            "ai-attachment-menu-button",
+                                                            IconName::Plus,
+                                                            rgb(if attachment_menu_open {
+                                                                theme.accent
+                                                            } else {
+                                                                theme.text_muted
+                                                            }),
+                                                            rgb(theme.element_hover),
+                                                        )
+                                                        .icon_size(ui_rems(13.0))
+                                                        .into_div()
+                                                        .tooltip(text_tooltip(tr("attach")))
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(
+                                                                |this,
+                                                                 event: &MouseDownEvent,
+                                                                 _,
+                                                                 cx| {
+                                                                    this.toggle_attachment_menu(
+                                                                        event.position,
+                                                                        cx,
+                                                                    );
+                                                                    cx.stop_propagation();
+                                                                },
+                                                            ),
+                                                        ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("ai-thinking-menu-button")
+                                                            .flex()
+                                                            .h(ui_rems(28.0))
+                                                            .items_center()
+                                                            .gap_1()
+                                                            .px_2()
+                                                            .rounded(px(4.0))
+                                                            .text_color(rgb(
+                                                                if thinking_menu_open
+                                                                    || selected_thinking_level
+                                                                        != AiThinkingLevel::Off
+                                                                {
+                                                                    theme.accent
+                                                                } else {
+                                                                    theme.text_muted
+                                                                },
+                                                            ))
+                                                            .cursor_pointer()
+                                                            .hover(move |style| {
+                                                                style.bg(rgb(theme.element_hover))
+                                                            })
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                cx.listener(
+                                                                    |this,
+                                                                     event: &MouseDownEvent,
+                                                                     _,
+                                                                     cx| {
+                                                                        this.toggle_thinking_menu(
+                                                                            event.position,
+                                                                            cx,
+                                                                        );
+                                                                        cx.stop_propagation();
+                                                                    },
+                                                                ),
+                                                            )
+                                                            .child(format!(
+                                                                "Think {}",
+                                                                selected_thinking_level.label()
+                                                            ))
+                                                            .child(Icon::new(
+                                                                if thinking_menu_open {
+                                                                    IconName::ChevronUp
+                                                                } else {
+                                                                    IconName::ChevronDown
+                                                                },
+                                                                ui_rems(11.0),
+                                                                rgb(theme.text_muted),
+                                                            )),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .min_w_0()
+                                                    .flex_wrap()
+                                                    .items_center()
+                                                    .justify_end()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .id("ai-model-menu-button")
+                                                            .flex()
+                                                            .h(ui_rems(28.0))
+                                                            .min_w_0()
+                                                            .items_center()
+                                                            .gap_1()
+                                                            .px_2()
+                                                            .rounded(px(4.0))
+                                                            .text_color(rgb(
+                                                                if model_menu_open {
+                                                                    theme.accent
+                                                                } else {
+                                                                    theme.text_muted
+                                                                },
+                                                            ))
+                                                            .cursor_pointer()
+                                                            .hover(move |style| {
+                                                                style.bg(rgb(theme.element_hover))
+                                                            })
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                cx.listener(
+                                                                    |this,
+                                                                     event: &MouseDownEvent,
+                                                                     window,
+                                                                     cx| {
+                                                                        this.toggle_model_menu(
+                                                                            event.position,
+                                                                            window,
+                                                                            cx,
+                                                                        );
+                                                                        cx.stop_propagation();
+                                                                    },
+                                                                ),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .max_w(px(96.0))
+                                                                    .truncate()
+                                                                    .child(model_label),
+                                                            )
+                                                            .child(Icon::new(
+                                                                if model_menu_open {
+                                                                    IconName::ChevronUp
+                                                                } else {
+                                                                    IconName::ChevronDown
+                                                                },
+                                                                ui_rems(11.0),
+                                                                rgb(theme.text_muted),
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("ai-send-button")
+                                                            .tooltip(text_tooltip(if loading {
+                                                                tr("ai-stop-generation")
+                                                            } else if can_send {
+                                                                tr("send")
+                                                            } else {
+                                                                tr("ai-ask-placeholder")
+                                                            }))
+                                                            .flex()
+                                                            .flex_none()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .w(ui_rems(28.0))
+                                                            .h(ui_rems(28.0))
+                                                            .rounded(px(4.0))
+                                                            .bg(rgb(theme.control_background))
+                                                            .when(can_send, |this| {
+                                                                this.cursor_pointer().hover(
+                                                                    move |style| {
+                                                                        style.bg(rgb(
+                                                                            theme.control_hover,
+                                                                        ))
+                                                                    },
+                                                                )
+                                                            })
+                                                            .when(loading, |this| {
+                                                                this.cursor_pointer()
+                                                                    .bg(rgba(with_alpha(
+                                                                        theme.error,
+                                                                        0x20,
+                                                                    )))
+                                                                    .hover(move |style| {
+                                                                        style.bg(rgba(with_alpha(
+                                                                            theme.error,
+                                                                            0x30,
+                                                                        )))
+                                                                    })
+                                                            })
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        if this.loading {
+                                                                            this.stop_generation(
+                                                                                cx,
+                                                                            );
+                                                                        } else if can_send {
+                                                                            this.send_message(cx);
+                                                                        }
+                                                                        cx.stop_propagation();
+                                                                    },
+                                                                ),
+                                                            )
+                                                            .child(if loading {
+                                                                Icon::new(
+                                                                    IconName::Stop,
+                                                                    ui_rems(13.0),
+                                                                    rgb(theme.error),
+                                                                )
+                                                                .into_any_element()
+                                                            } else {
+                                                                Icon::new(
+                                                                    IconName::ArrowUp,
+                                                                    ui_rems(13.0),
+                                                                    rgb(if can_send {
+                                                                        theme.accent
+                                                                    } else {
+                                                                        theme.text_muted
+                                                                    }),
+                                                                )
+                                                                .into_any_element()
+                                                            }),
+                                                    ),
+                                            ),
+                                    ),
+                            ),
                     )
                 })
             })
@@ -5513,31 +5706,16 @@ impl Element for AiInputElement {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let input = self.panel.read(cx);
-        let (content, mentions, empty_chat, min_lines, max_lines) = match &self.source {
-            AiInputSource::Editor => {
-                let empty_chat = input.mode == AiPanelMode::Sidebar && input.messages.is_empty();
-                let min_lines = if input.mode == AiPanelMode::QuickAsk {
-                    1
-                } else {
-                    3
-                };
-                let max_lines = if input.mode == AiPanelMode::QuickAsk {
-                    4
-                } else {
-                    8
-                };
-                (
-                    input.content.clone(),
-                    input.composer_mentions.clone(),
-                    empty_chat,
-                    min_lines,
-                    Some(max_lines),
-                )
+        let (content, mentions) = match &self.source {
+            AiInputSource::Composer | AiInputSource::EditedMessage => {
+                (input.content.clone(), input.composer_mentions.clone())
             }
             AiInputSource::UserMessage {
                 content, mentions, ..
-            } => (content.clone(), mentions.clone(), false, 1, None),
+            } => (content.clone(), mentions.clone()),
         };
+        let (empty_chat, min_lines, max_lines) =
+            input_line_constraints(input.mode, &self.source, input.messages.is_empty());
         let chars_per_line = ((input.width - 32.0) / 7.0).floor().max(12.0) as usize;
         let display = composer_display(content.as_ref(), &mentions);
         let text = display.text.as_str();
@@ -5586,7 +5764,7 @@ impl Element for AiInputElement {
             marked_range,
             editing,
         ) = match &self.source {
-            AiInputSource::Editor => (
+            AiInputSource::Composer | AiInputSource::EditedMessage => (
                 input.content.clone(),
                 input.selected_range.clone(),
                 input.cursor_offset(),
@@ -5819,7 +5997,10 @@ impl Element for AiInputElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if matches!(&self.source, AiInputSource::Editor) {
+        if matches!(
+            &self.source,
+            AiInputSource::Composer | AiInputSource::EditedMessage
+        ) {
             let focus_handle = {
                 let input = self.panel.read(cx);
                 if input.editing_turn.is_some() {
@@ -5904,7 +6085,7 @@ impl Element for AiInputElement {
         }
 
         match &self.source {
-            AiInputSource::Editor => {
+            AiInputSource::Composer | AiInputSource::EditedMessage => {
                 self.panel.update(cx, |input, _| {
                     input.last_lines = lines;
                     input.last_bounds = Some(bounds);
@@ -5916,13 +6097,30 @@ impl Element for AiInputElement {
             AiInputSource::UserMessage {
                 message_index,
                 content,
-                ..
+                mentions,
             } => {
                 let Some(hitbox) = prepaint.hitbox.take() else {
                     return;
                 };
-                let panel = self.panel.clone();
                 let message_index = *message_index;
+                let preview_hitboxes = std::mem::take(&mut prepaint.mention_hitboxes);
+                self.panel.update(cx, |panel, _| {
+                    panel
+                        .message_mention_hitboxes
+                        .extend(preview_hitboxes.into_iter().filter_map(|hitbox| {
+                            mentions
+                                .iter()
+                                .find(|mention| mention.range == hitbox.source_range)
+                                .cloned()
+                                .map(|mention| MessageMentionHitbox {
+                                    message_index,
+                                    hitbox,
+                                    mention,
+                                })
+                        }));
+                });
+
+                let panel = self.panel.clone();
                 let content_len = content.len();
                 let display = std::mem::take(&mut prepaint.display);
                 window.on_mouse_event(
@@ -6589,6 +6787,20 @@ fn display_mentions_for_message(message: &ChatMessage) -> Vec<ComposerMention> {
     mentions
 }
 
+fn historical_preview_mention(
+    message: &ChatMessage,
+    hovered: (MentionHitbox, ComposerMention),
+) -> (MentionHitbox, ComposerMention) {
+    let captured = composer_mentions_for_message(message)
+        .ok()
+        .and_then(|mentions| {
+            mentions.into_iter().find(|mention| {
+                mention.reference == hovered.1.reference && mention.range == hovered.1.range
+            })
+        });
+    (hovered.0, captured.unwrap_or(hovered.1))
+}
+
 fn occurrence_matches_content(content: &str, occurrence: &MentionOccurrence) -> bool {
     if occurrence.range.start >= occurrence.range.end
         || occurrence.range.end > content.len()
@@ -6821,9 +7033,10 @@ fn mention_preview_text(mention: &ComposerMention, context: Option<&AiContext>) 
             || resolve_mention_context(MentionKind::Selection, context).text,
             |text| ContextBlock::new(MentionKind::Selection, None, text.to_string()).text,
         )),
-        MentionKind::DocumentText => {
-            Some(resolve_mention_context(MentionKind::DocumentText, context).text)
-        }
+        MentionKind::DocumentText => Some(mention.captured_text().map_or_else(
+            || resolve_mention_context(MentionKind::DocumentText, context).text,
+            str::to_string,
+        )),
         MentionKind::Page
         | MentionKind::PageImage
         | MentionKind::DocumentImage
@@ -6926,27 +7139,24 @@ fn preview_image_dimensions(format: ImageFormat, bytes: &[u8]) -> Result<(u32, u
 
 fn mention_preview_matches(
     preview: &MentionPreview,
+    source: MentionPreviewSource,
     generation: u64,
     reference: MentionReference,
     source_range: &Range<usize>,
 ) -> bool {
-    preview.generation == generation
+    preview.source == source
+        && preview.generation == generation
         && preview.reference == reference
         && preview.source_range == *source_range
 }
 
 fn mention_preview_region_contains(
     position: GpuiPoint<Pixels>,
-    source_range: Option<&Range<usize>>,
-    mention_hitboxes: &[MentionHitbox],
+    trigger_bounds: Option<Bounds<Pixels>>,
     preview_bounds: Option<Bounds<Pixels>>,
 ) -> bool {
     preview_bounds.is_some_and(|bounds| bounds.contains(&position))
-        || source_range.is_some_and(|source_range| {
-            mention_hitboxes.iter().any(|hitbox| {
-                hitbox.source_range == *source_range && hitbox.bounds.contains(&position)
-            })
-        })
+        || trigger_bounds.is_some_and(|bounds| bounds.contains(&position))
 }
 
 fn mention_insertion_text(
@@ -7425,6 +7635,109 @@ fn with_alpha(rgb: u32, alpha: u8) -> u32 {
 mod tests {
     use super::*;
     use glyphst_core::{PageIndex, PageRegion};
+    use gpui::TestAppContext;
+
+    struct MessageScrollTestView {
+        handle: ScrollHandle,
+        row_heights: Vec<Pixels>,
+    }
+
+    impl Render for MessageScrollTestView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .w(px(300.0))
+                .h(px(200.0))
+                .child(
+                    div()
+                        .id("message-scroll-test")
+                        .flex()
+                        .flex_col()
+                        .p_3()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.handle)
+                        .children(
+                            self.row_heights
+                                .iter()
+                                .map(|height| div().flex_none().h(*height)),
+                        ),
+                )
+                .vertical_scrollbar_for(&self.handle, window, cx)
+        }
+    }
+
+    fn install_test_settings(cx: &mut App) {
+        let settings = glyphst_settings::Settings::default();
+        let appearance = glyphst_settings::theme::ThemeAppearance::Light;
+        let registry =
+            glyphst_settings::theme::ThemeRegistry::load(std::path::Path::new("/nonexistent"));
+        let resolved_theme = registry.resolve(settings.theme.name(appearance), settings.overrides);
+        cx.set_global(SettingsStore {
+            settings,
+            registry,
+            resolved_theme,
+            system_appearance: appearance,
+            user_managed: false,
+            config_path: PathBuf::new(),
+            state_path: PathBuf::new(),
+            last_dynamic_light: None,
+            last_dynamic_dark: None,
+        });
+    }
+
+    fn message_scroll_metrics(content_height: Pixels) -> (GpuiPoint<Pixels>, GpuiPoint<Pixels>) {
+        let mut cx = TestAppContext::single();
+        cx.update(install_test_settings);
+        let handle = ScrollHandle::new();
+        let window = cx.add_window({
+            let handle = handle.clone();
+            move |_, _| MessageScrollTestView {
+                handle,
+                row_heights: vec![content_height],
+            }
+        });
+
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear();
+        })
+        .unwrap();
+        handle.scroll_to_bottom();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear();
+        })
+        .unwrap();
+
+        (handle.offset(), handle.max_offset())
+    }
+
+    fn message_scroll_item_offset(row_heights: Vec<Pixels>, item_index: usize) -> Pixels {
+        let mut cx = TestAppContext::single();
+        cx.update(install_test_settings);
+        let handle = ScrollHandle::new();
+        let window = cx.add_window({
+            let handle = handle.clone();
+            move |_, _| MessageScrollTestView {
+                handle,
+                row_heights,
+            }
+        });
+
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear();
+        })
+        .unwrap();
+        handle.scroll_to_top_of_item(item_index);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear();
+        })
+        .unwrap();
+
+        handle.offset().y
+    }
 
     fn region_reference(page: usize, x0: f32) -> RegionImageReference {
         RegionImageReference::new([PageRegion {
@@ -7443,6 +7756,47 @@ mod tests {
         assert_eq!(
             request_prompt_without_mentions(text, &mentions),
             "Compare with\nusing."
+        );
+    }
+
+    #[test]
+    fn historical_message_editing_uses_one_line_auto_height() {
+        let edited = AiInputSource::EditedMessage;
+        assert_eq!(
+            input_line_constraints(AiPanelMode::Sidebar, &edited, false),
+            (false, 1, None)
+        );
+
+        let composer = AiInputSource::Composer;
+        assert_eq!(
+            input_line_constraints(AiPanelMode::Sidebar, &composer, false),
+            (false, 3, Some(8))
+        );
+        assert_eq!(
+            input_line_constraints(AiPanelMode::QuickAsk, &composer, false),
+            (false, 1, Some(4))
+        );
+    }
+
+    #[test]
+    fn message_scrollbar_host_does_not_create_false_overflow() {
+        let (offset, max_offset) = message_scroll_metrics(px(40.0));
+        assert_eq!(max_offset.y, px(0.0));
+        assert_eq!(offset.y, px(0.0));
+    }
+
+    #[test]
+    fn message_scrollbar_host_preserves_real_overflow() {
+        let (offset, max_offset) = message_scroll_metrics(px(400.0));
+        assert!(max_offset.y > px(0.0));
+        assert_eq!(offset.y, -max_offset.y);
+    }
+
+    #[test]
+    fn message_scrollbar_host_preserves_item_targeting() {
+        assert_eq!(
+            message_scroll_item_offset(vec![px(100.0); 4], 1),
+            px(-112.0)
         );
     }
 
@@ -7560,6 +7914,21 @@ mod tests {
     }
 
     #[test]
+    fn document_text_preview_prefers_the_historical_snapshot() {
+        let mut mention = parse_composer_mentions("@document").remove(0);
+        mention.captured = Some(CapturedMention::Text("Historical document".to_string()));
+        let context = AiContext {
+            document_text: Some("Current document".to_string()),
+            ..AiContext::default()
+        };
+
+        assert_eq!(
+            mention_preview_text(&mention, Some(&context)).as_deref(),
+            Some("Historical document")
+        );
+    }
+
+    #[test]
     fn document_image_preview_is_disabled() {
         let mention = parse_composer_mentions("@document-image").remove(0);
         assert!(mention_preview_text(&mention, None).is_none());
@@ -7642,45 +8011,65 @@ mod tests {
     #[test]
     fn async_preview_results_require_matching_identity() {
         let reference = MentionReference::new(MentionKind::Page, Some(2));
+        let source = MentionPreviewSource::Message(3);
+        let trigger_bounds = Bounds {
+            origin: point(px(10.0), px(10.0)),
+            size: size(px(80.0), px(20.0)),
+        };
         let preview = MentionPreview {
+            source,
             reference,
             source_range: 4..12,
+            trigger_bounds,
             position: point(px(0.0), px(0.0)),
             anchor: Anchor::TopLeft,
             generation: 7,
             status: MentionPreviewStatus::Loading,
         };
 
-        assert!(mention_preview_matches(&preview, 7, reference, &(4..12)));
-        assert!(!mention_preview_matches(&preview, 8, reference, &(4..12)));
+        assert!(mention_preview_matches(
+            &preview,
+            source,
+            7,
+            reference,
+            &(4..12)
+        ));
         assert!(!mention_preview_matches(
             &preview,
+            MentionPreviewSource::Message(4),
+            7,
+            reference,
+            &(4..12)
+        ));
+        assert!(!mention_preview_matches(
+            &preview,
+            source,
+            8,
+            reference,
+            &(4..12)
+        ));
+        assert!(!mention_preview_matches(
+            &preview,
+            source,
             7,
             MentionReference::new(MentionKind::Page, Some(3)),
             &(4..12)
         ));
-        assert!(!mention_preview_matches(&preview, 7, reference, &(5..13)));
+        assert!(!mention_preview_matches(
+            &preview,
+            source,
+            7,
+            reference,
+            &(5..13)
+        ));
     }
 
     #[test]
-    fn preview_hover_region_includes_mention_and_measured_bridge() {
-        let source_range = 4..14;
-        let mention_hitboxes = vec![
-            MentionHitbox {
-                bounds: Bounds {
-                    origin: point(px(10.0), px(10.0)),
-                    size: size(px(80.0), px(20.0)),
-                },
-                source_range: source_range.clone(),
-            },
-            MentionHitbox {
-                bounds: Bounds {
-                    origin: point(px(400.0), px(10.0)),
-                    size: size(px(80.0), px(20.0)),
-                },
-                source_range: 20..30,
-            },
-        ];
+    fn preview_hover_region_includes_trigger_and_panel() {
+        let trigger_bounds = Bounds {
+            origin: point(px(10.0), px(10.0)),
+            size: size(px(80.0), px(20.0)),
+        };
         let preview_bounds = Bounds {
             origin: point(px(10.0), px(30.0)),
             size: size(px(320.0), px(126.0)),
@@ -7688,26 +8077,17 @@ mod tests {
 
         assert!(mention_preview_region_contains(
             point(px(20.0), px(20.0)),
-            Some(&source_range),
-            &mention_hitboxes,
+            Some(trigger_bounds),
             Some(preview_bounds),
         ));
         assert!(mention_preview_region_contains(
             point(px(20.0), px(33.0)),
-            Some(&source_range),
-            &mention_hitboxes,
+            Some(trigger_bounds),
             Some(preview_bounds),
         ));
         assert!(!mention_preview_region_contains(
             point(px(340.0), px(160.0)),
-            Some(&source_range),
-            &mention_hitboxes,
-            Some(preview_bounds),
-        ));
-        assert!(!mention_preview_region_contains(
-            point(px(420.0), px(20.0)),
-            Some(&source_range),
-            &mention_hitboxes,
+            Some(trigger_bounds),
             Some(preview_bounds),
         ));
     }
@@ -8284,17 +8664,31 @@ mod tests {
         let exact = ChatMessage::user(
             text.to_string(),
             "literal @selection and attached".to_string(),
-            Vec::new(),
+            vec![ContextBlock::new(
+                MentionKind::Selection,
+                None,
+                "historical selection".to_string(),
+            )],
             vec![reference],
         )
         .with_mention_occurrences(vec![MentionOccurrence::new(attached.0.clone(), attached.1)]);
-        assert_eq!(
-            display_mentions_for_message(&exact)
-                .into_iter()
-                .map(|mention| mention.range)
-                .collect::<Vec<_>>(),
-            vec![attached.0]
+        let mentions = display_mentions_for_message(&exact);
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].range, attached.0);
+        let hovered = historical_preview_mention(
+            &exact,
+            (
+                MentionHitbox {
+                    source_range: mentions[0].range.clone(),
+                    bounds: Bounds {
+                        origin: point(px(0.0), px(0.0)),
+                        size: size(px(10.0), px(10.0)),
+                    },
+                },
+                mentions[0].clone(),
+            ),
         );
+        assert_eq!(hovered.1.captured_text(), Some("historical selection"));
 
         let legacy = ChatMessage::user(
             text.to_string(),

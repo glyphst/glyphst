@@ -14,3 +14,6 @@ glyphst-settings = { path = "../settings" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
 image.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
