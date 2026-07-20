@@ -1,6 +1,13 @@
 use std::{
-    cell::Cell, collections::HashSet, io::Cursor, ops::Range, path::PathBuf, rc::Rc, sync::Arc,
-    thread, time::Duration,
+    cell::{Cell, RefCell},
+    collections::HashSet,
+    io::Cursor,
+    ops::Range,
+    path::PathBuf,
+    rc::Rc,
+    sync::Arc,
+    thread,
+    time::Duration,
 };
 
 use crate::{
@@ -35,15 +42,16 @@ use glyphst_ui::{
     tooltip::text_tooltip,
 };
 use gpui::{
-    Anchor, AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, Corners, CursorStyle,
-    DispatchPhase, Edges, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId, HighlightStyle, Hitbox,
-    HitboxBehavior, Image, ImageFormat, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point as GpuiPoint,
-    Render, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Style,
-    StyledText, Subscription, Task, TextRun, TextStyle, TransformationMatrix, UTF16Selection,
-    UniformListScrollHandle, Window, WrappedLine, anchored, canvas, deferred, div, fill, img,
-    point, prelude::*, px, quad, relative, rgb, rgba, size, uniform_list,
+    Anchor, Animation, AnimationExt, AnyElement, App, AvailableSpace, BorderStyle, Bounds,
+    ClipboardItem, Context, Corners, CursorStyle, DispatchPhase, Edges, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    FontWeight, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, Image, ImageFormat,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollDelta,
+    ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Style, StyledText, Subscription,
+    Task, TextRun, TextStyle, TransformationMatrix, UTF16Selection, UniformListScrollHandle,
+    Window, WrappedLine, anchored, canvas, deferred, div, fill, img, point, prelude::*, px, quad,
+    relative, rgb, rgba, size, uniform_list,
 };
 
 pub const AI_PANEL_WIDTH: f32 = 360.0;
@@ -298,6 +306,23 @@ struct GenerationFailure {
     message: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmitAction {
+    Edit,
+    Retry(usize),
+    Send,
+}
+
+fn submit_action(editing: bool, failure: Option<&GenerationFailure>) -> SubmitAction {
+    if editing {
+        SubmitAction::Edit
+    } else if let Some(failure) = failure {
+        SubmitAction::Retry(failure.assistant_index)
+    } else {
+        SubmitAction::Send
+    }
+}
+
 #[derive(Clone)]
 struct ComposerSnapshot {
     content: SharedString,
@@ -427,6 +452,16 @@ struct AiInputElement {
     source: AiInputSource,
 }
 
+struct AiInputLayoutState {
+    display: ComposerDisplay,
+    measurement: Rc<RefCell<Option<AiInputMeasurement>>>,
+}
+
+struct AiInputMeasurement {
+    width: Pixels,
+    lines: Vec<WrappedLine>,
+}
+
 #[derive(Clone)]
 enum AiInputSource {
     Composer,
@@ -454,6 +489,24 @@ fn input_line_constraints(
         }
         AiInputSource::EditedMessage | AiInputSource::UserMessage { .. } => (false, 1, None),
     }
+}
+
+fn constrained_input_height(
+    measured_height: Pixels,
+    line_height: Pixels,
+    min_lines: usize,
+    max_lines: Option<usize>,
+) -> Pixels {
+    let min_height = line_height * min_lines as f32;
+    let height = measured_height.max(min_height);
+    max_lines.map_or(height, |max_lines| {
+        height.min(line_height * max_lines as f32)
+    })
+}
+
+fn loading_dot_opacity(delta: f32, phase: f32) -> f32 {
+    let wave = (1.0 + (std::f32::consts::TAU * (delta - phase)).cos()) / 2.0;
+    0.25 + 0.75 * wave
 }
 
 struct PrepaintState {
@@ -664,10 +717,13 @@ impl AiPanel {
         if self.confirm_mention_completion(cx) {
             return;
         }
-        if self.editing_turn.is_some() {
-            self.submit_edited_message(window, cx);
-        } else {
-            self.send_message(cx);
+        match submit_action(
+            self.editing_turn.is_some(),
+            self.generation_failure.as_ref(),
+        ) {
+            SubmitAction::Edit => self.submit_edited_message(window, cx),
+            SubmitAction::Retry(assistant_index) => self.retry_assistant(assistant_index, cx),
+            SubmitAction::Send => self.send_message(cx),
         }
     }
 
@@ -3178,7 +3234,10 @@ impl AiPanel {
                 .justify_center()
                 .h(px(72.0))
                 .p_3()
-                .child(Self::render_loading_indicator(theme))
+                .child(Self::render_loading_indicator(
+                    "ai-mention-preview-loading",
+                    theme,
+                ))
                 .into_any_element(),
             MentionPreviewStatus::Ready(MentionPreviewContent::Text {
                 markdown,
@@ -3461,7 +3520,10 @@ impl AiPanel {
                                 .text_color(rgb(theme.text))
                                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                                 .when(loading && answer.is_empty(), |this| {
-                                    this.child(Self::render_loading_indicator(theme))
+                                    this.child(Self::render_loading_indicator(
+                                        "quick-ask-loading",
+                                        theme,
+                                    ))
                                 })
                                 .when(!answer.is_empty(), |this| {
                                     this.when_some(answer_md, |this, md| {
@@ -3860,7 +3922,7 @@ impl AiPanel {
                         })
                     })
                     .when(!is_editing && is_loading, |this| {
-                        this.child(Self::render_loading_indicator(theme))
+                        this.child(Self::render_loading_indicator("ai-message-loading", theme))
                     })
                     .when(!is_editing && !is_loading && !content.is_empty(), |this| {
                         this.child(message_content)
@@ -3993,13 +4055,22 @@ impl AiPanel {
             .into_any_element()
     }
 
-    fn render_loading_indicator(theme: Theme) -> impl IntoElement {
-        let dot = move |opacity| {
+    fn render_loading_indicator(id_prefix: &'static str, theme: Theme) -> impl IntoElement {
+        const PHASES: [f32; 3] = [0.0, 1.0 / 3.0, 2.0 / 3.0];
+
+        let dot = move |index| {
             div()
                 .w(px(4.0))
                 .h(px(4.0))
+                .rounded_full()
                 .bg(rgb(theme.text_muted))
-                .opacity(opacity)
+                .with_animation(
+                    (id_prefix, index),
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    move |element, delta| {
+                        element.opacity(loading_dot_opacity(delta, PHASES[index]))
+                    },
+                )
         };
 
         div()
@@ -4007,9 +4078,7 @@ impl AiPanel {
             .items_center()
             .gap_1()
             .h(px(18.0))
-            .child(dot(0.45))
-            .child(dot(0.7))
-            .child(dot(1.0))
+            .children((0..3).map(dot))
     }
 
     fn render_turn_footer(
@@ -5687,7 +5756,7 @@ impl IntoElement for AiInputElement {
 }
 
 impl Element for AiInputElement {
-    type RequestLayoutState = ComposerDisplay;
+    type RequestLayoutState = AiInputLayoutState;
     type PrepaintState = PrepaintState;
 
     fn id(&self) -> Option<ElementId> {
@@ -5706,43 +5775,91 @@ impl Element for AiInputElement {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let input = self.panel.read(cx);
-        let (content, mentions) = match &self.source {
-            AiInputSource::Composer | AiInputSource::EditedMessage => {
-                (input.content.clone(), input.composer_mentions.clone())
-            }
+        let (content, mentions, marked_range) = match &self.source {
+            AiInputSource::Composer | AiInputSource::EditedMessage => (
+                input.content.clone(),
+                input.composer_mentions.clone(),
+                input.marked_range.clone(),
+            ),
             AiInputSource::UserMessage {
                 content, mentions, ..
-            } => (content.clone(), mentions.clone()),
+            } => (content.clone(), mentions.clone(), None),
         };
         let (empty_chat, min_lines, max_lines) =
             input_line_constraints(input.mode, &self.source, input.messages.is_empty());
-        let chars_per_line = ((input.width - 32.0) / 7.0).floor().max(12.0) as usize;
+        let fallback_width = px(input.width.max(1.0));
         let display = composer_display(content.as_ref(), &mentions);
-        let text = display.text.as_str();
-        let estimated_lines = if text.is_empty() {
-            if min_lines == 1 || empty_chat {
-                1
-            } else {
-                min_lines
-            }
-        } else {
-            text.lines()
-                .map(|line| line.chars().count().saturating_sub(1) / chars_per_line + 1)
-                .sum::<usize>()
-                + usize::from(text.ends_with('\n'))
-        };
-        let estimated_lines = max_lines.map_or(estimated_lines.max(min_lines), |max_lines| {
-            estimated_lines.clamp(min_lines, max_lines)
-        });
 
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
-        style.size.height = if empty_chat {
-            relative(1.0).into()
-        } else {
-            (window.line_height() * estimated_lines as f32).into()
+        let measurement = Rc::new(RefCell::new(None));
+        if empty_chat {
+            style.size.height = relative(1.0).into();
+            return (
+                window.request_layout(style, [], cx),
+                AiInputLayoutState {
+                    display,
+                    measurement,
+                },
+            );
+        }
+
+        let text_style = window.text_style();
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
+        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let display_text: SharedString = display.text.clone().into();
+        let base_run = TextRun {
+            len: display_text.len(),
+            font: text_style.font(),
+            color: text_style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
         };
-        (window.request_layout(style, [], cx), display)
+        let runs = input_text_runs(
+            display_text.as_ref(),
+            base_run,
+            theme,
+            &display.mentions,
+            marked_range
+                .as_ref()
+                .map(|range| display.display_range(range))
+                .as_ref(),
+        );
+        let layout_id = window.request_measured_layout(style, {
+            let measurement = measurement.clone();
+            move |known, available, window, _| {
+                let width = known.width.unwrap_or(match available.width {
+                    AvailableSpace::Definite(width) => width,
+                    AvailableSpace::MinContent | AvailableSpace::MaxContent => fallback_width,
+                });
+                let lines = if display_text.is_empty() {
+                    Vec::new()
+                } else {
+                    window
+                        .text_system()
+                        .shape_text(display_text.clone(), font_size, &runs, Some(width), None)
+                        .map(|lines| lines.into_vec())
+                        .unwrap_or_else(|error| {
+                            eprintln!("failed to measure AI input: {error:#}");
+                            Vec::new()
+                        })
+                };
+                let measured_height = lines.iter().map(|line| line.size(line_height).height).sum();
+                let height =
+                    constrained_input_height(measured_height, line_height, min_lines, max_lines);
+                *measurement.borrow_mut() = Some(AiInputMeasurement { width, lines });
+                size(width, height)
+            }
+        });
+        (
+            layout_id,
+            AiInputLayoutState {
+                display,
+                measurement,
+            },
+        )
     }
 
     fn prepaint(
@@ -5750,7 +5867,7 @@ impl Element for AiInputElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        layout_display: &mut Self::RequestLayoutState,
+        layout_state: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
@@ -5804,61 +5921,70 @@ impl Element for AiInputElement {
                 rgba(theme.placeholder_text).into(),
             )
         } else {
-            let display = std::mem::take(layout_display);
+            let display = std::mem::take(&mut layout_state.display);
             let display_text: SharedString = display.text.clone().into();
             (display, display_text, style.color)
         };
 
-        let base_run = TextRun {
-            len: display_text.len(),
-            font: style.font(),
-            color: text_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let runs = if !content.is_empty() {
-            input_text_runs(
-                display_text.as_ref(),
-                base_run,
-                theme,
-                &display.mentions,
-                marked_range
-                    .as_ref()
-                    .map(|range| display.display_range(range))
-                    .as_ref(),
-            )
+        let measured_lines = (!content.is_empty())
+            .then(|| layout_state.measurement.borrow_mut().take())
+            .flatten()
+            .and_then(|measurement| {
+                (measurement.width == bounds.size.width).then_some(measurement.lines)
+            });
+        let lines = if let Some(lines) = measured_lines {
+            lines
         } else {
-            vec![base_run]
-        };
-
-        let font_size = style.font_size.to_pixels(window.rem_size());
-        let line_height = window.line_height();
-        let lines = match window.text_system().shape_text(
-            display_text.clone(),
-            font_size,
-            &runs,
-            Some(bounds.size.width),
-            None,
-        ) {
-            Ok(lines) => lines,
-            Err(error) => {
-                eprintln!("failed to shape AI input: {error:#}");
-                return PrepaintState {
-                    lines: Some(Vec::new()),
-                    display,
-                    cursor: None,
-                    cursor_position: None,
-                    selections: Vec::new(),
-                    mention_quads: Vec::new(),
-                    active_number_quads: Vec::new(),
-                    mention_icons: Vec::new(),
-                    mention_hitboxes: Vec::new(),
-                    hitbox: matches!(&self.source, AiInputSource::UserMessage { .. })
-                        .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal)),
-                };
+            let base_run = TextRun {
+                len: display_text.len(),
+                font: style.font(),
+                color: text_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let runs = if !content.is_empty() {
+                input_text_runs(
+                    display_text.as_ref(),
+                    base_run,
+                    theme,
+                    &display.mentions,
+                    marked_range
+                        .as_ref()
+                        .map(|range| display.display_range(range))
+                        .as_ref(),
+                )
+            } else {
+                vec![base_run]
+            };
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            match window.text_system().shape_text(
+                display_text.clone(),
+                font_size,
+                &runs,
+                Some(bounds.size.width),
+                None,
+            ) {
+                Ok(lines) => lines.into_vec(),
+                Err(error) => {
+                    eprintln!("failed to shape AI input: {error:#}");
+                    return PrepaintState {
+                        lines: Some(Vec::new()),
+                        display,
+                        cursor: None,
+                        cursor_position: None,
+                        selections: Vec::new(),
+                        mention_quads: Vec::new(),
+                        active_number_quads: Vec::new(),
+                        mention_icons: Vec::new(),
+                        mention_hitboxes: Vec::new(),
+                        hitbox: matches!(&self.source, AiInputSource::UserMessage { .. })
+                            .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal)),
+                    };
+                }
             }
         };
+        let line_height = window.line_height();
 
         let mut laid_out_lines = Vec::with_capacity(lines.len());
         let mut starts = line_starts(display_text.as_ref());
@@ -7760,6 +7886,18 @@ mod tests {
     }
 
     #[test]
+    fn failed_submit_retries_the_failed_assistant() {
+        let failure = GenerationFailure {
+            assistant_index: 3,
+            message: "offline".to_string(),
+        };
+
+        assert_eq!(submit_action(false, Some(&failure)), SubmitAction::Retry(3));
+        assert_eq!(submit_action(true, Some(&failure)), SubmitAction::Edit);
+        assert_eq!(submit_action(false, None), SubmitAction::Send);
+    }
+
+    #[test]
     fn historical_message_editing_uses_one_line_auto_height() {
         let edited = AiInputSource::EditedMessage;
         assert_eq!(
@@ -7776,6 +7914,80 @@ mod tests {
             input_line_constraints(AiPanelMode::QuickAsk, &composer, false),
             (false, 1, Some(4))
         );
+    }
+
+    #[test]
+    fn measured_input_height_respects_composer_limits_without_clipping_messages() {
+        let line_height = px(20.0);
+
+        assert_eq!(
+            constrained_input_height(px(180.0), line_height, 1, None),
+            px(180.0)
+        );
+        assert_eq!(
+            constrained_input_height(px(20.0), line_height, 3, Some(8)),
+            px(60.0)
+        );
+        assert_eq!(
+            constrained_input_height(px(200.0), line_height, 3, Some(8)),
+            px(160.0)
+        );
+    }
+
+    #[test]
+    fn measured_input_height_tracks_available_wrap_width() {
+        let mut cx = TestAppContext::single();
+        cx.update(install_test_settings);
+        let handle = ScrollHandle::new();
+        let window = cx.add_window({
+            let handle = handle.clone();
+            move |_, _| MessageScrollTestView {
+                handle,
+                row_heights: Vec::new(),
+            }
+        });
+        let (narrow_height, wide_height, line_height) = cx
+            .update_window(window.into(), |_, window, _| {
+                let text: SharedString = "WWWWWWWWWWWWWWWWWWWW WWWWWWWWWWWWWWWWWWWW".into();
+                let text_style = window.text_style();
+                let font_size = text_style.font_size.to_pixels(window.rem_size());
+                let line_height = window.line_height();
+                let runs = [text_style.to_run(text.len())];
+                let measure = |width| {
+                    window
+                        .text_system()
+                        .shape_text(text.clone(), font_size, &runs, Some(width), None)
+                        .unwrap()
+                        .iter()
+                        .map(|line| line.size(line_height).height)
+                        .sum::<Pixels>()
+                };
+                (measure(px(120.0)), measure(px(480.0)), line_height)
+            })
+            .unwrap();
+
+        assert!(narrow_height > wide_height);
+        assert_eq!(
+            constrained_input_height(narrow_height, line_height, 1, None),
+            narrow_height
+        );
+    }
+
+    #[test]
+    fn loading_dot_opacity_cycles_between_dots() {
+        let phases = [0.0, 1.0 / 3.0, 2.0 / 3.0];
+
+        for (active, delta) in phases.into_iter().enumerate() {
+            let opacities = phases.map(|phase| loading_dot_opacity(delta, phase));
+            let active_opacity = opacities[active];
+            assert!(active_opacity > 0.99);
+            assert!(
+                opacities
+                    .into_iter()
+                    .enumerate()
+                    .all(|(index, opacity)| index == active || opacity < active_opacity)
+            );
+        }
     }
 
     #[test]
