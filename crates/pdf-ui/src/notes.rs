@@ -95,6 +95,10 @@ impl NotesPaletteDelegate {
             matches: Vec::new(),
         }
     }
+
+    pub fn replace_entries(&mut self, entries: Vec<NotePaletteEntry>) {
+        self.entries = entries;
+    }
 }
 
 impl PickerDelegate for NotesPaletteDelegate {

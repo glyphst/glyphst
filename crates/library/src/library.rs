@@ -1,6 +1,7 @@
 use std::{
-    collections::HashSet,
-    fs,
+    collections::{HashMap, HashSet, VecDeque},
+    error::Error,
+    fmt, fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -15,6 +16,8 @@ use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 const MAX_HISTORY_ENTRIES: usize = 100;
+const MAX_DOCUMENT_EDIT_HISTORY_ENTRIES: usize = 100;
+const MAX_DOCUMENT_EDIT_HISTORIES: usize = 32;
 // Legacy tables are retained so pre-v1 databases remain readable.
 const HISTORY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("history");
 const BOOKMARKS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("bookmarks");
@@ -975,27 +978,6 @@ pub struct SemanticTextRange {
     pub end: SemanticTextAnchor,
 }
 
-struct AnnotationGeometry {
-    rects: Vec<HighlightRect>,
-    semantic_range: Option<SemanticTextRange>,
-}
-
-impl AnnotationGeometry {
-    fn fixed(rects: Vec<HighlightRect>) -> Self {
-        Self {
-            rects,
-            semantic_range: None,
-        }
-    }
-
-    fn reflow(rects: Vec<HighlightRect>, semantic_range: SemanticTextRange) -> Self {
-        Self {
-            rects,
-            semantic_range: Some(semantic_range),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub path: PathBuf,
@@ -1010,6 +992,16 @@ pub struct Bookmark {
     pub label: String,
     pub position: DocumentPosition,
     pub created: u64,
+}
+
+impl Bookmark {
+    fn normalize(&mut self) {
+        self.label = self.label.trim().to_string();
+    }
+
+    fn is_valid(&self) -> bool {
+        !self.path.as_os_str().is_empty() && !self.label.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -1039,6 +1031,22 @@ pub struct Highlight {
     pub created: u64,
 }
 
+impl Highlight {
+    fn normalize(&mut self) {
+        self.text = self.text.trim().to_string();
+        self.note = self.note.trim().to_string();
+    }
+
+    fn is_valid(&self) -> bool {
+        !self.path.as_os_str().is_empty()
+            && (!self.rects.is_empty()
+                || self
+                    .semantic_range
+                    .as_ref()
+                    .is_some_and(valid_semantic_range))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Note {
     pub id: u64,
@@ -1049,6 +1057,44 @@ pub struct Note {
     pub text: String,
     pub body: String,
     pub created: u64,
+}
+
+impl Note {
+    fn normalize(&mut self) {
+        self.text = self.text.trim().to_string();
+        self.body = self.body.trim().to_string();
+    }
+
+    fn is_valid(&self) -> bool {
+        !self.path.as_os_str().is_empty()
+            && (!self.rects.is_empty()
+                || self
+                    .semantic_range
+                    .as_ref()
+                    .is_some_and(valid_semantic_range))
+            && !self.body.is_empty()
+    }
+}
+
+struct AnnotationGeometry {
+    rects: Vec<HighlightRect>,
+    semantic_range: Option<SemanticTextRange>,
+}
+
+impl AnnotationGeometry {
+    fn fixed(rects: Vec<HighlightRect>) -> Self {
+        Self {
+            rects,
+            semantic_range: None,
+        }
+    }
+
+    fn reflow(rects: Vec<HighlightRect>, semantic_range: SemanticTextRange) -> Self {
+        Self {
+            rects,
+            semantic_range: Some(semantic_range),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1137,9 +1183,117 @@ pub struct LibraryStore {
     pub library: Library,
     database: Option<Database>,
     startup_error: Option<String>,
+    document_edit_histories: HashMap<PathBuf, DocumentEditHistory>,
+    next_document_edit_sequence: u64,
+    bookmarks_revision: u64,
 }
 
 impl Global for LibraryStore {}
+
+#[derive(Clone, Debug, PartialEq)]
+enum DocumentEdit {
+    Bookmark {
+        before: Option<Bookmark>,
+        after: Option<Bookmark>,
+    },
+    Highlight {
+        before: Option<Highlight>,
+        after: Option<Highlight>,
+    },
+    HighlightColor {
+        before: Highlight,
+        after: HighlightColor,
+    },
+    Note {
+        before: Option<Note>,
+        after: Option<Note>,
+    },
+    NoteUpdate {
+        before: Note,
+        after_body: String,
+        after_color: HighlightColor,
+    },
+    Rotation {
+        path: PathBuf,
+        before: DocumentRotation,
+        after: DocumentRotation,
+    },
+}
+
+impl DocumentEdit {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Bookmark { before, after } => before
+                .as_ref()
+                .or(after.as_ref())
+                .map(|bookmark| bookmark.path.as_path())
+                .expect("bookmark edit must contain a snapshot"),
+            Self::Highlight { before, after } => before
+                .as_ref()
+                .or(after.as_ref())
+                .map(|highlight| highlight.path.as_path())
+                .expect("highlight edit must contain a snapshot"),
+            Self::HighlightColor { before, .. } => &before.path,
+            Self::Note { before, after } => before
+                .as_ref()
+                .or(after.as_ref())
+                .map(|note| note.path.as_path())
+                .expect("note edit must contain a snapshot"),
+            Self::NoteUpdate { before, .. } => &before.path,
+            Self::Rotation { path, .. } => path,
+        }
+    }
+
+    fn is_bookmark(&self) -> bool {
+        matches!(self, Self::Bookmark { .. })
+    }
+
+    fn bump_revision(&self, revision: &mut DocumentEditRevision) {
+        match self {
+            Self::Bookmark { .. } => {}
+            Self::Highlight { .. }
+            | Self::HighlightColor { .. }
+            | Self::Note { .. }
+            | Self::NoteUpdate { .. } => {
+                revision.annotations = revision.annotations.wrapping_add(1);
+            }
+            Self::Rotation { .. } => {
+                revision.rotation = revision.rotation.wrapping_add(1);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DocumentEditRevision {
+    pub annotations: u64,
+    pub rotation: u64,
+}
+
+#[derive(Default)]
+struct DocumentEditHistory {
+    undo: VecDeque<DocumentEdit>,
+    redo: Vec<DocumentEdit>,
+    revision: DocumentEditRevision,
+    last_used: u64,
+}
+
+#[derive(Clone, Copy)]
+enum DocumentEditDirection {
+    Undo,
+    Redo,
+}
+
+#[derive(Debug)]
+struct DocumentEditConflict(&'static str);
+
+impl fmt::Display for DocumentEditConflict {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} changed outside undo history", self.0)
+    }
+}
+
+impl Error for DocumentEditConflict {}
 
 impl LibraryStore {
     pub fn load() -> Self {
@@ -1152,6 +1306,9 @@ impl LibraryStore {
                     library: Library::default(),
                     database: None,
                     startup_error: Some(format!("{error:#}")),
+                    document_edit_histories: HashMap::new(),
+                    next_document_edit_sequence: 0,
+                    bookmarks_revision: 0,
                 }
             }
         }
@@ -1178,6 +1335,9 @@ impl LibraryStore {
             library,
             database: Some(database),
             startup_error: None,
+            document_edit_histories: HashMap::new(),
+            next_document_edit_sequence: 0,
+            bookmarks_revision: 0,
         };
         if let Err(error) = store.prune_ai_session_rows() {
             eprintln!("failed to prune expired AI sessions: {error:#}");
@@ -1187,6 +1347,40 @@ impl LibraryStore {
 
     pub fn startup_error(&self) -> Option<&str> {
         self.startup_error.as_deref()
+    }
+
+    pub fn document_edit_revision(&self, path: &Path) -> DocumentEditRevision {
+        let path = normalize_path(path);
+        self.document_edit_histories
+            .get(&path)
+            .map(|history| history.revision)
+            .unwrap_or_default()
+    }
+
+    pub fn bookmarks_revision(&self) -> u64 {
+        self.bookmarks_revision
+    }
+
+    pub fn can_undo_document(&self, path: &Path) -> bool {
+        let path = normalize_path(path);
+        self.document_edit_histories
+            .get(&path)
+            .is_some_and(|history| !history.undo.is_empty())
+    }
+
+    pub fn can_redo_document(&self, path: &Path) -> bool {
+        let path = normalize_path(path);
+        self.document_edit_histories
+            .get(&path)
+            .is_some_and(|history| !history.redo.is_empty())
+    }
+
+    pub fn undo_document(&mut self, path: &Path) -> Result<bool> {
+        self.apply_history_edit(path, DocumentEditDirection::Undo)
+    }
+
+    pub fn redo_document(&mut self, path: &Path) -> Result<bool> {
+        self.apply_history_edit(path, DocumentEditDirection::Redo)
     }
 
     pub fn history_entries(&self) -> &[HistoryEntry] {
@@ -1304,10 +1498,25 @@ impl LibraryStore {
         })
     }
 
-    pub fn set_document_rotation(&mut self, path: &Path, rotation: DocumentRotation) -> Result<()> {
-        self.update_document_preferences(path, |preferences| {
+    pub fn set_document_rotation(
+        &mut self,
+        path: &Path,
+        rotation: DocumentRotation,
+    ) -> Result<bool> {
+        let path = normalize_path(path);
+        let before = self.document_rotation(&path);
+        if before == rotation {
+            return Ok(false);
+        }
+        self.update_document_preferences(&path, |preferences| {
             preferences.rotation = rotation;
-        })
+        })?;
+        self.record_document_edit(DocumentEdit::Rotation {
+            path,
+            before,
+            after: rotation,
+        });
+        Ok(true)
     }
 
     pub fn clear_epub_reader_preferences(&mut self, path: &Path) -> Result<()> {
@@ -1400,27 +1609,39 @@ impl LibraryStore {
         label: impl Into<String>,
         position: DocumentPosition,
     ) -> Result<u64> {
-        let bookmark = self
-            .library
-            .build_bookmark(path, label, position, current_timestamp());
-        self.write_bookmark(&bookmark)?;
-        self.library.bookmarks.push(bookmark.clone());
-        self.library.sanitize();
+        let mut bookmark = Bookmark {
+            id: self.library.next_bookmark_id.max(1),
+            path: normalize_path(path),
+            label: label.into(),
+            position,
+            created: current_timestamp(),
+        };
+        bookmark.normalize();
+        self.replace_bookmark_snapshot(None, Some(&bookmark))?;
+        self.record_document_edit(DocumentEdit::Bookmark {
+            before: None,
+            after: Some(bookmark.clone()),
+        });
         Ok(bookmark.id)
     }
 
     pub fn remove_bookmark(&mut self, id: u64) -> Result<bool> {
-        if !self
+        let Some(bookmark) = self
             .library
             .bookmarks
             .iter()
-            .any(|bookmark| bookmark.id == id)
-        {
+            .find(|bookmark| bookmark.id == id)
+            .cloned()
+        else {
             return Ok(false);
-        }
+        };
 
-        self.remove_bookmark_from_database(id)?;
-        Ok(self.library.remove_bookmark(id))
+        self.replace_bookmark_snapshot(Some(&bookmark), None)?;
+        self.record_document_edit(DocumentEdit::Bookmark {
+            before: Some(bookmark),
+            after: None,
+        });
+        Ok(true)
     }
 
     pub fn add_highlight(
@@ -1431,18 +1652,13 @@ impl LibraryStore {
         text: impl Into<String>,
         note: impl Into<String>,
     ) -> Result<Highlight> {
-        let highlight = self.library.build_highlight(
+        self.add_highlight_with_geometry(
             path,
             color,
             AnnotationGeometry::fixed(rects),
-            text,
-            note,
-            current_timestamp(),
-        );
-        self.write_highlight(&highlight)?;
-        self.library.highlights.push(highlight.clone());
-        self.library.sanitize();
-        Ok(highlight)
+            text.into(),
+            note.into(),
+        )
     }
 
     pub fn add_reflow_highlight(
@@ -1454,17 +1670,39 @@ impl LibraryStore {
         text: impl Into<String>,
         note: impl Into<String>,
     ) -> Result<Highlight> {
-        let highlight = self.library.build_highlight(
+        self.add_highlight_with_geometry(
             path,
             color,
             AnnotationGeometry::reflow(rects, semantic_range),
+            text.into(),
+            note.into(),
+        )
+    }
+
+    fn add_highlight_with_geometry(
+        &mut self,
+        path: &Path,
+        color: HighlightColor,
+        geometry: AnnotationGeometry,
+        text: String,
+        note: String,
+    ) -> Result<Highlight> {
+        let mut highlight = Highlight {
+            id: self.library.next_highlight_id.max(1),
+            path: normalize_path(path),
+            color,
+            rects: geometry.rects,
+            semantic_range: geometry.semantic_range,
             text,
             note,
-            current_timestamp(),
-        );
-        self.write_highlight(&highlight)?;
-        self.library.highlights.push(highlight.clone());
-        self.library.sanitize();
+            created: current_timestamp(),
+        };
+        highlight.normalize();
+        self.replace_highlight_snapshot(None, Some(&highlight))?;
+        self.record_document_edit(DocumentEdit::Highlight {
+            before: None,
+            after: Some(highlight.clone()),
+        });
         Ok(highlight)
     }
 
@@ -1476,18 +1714,13 @@ impl LibraryStore {
         text: impl Into<String>,
         body: impl Into<String>,
     ) -> Result<Note> {
-        let note = self.library.build_note(
+        self.add_note_with_geometry(
             path,
             color,
             AnnotationGeometry::fixed(rects),
-            text,
-            body,
-            current_timestamp(),
-        );
-        self.write_note(&note)?;
-        self.library.notes.push(note.clone());
-        self.library.sanitize();
-        Ok(note)
+            text.into(),
+            body.into(),
+        )
     }
 
     pub fn add_reflow_note(
@@ -1499,57 +1732,101 @@ impl LibraryStore {
         text: impl Into<String>,
         body: impl Into<String>,
     ) -> Result<Note> {
-        let note = self.library.build_note(
+        self.add_note_with_geometry(
             path,
             color,
             AnnotationGeometry::reflow(rects, semantic_range),
+            text.into(),
+            body.into(),
+        )
+    }
+
+    fn add_note_with_geometry(
+        &mut self,
+        path: &Path,
+        color: HighlightColor,
+        geometry: AnnotationGeometry,
+        text: String,
+        body: String,
+    ) -> Result<Note> {
+        let mut note = Note {
+            id: self.library.next_note_id.max(1),
+            path: normalize_path(path),
+            color,
+            rects: geometry.rects,
+            semantic_range: geometry.semantic_range,
             text,
             body,
-            current_timestamp(),
-        );
-        self.write_note(&note)?;
-        self.library.notes.push(note.clone());
-        self.library.sanitize();
+            created: current_timestamp(),
+        };
+        note.normalize();
+        self.replace_note_snapshot(None, Some(&note))?;
+        self.record_document_edit(DocumentEdit::Note {
+            before: None,
+            after: Some(note.clone()),
+        });
         Ok(note)
     }
 
     pub fn remove_highlight(&mut self, id: u64) -> Result<bool> {
-        if !self
+        let Some(highlight) = self
             .library
             .highlights
             .iter()
-            .any(|highlight| highlight.id == id)
-        {
-            return Ok(false);
-        }
-
-        self.remove_highlight_from_database(id)?;
-        Ok(self.library.remove_highlight(id))
-    }
-
-    pub fn remove_note(&mut self, id: u64) -> Result<bool> {
-        if !self.library.notes.iter().any(|note| note.id == id) {
-            return Ok(false);
-        }
-
-        self.remove_note_from_database(id)?;
-        Ok(self.library.remove_note(id))
-    }
-
-    pub fn set_highlight_color(&mut self, id: u64, color: HighlightColor) -> Result<bool> {
-        let Some(highlight_ix) = self
-            .library
-            .highlights
-            .iter()
-            .position(|highlight| highlight.id == id)
+            .find(|highlight| highlight.id == id)
+            .cloned()
         else {
             return Ok(false);
         };
 
-        let mut highlight = self.library.highlights[highlight_ix].clone();
-        highlight.color = color;
-        self.write_highlight(&highlight)?;
-        self.library.highlights[highlight_ix] = highlight;
+        self.replace_highlight_snapshot(Some(&highlight), None)?;
+        self.record_document_edit(DocumentEdit::Highlight {
+            before: Some(highlight),
+            after: None,
+        });
+        Ok(true)
+    }
+
+    pub fn remove_note(&mut self, id: u64) -> Result<bool> {
+        let Some(note) = self
+            .library
+            .notes
+            .iter()
+            .find(|note| note.id == id)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+
+        self.replace_note_snapshot(Some(&note), None)?;
+        self.record_document_edit(DocumentEdit::Note {
+            before: Some(note),
+            after: None,
+        });
+        Ok(true)
+    }
+
+    pub fn set_highlight_color(&mut self, id: u64, color: HighlightColor) -> Result<bool> {
+        let Some(before) = self
+            .library
+            .highlights
+            .iter()
+            .find(|highlight| highlight.id == id)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+
+        let mut after = before.clone();
+        after.color = color;
+        if after == before {
+            return Ok(false);
+        }
+        self.replace_highlight_snapshot(Some(&before), Some(&after))?;
+        self.record_document_edit(DocumentEdit::HighlightColor {
+            before,
+            after: color,
+        });
         Ok(true)
     }
 
@@ -1559,17 +1836,271 @@ impl LibraryStore {
         body: impl Into<String>,
         color: HighlightColor,
     ) -> Result<bool> {
-        let Some(note_ix) = self.library.notes.iter().position(|note| note.id == id) else {
+        let Some(before) = self
+            .library
+            .notes
+            .iter()
+            .find(|note| note.id == id)
+            .cloned()
+        else {
             return Ok(false);
         };
 
-        let mut note = self.library.notes[note_ix].clone();
-        note.body = body.into();
-        note.color = color;
-        self.write_note(&note)?;
-        self.library.notes[note_ix] = note;
-        self.library.sanitize();
+        let mut after = before.clone();
+        after.body = body.into();
+        after.color = color;
+        after.normalize();
+        if after == before {
+            return Ok(false);
+        }
+        self.replace_note_snapshot(Some(&before), Some(&after))?;
+        self.record_document_edit(DocumentEdit::NoteUpdate {
+            before,
+            after_body: after.body,
+            after_color: after.color,
+        });
         Ok(true)
+    }
+
+    fn record_document_edit(&mut self, edit: DocumentEdit) {
+        let path = normalize_path(edit.path());
+        let is_bookmark = edit.is_bookmark();
+        let sequence = self.next_document_edit_sequence();
+        let history = self.document_edit_histories.entry(path).or_default();
+        if history.undo.len() == MAX_DOCUMENT_EDIT_HISTORY_ENTRIES {
+            history.undo.pop_front();
+        }
+        edit.bump_revision(&mut history.revision);
+        history.undo.push_back(edit);
+        history.redo.clear();
+        history.last_used = sequence;
+        if is_bookmark {
+            self.bookmarks_revision = self.bookmarks_revision.wrapping_add(1);
+        }
+        self.trim_document_edit_histories();
+    }
+
+    fn apply_history_edit(
+        &mut self,
+        path: &Path,
+        direction: DocumentEditDirection,
+    ) -> Result<bool> {
+        let path = normalize_path(path);
+        let Some(edit) = self
+            .document_edit_histories
+            .get(&path)
+            .and_then(|history| match direction {
+                DocumentEditDirection::Undo => history.undo.back(),
+                DocumentEditDirection::Redo => history.redo.last(),
+            })
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        if normalize_path(edit.path()) != path {
+            return Err(anyhow!("document edit history path mismatch"));
+        }
+
+        if let Err(error) = self.apply_document_edit(&edit, direction) {
+            if error.downcast_ref::<DocumentEditConflict>().is_some() {
+                self.document_edit_histories.remove(&path);
+            }
+            return Err(error);
+        }
+
+        let is_bookmark = edit.is_bookmark();
+        let sequence = self.next_document_edit_sequence();
+        let history = self
+            .document_edit_histories
+            .get_mut(&path)
+            .expect("document edit history must still exist");
+        match direction {
+            DocumentEditDirection::Undo => {
+                let moved = history
+                    .undo
+                    .pop_back()
+                    .expect("undo history must contain the applied edit");
+                debug_assert_eq!(moved, edit);
+                history.redo.push(moved);
+            }
+            DocumentEditDirection::Redo => {
+                let moved = history
+                    .redo
+                    .pop()
+                    .expect("redo history must contain the applied edit");
+                debug_assert_eq!(moved, edit);
+                if history.undo.len() == MAX_DOCUMENT_EDIT_HISTORY_ENTRIES {
+                    history.undo.pop_front();
+                }
+                history.undo.push_back(moved);
+            }
+        }
+        edit.bump_revision(&mut history.revision);
+        history.last_used = sequence;
+        if is_bookmark {
+            self.bookmarks_revision = self.bookmarks_revision.wrapping_add(1);
+        }
+        Ok(true)
+    }
+
+    fn apply_document_edit(
+        &mut self,
+        edit: &DocumentEdit,
+        direction: DocumentEditDirection,
+    ) -> Result<()> {
+        match edit {
+            DocumentEdit::Bookmark { before, after } => {
+                let (expected, target) = match direction {
+                    DocumentEditDirection::Undo => (after.as_ref(), before.as_ref()),
+                    DocumentEditDirection::Redo => (before.as_ref(), after.as_ref()),
+                };
+                self.replace_bookmark_snapshot(expected, target)
+            }
+            DocumentEdit::Highlight { before, after } => {
+                let (expected, target) = match direction {
+                    DocumentEditDirection::Undo => (after.as_ref(), before.as_ref()),
+                    DocumentEditDirection::Redo => (before.as_ref(), after.as_ref()),
+                };
+                self.replace_highlight_snapshot(expected, target)
+            }
+            DocumentEdit::HighlightColor { before, after } => {
+                let mut after_snapshot = before.clone();
+                after_snapshot.color = *after;
+                let (expected, target) = match direction {
+                    DocumentEditDirection::Undo => (&after_snapshot, before),
+                    DocumentEditDirection::Redo => (before, &after_snapshot),
+                };
+                self.replace_highlight_snapshot(Some(expected), Some(target))
+            }
+            DocumentEdit::Note { before, after } => {
+                let (expected, target) = match direction {
+                    DocumentEditDirection::Undo => (after.as_ref(), before.as_ref()),
+                    DocumentEditDirection::Redo => (before.as_ref(), after.as_ref()),
+                };
+                self.replace_note_snapshot(expected, target)
+            }
+            DocumentEdit::NoteUpdate {
+                before,
+                after_body,
+                after_color,
+            } => {
+                let mut after_snapshot = before.clone();
+                after_snapshot.body.clone_from(after_body);
+                after_snapshot.color = *after_color;
+                let (expected, target) = match direction {
+                    DocumentEditDirection::Undo => (&after_snapshot, before),
+                    DocumentEditDirection::Redo => (before, &after_snapshot),
+                };
+                self.replace_note_snapshot(Some(expected), Some(target))
+            }
+            DocumentEdit::Rotation {
+                path,
+                before,
+                after,
+            } => {
+                let (expected, target) = match direction {
+                    DocumentEditDirection::Undo => (*after, *before),
+                    DocumentEditDirection::Redo => (*before, *after),
+                };
+                if self.document_rotation(path) != expected {
+                    return Err(DocumentEditConflict("document rotation").into());
+                }
+                self.update_document_preferences(path, |preferences| {
+                    preferences.rotation = target;
+                })
+            }
+        }
+    }
+
+    fn replace_bookmark_snapshot(
+        &mut self,
+        expected: Option<&Bookmark>,
+        target: Option<&Bookmark>,
+    ) -> Result<()> {
+        let id = validate_snapshot_replacement(
+            &self.library.bookmarks,
+            expected,
+            target,
+            |bookmark| bookmark.id,
+            |bookmark| bookmark.path.as_path(),
+            validate_bookmark_snapshot,
+            "bookmark",
+        )?;
+
+        if let Some(bookmark) = target {
+            self.write_bookmark(bookmark)?;
+        } else {
+            self.remove_bookmark_from_database(id)?;
+        }
+        self.library.apply_bookmark_snapshot(id, target.cloned());
+        Ok(())
+    }
+
+    fn replace_highlight_snapshot(
+        &mut self,
+        expected: Option<&Highlight>,
+        target: Option<&Highlight>,
+    ) -> Result<()> {
+        let id = validate_snapshot_replacement(
+            &self.library.highlights,
+            expected,
+            target,
+            |highlight| highlight.id,
+            |highlight| highlight.path.as_path(),
+            validate_highlight_snapshot,
+            "highlight",
+        )?;
+
+        if let Some(highlight) = target {
+            self.write_highlight(highlight)?;
+        } else {
+            self.remove_highlight_from_database(id)?;
+        }
+        self.library.apply_highlight_snapshot(id, target.cloned());
+        Ok(())
+    }
+
+    fn replace_note_snapshot(
+        &mut self,
+        expected: Option<&Note>,
+        target: Option<&Note>,
+    ) -> Result<()> {
+        let id = validate_snapshot_replacement(
+            &self.library.notes,
+            expected,
+            target,
+            |note| note.id,
+            |note| note.path.as_path(),
+            validate_note_snapshot,
+            "note",
+        )?;
+
+        if let Some(note) = target {
+            self.write_note(note)?;
+        } else {
+            self.remove_note_from_database(id)?;
+        }
+        self.library.apply_note_snapshot(id, target.cloned());
+        Ok(())
+    }
+
+    fn next_document_edit_sequence(&mut self) -> u64 {
+        self.next_document_edit_sequence = self.next_document_edit_sequence.wrapping_add(1);
+        self.next_document_edit_sequence
+    }
+
+    fn trim_document_edit_histories(&mut self) {
+        while self.document_edit_histories.len() > MAX_DOCUMENT_EDIT_HISTORIES {
+            let Some(path) = self
+                .document_edit_histories
+                .iter()
+                .min_by_key(|(_, history)| history.last_used)
+                .map(|(path, _)| path.clone())
+            else {
+                break;
+            };
+            self.document_edit_histories.remove(&path);
+        }
     }
 
     pub fn save_ai_session(&mut self, mut session: AiSession) -> Result<()> {
@@ -1658,7 +2189,7 @@ impl LibraryStore {
 
     fn write_bookmark(&self, bookmark: &Bookmark) -> Result<()> {
         let Some(database) = &self.database else {
-            return Ok(());
+            return Err(anyhow!("document library database is unavailable"));
         };
         let write_txn = database.begin_write()?;
         {
@@ -1672,7 +2203,7 @@ impl LibraryStore {
 
     fn remove_bookmark_from_database(&self, id: u64) -> Result<()> {
         let Some(database) = &self.database else {
-            return Ok(());
+            return Err(anyhow!("document library database is unavailable"));
         };
         let write_txn = database.begin_write()?;
         {
@@ -1685,7 +2216,7 @@ impl LibraryStore {
 
     fn write_highlight(&self, highlight: &Highlight) -> Result<()> {
         let Some(database) = &self.database else {
-            return Ok(());
+            return Err(anyhow!("document library database is unavailable"));
         };
         let write_txn = database.begin_write()?;
         {
@@ -1699,7 +2230,7 @@ impl LibraryStore {
 
     fn remove_highlight_from_database(&self, id: u64) -> Result<()> {
         let Some(database) = &self.database else {
-            return Ok(());
+            return Err(anyhow!("document library database is unavailable"));
         };
         let write_txn = database.begin_write()?;
         {
@@ -1712,7 +2243,7 @@ impl LibraryStore {
 
     fn write_note(&self, note: &Note) -> Result<()> {
         let Some(database) = &self.database else {
-            return Ok(());
+            return Err(anyhow!("document library database is unavailable"));
         };
         let write_txn = database.begin_write()?;
         {
@@ -1726,7 +2257,7 @@ impl LibraryStore {
 
     fn remove_note_from_database(&self, id: u64) -> Result<()> {
         let Some(database) = &self.database else {
-            return Ok(());
+            return Err(anyhow!("document library database is unavailable"));
         };
         let write_txn = database.begin_write()?;
         {
@@ -1824,6 +2355,79 @@ impl LibraryStore {
     }
 }
 
+fn snapshot_id(expected: Option<u64>, target: Option<u64>) -> Result<u64> {
+    match (expected, target) {
+        (Some(expected), Some(target)) if expected != target => {
+            Err(anyhow!("document edit snapshot id mismatch"))
+        }
+        (Some(id), _) | (_, Some(id)) => Ok(id),
+        (None, None) => Err(anyhow!("document edit must contain a snapshot")),
+    }
+}
+
+fn validate_snapshot_path(expected: Option<&Path>, target: Option<&Path>) -> Result<()> {
+    if let (Some(expected), Some(target)) = (expected, target)
+        && normalize_path(expected) != normalize_path(target)
+    {
+        return Err(anyhow!("document edit snapshot path mismatch"));
+    }
+    Ok(())
+}
+
+fn validate_bookmark_snapshot(bookmark: &Bookmark) -> Result<()> {
+    if !bookmark.is_valid() {
+        return Err(anyhow!("invalid bookmark snapshot"));
+    }
+    Ok(())
+}
+
+fn validate_highlight_snapshot(highlight: &Highlight) -> Result<()> {
+    if !highlight.is_valid() {
+        return Err(anyhow!("invalid highlight snapshot"));
+    }
+    Ok(())
+}
+
+fn validate_note_snapshot(note: &Note) -> Result<()> {
+    if !note.is_valid() {
+        return Err(anyhow!("invalid note snapshot"));
+    }
+    Ok(())
+}
+
+fn validate_snapshot_replacement<T: PartialEq>(
+    snapshots: &[T],
+    expected: Option<&T>,
+    target: Option<&T>,
+    id_of: impl Fn(&T) -> u64,
+    path_of: impl for<'a> Fn(&'a T) -> &'a Path,
+    validate: impl Fn(&T) -> Result<()>,
+    kind: &'static str,
+) -> Result<u64> {
+    let id = snapshot_id(expected.map(&id_of), target.map(&id_of))?;
+    validate_snapshot_path(expected.map(&path_of), target.map(&path_of))?;
+    if let Some(target) = target {
+        validate(target)?;
+    }
+    let current = snapshots.iter().find(|snapshot| id_of(snapshot) == id);
+    if current != expected {
+        return Err(DocumentEditConflict(kind).into());
+    }
+    Ok(id)
+}
+
+fn replace_snapshot_by_id<T>(
+    snapshots: &mut Vec<T>,
+    id: u64,
+    target: Option<T>,
+    snapshot_id: impl Fn(&T) -> u64,
+) {
+    snapshots.retain(|snapshot| snapshot_id(snapshot) != id);
+    if let Some(target) = target {
+        snapshots.push(target);
+    }
+}
+
 fn create_private_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -1873,86 +2477,36 @@ impl Library {
         self.sanitize();
     }
 
-    fn build_bookmark(
-        &mut self,
-        path: &Path,
-        label: impl Into<String>,
-        position: DocumentPosition,
-        created: u64,
-    ) -> Bookmark {
-        let id = self.next_bookmark_id.max(1);
-        self.next_bookmark_id = id + 1;
-        Bookmark {
-            id,
-            path: normalize_path(path),
-            label: label.into(),
-            position,
-            created,
-        }
+    fn apply_bookmark_snapshot(&mut self, id: u64, target: Option<Bookmark>) {
+        replace_snapshot_by_id(&mut self.bookmarks, id, target, |bookmark| bookmark.id);
+        self.bookmarks.sort_by(|left, right| {
+            right
+                .created
+                .cmp(&left.created)
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.next_bookmark_id = self.next_bookmark_id.max(id.saturating_add(1));
     }
 
-    fn build_highlight(
-        &mut self,
-        path: &Path,
-        color: HighlightColor,
-        geometry: AnnotationGeometry,
-        text: impl Into<String>,
-        note: impl Into<String>,
-        created: u64,
-    ) -> Highlight {
-        let id = self.next_highlight_id.max(1);
-        self.next_highlight_id = id + 1;
-        Highlight {
-            id,
-            path: normalize_path(path),
-            color,
-            rects: geometry.rects,
-            semantic_range: geometry.semantic_range,
-            text: text.into(),
-            note: note.into(),
-            created,
-        }
+    fn apply_highlight_snapshot(&mut self, id: u64, target: Option<Highlight>) {
+        replace_snapshot_by_id(&mut self.highlights, id, target, |highlight| highlight.id);
+        self.highlights.sort_by(|left, right| {
+            left.created
+                .cmp(&right.created)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.next_highlight_id = self.next_highlight_id.max(id.saturating_add(1));
     }
 
-    fn build_note(
-        &mut self,
-        path: &Path,
-        color: HighlightColor,
-        geometry: AnnotationGeometry,
-        text: impl Into<String>,
-        body: impl Into<String>,
-        created: u64,
-    ) -> Note {
-        let id = self.next_note_id.max(1);
-        self.next_note_id = id + 1;
-        Note {
-            id,
-            path: normalize_path(path),
-            color,
-            rects: geometry.rects,
-            semantic_range: geometry.semantic_range,
-            text: text.into(),
-            body: body.into(),
-            created,
-        }
-    }
-
-    fn remove_bookmark(&mut self, id: u64) -> bool {
-        let before = self.bookmarks.len();
-        self.bookmarks.retain(|bookmark| bookmark.id != id);
-        before != self.bookmarks.len()
-    }
-
-    fn remove_highlight(&mut self, id: u64) -> bool {
-        let before = self.highlights.len();
-        self.highlights.retain(|highlight| highlight.id != id);
-        before != self.highlights.len()
-    }
-
-    fn remove_note(&mut self, id: u64) -> bool {
-        let before = self.notes.len();
-        self.notes.retain(|note| note.id != id);
-        before != self.notes.len()
+    fn apply_note_snapshot(&mut self, id: u64, target: Option<Note>) {
+        replace_snapshot_by_id(&mut self.notes, id, target, |note| note.id);
+        self.notes.sort_by(|left, right| {
+            left.created
+                .cmp(&right.created)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.next_note_id = self.next_note_id.max(id.saturating_add(1));
     }
 
     fn sanitize(&mut self) {
@@ -1968,8 +2522,8 @@ impl Library {
         self.history.truncate(MAX_HISTORY_ENTRIES);
 
         self.bookmarks.retain_mut(|bookmark| {
-            bookmark.label = bookmark.label.trim().to_string();
-            !bookmark.path.as_os_str().is_empty() && !bookmark.label.is_empty()
+            bookmark.normalize();
+            bookmark.is_valid()
         });
         self.bookmarks.sort_by(|left, right| {
             right
@@ -1980,14 +2534,8 @@ impl Library {
         });
 
         self.highlights.retain_mut(|highlight| {
-            highlight.text = highlight.text.trim().to_string();
-            highlight.note = highlight.note.trim().to_string();
-            !highlight.path.as_os_str().is_empty()
-                && (!highlight.rects.is_empty()
-                    || highlight
-                        .semantic_range
-                        .as_ref()
-                        .is_some_and(valid_semantic_range))
+            highlight.normalize();
+            highlight.is_valid()
         });
         self.highlights.sort_by(|left, right| {
             left.created
@@ -1996,15 +2544,8 @@ impl Library {
         });
 
         self.notes.retain_mut(|note| {
-            note.text = note.text.trim().to_string();
-            note.body = note.body.trim().to_string();
-            !note.path.as_os_str().is_empty()
-                && (!note.rects.is_empty()
-                    || note
-                        .semantic_range
-                        .as_ref()
-                        .is_some_and(valid_semantic_range))
-                && !note.body.is_empty()
+            note.normalize();
+            note.is_valid()
         });
         self.notes.sort_by(|left, right| {
             left.created
@@ -3072,6 +3613,454 @@ mod tests {
     }
 
     #[test]
+    fn undo_and_redo_cover_persistent_document_edits() {
+        let database_path = temp_library_path("document-undo-redo");
+        let document_path = Path::new("/tmp/document-undo-redo.pdf");
+        let rect = HighlightRect {
+            page_idx: 0,
+            x0: 1.0,
+            y0: 2.0,
+            x1: 3.0,
+            y1: 4.0,
+        };
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+
+        let bookmark_id = store
+            .add_bookmark(document_path, "Chapter", position(1))
+            .unwrap();
+        let highlight = store
+            .add_highlight(
+                document_path,
+                HighlightColor::Yellow,
+                vec![rect],
+                "highlight",
+                "",
+            )
+            .unwrap();
+        assert!(
+            store
+                .set_highlight_color(highlight.id, HighlightColor::Blue)
+                .unwrap()
+        );
+        let note = store
+            .add_note(
+                document_path,
+                HighlightColor::Yellow,
+                vec![rect],
+                "note",
+                "before",
+            )
+            .unwrap();
+        assert!(
+            store
+                .update_note(note.id, "after", HighlightColor::Green)
+                .unwrap()
+        );
+        assert!(
+            store
+                .set_document_rotation(document_path, DocumentRotation::Degrees90)
+                .unwrap()
+        );
+
+        assert!(store.undo_document(document_path).unwrap());
+        assert_eq!(
+            store.document_rotation(document_path),
+            DocumentRotation::Degrees0
+        );
+        assert!(store.undo_document(document_path).unwrap());
+        assert_eq!(store.notes_for(document_path)[0].body, "before");
+        assert!(store.undo_document(document_path).unwrap());
+        assert!(store.notes_for(document_path).is_empty());
+        assert!(store.undo_document(document_path).unwrap());
+        assert_eq!(
+            store.highlights_for(document_path)[0].color,
+            HighlightColor::Yellow
+        );
+        assert!(store.undo_document(document_path).unwrap());
+        assert!(store.highlights_for(document_path).is_empty());
+        assert!(store.undo_document(document_path).unwrap());
+        assert!(store.bookmarks().is_empty());
+        assert!(!store.can_undo_document(document_path));
+        assert!(store.can_redo_document(document_path));
+
+        for _ in 0..6 {
+            assert!(store.redo_document(document_path).unwrap());
+        }
+        assert!(!store.can_redo_document(document_path));
+        assert_eq!(store.bookmarks()[0].id, bookmark_id);
+        assert_eq!(
+            store.highlights_for(document_path)[0],
+            Highlight {
+                color: HighlightColor::Blue,
+                ..highlight.clone()
+            }
+        );
+        assert_eq!(
+            store.notes_for(document_path)[0],
+            Note {
+                body: "after".to_string(),
+                color: HighlightColor::Green,
+                ..note
+            }
+        );
+        assert_eq!(
+            store.document_rotation(document_path),
+            DocumentRotation::Degrees90
+        );
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn undo_restores_deleted_objects_with_stable_ids() {
+        let database_path = temp_library_path("document-delete-undo");
+        let document_path = Path::new("/tmp/document-delete-undo.pdf");
+        let rect = HighlightRect {
+            page_idx: 0,
+            x0: 1.0,
+            y0: 2.0,
+            x1: 3.0,
+            y1: 4.0,
+        };
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let bookmark_id = store
+            .add_bookmark(document_path, "Bookmark", position(1))
+            .unwrap();
+        let highlight = store
+            .add_highlight(
+                document_path,
+                HighlightColor::Yellow,
+                vec![rect],
+                "highlight",
+                "",
+            )
+            .unwrap();
+        let note = store
+            .add_note(
+                document_path,
+                HighlightColor::Blue,
+                vec![rect],
+                "note",
+                "body",
+            )
+            .unwrap();
+
+        assert!(store.remove_bookmark(bookmark_id).unwrap());
+        assert!(store.undo_document(document_path).unwrap());
+        assert_eq!(store.bookmarks()[0].id, bookmark_id);
+        assert!(store.redo_document(document_path).unwrap());
+        assert!(store.bookmarks().is_empty());
+
+        assert!(store.remove_highlight(highlight.id).unwrap());
+        assert!(store.undo_document(document_path).unwrap());
+        assert_eq!(store.highlights_for(document_path)[0], highlight);
+        assert!(store.redo_document(document_path).unwrap());
+        assert!(store.highlights_for(document_path).is_empty());
+
+        assert!(store.remove_note(note.id).unwrap());
+        assert!(store.undo_document(document_path).unwrap());
+        assert_eq!(store.notes_for(document_path)[0], note);
+        assert!(store.redo_document(document_path).unwrap());
+        assert!(store.notes_for(document_path).is_empty());
+
+        let next_highlight = store
+            .add_highlight(document_path, HighlightColor::Green, vec![rect], "next", "")
+            .unwrap();
+        assert!(next_highlight.id > highlight.id);
+        assert!(!store.can_redo_document(document_path));
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn document_histories_are_independent_and_no_ops_preserve_redo() {
+        let database_path = temp_library_path("independent-document-undo");
+        let document_a = Path::new("/tmp/undo-a.pdf");
+        let document_b = Path::new("/tmp/undo-b.pdf");
+        let rect = HighlightRect {
+            page_idx: 0,
+            x0: 1.0,
+            y0: 2.0,
+            x1: 3.0,
+            y1: 4.0,
+        };
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let highlight_a = store
+            .add_highlight(document_a, HighlightColor::Yellow, vec![rect], "a", "")
+            .unwrap();
+        store
+            .add_highlight(document_b, HighlightColor::Blue, vec![rect], "b", "")
+            .unwrap();
+        assert!(
+            store
+                .set_highlight_color(highlight_a.id, HighlightColor::Green)
+                .unwrap()
+        );
+        assert!(store.undo_document(document_a).unwrap());
+        assert_eq!(
+            store.highlights_for(document_a)[0].color,
+            HighlightColor::Yellow
+        );
+        assert_eq!(store.highlights_for(document_b).len(), 1);
+        assert!(
+            !store
+                .set_highlight_color(highlight_a.id, HighlightColor::Yellow)
+                .unwrap()
+        );
+        assert!(store.can_redo_document(document_a));
+        assert!(store.redo_document(document_a).unwrap());
+        assert_eq!(
+            store.highlights_for(document_a)[0].color,
+            HighlightColor::Green
+        );
+        assert!(store.undo_document(document_a).unwrap());
+        store
+            .add_note(
+                document_a,
+                HighlightColor::Yellow,
+                vec![rect],
+                "note",
+                "body",
+            )
+            .unwrap();
+        assert!(!store.can_redo_document(document_a));
+        assert!(store.can_undo_document(document_b));
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn revisions_distinguish_document_content_from_global_bookmarks() {
+        let database_path = temp_library_path("document-edit-revisions");
+        let document_a = Path::new("/tmp/revision-a.pdf");
+        let document_b = Path::new("/tmp/revision-b.pdf");
+        let rect = HighlightRect {
+            page_idx: 0,
+            x0: 1.0,
+            y0: 2.0,
+            x1: 3.0,
+            y1: 4.0,
+        };
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+
+        let bookmark_id = store
+            .add_bookmark(document_b, "Bookmark", position(1))
+            .unwrap();
+        assert_eq!(
+            store.document_edit_revision(document_a),
+            DocumentEditRevision::default()
+        );
+        assert_eq!(
+            store.document_edit_revision(document_b),
+            DocumentEditRevision::default()
+        );
+        assert_eq!(store.bookmarks_revision(), 1);
+        assert!(store.remove_bookmark(bookmark_id).unwrap());
+        assert_eq!(store.bookmarks_revision(), 2);
+        assert!(store.undo_document(document_b).unwrap());
+        assert_eq!(store.bookmarks_revision(), 3);
+
+        store
+            .add_highlight(
+                document_a,
+                HighlightColor::Yellow,
+                vec![rect],
+                "highlight",
+                "",
+            )
+            .unwrap();
+        assert_eq!(
+            store.document_edit_revision(document_a),
+            DocumentEditRevision {
+                annotations: 1,
+                rotation: 0,
+            }
+        );
+        assert_eq!(
+            store.document_edit_revision(document_b),
+            DocumentEditRevision::default()
+        );
+        assert_eq!(store.bookmarks_revision(), 3);
+        assert!(
+            store
+                .set_document_rotation(document_a, DocumentRotation::Degrees90)
+                .unwrap()
+        );
+        assert_eq!(
+            store.document_edit_revision(document_a),
+            DocumentEditRevision {
+                annotations: 1,
+                rotation: 1,
+            }
+        );
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn per_document_history_drops_oldest_edits() {
+        let database_path = temp_library_path("document-edit-capacity");
+        let document_path = Path::new("/tmp/document-edit-capacity.pdf");
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+
+        for index in 0..MAX_DOCUMENT_EDIT_HISTORY_ENTRIES + 1 {
+            store
+                .add_bookmark(document_path, format!("Bookmark {index}"), position(index))
+                .unwrap();
+        }
+        for _ in 0..MAX_DOCUMENT_EDIT_HISTORY_ENTRIES {
+            assert!(store.undo_document(document_path).unwrap());
+        }
+        assert!(!store.undo_document(document_path).unwrap());
+        assert_eq!(store.bookmarks().len(), 1);
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn rotation_undo_preserves_other_document_preferences() {
+        let database_path = temp_library_path("rotation-undo-preferences");
+        let document_path = Path::new("/tmp/rotation-undo-preferences.epub");
+        let preferences = EpubReaderPreferences {
+            font_size: 19.0,
+            line_height: 1.6,
+            horizontal_margin: 32.0,
+            max_content_width: 720.0,
+            theme: glyphst_core::EpubTheme::Sepia,
+            use_publisher_styles: false,
+        };
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        store
+            .set_document_target_language(document_path, "ja")
+            .unwrap();
+        store
+            .set_epub_reader_preferences(document_path, preferences)
+            .unwrap();
+        assert!(
+            store
+                .set_document_rotation(document_path, DocumentRotation::Degrees180)
+                .unwrap()
+        );
+
+        assert!(store.undo_document(document_path).unwrap());
+        assert_eq!(
+            store.document_rotation(document_path),
+            DocumentRotation::Degrees0
+        );
+        assert_eq!(
+            store.document_target_language(document_path).as_deref(),
+            Some("ja")
+        );
+        assert_eq!(
+            store.epub_reader_preferences(document_path),
+            Some(preferences)
+        );
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn failed_edits_do_not_move_and_conflicts_clear_history() {
+        let document_path = Path::new("/tmp/failed-document-undo.pdf");
+        let rect = HighlightRect {
+            page_idx: 0,
+            x0: 1.0,
+            y0: 2.0,
+            x1: 3.0,
+            y1: 4.0,
+        };
+        let mut unavailable = LibraryStore {
+            library: Library::default(),
+            database: None,
+            startup_error: Some("database startup failed".to_string()),
+            document_edit_histories: HashMap::new(),
+            next_document_edit_sequence: 0,
+            bookmarks_revision: 0,
+        };
+        assert!(
+            unavailable
+                .add_highlight(
+                    document_path,
+                    HighlightColor::Yellow,
+                    vec![rect],
+                    "highlight",
+                    "",
+                )
+                .is_err()
+        );
+        assert!(unavailable.highlights_for(document_path).is_empty());
+        assert!(!unavailable.can_undo_document(document_path));
+
+        let database_path = temp_library_path("conflicting-document-undo");
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let note = store
+            .add_note(
+                document_path,
+                HighlightColor::Yellow,
+                vec![rect],
+                "note",
+                "body",
+            )
+            .unwrap();
+        assert!(
+            store
+                .update_note(note.id, "   ", HighlightColor::Blue)
+                .is_err()
+        );
+        assert_eq!(store.notes_for(document_path)[0], note);
+        assert!(store.undo_document(document_path).unwrap());
+        assert!(store.notes_for(document_path).is_empty());
+
+        let highlight = store
+            .add_highlight(
+                document_path,
+                HighlightColor::Yellow,
+                vec![rect],
+                "highlight",
+                "",
+            )
+            .unwrap();
+        store
+            .library
+            .highlights
+            .iter_mut()
+            .find(|stored| stored.id == highlight.id)
+            .unwrap()
+            .color = HighlightColor::Blue;
+        assert!(store.undo_document(document_path).is_err());
+        assert!(!store.can_undo_document(document_path));
+        assert!(!store.can_redo_document(document_path));
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn edit_history_is_bounded_and_not_persisted() {
+        let database_path = temp_library_path("bounded-document-undo");
+        let oldest_path = PathBuf::from("/tmp/bounded-document-0.pdf");
+        {
+            let mut store = LibraryStore::open(database_path.clone()).unwrap();
+            for index in 0..=MAX_DOCUMENT_EDIT_HISTORIES {
+                let path = PathBuf::from(format!("/tmp/bounded-document-{index}.pdf"));
+                store
+                    .add_bookmark(&path, format!("Bookmark {index}"), position(index))
+                    .unwrap();
+            }
+            assert!(!store.can_undo_document(&oldest_path));
+            assert!(store.can_undo_document(Path::new(&format!(
+                "/tmp/bounded-document-{}.pdf",
+                MAX_DOCUMENT_EDIT_HISTORIES
+            ))));
+        }
+
+        let store = LibraryStore::open(database_path.clone()).unwrap();
+        assert!(!store.can_undo_document(Path::new("/tmp/bounded-document-32.pdf")));
+        assert_eq!(store.bookmarks().len(), MAX_DOCUMENT_EDIT_HISTORIES + 1);
+
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
     fn loads_v1_ai_sessions_and_migrates_them_without_references() {
         let database_path = temp_library_path("ai-session-v1-compatibility");
         let document_path = PathBuf::from("/tmp/v1-session.pdf");
@@ -3572,6 +4561,9 @@ mod tests {
             library: Library::default(),
             database: None,
             startup_error: Some("database startup failed".to_string()),
+            document_edit_histories: HashMap::new(),
+            next_document_edit_sequence: 0,
+            bookmarks_revision: 0,
         };
         store.record_history(document_path, position(1));
 
@@ -3599,6 +4591,9 @@ mod tests {
             library: Library::default(),
             database: None,
             startup_error: Some("database startup failed".to_string()),
+            document_edit_histories: HashMap::new(),
+            next_document_edit_sequence: 0,
+            bookmarks_revision: 0,
         };
 
         let language_error = store

@@ -570,7 +570,7 @@ impl Pane {
             },
         )?;
         let pdf_view = cx.new(|cx| {
-            PdfView::register_cache_eviction(cx);
+            pdf_view.register_cache_eviction(cx);
             pdf_view.start_loading(cx);
             pdf_view
         });

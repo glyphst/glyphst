@@ -85,6 +85,8 @@ pub mod pdf_viewer {
         pdf_viewer,
         [
             CopySelection,
+            Undo,
+            Redo,
             SelectAll,
             ZoomIn,
             ZoomOut,

@@ -11,12 +11,12 @@ use glyphst_actions::{
         GridCursorDown, GridCursorLeft, GridCursorRight, GridCursorUp, GridOverviewConfirm,
         JumpBackward, JumpForward, NextHalfPage, NextPage, NextSearchResult, OpenBookmarks,
         OpenFile, OpenGoToPage, OpenHistory, OpenKeybindings, OpenNewTab, OpenNotes, OpenQuickAsk,
-        OpenSettings, OpenTranslationSplit, PrevSearchResult, PreviousHalfPage, PreviousPage,
+        OpenSettings, OpenTranslationSplit, PrevSearchResult, PreviousHalfPage, PreviousPage, Redo,
         Reload, ResetZoom, RotateClockwise, RotateCounterclockwise, ScrollLineDown, ScrollLineUp,
         Search, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette, ToggleFullScreen,
         ToggleGridOverview, ToggleNotes, TogglePinnedTranslation, TogglePresentationMode,
         TogglePublisherStyles, ToggleRegionSelection, ToggleThumbnailSidebar, ToggleToc,
-        ToggleTransparency, TranslateSelection, ZoomIn, ZoomOut,
+        ToggleTransparency, TranslateSelection, Undo, ZoomIn, ZoomOut,
     },
     search::{SearchInputCancel, SearchInputConfirm, SearchInputPrevious},
     settings_panel::PanelClose,
@@ -1234,6 +1234,24 @@ fn command_specs() -> &'static [CommandSpec] {
                     &["copy"],
                     true,
                 ),
+                spec::<Undo>(
+                    "undo",
+                    "Undo",
+                    KeyBindingCategory::PdfView,
+                    &["primary-z"],
+                    &["primary-z"],
+                    &["undo"],
+                    true,
+                ),
+                spec::<Redo>(
+                    "redo",
+                    "Redo",
+                    KeyBindingCategory::PdfView,
+                    &["primary-shift-z", "nonmac:ctrl-y"],
+                    &["primary-shift-z", "nonmac:ctrl-y"],
+                    &["redo"],
+                    true,
+                ),
                 spec::<TranslateSelection>(
                     "translate-selection",
                     "Translate Selection",
@@ -1987,6 +2005,51 @@ mod tests {
         keymap
     }
 
+    fn preset_keymap(preset: KeymapPreset) -> Keymap {
+        let mut bindings = Vec::new();
+
+        for spec in command_specs() {
+            let context =
+                Rc::new(KeyBindingContextPredicate::parse(&spec.category.predicate()).unwrap());
+            for keystrokes in default_keystrokes(spec, preset) {
+                bindings.push(
+                    KeyBinding::load(
+                        &keystrokes,
+                        (spec.build)(),
+                        Some(context.clone()),
+                        false,
+                        None,
+                        &DummyKeyboardMapper,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+
+        bindings.extend(
+            COMMON_TEXT_EDIT_BINDINGS
+                .iter()
+                .chain(PLATFORM_TEXT_EDIT_BINDINGS)
+                .map(|spec| {
+                    KeyBinding::load(
+                        &expand_platform_keystroke(spec.keystrokes),
+                        (spec.build)(),
+                        Some(Rc::new(
+                            KeyBindingContextPredicate::parse(spec.context).unwrap(),
+                        )),
+                        false,
+                        None,
+                        &DummyKeyboardMapper,
+                    )
+                    .unwrap()
+                }),
+        );
+
+        let mut keymap = Keymap::default();
+        keymap.add_bindings(bindings);
+        keymap
+    }
+
     fn first_action_for(keymap: &Keymap, keystrokes: &str, contexts: &[&str]) -> &'static str {
         let keystrokes = expand_platform_keystroke(keystrokes);
         let keystrokes = keystrokes
@@ -2095,5 +2158,65 @@ mod tests {
                 input::Redo::name_for_type()
             );
         }
+    }
+
+    #[test]
+    fn pdf_undo_redo_defaults_and_text_input_precedence() {
+        let undo_keystrokes = vec![expand_platform_keystroke("primary-z")];
+        let mut redo_keystrokes = vec![expand_platform_keystroke("primary-shift-z")];
+        if !cfg!(target_os = "macos") {
+            redo_keystrokes.push("ctrl-y".to_string());
+        }
+
+        for preset in [KeymapPreset::Modern, KeymapPreset::Vim] {
+            let rows = editable_bindings(preset, &[]);
+            let pdf_binding = |action| {
+                rows.iter()
+                    .find(|row| row.action == action && row.category == KeyBindingCategory::PdfView)
+                    .expect("PDF command binding should exist")
+            };
+
+            assert_eq!(pdf_binding("undo").keystrokes, undo_keystrokes);
+            assert_eq!(pdf_binding("redo").keystrokes, redo_keystrokes);
+
+            let keymap = preset_keymap(preset);
+            assert_eq!(
+                first_action_for(&keymap, "primary-z", &["PdfView"]),
+                Undo::name_for_type()
+            );
+            assert_eq!(
+                first_action_for(&keymap, "primary-shift-z", &["PdfView"]),
+                Redo::name_for_type()
+            );
+            assert_eq!(
+                first_action_for(&keymap, "primary-z", &["PdfView", "TextInput"]),
+                input::Undo::name_for_type()
+            );
+            assert_eq!(
+                first_action_for(&keymap, "primary-shift-z", &["PdfView", "TextInput"]),
+                input::Redo::name_for_type()
+            );
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                assert_eq!(
+                    first_action_for(&keymap, "ctrl-y", &["PdfView"]),
+                    Redo::name_for_type()
+                );
+                assert_eq!(
+                    first_action_for(&keymap, "ctrl-y", &["PdfView", "TextInput"]),
+                    input::Redo::name_for_type()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vim_ctrl_r_still_dispatches_reload() {
+        let keymap = preset_keymap(KeymapPreset::Vim);
+        assert_eq!(
+            first_action_for(&keymap, "ctrl-r", &["PdfView"]),
+            Reload::name_for_type()
+        );
     }
 }

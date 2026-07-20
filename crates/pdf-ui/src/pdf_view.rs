@@ -21,8 +21,8 @@ use crate::go_to_page::{GoToPagePrompt, GoToPagePromptDelegate};
 use crate::history::{HistoryPalette, HistoryPaletteDelegate};
 use crate::icons::{Icon, IconName};
 use crate::library::{
-    DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore, Note,
-    SemanticTextRange, SidebarWidths, normalize_path,
+    DocumentEditRevision, DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore,
+    Note, SemanticTextRange, SidebarWidths, normalize_path,
 };
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
 use crate::notes::{NotePaletteEntry, NotesPalette, NotesPaletteDelegate};
@@ -730,6 +730,15 @@ fn reset_translation_cards_for_document_replacement(
     }
 }
 
+fn retain_valid_annotation_id(id: &mut Option<u64>, valid_ids: &HashSet<u64>) -> bool {
+    if id.is_some_and(|id| !valid_ids.contains(&id)) {
+        *id = None;
+        true
+    } else {
+        false
+    }
+}
+
 enum NoteTarget {
     New {
         rects: Vec<HighlightRect>,
@@ -1048,6 +1057,8 @@ pub struct PdfView {
     context_menu_note: Option<u64>,
     context_menu_region: bool,
     context_menu_copy_submenu_open: bool,
+    document_edit_revision: DocumentEditRevision,
+    bookmarks_revision: u64,
     _image_clipboard: Option<Clipboard>,
     // Must drop after pending render tasks because they can hold document-backed display lists.
     _document: mupdf::Document,
@@ -2135,6 +2146,8 @@ impl PdfView {
             context_menu_note: None,
             context_menu_region: false,
             context_menu_copy_submenu_open: false,
+            document_edit_revision: DocumentEditRevision::default(),
+            bookmarks_revision: 0,
             _image_clipboard: None,
             _document: document,
         };
@@ -2146,7 +2159,11 @@ impl PdfView {
         Ok(view)
     }
 
-    pub fn register_cache_eviction(cx: &mut Context<Self>) {
+    pub fn register_cache_eviction(&mut self, cx: &mut Context<Self>) {
+        let store = cx.global::<LibraryStore>();
+        self.document_edit_revision = store.document_edit_revision(&self.path);
+        self.bookmarks_revision = store.bookmarks_revision();
+
         cx.on_release(|this, cx| {
             if cx.has_global::<RenderCache>() {
                 let mut doc_ids = Vec::with_capacity(2);
@@ -2178,6 +2195,11 @@ impl PdfView {
                 this.window_settings = window_settings;
             }
             cx.notify();
+        })
+        .detach();
+
+        cx.observe_global::<LibraryStore>(|this, cx| {
+            this.sync_document_edits_from_store(cx);
         })
         .detach();
     }
@@ -4589,6 +4611,120 @@ impl PdfView {
         }
     }
 
+    fn sync_document_edits_from_store(&mut self, cx: &mut Context<Self>) {
+        let (document_edit_revision, bookmarks_revision) = {
+            let store = cx.global::<LibraryStore>();
+            (
+                store.document_edit_revision(&self.path),
+                store.bookmarks_revision(),
+            )
+        };
+        let annotations_changed =
+            document_edit_revision.annotations != self.document_edit_revision.annotations;
+        let rotation_changed =
+            document_edit_revision.rotation != self.document_edit_revision.rotation;
+        let bookmarks_changed = bookmarks_revision != self.bookmarks_revision;
+        if !annotations_changed && !rotation_changed && !bookmarks_changed {
+            return;
+        }
+
+        self.document_edit_revision = document_edit_revision;
+        self.bookmarks_revision = bookmarks_revision;
+        let mut visible_state_changed = false;
+
+        if annotations_changed {
+            visible_state_changed = true;
+            let (highlights, notes) = {
+                let store = cx.global::<LibraryStore>();
+                (
+                    store.highlights_for(&self.path),
+                    store.notes_for(&self.path),
+                )
+            };
+            self.highlights = highlights;
+            self.notes = notes;
+            if self.capabilities.reflow && !self.glyphs.is_empty() {
+                self.refresh_semantic_annotations();
+            }
+
+            let highlight_ids = self
+                .highlights
+                .iter()
+                .map(|highlight| highlight.id)
+                .collect::<HashSet<_>>();
+            let note_ids = self
+                .notes
+                .iter()
+                .map(|note| note.id)
+                .collect::<HashSet<_>>();
+            retain_valid_annotation_id(&mut self.selected_highlight, &highlight_ids);
+            let stale_context_target = self
+                .context_menu_highlight
+                .is_some_and(|id| !highlight_ids.contains(&id))
+                || self
+                    .context_menu_note
+                    .is_some_and(|id| !note_ids.contains(&id));
+            if stale_context_target {
+                self.close_context_menu(cx);
+            }
+            if retain_valid_annotation_id(&mut self.hovered_note, &note_ids) {
+                self.hovered_note_position = None;
+            }
+            retain_valid_annotation_id(&mut self.notes_sidebar_selected, &note_ids);
+            if matches!(
+                self.note_target,
+                Some(NoteTarget::Edit { id }) if !note_ids.contains(&id)
+            ) {
+                self.note_target = None;
+            }
+            self.refresh_notes_sidebar_entries();
+            if let Some(palette) = self.notes_palette.clone() {
+                let entries = self.note_palette_entries();
+                palette.update(cx, |picker, cx| {
+                    picker.update_delegate(move |delegate| delegate.replace_entries(entries), cx);
+                });
+            }
+        }
+
+        if rotation_changed {
+            visible_state_changed = true;
+            let rotation = cx.global::<LibraryStore>().document_rotation(&self.path);
+            self.apply_stored_rotation(rotation, cx);
+        }
+
+        if bookmarks_changed && let Some(palette) = self.bookmark_palette.clone() {
+            visible_state_changed = true;
+            let (bookmarks, current_path) = {
+                let store = cx.global::<LibraryStore>();
+                (store.bookmarks().to_vec(), self.path.clone())
+            };
+            palette.update(cx, |picker, cx| {
+                picker.update_delegate(
+                    move |delegate| delegate.replace_bookmarks(bookmarks, current_path),
+                    cx,
+                );
+            });
+        }
+
+        if visible_state_changed {
+            cx.notify();
+        }
+    }
+
+    fn undo_document_edit(&mut self, cx: &mut Context<Self>) {
+        match cx.update_global::<LibraryStore, _>(|store, _| store.undo_document(&self.path)) {
+            Ok(_) => {}
+            Err(error) => eprintln!("failed to undo document edit: {error:#}"),
+        }
+    }
+
+    fn redo_document_edit(&mut self, cx: &mut Context<Self>) {
+        match cx.update_global::<LibraryStore, _>(|store, _| store.redo_document(&self.path)) {
+            Ok(_) => {}
+            Err(error) => eprintln!("failed to redo document edit: {error:#}"),
+        }
+    }
+
     pub fn set_translated_view(&mut self, translated: bool, cx: &mut Context<Self>) {
         if translated && !self.capabilities.translated_document {
             return;
@@ -4643,9 +4779,13 @@ impl PdfView {
         cx.notify();
     }
 
-    fn rotate_to(&mut self, rotation: DocumentRotation, cx: &mut Context<Self>) {
+    fn apply_stored_rotation(
+        &mut self,
+        rotation: DocumentRotation,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.rotation == rotation || self.capabilities.reflow {
-            return;
+            return false;
         }
         let anchor = self.viewport_center_pdf_anchor();
         self.set_rotation_state(rotation, cx);
@@ -4662,15 +4802,25 @@ impl PdfView {
             self.target_scroll_y_doc = self.scroll_y_doc;
             self.clamp_scroll();
         }
-        if let Err(error) = cx
-            .global_mut::<LibraryStore>()
-            .set_document_rotation(&self.path, self.rotation)
-        {
-            eprintln!("failed to save document rotation: {error:#}");
-        }
         self.schedule_position_save(cx);
-        self.emit_linked_viewport(cx);
-        cx.notify();
+        true
+    }
+
+    fn rotate_to(&mut self, rotation: DocumentRotation, cx: &mut Context<Self>) {
+        if self.rotation == rotation || self.capabilities.reflow {
+            return;
+        }
+        match cx.update_global::<LibraryStore, _>(|store, _| {
+            store.set_document_rotation(&self.path, rotation)
+        }) {
+            Ok(true) => {
+                self.apply_stored_rotation(rotation, cx);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("failed to save document rotation: {error:#}");
+            }
+        }
     }
 
     fn rotate_clockwise(&mut self, cx: &mut Context<Self>) {
@@ -7599,18 +7749,16 @@ impl PdfView {
             return;
         }
 
+        let path = self.path.clone();
         let result = if self.capabilities.reflow {
-            cx.global_mut::<LibraryStore>().add_reflow_highlight(
-                &self.path,
-                color,
-                self.semantic_range_for_selection(start, end),
-                rects,
-                text,
-                "",
-            )
+            let semantic_range = self.semantic_range_for_selection(start, end);
+            cx.update_global::<LibraryStore, _>(move |store, _| {
+                store.add_reflow_highlight(&path, color, semantic_range, rects, text, "")
+            })
         } else {
-            cx.global_mut::<LibraryStore>()
-                .add_highlight(&self.path, color, rects, text, "")
+            cx.update_global::<LibraryStore, _>(move |store, _| {
+                store.add_highlight(&path, color, rects, text, "")
+            })
         };
         match result {
             Ok(highlight) => {
@@ -7628,10 +7776,7 @@ impl PdfView {
             return;
         };
 
-        match cx
-            .global_mut::<LibraryStore>()
-            .set_highlight_color(id, color)
-        {
+        match cx.update_global::<LibraryStore, _>(|store, _| store.set_highlight_color(id, color)) {
             Ok(true) => {
                 if let Some(highlight) = self
                     .highlights
@@ -7653,7 +7798,7 @@ impl PdfView {
             return;
         };
 
-        match cx.global_mut::<LibraryStore>().remove_highlight(id) {
+        match cx.update_global::<LibraryStore, _>(|store, _| store.remove_highlight(id)) {
             Ok(true) => {
                 self.highlights.retain(|highlight| highlight.id != id);
                 if self.selected_highlight == Some(id) {
@@ -7766,18 +7911,15 @@ impl PdfView {
                 semantic_range,
                 text,
             } => {
+                let path = self.path.clone();
                 let result = if let Some(semantic_range) = semantic_range {
-                    cx.global_mut::<LibraryStore>().add_reflow_note(
-                        &self.path,
-                        color,
-                        semantic_range,
-                        rects,
-                        text,
-                        body,
-                    )
+                    cx.update_global::<LibraryStore, _>(move |store, _| {
+                        store.add_reflow_note(&path, color, semantic_range, rects, text, body)
+                    })
                 } else {
-                    cx.global_mut::<LibraryStore>()
-                        .add_note(&self.path, color, rects, text, body)
+                    cx.update_global::<LibraryStore, _>(move |store, _| {
+                        store.add_note(&path, color, rects, text, body)
+                    })
                 };
                 match result {
                     Ok(note) => {
@@ -7791,10 +7933,9 @@ impl PdfView {
                 }
             }
             NoteTarget::Edit { id } => {
-                match cx
-                    .global_mut::<LibraryStore>()
-                    .update_note(id, body.clone(), color)
-                {
+                match cx.update_global::<LibraryStore, _>(|store, _| {
+                    store.update_note(id, body.clone(), color)
+                }) {
                     Ok(true) => {
                         if let Some(note) = self.notes.iter_mut().find(|note| note.id == id) {
                             note.body = body;
@@ -7827,7 +7968,7 @@ impl PdfView {
             return;
         };
 
-        match cx.global_mut::<LibraryStore>().remove_note(id) {
+        match cx.update_global::<LibraryStore, _>(|store, _| store.remove_note(id)) {
             Ok(true) => {
                 self.notes.retain(|note| note.id != id);
                 if self.notes_sidebar_selected == Some(id) {
@@ -12615,6 +12756,12 @@ impl Render for PdfView {
                 "PdfView"
             })
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &Undo, _, cx| {
+                this.undo_document_edit(cx);
+            }))
+            .on_action(cx.listener(|this, _: &Redo, _, cx| {
+                this.redo_document_edit(cx);
+            }))
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| {
                 this.copy_selection(cx);
             }))
@@ -13335,13 +13482,13 @@ impl Render for PdfView {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashSet, sync::Arc};
 
     use super::{
         Glyph, PdfPage, PdfView, RegionDragState, RegionImageExport, RenderCache, RenderKey,
         SearchState, TextChunk, TextFormatBlock, TextIndexState, TextLine, TranslationCardState,
         TranslationStatus, clear_copied_region_selection,
-        reset_translation_cards_for_document_replacement,
+        reset_translation_cards_for_document_replacement, retain_valid_annotation_id,
     };
     use glyphst_ai::ai_chat::{MentionKind, MentionReference};
     use glyphst_core::{
@@ -13351,6 +13498,20 @@ mod tests {
     use image::{Frame, GenericImageView, RgbaImage};
     use mupdf::{Point, Quad, Rect};
     use smallvec::smallvec;
+
+    #[test]
+    fn annotation_reconciliation_clears_only_stale_ids() {
+        let valid_ids = HashSet::from([7, 11]);
+        let mut retained = Some(7);
+        let mut removed = Some(9);
+        let mut empty = None;
+
+        assert!(!retain_valid_annotation_id(&mut retained, &valid_ids));
+        assert_eq!(retained, Some(7));
+        assert!(retain_valid_annotation_id(&mut removed, &valid_ids));
+        assert_eq!(removed, None);
+        assert!(!retain_valid_annotation_id(&mut empty, &valid_ids));
+    }
 
     #[test]
     fn page_counter_uses_generated_pages_for_any_document_format() {

@@ -90,6 +90,11 @@ impl BookmarkPaletteDelegate {
             matches: Vec::new(),
         }
     }
+
+    pub fn replace_bookmarks(&mut self, bookmarks: Vec<Bookmark>, current_path: PathBuf) {
+        let pdf_view = self.pdf_view.clone();
+        *self = Self::new(pdf_view, bookmarks, current_path);
+    }
 }
 
 impl BookmarkPromptDelegate {
@@ -273,7 +278,7 @@ impl PickerDelegate for BookmarkPaletteDelegate {
             return;
         };
 
-        match cx.global_mut::<LibraryStore>().remove_bookmark(id) {
+        match cx.update_global::<LibraryStore, _>(|store, _| store.remove_bookmark(id)) {
             Ok(true) => self.entries.retain(|entry| entry.id != id),
             Ok(false) => {}
             Err(error) => eprintln!("failed to remove bookmark: {error:#}"),
@@ -337,10 +342,9 @@ impl PickerDelegate for BookmarkPromptDelegate {
             return;
         }
 
-        if let Err(error) =
-            cx.global_mut::<LibraryStore>()
-                .add_bookmark(&self.path, label, self.position.clone())
-        {
+        if let Err(error) = cx.update_global::<LibraryStore, _>(|store, _| {
+            store.add_bookmark(&self.path, label, self.position.clone())
+        }) {
             eprintln!("failed to add bookmark: {error:#}");
         }
     }

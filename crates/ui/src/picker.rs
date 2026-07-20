@@ -146,6 +146,12 @@ impl<D: PickerDelegate> Picker<D> {
         self.center_selected();
     }
 
+    pub fn update_delegate(&mut self, update: impl FnOnce(&mut D), cx: &mut Context<Self>) {
+        update(&mut self.delegate);
+        self.update_matches();
+        cx.notify();
+    }
+
     fn match_count(&self) -> usize {
         self.delegate.match_count()
     }
