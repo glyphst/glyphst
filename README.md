@@ -84,3 +84,9 @@ Clippy, and `cargo audit`; see `prek.toml`.
 ├── flake.nix               Optional Nix development shell
 └── prek.toml               Pre-commit hook configuration
 ```
+
+## Credits
+
+- Zed editor
+- Zathura
+- Sioyek
