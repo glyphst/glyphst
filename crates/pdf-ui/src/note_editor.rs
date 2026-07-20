@@ -6,6 +6,12 @@ use crate::{
     settings::{SettingsStore, ui_rems},
 };
 pub use glyphst_actions::note_editor::{NoteCancel, NoteSave};
+use glyphst_ui::text_edit::{
+    EditGroup, EditHistory, TextSnapshot, backward_word_deletion_start, forward_word_deletion_end,
+    line_end, line_start, next_grapheme_boundary, next_word_end, offset_from_utf16,
+    offset_to_utf16, previous_grapheme_boundary, previous_word_start, range_from_utf16,
+    range_to_utf16,
+};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
@@ -36,6 +42,7 @@ pub struct NoteEditor {
     last_lines: Vec<LaidOutLine>,
     last_bounds: Option<Bounds<Pixels>>,
     drag_origin: Option<GpuiPoint<Pixels>>,
+    history: EditHistory<TextSnapshot>,
 }
 
 struct LaidOutLine {
@@ -72,6 +79,7 @@ impl NoteEditor {
             last_lines: Vec::new(),
             last_bounds: None,
             drag_origin: None,
+            history: EditHistory::default(),
         }
     }
 
@@ -88,35 +96,128 @@ impl NoteEditor {
         cx.emit(NoteEditorEvent::Cancel);
     }
 
-    fn newline(&mut self, _: &input::Newline, window: &mut Window, cx: &mut Context<Self>) {
-        self.replace_text_in_range(None, "\n", window, cx);
+    fn newline(&mut self, _: &input::Newline, _: &mut Window, cx: &mut Context<Self>) {
+        self.replace_selected_text("\n", EditGroup::Isolated, cx);
     }
 
-    fn backspace(&mut self, _: &input::Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.select_to(self.previous_boundary(self.cursor_offset()), cx);
-        }
-        self.replace_text_in_range(None, "", window, cx);
+    fn backspace(&mut self, _: &input::Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        let (range, group) = if self.selected_range.is_empty() {
+            (
+                previous_grapheme_boundary(&self.content, self.cursor_offset())
+                    ..self.cursor_offset(),
+                EditGroup::Backspace,
+            )
+        } else {
+            (self.selected_range.clone(), EditGroup::Isolated)
+        };
+        self.replace_range(range, "", group, cx);
     }
 
-    fn delete(&mut self, _: &input::Delete, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.select_to(self.next_boundary(self.cursor_offset()), cx);
-        }
-        self.replace_text_in_range(None, "", window, cx);
+    fn delete(&mut self, _: &input::Delete, _: &mut Window, cx: &mut Context<Self>) {
+        let (range, group) = if self.selected_range.is_empty() {
+            (
+                self.cursor_offset()..next_grapheme_boundary(&self.content, self.cursor_offset()),
+                EditGroup::Delete,
+            )
+        } else {
+            (self.selected_range.clone(), EditGroup::Isolated)
+        };
+        self.replace_range(range, "", group, cx);
+    }
+
+    fn delete_word_backward(
+        &mut self,
+        _: &input::DeleteWordBackward,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = if self.selected_range.is_empty() {
+            note_word_deletion_start(&self.content, self.cursor_offset())..self.cursor_offset()
+        } else {
+            self.selected_range.clone()
+        };
+        self.replace_range(range, "", EditGroup::Isolated, cx);
+    }
+
+    fn delete_word_forward(
+        &mut self,
+        _: &input::DeleteWordForward,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = if self.selected_range.is_empty() {
+            self.cursor_offset()..note_word_deletion_end(&self.content, self.cursor_offset())
+        } else {
+            self.selected_range.clone()
+        };
+        self.replace_range(range, "", EditGroup::Isolated, cx);
+    }
+
+    fn delete_to_line_start(
+        &mut self,
+        _: &input::DeleteToLineStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = if self.selected_range.is_empty() {
+            line_start(&self.content, self.cursor_offset())..self.cursor_offset()
+        } else {
+            self.selected_range.clone()
+        };
+        self.replace_range(range, "", EditGroup::Isolated, cx);
+    }
+
+    fn delete_to_line_end(
+        &mut self,
+        _: &input::DeleteToLineEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = if self.selected_range.is_empty() {
+            self.cursor_offset()..line_end(&self.content, self.cursor_offset())
+        } else {
+            self.selected_range.clone()
+        };
+        self.replace_range(range, "", EditGroup::Isolated, cx);
     }
 
     fn left(&mut self, _: &input::Left, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
         if self.selected_range.is_empty() {
-            self.move_to(self.previous_boundary(self.cursor_offset()), cx);
+            self.move_to(
+                previous_grapheme_boundary(&self.content, self.cursor_offset()),
+                cx,
+            );
         } else {
             self.move_to(self.selected_range.start, cx);
         }
     }
 
     fn right(&mut self, _: &input::Right, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
         if self.selected_range.is_empty() {
-            self.move_to(self.next_boundary(self.selected_range.end), cx);
+            self.move_to(
+                next_grapheme_boundary(&self.content, self.selected_range.end),
+                cx,
+            );
+        } else {
+            self.move_to(self.selected_range.end, cx);
+        }
+    }
+
+    fn word_left(&mut self, _: &input::WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
+        if self.selected_range.is_empty() {
+            self.move_to(previous_word_start(&self.content, self.cursor_offset()), cx);
+        } else {
+            self.move_to(self.selected_range.start, cx);
+        }
+    }
+
+    fn word_right(&mut self, _: &input::WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
+        if self.selected_range.is_empty() {
+            self.move_to(next_word_end(&self.content, self.cursor_offset()), cx);
         } else {
             self.move_to(self.selected_range.end, cx);
         }
@@ -131,24 +232,65 @@ impl NoteEditor {
     }
 
     fn home(&mut self, _: &input::Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.line_start_offset(), cx);
+        self.history.break_group();
+        self.move_to(line_start(&self.content, self.cursor_offset()), cx);
     }
 
     fn end(&mut self, _: &input::End, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.line_end_offset(), cx);
+        self.history.break_group();
+        self.move_to(line_end(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn document_start(&mut self, _: &input::DocumentStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
+        self.move_to(0, cx);
+    }
+
+    fn document_end(&mut self, _: &input::DocumentEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
+        self.move_to(self.content.len(), cx);
     }
 
     fn select_all(&mut self, _: &input::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
 
     fn select_left(&mut self, _: &input::SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.previous_boundary(self.cursor_offset()), cx);
+        self.history.break_group();
+        self.select_to(
+            previous_grapheme_boundary(&self.content, self.cursor_offset()),
+            cx,
+        );
     }
 
     fn select_right(&mut self, _: &input::SelectRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.next_boundary(self.cursor_offset()), cx);
+        self.history.break_group();
+        self.select_to(
+            next_grapheme_boundary(&self.content, self.cursor_offset()),
+            cx,
+        );
+    }
+
+    fn select_word_left(
+        &mut self,
+        _: &input::SelectWordLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.history.break_group();
+        self.select_to(previous_word_start(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(
+        &mut self,
+        _: &input::SelectWordRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.history.break_group();
+        self.select_to(next_word_end(&self.content, self.cursor_offset()), cx);
     }
 
     fn select_up(&mut self, _: &input::SelectUp, window: &mut Window, cx: &mut Context<Self>) {
@@ -160,27 +302,63 @@ impl NoteEditor {
     }
 
     fn select_home(&mut self, _: &input::SelectHome, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.line_start_offset(), cx);
+        self.history.break_group();
+        self.select_to(line_start(&self.content, self.cursor_offset()), cx);
     }
 
     fn select_end(&mut self, _: &input::SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.line_end_offset(), cx);
+        self.history.break_group();
+        self.select_to(line_end(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_document_start(
+        &mut self,
+        _: &input::SelectDocumentStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.history.break_group();
+        self.select_to(0, cx);
+    }
+
+    fn select_document_end(
+        &mut self,
+        _: &input::SelectDocumentEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.history.break_group();
+        self.select_to(self.content.len(), cx);
     }
 
     fn copy(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
         self.copy_selected_text(cx);
     }
 
-    fn cut(&mut self, _: &input::Cut, window: &mut Window, cx: &mut Context<Self>) {
+    fn cut(&mut self, _: &input::Cut, _: &mut Window, cx: &mut Context<Self>) {
         if self.copy_selected_text(cx) {
-            self.replace_text_in_range(None, "", window, cx);
+            self.replace_selected_text("", EditGroup::Isolated, cx);
         }
     }
 
-    fn paste(&mut self, _: &input::Paste, window: &mut Window, cx: &mut Context<Self>) {
+    fn paste(&mut self, _: &input::Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace("\r\n", "\n").replace('\r', "\n");
-            self.replace_text_in_range(None, &text, window, cx);
+            self.replace_selected_text(&text, EditGroup::Isolated, cx);
+        }
+    }
+
+    fn undo(&mut self, _: &input::Undo, _: &mut Window, cx: &mut Context<Self>) {
+        let current = self.snapshot();
+        if let Some(snapshot) = self.history.undo(current) {
+            self.restore_snapshot(snapshot, cx);
+        }
+    }
+
+    fn redo(&mut self, _: &input::Redo, _: &mut Window, cx: &mut Context<Self>) {
+        let current = self.snapshot();
+        if let Some(snapshot) = self.history.redo(current) {
+            self.restore_snapshot(snapshot, cx);
         }
     }
 
@@ -199,6 +377,7 @@ impl NoteEditor {
     ) {
         self.focus_handle.focus(window, cx);
         self.drag_origin = Some(event.position);
+        self.history.break_group();
 
         let offset = self.index_for_mouse_position(event.position, window);
         if event.modifiers.shift {
@@ -237,6 +416,7 @@ impl NoteEditor {
         };
 
         if should_select {
+            self.history.break_group();
             self.select_to(self.index_for_mouse_position(event.position, window), cx);
             cx.stop_propagation();
         }
@@ -245,6 +425,7 @@ impl NoteEditor {
     fn cancel_selection(&mut self, cx: &mut Context<Self>) {
         self.drag_origin = None;
         if !self.selected_range.is_empty() {
+            self.history.break_group();
             self.move_to(self.cursor_offset(), cx);
         }
     }
@@ -287,6 +468,7 @@ impl NoteEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.history.break_group();
         let (Some(bounds), Some(cursor)) = (
             self.last_bounds,
             self.position_for_offset(self.cursor_offset(), window),
@@ -307,22 +489,6 @@ impl NoteEditor {
         }
     }
 
-    fn line_start_offset(&self) -> usize {
-        let cursor = self.cursor_offset();
-        self.content[..cursor]
-            .rfind('\n')
-            .map(|ix| ix + '\n'.len_utf8())
-            .unwrap_or(0)
-    }
-
-    fn line_end_offset(&self) -> usize {
-        let cursor = self.cursor_offset();
-        self.content[cursor..]
-            .find('\n')
-            .map(|ix| cursor + ix)
-            .unwrap_or(self.content.len())
-    }
-
     fn copy_selected_text(&self, cx: &mut Context<Self>) -> bool {
         if self.selected_range.is_empty() {
             return false;
@@ -332,6 +498,51 @@ impl NoteEditor {
             self.content[self.selected_range.clone()].to_string(),
         ));
         true
+    }
+
+    fn snapshot(&self) -> TextSnapshot {
+        TextSnapshot::new(
+            self.content.clone(),
+            self.selected_range.clone(),
+            self.selection_reversed,
+            self.marked_range.clone(),
+        )
+    }
+
+    fn restore_snapshot(&mut self, snapshot: TextSnapshot, cx: &mut Context<Self>) {
+        self.content = snapshot.content;
+        self.selected_range = snapshot.selected_range;
+        self.selection_reversed = snapshot.selection_reversed;
+        self.marked_range = snapshot.marked_range;
+        cx.notify();
+    }
+
+    fn replace_selected_text(&mut self, new_text: &str, group: EditGroup, cx: &mut Context<Self>) {
+        let range = self
+            .marked_range
+            .clone()
+            .unwrap_or_else(|| self.selected_range.clone());
+        self.replace_range(range, new_text, group, cx);
+    }
+
+    fn replace_range(
+        &mut self,
+        range: Range<usize>,
+        new_text: &str,
+        group: EditGroup,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.snapshot();
+        self.content =
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
+        let cursor = range.start + new_text.len();
+        self.selected_range = cursor..cursor;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        let after = self.snapshot();
+        self.history.record(before, &after, group);
+        cx.notify();
     }
 
     fn index_for_mouse_position(&self, position: GpuiPoint<Pixels>, window: &mut Window) -> usize {
@@ -388,37 +599,6 @@ impl NoteEditor {
                 .map(|position| point(position.x, line_top + position.y))
         })
     }
-
-    fn offset_from_utf16(&self, offset: usize) -> usize {
-        offset_from_utf16_in_text(&self.content, offset)
-    }
-
-    fn offset_to_utf16(&self, offset: usize) -> usize {
-        offset_to_utf16_in_text(&self.content, offset)
-    }
-
-    fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
-    }
-
-    fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
-        self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
-    }
-
-    fn previous_boundary(&self, offset: usize) -> usize {
-        self.content
-            .char_indices()
-            .rev()
-            .find_map(|(idx, _)| (idx < offset).then_some(idx))
-            .unwrap_or(0)
-    }
-
-    fn next_boundary(&self, offset: usize) -> usize {
-        self.content
-            .char_indices()
-            .find_map(|(idx, _)| (idx > offset).then_some(idx))
-            .unwrap_or(self.content.len())
-    }
 }
 
 impl EntityInputHandler for NoteEditor {
@@ -429,8 +609,8 @@ impl EntityInputHandler for NoteEditor {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
-        let range = self.range_from_utf16(&range_utf16);
-        actual_range.replace(self.range_to_utf16(&range));
+        let range = range_from_utf16(&self.content, &range_utf16);
+        actual_range.replace(range_to_utf16(&self.content, &range));
         Some(self.content[range].to_string())
     }
 
@@ -441,7 +621,7 @@ impl EntityInputHandler for NoteEditor {
         _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
         Some(UTF16Selection {
-            range: self.range_to_utf16(&self.selected_range),
+            range: range_to_utf16(&self.content, &self.selected_range),
             reversed: self.selection_reversed,
         })
     }
@@ -449,11 +629,12 @@ impl EntityInputHandler for NoteEditor {
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
         self.marked_range
             .as_ref()
-            .map(|range| self.range_to_utf16(range))
+            .map(|range| range_to_utf16(&self.content, range))
     }
 
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
         self.marked_range = None;
+        self.history.break_group();
     }
 
     fn replace_text_in_range(
@@ -463,19 +644,17 @@ impl EntityInputHandler for NoteEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let group = if self.marked_range.is_some() {
+            EditGroup::Composition
+        } else {
+            EditGroup::Typing
+        };
         let range = range_utf16
             .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
+            .map(|range_utf16| range_from_utf16(&self.content, range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
-        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
-        self.selection_reversed = false;
-        self.marked_range.take();
-        cx.notify();
+        self.replace_range(range, new_text, group, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -488,10 +667,11 @@ impl EntityInputHandler for NoteEditor {
     ) {
         let range = range_utf16
             .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
+            .map(|range_utf16| range_from_utf16(&self.content, range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let selected_range_start = range.start;
+        let before = self.snapshot();
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -501,12 +681,14 @@ impl EntityInputHandler for NoteEditor {
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| {
-                let start = offset_from_utf16_in_text(new_text, range_utf16.start);
-                let end = offset_from_utf16_in_text(new_text, range_utf16.end);
+                let start = offset_from_utf16(new_text, range_utf16.start);
+                let end = offset_from_utf16(new_text, range_utf16.end);
                 selected_range_start + start..selected_range_start + end
             })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         self.selection_reversed = false;
+        let after = self.snapshot();
+        self.history.record(before, &after, EditGroup::Composition);
         cx.notify();
     }
 
@@ -517,7 +699,7 @@ impl EntityInputHandler for NoteEditor {
         window: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let range = self.range_from_utf16(&range_utf16);
+        let range = range_from_utf16(&self.content, &range_utf16);
         let start = self.position_for_offset(range.start, window)?;
         let end = self.position_for_offset(range.end, window)?;
         Some(Bounds::from_corners(
@@ -535,7 +717,10 @@ impl EntityInputHandler for NoteEditor {
         window: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<usize> {
-        Some(self.offset_to_utf16(self.index_for_mouse_position(point, window)))
+        Some(offset_to_utf16(
+            &self.content,
+            self.index_for_mouse_position(point, window),
+        ))
     }
 }
 
@@ -597,22 +782,36 @@ impl Render for NoteEditor {
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::delete_word_backward))
+            .on_action(cx.listener(Self::delete_word_forward))
+            .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::delete_to_line_end))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::document_start))
+            .on_action(cx.listener(Self::document_end))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::select_up))
             .on_action(cx.listener(Self::select_down))
             .on_action(cx.listener(Self::select_home))
             .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::select_document_start))
+            .on_action(cx.listener(Self::select_document_end))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .child(
                 div()
                     .flex()
@@ -860,6 +1059,14 @@ impl Element for NoteTextElement {
     }
 }
 
+fn note_word_deletion_start(text: &str, offset: usize) -> usize {
+    backward_word_deletion_start(text, offset).max(line_start(text, offset))
+}
+
+fn note_word_deletion_end(text: &str, offset: usize) -> usize {
+    forward_word_deletion_end(text, offset).min(line_end(text, offset))
+}
+
 fn line_starts(text: &str) -> impl Iterator<Item = usize> + '_ {
     std::iter::once(0).chain(
         text.char_indices()
@@ -952,32 +1159,16 @@ fn selection_quads(
     quads
 }
 
-fn offset_from_utf16_in_text(text: &str, offset: usize) -> usize {
-    let mut utf8_offset = 0;
-    let mut utf16_count = 0;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for ch in text.chars() {
-        if utf16_count >= offset {
-            break;
-        }
-        utf16_count += ch.len_utf16();
-        utf8_offset += ch.len_utf8();
+    #[test]
+    fn word_deletion_does_not_cross_logical_lines() {
+        let text = "first\nsecond";
+        let second_start = "first\n".len();
+
+        assert_eq!(note_word_deletion_start(text, second_start), second_start);
+        assert_eq!(note_word_deletion_end(text, "first".len()), "first".len());
     }
-
-    utf8_offset
-}
-
-fn offset_to_utf16_in_text(text: &str, offset: usize) -> usize {
-    let mut utf16_offset = 0;
-    let mut utf8_count = 0;
-
-    for ch in text.chars() {
-        if utf8_count >= offset {
-            break;
-        }
-        utf8_count += ch.len_utf8();
-        utf16_offset += ch.len_utf16();
-    }
-
-    utf16_offset
 }

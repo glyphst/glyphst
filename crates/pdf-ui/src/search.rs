@@ -9,6 +9,11 @@ use crate::{
     text_input::SingleLineTextElement,
 };
 pub use glyphst_actions::search::{SearchInputCancel, SearchInputConfirm, SearchInputPrevious};
+use glyphst_ui::text_edit::{
+    EditGroup, EditHistory, TextSnapshot, backward_word_deletion_start, forward_word_deletion_end,
+    next_grapheme_boundary, next_word_end, offset_from_utf16, offset_to_utf16,
+    previous_grapheme_boundary, previous_word_start, range_from_utf16, range_to_utf16,
+};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
@@ -49,6 +54,7 @@ pub struct SearchBar {
     ignore_case: bool,
     indexing: bool,
     search_debounce: Option<Task<()>>,
+    history: EditHistory<TextSnapshot>,
 }
 
 impl SearchBar {
@@ -82,6 +88,7 @@ impl SearchBar {
             ignore_case,
             indexing,
             search_debounce: None,
+            history: EditHistory::default(),
         }
     }
 
@@ -166,39 +173,116 @@ impl SearchBar {
     }
 
     fn left(&mut self, _: &input::Left, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
         if self.selected_range.is_empty() {
-            self.move_to(self.previous_boundary(self.cursor_offset()), cx);
+            self.move_to(
+                previous_grapheme_boundary(&self.content, self.cursor_offset()),
+                cx,
+            );
         } else {
             self.move_to(self.selected_range.start, cx);
         }
     }
 
     fn right(&mut self, _: &input::Right, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
         if self.selected_range.is_empty() {
-            self.move_to(self.next_boundary(self.selected_range.end), cx);
+            self.move_to(
+                next_grapheme_boundary(&self.content, self.selected_range.end),
+                cx,
+            );
+        } else {
+            self.move_to(self.selected_range.end, cx);
+        }
+    }
+
+    fn word_left(&mut self, _: &input::WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
+        if self.selected_range.is_empty() {
+            self.move_to(previous_word_start(&self.content, self.cursor_offset()), cx);
+        } else {
+            self.move_to(self.selected_range.start, cx);
+        }
+    }
+
+    fn word_right(&mut self, _: &input::WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
+        if self.selected_range.is_empty() {
+            self.move_to(next_word_end(&self.content, self.cursor_offset()), cx);
         } else {
             self.move_to(self.selected_range.end, cx);
         }
     }
 
     fn select_all(&mut self, _: &input::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
 
     fn select_left(&mut self, _: &input::SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.previous_boundary(self.cursor_offset()), cx);
+        self.history.break_group();
+        self.select_to(
+            previous_grapheme_boundary(&self.content, self.cursor_offset()),
+            cx,
+        );
     }
 
     fn select_right(&mut self, _: &input::SelectRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.next_boundary(self.cursor_offset()), cx);
+        self.history.break_group();
+        self.select_to(
+            next_grapheme_boundary(&self.content, self.cursor_offset()),
+            cx,
+        );
+    }
+
+    fn select_word_left(
+        &mut self,
+        _: &input::SelectWordLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.history.break_group();
+        self.select_to(previous_word_start(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(
+        &mut self,
+        _: &input::SelectWordRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.history.break_group();
+        self.select_to(next_word_end(&self.content, self.cursor_offset()), cx);
     }
 
     fn select_home(&mut self, _: &input::SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
         self.select_to(0, cx);
     }
 
     fn select_end(&mut self, _: &input::SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
+        self.select_to(self.content.len(), cx);
+    }
+
+    fn select_document_start(
+        &mut self,
+        _: &input::SelectDocumentStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.history.break_group();
+        self.select_to(0, cx);
+    }
+
+    fn select_document_end(
+        &mut self,
+        _: &input::SelectDocumentEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.history.break_group();
         self.select_to(self.content.len(), cx);
     }
 
@@ -206,38 +290,131 @@ impl SearchBar {
         self.copy_selected_text(cx);
     }
 
-    fn cut(&mut self, _: &input::Cut, window: &mut Window, cx: &mut Context<Self>) {
+    fn cut(&mut self, _: &input::Cut, _: &mut Window, cx: &mut Context<Self>) {
         if self.copy_selected_text(cx) {
-            self.replace_text_in_range(None, "", window, cx);
+            self.replace_selected_text("", EditGroup::Isolated, cx);
         }
     }
 
     fn home(&mut self, _: &input::Home, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
         self.move_to(0, cx);
     }
 
     fn end(&mut self, _: &input::End, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
         self.move_to(self.content.len(), cx);
     }
 
-    fn backspace(&mut self, _: &input::Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.select_to(self.previous_boundary(self.cursor_offset()), cx);
-        }
-        self.replace_text_in_range(None, "", window, cx);
+    fn document_start(&mut self, _: &input::DocumentStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
+        self.move_to(0, cx);
     }
 
-    fn delete(&mut self, _: &input::Delete, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.select_to(self.next_boundary(self.cursor_offset()), cx);
-        }
-        self.replace_text_in_range(None, "", window, cx);
+    fn document_end(&mut self, _: &input::DocumentEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
+        self.move_to(self.content.len(), cx);
     }
 
-    fn paste(&mut self, _: &input::Paste, window: &mut Window, cx: &mut Context<Self>) {
+    fn backspace(&mut self, _: &input::Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        let (range, group) = if self.selected_range.is_empty() {
+            (
+                previous_grapheme_boundary(&self.content, self.cursor_offset())
+                    ..self.cursor_offset(),
+                EditGroup::Backspace,
+            )
+        } else {
+            (self.selected_range.clone(), EditGroup::Isolated)
+        };
+        self.replace_range(range, "", group, cx);
+    }
+
+    fn delete(&mut self, _: &input::Delete, _: &mut Window, cx: &mut Context<Self>) {
+        let (range, group) = if self.selected_range.is_empty() {
+            (
+                self.cursor_offset()..next_grapheme_boundary(&self.content, self.cursor_offset()),
+                EditGroup::Delete,
+            )
+        } else {
+            (self.selected_range.clone(), EditGroup::Isolated)
+        };
+        self.replace_range(range, "", group, cx);
+    }
+
+    fn delete_word_backward(
+        &mut self,
+        _: &input::DeleteWordBackward,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = if self.selected_range.is_empty() {
+            backward_word_deletion_start(&self.content, self.cursor_offset())..self.cursor_offset()
+        } else {
+            self.selected_range.clone()
+        };
+        self.replace_range(range, "", EditGroup::Isolated, cx);
+    }
+
+    fn delete_word_forward(
+        &mut self,
+        _: &input::DeleteWordForward,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = if self.selected_range.is_empty() {
+            self.cursor_offset()..forward_word_deletion_end(&self.content, self.cursor_offset())
+        } else {
+            self.selected_range.clone()
+        };
+        self.replace_range(range, "", EditGroup::Isolated, cx);
+    }
+
+    fn delete_to_line_start(
+        &mut self,
+        _: &input::DeleteToLineStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = if self.selected_range.is_empty() {
+            0..self.cursor_offset()
+        } else {
+            self.selected_range.clone()
+        };
+        self.replace_range(range, "", EditGroup::Isolated, cx);
+    }
+
+    fn delete_to_line_end(
+        &mut self,
+        _: &input::DeleteToLineEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = if self.selected_range.is_empty() {
+            self.cursor_offset()..self.content.len()
+        } else {
+            self.selected_range.clone()
+        };
+        self.replace_range(range, "", EditGroup::Isolated, cx);
+    }
+
+    fn paste(&mut self, _: &input::Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace(['\n', '\r'], " ");
-            self.replace_text_in_range(None, &text, window, cx);
+            self.replace_selected_text(&text, EditGroup::Isolated, cx);
+        }
+    }
+
+    fn undo(&mut self, _: &input::Undo, _: &mut Window, cx: &mut Context<Self>) {
+        let current = self.snapshot();
+        if let Some(snapshot) = self.history.undo(current) {
+            self.restore_snapshot(snapshot, cx);
+        }
+    }
+
+    fn redo(&mut self, _: &input::Redo, _: &mut Window, cx: &mut Context<Self>) {
+        let current = self.snapshot();
+        if let Some(snapshot) = self.history.redo(current) {
+            self.restore_snapshot(snapshot, cx);
         }
     }
 
@@ -249,6 +426,7 @@ impl SearchBar {
     ) {
         self.focus_handle.focus(window, cx);
         self.drag_origin = Some(event.position);
+        self.history.break_group();
 
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
@@ -270,6 +448,7 @@ impl SearchBar {
     fn cancel_selection(&mut self, cx: &mut Context<Self>) {
         self.drag_origin = None;
         if !self.selected_range.is_empty() {
+            self.history.break_group();
             self.move_to(self.cursor_offset(), cx);
         }
     }
@@ -334,57 +513,51 @@ impl SearchBar {
         true
     }
 
-    fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf8_offset = 0;
-        let mut utf16_count = 0;
-
-        for ch in self.content.chars() {
-            if utf16_count >= offset {
-                break;
-            }
-            utf16_count += ch.len_utf16();
-            utf8_offset += ch.len_utf8();
-        }
-
-        utf8_offset
+    fn snapshot(&self) -> TextSnapshot {
+        TextSnapshot::new(
+            self.content.clone(),
+            self.selected_range.clone(),
+            self.selection_reversed,
+            self.marked_range.clone(),
+        )
     }
 
-    fn offset_to_utf16(&self, offset: usize) -> usize {
-        let mut utf16_offset = 0;
-        let mut utf8_count = 0;
-
-        for ch in self.content.chars() {
-            if utf8_count >= offset {
-                break;
-            }
-            utf8_count += ch.len_utf8();
-            utf16_offset += ch.len_utf16();
-        }
-
-        utf16_offset
+    fn restore_snapshot(&mut self, snapshot: TextSnapshot, cx: &mut Context<Self>) {
+        self.content = snapshot.content;
+        self.selected_range = snapshot.selected_range;
+        self.selection_reversed = snapshot.selection_reversed;
+        self.marked_range = snapshot.marked_range;
+        self.schedule_query(cx);
+        cx.notify();
     }
 
-    fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
+    fn replace_selected_text(&mut self, new_text: &str, group: EditGroup, cx: &mut Context<Self>) {
+        let range = self
+            .marked_range
+            .clone()
+            .unwrap_or_else(|| self.selected_range.clone());
+        self.replace_range(range, new_text, group, cx);
     }
 
-    fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
-        self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
-    }
-
-    fn previous_boundary(&self, offset: usize) -> usize {
-        self.content
-            .char_indices()
-            .rev()
-            .find_map(|(idx, _)| (idx < offset).then_some(idx))
-            .unwrap_or(0)
-    }
-
-    fn next_boundary(&self, offset: usize) -> usize {
-        self.content
-            .char_indices()
-            .find_map(|(idx, _)| (idx > offset).then_some(idx))
-            .unwrap_or(self.content.len())
+    fn replace_range(
+        &mut self,
+        range: Range<usize>,
+        new_text: &str,
+        group: EditGroup,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.snapshot();
+        self.content =
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
+        let cursor = range.start + new_text.len();
+        self.selected_range = cursor..cursor;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        let after = self.snapshot();
+        self.history.record(before, &after, group);
+        self.schedule_query(cx);
+        cx.notify();
     }
 
     fn counter_text(&self) -> String {
@@ -407,8 +580,8 @@ impl EntityInputHandler for SearchBar {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
-        let range = self.range_from_utf16(&range_utf16);
-        actual_range.replace(self.range_to_utf16(&range));
+        let range = range_from_utf16(&self.content, &range_utf16);
+        actual_range.replace(range_to_utf16(&self.content, &range));
         Some(self.content[range].to_string())
     }
 
@@ -419,7 +592,7 @@ impl EntityInputHandler for SearchBar {
         _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
         Some(UTF16Selection {
-            range: self.range_to_utf16(&self.selected_range),
+            range: range_to_utf16(&self.content, &self.selected_range),
             reversed: self.selection_reversed,
         })
     }
@@ -427,11 +600,12 @@ impl EntityInputHandler for SearchBar {
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
         self.marked_range
             .as_ref()
-            .map(|range| self.range_to_utf16(range))
+            .map(|range| range_to_utf16(&self.content, range))
     }
 
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
         self.marked_range = None;
+        self.history.break_group();
     }
 
     fn replace_text_in_range(
@@ -441,20 +615,17 @@ impl EntityInputHandler for SearchBar {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let group = if self.marked_range.is_some() {
+            EditGroup::Composition
+        } else {
+            EditGroup::Typing
+        };
         let range = range_utf16
             .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
+            .map(|range_utf16| range_from_utf16(&self.content, range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
-        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
-        self.selection_reversed = false;
-        self.marked_range.take();
-        self.schedule_query(cx);
-        cx.notify();
+        self.replace_range(range, new_text, group, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -467,10 +638,11 @@ impl EntityInputHandler for SearchBar {
     ) {
         let range = range_utf16
             .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
+            .map(|range_utf16| range_from_utf16(&self.content, range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let selected_range_start = range.start;
+        let before = self.snapshot();
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -480,12 +652,14 @@ impl EntityInputHandler for SearchBar {
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| {
-                let start = offset_from_utf16_in_text(new_text, range_utf16.start);
-                let end = offset_from_utf16_in_text(new_text, range_utf16.end);
+                let start = offset_from_utf16(new_text, range_utf16.start);
+                let end = offset_from_utf16(new_text, range_utf16.end);
                 selected_range_start + start..selected_range_start + end
             })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         self.selection_reversed = false;
+        let after = self.snapshot();
+        self.history.record(before, &after, EditGroup::Composition);
         self.schedule_query(cx);
         cx.notify();
     }
@@ -498,7 +672,7 @@ impl EntityInputHandler for SearchBar {
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
-        let range = self.range_from_utf16(&range_utf16);
+        let range = range_from_utf16(&self.content, &range_utf16);
         Some(Bounds::from_corners(
             point(
                 bounds.left() + last_layout.x_for_index(range.start) - self.scroll_offset,
@@ -520,7 +694,7 @@ impl EntityInputHandler for SearchBar {
         let bounds = self.last_bounds?;
         let line = self.last_layout.as_ref()?;
         let utf8_index = line.index_for_x(point.x - bounds.left() + self.scroll_offset)?;
-        Some(self.offset_to_utf16(utf8_index))
+        Some(offset_to_utf16(&self.content, utf8_index))
     }
 }
 
@@ -631,18 +805,32 @@ impl Render for SearchBar {
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::delete_word_backward))
+            .on_action(cx.listener(Self::delete_word_forward))
+            .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::delete_to_line_end))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::document_start))
+            .on_action(cx.listener(Self::document_end))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::select_home))
             .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::select_document_start))
+            .on_action(cx.listener(Self::select_document_end))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .child(div().flex_none().mr_2().child(Icon::new(
                 IconName::Search,
                 ui_rems(CONTROL_ICON_SIZE),
@@ -753,19 +941,4 @@ impl Render for SearchBar {
                 ),
             )
     }
-}
-
-fn offset_from_utf16_in_text(text: &str, offset: usize) -> usize {
-    let mut utf8_offset = 0;
-    let mut utf16_count = 0;
-
-    for ch in text.chars() {
-        if utf16_count >= offset {
-            break;
-        }
-        utf16_count += ch.len_utf16();
-        utf8_offset += ch.len_utf8();
-    }
-
-    utf8_offset
 }

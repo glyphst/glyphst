@@ -12,3 +12,4 @@ gpui.workspace = true
 pulldown-cmark.workspace = true
 rust-embed.workspace = true
 smallvec.workspace = true
+unicode-segmentation.workspace = true

@@ -8,6 +8,7 @@ pub mod searchable_dropdown;
 pub mod settings_input;
 pub mod smooth_scroll;
 pub mod style;
+pub mod text_edit;
 pub mod text_input;
 pub mod tooltip;
 

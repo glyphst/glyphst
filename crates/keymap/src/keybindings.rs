@@ -182,6 +182,177 @@ const AI_PROMPT_BINDINGS: &[InternalBindingSpec] = &[
     },
 ];
 
+const COMMON_TEXT_EDIT_BINDINGS: &[InternalBindingSpec] = &[
+    InternalBindingSpec {
+        keystrokes: "primary-z",
+        context: "TextInput",
+        build: boxed::<input::Undo>,
+    },
+    InternalBindingSpec {
+        keystrokes: "primary-shift-z",
+        context: "TextInput",
+        build: boxed::<input::Redo>,
+    },
+];
+
+#[cfg(target_os = "macos")]
+const PLATFORM_TEXT_EDIT_BINDINGS: &[InternalBindingSpec] = &[
+    InternalBindingSpec {
+        keystrokes: "alt-backspace",
+        context: "TextInput",
+        build: boxed::<input::DeleteWordBackward>,
+    },
+    InternalBindingSpec {
+        keystrokes: "alt-delete",
+        context: "TextInput",
+        build: boxed::<input::DeleteWordForward>,
+    },
+    InternalBindingSpec {
+        keystrokes: "cmd-backspace",
+        context: "TextInput",
+        build: boxed::<input::DeleteToLineStart>,
+    },
+    InternalBindingSpec {
+        keystrokes: "cmd-delete",
+        context: "TextInput",
+        build: boxed::<input::DeleteToLineEnd>,
+    },
+    InternalBindingSpec {
+        keystrokes: "alt-left",
+        context: "TextInput",
+        build: boxed::<input::WordLeft>,
+    },
+    InternalBindingSpec {
+        keystrokes: "alt-right",
+        context: "TextInput",
+        build: boxed::<input::WordRight>,
+    },
+    InternalBindingSpec {
+        keystrokes: "alt-shift-left",
+        context: "TextInput",
+        build: boxed::<input::SelectWordLeft>,
+    },
+    InternalBindingSpec {
+        keystrokes: "alt-shift-right",
+        context: "TextInput",
+        build: boxed::<input::SelectWordRight>,
+    },
+    InternalBindingSpec {
+        keystrokes: "cmd-left",
+        context: "TextInput",
+        build: boxed::<input::Home>,
+    },
+    InternalBindingSpec {
+        keystrokes: "cmd-right",
+        context: "TextInput",
+        build: boxed::<input::End>,
+    },
+    InternalBindingSpec {
+        keystrokes: "cmd-shift-left",
+        context: "TextInput",
+        build: boxed::<input::SelectHome>,
+    },
+    InternalBindingSpec {
+        keystrokes: "cmd-shift-right",
+        context: "TextInput",
+        build: boxed::<input::SelectEnd>,
+    },
+    InternalBindingSpec {
+        keystrokes: "cmd-up",
+        context: "TextInput",
+        build: boxed::<input::DocumentStart>,
+    },
+    InternalBindingSpec {
+        keystrokes: "cmd-down",
+        context: "TextInput",
+        build: boxed::<input::DocumentEnd>,
+    },
+    InternalBindingSpec {
+        keystrokes: "cmd-shift-up",
+        context: "TextInput",
+        build: boxed::<input::SelectDocumentStart>,
+    },
+    InternalBindingSpec {
+        keystrokes: "cmd-shift-down",
+        context: "TextInput",
+        build: boxed::<input::SelectDocumentEnd>,
+    },
+];
+
+#[cfg(not(target_os = "macos"))]
+const PLATFORM_TEXT_EDIT_BINDINGS: &[InternalBindingSpec] = &[
+    InternalBindingSpec {
+        keystrokes: "ctrl-backspace",
+        context: "TextInput",
+        build: boxed::<input::DeleteWordBackward>,
+    },
+    InternalBindingSpec {
+        keystrokes: "ctrl-delete",
+        context: "TextInput",
+        build: boxed::<input::DeleteWordForward>,
+    },
+    InternalBindingSpec {
+        keystrokes: "ctrl-left",
+        context: "TextInput",
+        build: boxed::<input::WordLeft>,
+    },
+    InternalBindingSpec {
+        keystrokes: "ctrl-right",
+        context: "TextInput",
+        build: boxed::<input::WordRight>,
+    },
+    InternalBindingSpec {
+        keystrokes: "ctrl-shift-left",
+        context: "TextInput",
+        build: boxed::<input::SelectWordLeft>,
+    },
+    InternalBindingSpec {
+        keystrokes: "ctrl-shift-right",
+        context: "TextInput",
+        build: boxed::<input::SelectWordRight>,
+    },
+    InternalBindingSpec {
+        keystrokes: "ctrl-home",
+        context: "TextInput",
+        build: boxed::<input::DocumentStart>,
+    },
+    InternalBindingSpec {
+        keystrokes: "ctrl-end",
+        context: "TextInput",
+        build: boxed::<input::DocumentEnd>,
+    },
+    InternalBindingSpec {
+        keystrokes: "ctrl-shift-home",
+        context: "TextInput",
+        build: boxed::<input::SelectDocumentStart>,
+    },
+    InternalBindingSpec {
+        keystrokes: "ctrl-shift-end",
+        context: "TextInput",
+        build: boxed::<input::SelectDocumentEnd>,
+    },
+    InternalBindingSpec {
+        keystrokes: "ctrl-insert",
+        context: "TextInput",
+        build: boxed::<input::Copy>,
+    },
+    InternalBindingSpec {
+        keystrokes: "shift-delete",
+        context: "TextInput",
+        build: boxed::<input::Cut>,
+    },
+    InternalBindingSpec {
+        keystrokes: "shift-insert",
+        context: "TextInput",
+        build: boxed::<input::Paste>,
+    },
+    InternalBindingSpec {
+        keystrokes: "ctrl-y",
+        context: "TextInput",
+        build: boxed::<input::Redo>,
+    },
+];
+
 pub fn apply(cx: &mut App, preset: KeymapPreset, overrides: &[KeyBindingOverride]) {
     let mut bindings = Vec::new();
 
@@ -517,7 +688,7 @@ fn bindings_for_unknown_override(cx: &mut App, binding: &KeyBindingOverride) -> 
 }
 
 fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
-    add_many::<input::Backspace>(cx, bindings, &["backspace"], "TextInput");
+    add_many::<input::Backspace>(cx, bindings, &["backspace", "shift-backspace"], "TextInput");
     add_many::<input::Delete>(cx, bindings, &["delete"], "TextInput");
     add_many::<input::Left>(cx, bindings, &["left"], "TextInput");
     add_many::<input::Right>(cx, bindings, &["right"], "TextInput");
@@ -532,6 +703,8 @@ fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
     add_many::<markdown::Copy>(cx, bindings, &["primary-c"], "Markdown");
     add_many::<input::Cut>(cx, bindings, &["primary-x"], "TextInput");
     add_many::<input::Paste>(cx, bindings, &["primary-v"], "TextInput");
+    add_internal_binding_specs(cx, bindings, COMMON_TEXT_EDIT_BINDINGS);
+    add_internal_binding_specs(cx, bindings, PLATFORM_TEXT_EDIT_BINDINGS);
 
     for context in ["NoteEditor", "AiPanel", "QuickAsk"] {
         add_many::<input::Up>(cx, bindings, &["up"], context);
@@ -1792,6 +1965,28 @@ mod tests {
         keymap
     }
 
+    fn internal_keymap(specs: impl IntoIterator<Item = &'static InternalBindingSpec>) -> Keymap {
+        let bindings = specs
+            .into_iter()
+            .map(|spec| {
+                KeyBinding::load(
+                    &expand_platform_keystroke(spec.keystrokes),
+                    (spec.build)(),
+                    Some(Rc::new(
+                        KeyBindingContextPredicate::parse(spec.context).unwrap(),
+                    )),
+                    false,
+                    None,
+                    &DummyKeyboardMapper,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut keymap = Keymap::default();
+        keymap.add_bindings(bindings);
+        keymap
+    }
+
     fn first_action_for(keymap: &Keymap, keystrokes: &str, contexts: &[&str]) -> &'static str {
         let keystrokes = expand_platform_keystroke(keystrokes);
         let keystrokes = keystrokes
@@ -1844,6 +2039,60 @@ mod tests {
             assert_eq!(
                 first_action_for(&keymap, "enter", &[&format!("{context} Menu")]),
                 confirm
+            );
+        }
+    }
+
+    #[test]
+    fn browser_text_bindings_dispatch_semantic_actions() {
+        let keymap = internal_keymap(
+            COMMON_TEXT_EDIT_BINDINGS
+                .iter()
+                .chain(PLATFORM_TEXT_EDIT_BINDINGS),
+        );
+
+        assert_eq!(
+            first_action_for(&keymap, "primary-z", &["TextInput"]),
+            input::Undo::name_for_type()
+        );
+        assert_eq!(
+            first_action_for(&keymap, "primary-shift-z", &["TextInput"]),
+            input::Redo::name_for_type()
+        );
+
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                first_action_for(&keymap, "alt-backspace", &["TextInput"]),
+                input::DeleteWordBackward::name_for_type()
+            );
+            assert_eq!(
+                first_action_for(&keymap, "alt-shift-right", &["TextInput"]),
+                input::SelectWordRight::name_for_type()
+            );
+            assert_eq!(
+                first_action_for(&keymap, "cmd-down", &["TextInput"]),
+                input::DocumentEnd::name_for_type()
+            );
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(
+                first_action_for(&keymap, "ctrl-backspace", &["TextInput"]),
+                input::DeleteWordBackward::name_for_type()
+            );
+            assert_eq!(
+                first_action_for(&keymap, "ctrl-shift-right", &["TextInput"]),
+                input::SelectWordRight::name_for_type()
+            );
+            assert_eq!(
+                first_action_for(&keymap, "ctrl-end", &["TextInput"]),
+                input::DocumentEnd::name_for_type()
+            );
+            assert_eq!(
+                first_action_for(&keymap, "ctrl-y", &["TextInput"]),
+                input::Redo::name_for_type()
             );
         }
     }

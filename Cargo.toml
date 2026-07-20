@@ -53,6 +53,7 @@ smallvec = "1"
 tikv-jemalloc-sys = { version = "0.7", features = ["override_allocator_on_supported_platforms"] }
 tikv-jemallocator = { version = "0.7", features = ["override_allocator_on_supported_platforms"] }
 tracing = "0.1"
+unicode-segmentation = "1"
 ztracing = { git = "https://github.com/zed-industries/zed", rev = "49ad06c1b4047b018b1622e1cf94cafcacd39247" }
 
 [profile.dev.package.tikv-jemalloc-sys]

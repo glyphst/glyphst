@@ -2395,6 +2395,7 @@ dependencies = [
  "pulldown-cmark",
  "rust-embed",
  "smallvec",
+ "unicode-segmentation",
 ]
 
 [[package]]

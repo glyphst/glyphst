@@ -39,6 +39,11 @@ use glyphst_ui::{
     markdown::{Markdown, MarkdownContextMenuRequest, MarkdownElement, MarkdownStyle},
     picker::fuzzy_match,
     scrollbar::{ScrollableHandle, WithScrollbar as _},
+    text_edit::{
+        EditGroup, EditHistory, backward_word_deletion_start, forward_word_deletion_end, line_end,
+        line_start, next_grapheme_boundary, next_word_end, offset_from_utf16, offset_to_utf16,
+        previous_grapheme_boundary, previous_word_start, range_from_utf16, range_to_utf16,
+    },
     tooltip::text_tooltip,
 };
 use gpui::{
@@ -323,7 +328,7 @@ fn submit_action(editing: bool, failure: Option<&GenerationFailure>) -> SubmitAc
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct ComposerSnapshot {
     content: SharedString,
     selected_range: Range<usize>,
@@ -423,6 +428,7 @@ pub struct AiPanel {
     model_menu_open: bool,
     model_menu_anchor: Option<GpuiPoint<Pixels>>,
     model_search_query: SharedString,
+    model_search_history: EditHistory<SharedString>,
     model_menu_scroll: ScrollHandle,
     thinking_menu_open: bool,
     thinking_menu_anchor: Option<GpuiPoint<Pixels>>,
@@ -440,6 +446,7 @@ pub struct AiPanel {
     message_scroll_interacted: Rc<Cell<bool>>,
     message_scroll_task: Option<Task<()>>,
     message_context_menu: Option<MessageContextMenu>,
+    composer_history: EditHistory<ComposerSnapshot>,
 }
 
 struct LaidOutLine {
@@ -643,6 +650,7 @@ impl AiPanel {
             model_menu_open: false,
             model_menu_anchor: None,
             model_search_query: SharedString::default(),
+            model_search_history: EditHistory::default(),
             model_menu_scroll: ScrollHandle::new(),
             thinking_menu_open: false,
             thinking_menu_anchor: None,
@@ -660,6 +668,7 @@ impl AiPanel {
             message_scroll_interacted: Rc::new(Cell::new(false)),
             message_scroll_task: None,
             message_context_menu: None,
+            composer_history: EditHistory::default(),
         }
     }
 
@@ -732,13 +741,19 @@ impl AiPanel {
     }
 
     fn newline(&mut self, _: &input::Newline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model_menu_open {
+            self.model_search_history.break_group();
+            return;
+        }
         if self.finish_page_number_edit(cx) {
             return;
         }
         if self.mode == AiPanelMode::Sidebar && self.confirm_mention_completion(cx) {
             return;
         }
-        self.replace_text_in_range(None, "\n", window, cx);
+        if self.input_is_focused(window) {
+            self.replace_composer_selection("\n", EditGroup::Isolated, cx);
+        }
     }
 
     fn backspace(&mut self, _: &input::Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -746,12 +761,12 @@ impl AiPanel {
             return;
         }
         if self.model_menu_open {
-            let mut query = self.model_search_query.to_string();
-            query.pop();
-            self.model_search_query = query.into();
-            cx.notify();
+            let end = self.model_search_query.len();
+            let start = previous_grapheme_boundary(&self.model_search_query, end);
+            self.edit_model_search_query(start..end, "", EditGroup::Backspace, cx);
             return;
         }
+        let before = self.composer_snapshot();
         if let Some(active) = self.active_page_number_edit.clone() {
             if self.selected_range.is_empty()
                 && let Some(range) = mention_range_for_empty_page_number_backspace(
@@ -763,23 +778,23 @@ impl AiPanel {
                 self.apply_regular_edit(range, "");
                 self.selection_reversed = false;
                 self.marked_range = None;
-                self.update_mention_completion(cx);
-                cx.notify();
+                self.finish_composer_edit(before, EditGroup::Backspace, cx);
                 return;
             }
             let range = if self.selected_range.is_empty() {
                 let cursor = self.cursor_offset();
                 if cursor <= active.digits.start {
+                    self.composer_history.break_group();
                     return;
                 }
-                self.previous_boundary(cursor)..cursor
+                previous_grapheme_boundary(&self.content, cursor)..cursor
             } else {
                 self.selected_range.clone()
             };
             if self.apply_page_number_edit(range, "") {
                 self.selection_reversed = false;
                 self.marked_range = None;
-                cx.notify();
+                self.finish_composer_edit(before, EditGroup::Backspace, cx);
             }
             return;
         }
@@ -792,10 +807,15 @@ impl AiPanel {
             {
                 self.selected_range = mention.range.clone();
             } else {
-                self.select_to(self.previous_boundary(cursor), cx);
+                self.selected_range = previous_grapheme_boundary(&self.content, cursor)..cursor;
+                self.selection_reversed = true;
             }
         }
-        self.replace_text_in_range(None, "", window, cx);
+        let range = expand_range_to_mentions(self.selected_range.clone(), &self.composer_mentions);
+        self.apply_regular_edit(range, "");
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.finish_composer_edit(before, EditGroup::Backspace, cx);
     }
 
     fn delete(&mut self, _: &input::Delete, window: &mut Window, cx: &mut Context<Self>) {
@@ -803,24 +823,25 @@ impl AiPanel {
             return;
         }
         if self.model_menu_open {
-            self.model_search_query = SharedString::default();
-            cx.notify();
+            self.model_search_history.break_group();
             return;
         }
+        let before = self.composer_snapshot();
         if let Some(active) = self.active_page_number_edit.clone() {
             let range = if self.selected_range.is_empty() {
                 let cursor = self.cursor_offset();
                 if cursor >= active.digits.end {
+                    self.composer_history.break_group();
                     return;
                 }
-                cursor..self.next_boundary(cursor)
+                cursor..next_grapheme_boundary(&self.content, cursor).min(active.digits.end)
             } else {
                 self.selected_range.clone()
             };
             if self.apply_page_number_edit(range, "") {
                 self.selection_reversed = false;
                 self.marked_range = None;
-                cx.notify();
+                self.finish_composer_edit(before, EditGroup::Delete, cx);
             }
             return;
         }
@@ -833,14 +854,126 @@ impl AiPanel {
             {
                 self.selected_range = mention.range.clone();
             } else {
-                self.select_to(self.next_boundary(cursor), cx);
+                self.selected_range = cursor..next_grapheme_boundary(&self.content, cursor);
             }
         }
-        self.replace_text_in_range(None, "", window, cx);
+        let range = expand_range_to_mentions(self.selected_range.clone(), &self.composer_mentions);
+        self.apply_regular_edit(range, "");
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.finish_composer_edit(before, EditGroup::Delete, cx);
+    }
+
+    fn delete_word_backward(
+        &mut self,
+        _: &input::DeleteWordBackward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.input_is_focused(window) {
+            return;
+        }
+        if self.model_menu_open {
+            let end = self.model_search_query.len();
+            let start = backward_word_deletion_start(&self.model_search_query, end);
+            self.edit_model_search_query(start..end, "", EditGroup::Isolated, cx);
+            return;
+        }
+        let before = self.composer_snapshot();
+        let range = if self.selected_range.is_empty() {
+            let cursor = self.cursor_offset();
+            let start = backward_word_deletion_start(&self.content, cursor);
+            start..cursor
+        } else {
+            self.selected_range.clone()
+        };
+        let range = self.constrain_deletion_range(range);
+        if range.is_empty() {
+            self.composer_history.break_group();
+            return;
+        }
+        if !self.apply_page_number_edit(range.clone(), "") {
+            self.apply_regular_edit(expand_range_to_mentions(range, &self.composer_mentions), "");
+        }
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.finish_composer_edit(before, EditGroup::Isolated, cx);
+    }
+
+    fn delete_word_forward(
+        &mut self,
+        _: &input::DeleteWordForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.input_is_focused(window) {
+            return;
+        }
+        if self.model_menu_open {
+            self.model_search_history.break_group();
+            return;
+        }
+        let before = self.composer_snapshot();
+        let range = if self.selected_range.is_empty() {
+            let cursor = self.cursor_offset();
+            cursor..forward_word_deletion_end(&self.content, cursor)
+        } else {
+            self.selected_range.clone()
+        };
+        let range = self.constrain_deletion_range(range);
+        if range.is_empty() {
+            self.composer_history.break_group();
+            return;
+        }
+        if !self.apply_page_number_edit(range.clone(), "") {
+            self.apply_regular_edit(expand_range_to_mentions(range, &self.composer_mentions), "");
+        }
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.finish_composer_edit(before, EditGroup::Isolated, cx);
+    }
+
+    fn delete_to_line_start(
+        &mut self,
+        _: &input::DeleteToLineStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.input_is_focused(window) {
+            return;
+        }
+        if self.model_menu_open {
+            let end = self.model_search_query.len();
+            self.edit_model_search_query(0..end, "", EditGroup::Isolated, cx);
+            return;
+        }
+        let cursor = self.cursor_offset();
+        self.delete_semantic_range(line_start(&self.content, cursor)..cursor, cx);
+    }
+
+    fn delete_to_line_end(
+        &mut self,
+        _: &input::DeleteToLineEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.input_is_focused(window) {
+            return;
+        }
+        if self.model_menu_open {
+            self.model_search_history.break_group();
+            return;
+        }
+        let cursor = self.cursor_offset();
+        self.delete_semantic_range(cursor..line_end(&self.content, cursor), cx);
     }
 
     fn left(&mut self, _: &input::Left, window: &mut Window, cx: &mut Context<Self>) {
         if !self.input_is_focused(window) {
+            return;
+        }
+        if self.model_menu_open {
+            self.model_search_history.break_group();
             return;
         }
         if let Some(active) = self.active_page_number_edit.clone()
@@ -858,7 +991,7 @@ impl AiPanel {
                 .iter()
                 .find(|mention| mention.range.end == cursor)
                 .map_or_else(
-                    || self.previous_boundary(cursor),
+                    || previous_grapheme_boundary(&self.content, cursor),
                     |mention| mention.range.start,
                 );
             self.move_to(target, cx);
@@ -869,6 +1002,10 @@ impl AiPanel {
 
     fn right(&mut self, _: &input::Right, window: &mut Window, cx: &mut Context<Self>) {
         if !self.input_is_focused(window) {
+            return;
+        }
+        if self.model_menu_open {
+            self.model_search_history.break_group();
             return;
         }
         if let Some(active) = self.active_page_number_edit.clone()
@@ -884,7 +1021,10 @@ impl AiPanel {
                 .composer_mentions
                 .iter()
                 .find(|mention| mention.range.start == cursor)
-                .map_or_else(|| self.next_boundary(cursor), |mention| mention.range.end);
+                .map_or_else(
+                    || next_grapheme_boundary(&self.content, cursor),
+                    |mention| mention.range.end,
+                );
             self.move_to(target, cx);
         } else {
             self.move_to(self.selected_range.end, cx);
@@ -895,6 +1035,11 @@ impl AiPanel {
         if !self.input_is_focused(window) {
             return;
         }
+        if self.model_menu_open {
+            self.model_search_history.break_group();
+            return;
+        }
+        self.composer_history.break_group();
         if self.select_previous_mention_completion(cx) {
             return;
         }
@@ -905,6 +1050,11 @@ impl AiPanel {
         if !self.input_is_focused(window) {
             return;
         }
+        if self.model_menu_open {
+            self.model_search_history.break_group();
+            return;
+        }
+        self.composer_history.break_group();
         if self.select_next_mention_completion(cx) {
             return;
         }
@@ -912,21 +1062,61 @@ impl AiPanel {
     }
 
     fn home(&mut self, _: &input::Home, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_is_focused(window) {
+        if !self.input_is_focused(window) || self.model_menu_open {
             return;
         }
-        self.move_to(self.line_start_offset(), cx);
+        self.move_to(line_start(&self.content, self.cursor_offset()), cx);
     }
 
     fn end(&mut self, _: &input::End, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_is_focused(window) {
+        if !self.input_is_focused(window) || self.model_menu_open {
             return;
         }
-        self.move_to(self.line_end_offset(), cx);
+        self.move_to(line_end(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn word_left(&mut self, _: &input::WordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.input_is_focused(window) || self.model_menu_open {
+            return;
+        }
+        let target =
+            mention_aware_word_left(&self.content, self.cursor_offset(), &self.composer_mentions);
+        self.move_to(self.constrain_movement_target(target), cx);
+    }
+
+    fn word_right(&mut self, _: &input::WordRight, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.input_is_focused(window) || self.model_menu_open {
+            return;
+        }
+        let target =
+            mention_aware_word_right(&self.content, self.cursor_offset(), &self.composer_mentions);
+        self.move_to(self.constrain_movement_target(target), cx);
+    }
+
+    fn document_start(
+        &mut self,
+        _: &input::DocumentStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.input_is_focused(window) && !self.model_menu_open {
+            self.move_to(self.constrain_movement_target(0), cx);
+        }
+    }
+
+    fn document_end(
+        &mut self,
+        _: &input::DocumentEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.input_is_focused(window) && !self.model_menu_open {
+            self.move_to(self.constrain_movement_target(self.content.len()), cx);
+        }
     }
 
     fn select_all(&mut self, _: &input::SelectAll, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_is_focused(window) {
+        if !self.input_is_focused(window) || self.model_menu_open {
             return;
         }
         self.move_to(0, cx);
@@ -934,10 +1124,19 @@ impl AiPanel {
     }
 
     fn select_left(&mut self, _: &input::SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_is_focused(window) {
+        if !self.input_is_focused(window) || self.model_menu_open {
             return;
         }
-        self.select_to(self.previous_boundary(self.cursor_offset()), cx);
+        let cursor = self.cursor_offset();
+        let target = self
+            .composer_mentions
+            .iter()
+            .find(|mention| mention.range.end == cursor)
+            .map_or_else(
+                || previous_grapheme_boundary(&self.content, cursor),
+                |mention| mention.range.start,
+            );
+        self.select_to(self.constrain_movement_target(target), cx);
     }
 
     fn select_right(
@@ -946,53 +1145,118 @@ impl AiPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.input_is_focused(window) {
+        if !self.input_is_focused(window) || self.model_menu_open {
             return;
         }
-        self.select_to(self.next_boundary(self.cursor_offset()), cx);
+        let cursor = self.cursor_offset();
+        let target = self
+            .composer_mentions
+            .iter()
+            .find(|mention| mention.range.start == cursor)
+            .map_or_else(
+                || next_grapheme_boundary(&self.content, cursor),
+                |mention| mention.range.end,
+            );
+        self.select_to(self.constrain_movement_target(target), cx);
+    }
+
+    fn select_word_left(
+        &mut self,
+        _: &input::SelectWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.input_is_focused(window) || self.model_menu_open {
+            return;
+        }
+        let target =
+            mention_aware_word_left(&self.content, self.cursor_offset(), &self.composer_mentions);
+        self.select_to(self.constrain_movement_target(target), cx);
+    }
+
+    fn select_word_right(
+        &mut self,
+        _: &input::SelectWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.input_is_focused(window) || self.model_menu_open {
+            return;
+        }
+        let target =
+            mention_aware_word_right(&self.content, self.cursor_offset(), &self.composer_mentions);
+        self.select_to(self.constrain_movement_target(target), cx);
     }
 
     fn select_up(&mut self, _: &input::SelectUp, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_is_focused(window) {
+        if !self.input_is_focused(window) || self.model_menu_open {
             return;
         }
         self.move_vertically(-1, true, window, cx);
     }
 
     fn select_down(&mut self, _: &input::SelectDown, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_is_focused(window) {
+        if !self.input_is_focused(window) || self.model_menu_open {
             return;
         }
         self.move_vertically(1, true, window, cx);
     }
 
     fn select_home(&mut self, _: &input::SelectHome, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_is_focused(window) {
+        if !self.input_is_focused(window) || self.model_menu_open {
             return;
         }
-        self.select_to(self.line_start_offset(), cx);
+        self.select_to(
+            self.constrain_movement_target(line_start(&self.content, self.cursor_offset())),
+            cx,
+        );
     }
 
     fn select_end(&mut self, _: &input::SelectEnd, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_is_focused(window) {
+        if !self.input_is_focused(window) || self.model_menu_open {
             return;
         }
-        self.select_to(self.line_end_offset(), cx);
+        self.select_to(
+            self.constrain_movement_target(line_end(&self.content, self.cursor_offset())),
+            cx,
+        );
+    }
+
+    fn select_document_start(
+        &mut self,
+        _: &input::SelectDocumentStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.input_is_focused(window) && !self.model_menu_open {
+            self.select_to(self.constrain_movement_target(0), cx);
+        }
+    }
+
+    fn select_document_end(
+        &mut self,
+        _: &input::SelectDocumentEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.input_is_focused(window) && !self.model_menu_open {
+            self.select_to(self.constrain_movement_target(self.content.len()), cx);
+        }
     }
 
     fn copy(&mut self, _: &input::Copy, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_is_focused(window) {
+        if !self.input_is_focused(window) || self.model_menu_open {
             return;
         }
         self.copy_selected_text(cx);
     }
 
     fn cut(&mut self, _: &input::Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_is_focused(window) {
+        if !self.input_is_focused(window) || self.model_menu_open {
             return;
         }
         if self.copy_selected_text(cx) {
-            self.replace_text_in_range(None, "", window, cx);
+            self.delete_semantic_range(self.selected_range.clone(), cx);
         }
     }
 
@@ -1002,8 +1266,50 @@ impl AiPanel {
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace("\r\n", "\n").replace('\r', "\n");
-            self.replace_text_in_range(None, &text, window, cx);
-            cx.notify();
+            if self.model_menu_open {
+                let end = self.model_search_query.len();
+                self.edit_model_search_query(end..end, &text, EditGroup::Isolated, cx);
+                return;
+            }
+            self.replace_composer_selection(&text, EditGroup::Isolated, cx);
+        }
+    }
+
+    fn undo(&mut self, _: &input::Undo, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.input_is_focused(window) {
+            return;
+        }
+        if self.model_menu_open {
+            if let Some(query) = self
+                .model_search_history
+                .undo(self.model_search_query.clone())
+            {
+                self.model_search_query = query;
+                cx.notify();
+            }
+            return;
+        }
+        if let Some(snapshot) = self.composer_history.undo(self.composer_snapshot()) {
+            self.restore_composer_snapshot(snapshot, cx);
+        }
+    }
+
+    fn redo(&mut self, _: &input::Redo, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.input_is_focused(window) {
+            return;
+        }
+        if self.model_menu_open {
+            if let Some(query) = self
+                .model_search_history
+                .redo(self.model_search_query.clone())
+            {
+                self.model_search_query = query;
+                cx.notify();
+            }
+            return;
+        }
+        if let Some(snapshot) = self.composer_history.redo(self.composer_snapshot()) {
+            self.restore_composer_snapshot(snapshot, cx);
         }
     }
 
@@ -1018,7 +1324,7 @@ impl AiPanel {
         }
     }
 
-    fn restore_composer_snapshot(&mut self, snapshot: ComposerSnapshot) {
+    fn restore_composer_snapshot(&mut self, snapshot: ComposerSnapshot, cx: &mut Context<Self>) {
         self.content = snapshot.content;
         self.selected_range = snapshot.selected_range;
         self.selection_reversed = snapshot.selection_reversed;
@@ -1026,6 +1332,88 @@ impl AiPanel {
         self.composer_mentions = snapshot.mentions;
         self.active_page_number_edit = snapshot.active_page_number_edit;
         self.reset_composer_layout();
+        self.update_mention_completion(cx);
+        cx.notify();
+    }
+
+    fn finish_composer_edit(
+        &mut self,
+        before: ComposerSnapshot,
+        group: EditGroup,
+        cx: &mut Context<Self>,
+    ) {
+        let after = self.composer_snapshot();
+        self.composer_history.record(before, &after, group);
+        self.update_mention_completion(cx);
+        cx.notify();
+    }
+
+    fn replace_composer_selection(
+        &mut self,
+        new_text: &str,
+        group: EditGroup,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.composer_snapshot();
+        let range = self.selected_range.clone();
+        if !self.apply_page_number_edit(range.clone(), new_text) {
+            self.apply_regular_edit(range, new_text);
+        }
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.finish_composer_edit(before, group, cx);
+    }
+
+    fn delete_semantic_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let before = self.composer_snapshot();
+        let range = if self.selected_range.is_empty() {
+            range
+        } else {
+            self.selected_range.clone()
+        };
+        let range = self.constrain_deletion_range(range);
+        if range.is_empty() {
+            self.composer_history.break_group();
+            return;
+        }
+        if !self.apply_page_number_edit(range.clone(), "") {
+            self.apply_regular_edit(expand_range_to_mentions(range, &self.composer_mentions), "");
+        }
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.finish_composer_edit(before, EditGroup::Isolated, cx);
+    }
+
+    fn constrain_deletion_range(&self, range: Range<usize>) -> Range<usize> {
+        let Some(active) = self.active_page_number_edit.as_ref() else {
+            return range;
+        };
+        range.start.clamp(active.digits.start, active.digits.end)
+            ..range.end.clamp(active.digits.start, active.digits.end)
+    }
+
+    fn constrain_movement_target(&self, target: usize) -> usize {
+        self.active_page_number_edit
+            .as_ref()
+            .map_or(target, |active| {
+                target.clamp(active.digits.start, active.digits.end)
+            })
+    }
+
+    fn edit_model_search_query(
+        &mut self,
+        range: Range<usize>,
+        new_text: &str,
+        group: EditGroup,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.model_search_query.clone();
+        let query = self.model_search_query.to_string();
+        self.model_search_query =
+            (query[..range.start].to_owned() + new_text + &query[range.end..]).into();
+        self.model_search_history
+            .record(before, &self.model_search_query, group);
+        cx.notify();
     }
 
     fn reset_composer_layout(&mut self) {
@@ -1084,6 +1472,7 @@ impl AiPanel {
         self.marked_range = None;
         self.composer_mentions = mentions;
         self.active_page_number_edit = None;
+        self.composer_history.clear();
         self.close_composer_menus();
         self.clear_validation_notice();
         self.reset_composer_layout();
@@ -1098,7 +1487,8 @@ impl AiPanel {
             return false;
         };
         self.edit_blur_subscription = None;
-        self.restore_composer_snapshot(editing.saved_composer);
+        self.restore_composer_snapshot(editing.saved_composer, cx);
+        self.composer_history.clear();
         self.close_composer_menus();
         self.clear_validation_notice();
         self.focus_handle.focus(window, cx);
@@ -1182,7 +1572,8 @@ impl AiPanel {
 
         self.editing_turn = None;
         self.edit_blur_subscription = None;
-        self.restore_composer_snapshot(editing.saved_composer);
+        self.restore_composer_snapshot(editing.saved_composer, cx);
+        self.composer_history.clear();
         self.pending_title_task = None;
         self.truncate_messages(editing.message_index);
         if editing.message_index == 0 {
@@ -1461,6 +1852,7 @@ impl AiPanel {
         self.mention_completion = None;
         self.active_page_number_edit = None;
         self.last_cursor_pos = None;
+        self.composer_history.clear();
         self.close_composer_menus();
         self.clear_validation_notice();
         self.push_message(user_message, cx);
@@ -2299,12 +2691,14 @@ impl AiPanel {
             mention_start,
             digits,
         });
+        self.composer_history.break_group();
         self.mention_completion = None;
         cx.notify();
         true
     }
 
     fn finish_page_number_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        let before = self.composer_snapshot();
         let Some(active) = self.active_page_number_edit.take() else {
             return false;
         };
@@ -2336,8 +2730,7 @@ impl AiPanel {
         self.marked_range = None;
         self.last_display = None;
         self.last_lines.clear();
-        self.update_mention_completion(cx);
-        cx.notify();
+        self.finish_composer_edit(before, EditGroup::Isolated, cx);
         true
     }
 
@@ -2458,9 +2851,10 @@ impl AiPanel {
         self.attachment_menu_anchor = None;
         self.model_menu_open = false;
         self.model_menu_anchor = None;
+        self.model_search_query = SharedString::default();
+        self.model_search_history.clear();
         self.thinking_menu_open = false;
         self.thinking_menu_anchor = None;
-        self.model_search_query = SharedString::default();
     }
 
     fn menu_anchor_for_button(position: GpuiPoint<Pixels>) -> GpuiPoint<Pixels> {
@@ -2478,6 +2872,8 @@ impl AiPanel {
             .then_some(Self::menu_anchor_for_button(position));
         self.model_menu_open = false;
         self.model_menu_anchor = None;
+        self.model_search_query = SharedString::default();
+        self.model_search_history.clear();
         self.thinking_menu_open = false;
         self.thinking_menu_anchor = None;
         cx.notify();
@@ -2503,6 +2899,7 @@ impl AiPanel {
         self.thinking_menu_open = false;
         self.thinking_menu_anchor = None;
         self.model_search_query = SharedString::default();
+        self.model_search_history.clear();
         cx.notify();
     }
 
@@ -2519,6 +2916,8 @@ impl AiPanel {
         self.attachment_menu_anchor = None;
         self.model_menu_open = false;
         self.model_menu_anchor = None;
+        self.model_search_query = SharedString::default();
+        self.model_search_history.clear();
         cx.notify();
     }
 
@@ -2579,6 +2978,7 @@ impl AiPanel {
         self.generation_failure = None;
         self.active_generation = None;
         self.message_context_menu = None;
+        self.composer_history.clear();
         self.clear_validation_notice();
         self.close_composer_menus();
         self.reset_message_scroll();
@@ -2659,6 +3059,7 @@ impl AiPanel {
         self.generation_failure = None;
         self.active_generation = None;
         self.message_context_menu = None;
+        self.composer_history.clear();
         self.clear_validation_notice();
         self.close_composer_menus();
         self.reset_message_scroll();
@@ -2827,6 +3228,7 @@ impl AiPanel {
         range: Range<usize>,
         cx: &mut Context<Self>,
     ) {
+        let before = self.composer_snapshot();
         if mention.requires_fixed_layout() {
             self.update_current_page(cx);
         }
@@ -2887,7 +3289,7 @@ impl AiPanel {
         self.selection_reversed = false;
         self.marked_range = None;
         self.mention_completion = None;
-        cx.notify();
+        self.finish_composer_edit(before, EditGroup::Isolated, cx);
     }
 
     fn on_mouse_down(
@@ -2915,12 +3317,14 @@ impl AiPanel {
             offset = self.index_for_mouse_position(event.position, window);
         }
         if event.click_count >= 2 && !event.modifiers.shift {
-            self.selected_range = selection_range_for_click(
+            self.composer_history.break_group();
+            let range = selection_range_for_click(
                 &self.content,
                 &self.composer_mentions,
                 offset,
                 event.click_count,
             );
+            self.selected_range = self.constrain_deletion_range(range);
             self.selection_reversed = false;
             self.marked_range = None;
             cx.notify();
@@ -3083,7 +3487,10 @@ impl AiPanel {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        let offset = offset.min(self.content.len());
+        self.composer_history.break_group();
+        let offset = self
+            .constrain_movement_target(offset)
+            .min(self.content.len());
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.update_mention_completion(cx);
@@ -3099,7 +3506,10 @@ impl AiPanel {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        let offset = offset.min(self.content.len());
+        self.composer_history.break_group();
+        let offset = self
+            .constrain_movement_target(offset)
+            .min(self.content.len());
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -3140,22 +3550,6 @@ impl AiPanel {
         } else {
             self.move_to(offset, cx);
         }
-    }
-
-    fn line_start_offset(&self) -> usize {
-        let cursor = self.cursor_offset();
-        self.content[..cursor]
-            .rfind('\n')
-            .map(|ix| ix + '\n'.len_utf8())
-            .unwrap_or(0)
-    }
-
-    fn line_end_offset(&self) -> usize {
-        let cursor = self.cursor_offset();
-        self.content[cursor..]
-            .find('\n')
-            .map(|ix| cursor + ix)
-            .unwrap_or(self.content.len())
     }
 
     fn copy_selected_text(&self, cx: &mut Context<Self>) -> bool {
@@ -3439,22 +3833,36 @@ impl AiPanel {
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::delete_word_backward))
+            .on_action(cx.listener(Self::delete_word_forward))
+            .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::delete_to_line_end))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::document_start))
+            .on_action(cx.listener(Self::document_end))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::select_up))
             .on_action(cx.listener(Self::select_down))
             .on_action(cx.listener(Self::select_home))
             .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::select_document_start))
+            .on_action(cx.listener(Self::select_document_end))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .child(
                 div().flex().flex_col().child(
                     div()
@@ -3679,35 +4087,16 @@ impl AiPanel {
         })
     }
 
-    fn offset_from_utf16(&self, offset: usize) -> usize {
-        offset_from_utf16_in_text(&self.content, offset)
-    }
-
     fn offset_to_utf16(&self, offset: usize) -> usize {
-        offset_to_utf16_in_text(&self.content, offset)
+        offset_to_utf16(&self.content, offset)
     }
 
     fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
+        range_to_utf16(&self.content, range)
     }
 
     fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
-        self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
-    }
-
-    fn previous_boundary(&self, offset: usize) -> usize {
-        self.content
-            .char_indices()
-            .rev()
-            .find_map(|(idx, _)| (idx < offset).then_some(idx))
-            .unwrap_or(0)
-    }
-
-    fn next_boundary(&self, offset: usize) -> usize {
-        self.content
-            .char_indices()
-            .find_map(|(idx, _)| (idx > offset).then_some(idx))
-            .unwrap_or(self.content.len())
+        range_from_utf16(&self.content, range_utf16)
     }
 
     fn message_action_button(
@@ -4896,6 +5285,8 @@ impl EntityInputHandler for AiPanel {
 
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
         self.marked_range = None;
+        self.composer_history.break_group();
+        self.model_search_history.break_group();
     }
 
     fn replace_text_in_range(
@@ -4907,10 +5298,8 @@ impl EntityInputHandler for AiPanel {
     ) {
         if self.model_menu_open {
             if !new_text.is_empty() {
-                let mut query = self.model_search_query.to_string();
-                query.push_str(new_text);
-                self.model_search_query = query.into();
-                cx.notify();
+                let end = self.model_search_query.len();
+                self.edit_model_search_query(end..end, new_text, EditGroup::Typing, cx);
             }
             return;
         }
@@ -4921,19 +5310,29 @@ impl EntityInputHandler for AiPanel {
             return;
         }
 
+        let had_marked_range = self.marked_range.is_some();
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = self.constrain_deletion_range(range);
 
+        let before = self.composer_snapshot();
         if !self.apply_page_number_edit(range.clone(), new_text) {
             self.apply_regular_edit(range, new_text);
         }
         self.selection_reversed = false;
         self.marked_range.take();
-        self.update_mention_completion(cx);
-        cx.notify();
+        self.finish_composer_edit(
+            before,
+            if had_marked_range {
+                EditGroup::Composition
+            } else {
+                EditGroup::Typing
+            },
+            cx,
+        );
     }
 
     fn replace_and_mark_text_in_range(
@@ -4946,10 +5345,8 @@ impl EntityInputHandler for AiPanel {
     ) {
         if self.model_menu_open {
             if !new_text.is_empty() {
-                let mut query = self.model_search_query.to_string();
-                query.push_str(new_text);
-                self.model_search_query = query.into();
-                cx.notify();
+                let end = self.model_search_query.len();
+                self.edit_model_search_query(end..end, new_text, EditGroup::Composition, cx);
             }
             return;
         }
@@ -4965,7 +5362,9 @@ impl EntityInputHandler for AiPanel {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = self.constrain_deletion_range(range);
         let selected_range_start = range.start;
+        let before = self.composer_snapshot();
 
         let inserted_len = if self.active_page_number_edit.is_some() {
             new_text.bytes().filter(u8::is_ascii_digit).count()
@@ -4980,14 +5379,13 @@ impl EntityInputHandler for AiPanel {
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| {
-                let start = offset_from_utf16_in_text(new_text, range_utf16.start);
-                let end = offset_from_utf16_in_text(new_text, range_utf16.end);
+                let start = offset_from_utf16(new_text, range_utf16.start);
+                let end = offset_from_utf16(new_text, range_utf16.end);
                 selected_range_start + start..selected_range_start + end
             })
             .unwrap_or_else(|| range.start + inserted_len..range.start + inserted_len);
         self.selection_reversed = false;
-        self.update_mention_completion(cx);
-        cx.notify();
+        self.finish_composer_edit(before, EditGroup::Composition, cx);
     }
 
     fn bounds_for_range(
@@ -5193,22 +5591,36 @@ impl Render for AiPanel {
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::delete_word_backward))
+            .on_action(cx.listener(Self::delete_word_forward))
+            .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::delete_to_line_end))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::document_start))
+            .on_action(cx.listener(Self::document_end))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::select_up))
             .on_action(cx.listener(Self::select_down))
             .on_action(cx.listener(Self::select_home))
             .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::select_document_start))
+            .on_action(cx.listener(Self::select_document_end))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .child(
                 div()
                     .flex()
@@ -6591,6 +7003,35 @@ fn source_index_for_mouse_position(
     content_len
 }
 
+fn mention_aware_word_left(content: &str, offset: usize, mentions: &[ComposerMention]) -> usize {
+    let target = previous_word_start(content, offset);
+    mentions
+        .iter()
+        .find(|mention| mention.range.start < target && target < mention.range.end)
+        .map_or(target, |mention| mention.range.start)
+}
+
+fn mention_aware_word_right(content: &str, offset: usize, mentions: &[ComposerMention]) -> usize {
+    let target = next_word_end(content, offset);
+    mentions
+        .iter()
+        .find(|mention| mention.range.start < target && target < mention.range.end)
+        .map_or(target, |mention| mention.range.end)
+}
+
+fn expand_range_to_mentions(mut range: Range<usize>, mentions: &[ComposerMention]) -> Range<usize> {
+    if range.is_empty() {
+        return range;
+    }
+    for mention in mentions {
+        if range.start < mention.range.end && range.end > mention.range.start {
+            range.start = range.start.min(mention.range.start);
+            range.end = range.end.max(mention.range.end);
+        }
+    }
+    range
+}
+
 fn selection_range_for_click(
     content: &str,
     mentions: &[ComposerMention],
@@ -7760,36 +8201,6 @@ fn library_occurrence_to_ai(occurrence: &AiMentionOccurrence) -> Option<MentionO
     })
 }
 
-fn offset_from_utf16_in_text(text: &str, offset: usize) -> usize {
-    let mut utf8_offset = 0;
-    let mut utf16_count = 0;
-
-    for ch in text.chars() {
-        if utf16_count >= offset {
-            break;
-        }
-        utf16_count += ch.len_utf16();
-        utf8_offset += ch.len_utf8();
-    }
-
-    utf8_offset
-}
-
-fn offset_to_utf16_in_text(text: &str, offset: usize) -> usize {
-    let mut utf16_offset = 0;
-    let mut utf8_count = 0;
-
-    for ch in text.chars() {
-        if utf8_count >= offset {
-            break;
-        }
-        utf8_count += ch.len_utf8();
-        utf16_offset += ch.len_utf16();
-    }
-
-    utf16_offset
-}
-
 fn with_alpha(rgb: u32, alpha: u8) -> u32 {
     (rgb << 8) | u32::from(alpha)
 }
@@ -8397,6 +8808,57 @@ mod tests {
         assert_eq!(mentions.len(), 1);
         assert_eq!(mentions[0].captured_text(), Some("Second selection"));
         assert_eq!(mentions[0].range.start, 5);
+    }
+
+    #[test]
+    fn word_deletion_expands_to_the_whole_mention() {
+        let source = "ask @document now";
+        let mentions = parse_composer_mentions(source);
+        let mention = &mentions[0];
+
+        let backward = backward_word_deletion_start(source, mention.range.end)..mention.range.end;
+        assert_eq!(expand_range_to_mentions(backward, &mentions), mention.range);
+
+        let forward = mention.range.start..forward_word_deletion_end(source, mention.range.start);
+        assert_eq!(expand_range_to_mentions(forward, &mentions), mention.range);
+        assert_eq!(
+            mention_aware_word_left(source, mention.range.end, &mentions),
+            mention.range.start
+        );
+        assert_eq!(
+            mention_aware_word_right(source, mention.range.start, &mentions),
+            mention.range.end
+        );
+    }
+
+    #[test]
+    fn composer_history_restores_mentions_and_page_edit_state() {
+        let mentions = parse_composer_mentions("@page(12)");
+        let digits = AiPanel::page_digits_range(&mentions[0]).unwrap();
+        let before = ComposerSnapshot {
+            content: "@page(12)".into(),
+            selected_range: digits.clone(),
+            selection_reversed: false,
+            marked_range: Some(digits.clone()),
+            mentions: mentions.clone(),
+            active_page_number_edit: Some(ActivePageNumberEdit {
+                mention_start: mentions[0].range.start,
+                digits,
+            }),
+        };
+        let after = ComposerSnapshot {
+            content: "done".into(),
+            selected_range: 4..4,
+            selection_reversed: false,
+            marked_range: None,
+            mentions: Vec::new(),
+            active_page_number_edit: None,
+        };
+        let mut history = EditHistory::default();
+        history.record(before.clone(), &after, EditGroup::Isolated);
+
+        assert_eq!(history.undo(after.clone()), Some(before.clone()));
+        assert_eq!(history.redo(before), Some(after));
     }
 
     #[test]
