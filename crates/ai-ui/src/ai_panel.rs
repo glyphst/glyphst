@@ -3400,19 +3400,18 @@ impl AiPanel {
             self.completion_menu_placement(&completion_matches, window)
         };
         let completion_scroll = self.mention_completion_scroll.clone();
-        let answer = self
+        let answer_index = self
             .messages
             .iter()
-            .rev()
-            .find(|message| message.role == Role::Assistant)
+            .rposition(|message| message.role == Role::Assistant);
+        let answer = answer_index
+            .and_then(|index| self.messages.get(index))
             .map(ChatMessage::display_text)
             .unwrap_or_default();
-        let answer_md = self
-            .messages
-            .iter()
-            .rposition(|m| m.role == Role::Assistant)
-            .and_then(|ix| self.markdown_views.get(ix).cloned());
+        let answer_md = answer_index.and_then(|index| self.markdown_views.get(index).cloned());
         let generation_failure = self.generation_failure.clone();
+        let copied_answer = answer_index
+            .is_some_and(|index| self.copied_target == Some(CopyFeedbackTarget::Message(index)));
         let copied_error = self.copied_target == Some(CopyFeedbackTarget::Error);
         let show_answer = loading || !answer.is_empty() || generation_failure.is_some();
 
@@ -3506,6 +3505,8 @@ impl AiPanel {
             .when(show_answer, |this| {
                 this.child(
                     div()
+                        .relative()
+                        .group("quick-ask-answer")
                         .border_t(px(1.0))
                         .border_color(rgb(theme.border_variant))
                         .child(
@@ -3545,6 +3546,42 @@ impl AiPanel {
                                         cx,
                                     ))
                                 }),
+                        )
+                        .when_some(
+                            answer_index.filter(|_| !answer.is_empty()),
+                            |this, index| {
+                                this.child(
+                                    div()
+                                        .invisible()
+                                        .group_hover("quick-ask-answer", |style| style.visible())
+                                        .absolute()
+                                        .top_2()
+                                        .right_3()
+                                        .rounded(px(4.0))
+                                        .bg(rgb(theme.surface_background))
+                                        .child(Self::message_action_button(
+                                            "quick-ask-copy-response",
+                                            if copied_answer {
+                                                IconName::Check
+                                            } else {
+                                                IconName::Copy
+                                            },
+                                            if copied_answer {
+                                                tr("ai-copied")
+                                            } else {
+                                                tr("ai-copy-response")
+                                            },
+                                            if copied_answer {
+                                                theme.success
+                                            } else {
+                                                theme.text_muted
+                                            },
+                                            theme,
+                                            move |this, _, cx| this.copy_message(index, cx),
+                                            cx,
+                                        )),
+                                )
+                            },
                         )
                         .vertical_scrollbar_for(&self.scroll_handle, window, cx),
                 )
