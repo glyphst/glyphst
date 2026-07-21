@@ -86,7 +86,9 @@ Clippy, and `cargo audit`; see `prek.toml`.
 ```
 
 ## Credits
+(TODO: add links)
 
 - Zed editor
 - Zathura
 - Sioyek
+- Retain-pdf
