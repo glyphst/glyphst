@@ -8,6 +8,7 @@
   perl,
   gnumake,
   python3,
+  typst,
   unzip,
   makeFontsConf,
   makeWrapper,
@@ -109,13 +110,18 @@ in
     doCheck = false;
 
     postInstall = ''
-      wrapProgram $out/bin/glyphst --set FONTCONFIG_FILE ${fontsConf}
+      mkdir -p $out/share/glyphst/pdf-translation
+      cp -R crates/pdf-translation/assets/. $out/share/glyphst/pdf-translation/
+      wrapProgram $out/bin/glyphst \
+        --set FONTCONFIG_FILE ${fontsConf} \
+        --set GLYPHST_PDF_TRANSLATION_ASSETS $out/share/glyphst/pdf-translation \
+        --prefix PATH : ${lib.makeBinPath [ typst ]}
       install -Dm644 crates/app/glyphst.desktop $out/share/applications/glyphst.desktop
     '';
 
     meta = {
       description = "A GPUI-based PDF viewer";
-      license = lib.licenses.gpl3Only;
+      license = lib.licenses.agpl3Only;
       mainProgram = "glyphst";
       platforms = lib.platforms.linux;
     };

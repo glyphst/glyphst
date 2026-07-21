@@ -47,6 +47,8 @@ const DEFAULT_TRANSLATION_TARGET_LANGUAGE: &str = "en";
 const DEFAULT_PINNED_TRANSLATION_WIDTH: f32 = 360.0;
 const MIN_PINNED_TRANSLATION_WIDTH: f32 = 240.0;
 const MAX_PINNED_TRANSLATION_WIDTH: f32 = 640.0;
+pub const DEFAULT_OCR_ENDPOINT: &str = "https://paddleocr.aistudio-app.com";
+pub const DEFAULT_OCR_MODEL: &str = "PaddleOCR-VL-1.6";
 const DEFAULT_UI_FONT_FALLBACKS: &[&str] = &[
     "Noto Sans CJK SC",
     "Noto Sans SC",
@@ -1709,6 +1711,80 @@ impl TranslationSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OcrMode {
+    #[default]
+    Always,
+    Auto,
+    Off,
+}
+
+impl OcrMode {
+    pub const ALL: [Self; 3] = [Self::Always, Self::Auto, Self::Off];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::Auto => "auto",
+            Self::Off => "off",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "always" => Some(Self::Always),
+            "auto" => Some(Self::Auto),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct OcrSettings {
+    pub mode: OcrMode,
+    pub token: String,
+    pub endpoint: String,
+    pub model: String,
+}
+
+impl std::fmt::Debug for OcrSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OcrSettings")
+            .field("mode", &self.mode)
+            .field("has_token", &!self.token.is_empty())
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .finish()
+    }
+}
+
+impl Default for OcrSettings {
+    fn default() -> Self {
+        Self {
+            mode: OcrMode::Always,
+            token: String::new(),
+            endpoint: DEFAULT_OCR_ENDPOINT.to_string(),
+            model: DEFAULT_OCR_MODEL.to_string(),
+        }
+    }
+}
+
+impl OcrSettings {
+    fn sanitize(&mut self) {
+        self.token = self.token.trim().to_string();
+        self.endpoint = self.endpoint.trim().trim_end_matches('/').to_string();
+        if self.endpoint.is_empty() {
+            self.endpoint = DEFAULT_OCR_ENDPOINT.to_string();
+        }
+        self.model = self.model.trim().to_string();
+        if self.model.is_empty() {
+            self.model = DEFAULT_OCR_MODEL.to_string();
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub behavior: BehaviorSettings,
@@ -1719,6 +1795,7 @@ pub struct Settings {
     pub language: AppLanguage,
     pub ai: AiSettings,
     pub translation: TranslationSettings,
+    pub ocr: OcrSettings,
     pub keymap_preset: KeymapPreset,
     pub keybinding_overrides: Vec<KeyBindingOverride>,
     pub theme: ThemeSelection,
@@ -1733,6 +1810,7 @@ impl Settings {
         self.window.sanitize();
         self.ai.sanitize();
         self.translation.sanitize();
+        self.ocr.sanitize();
         self.overrides.sanitize();
         self.theme.sanitize();
         self.keybinding_overrides.retain_mut(|binding| {
@@ -2065,6 +2143,25 @@ impl Settings {
             }
         }
 
+        if let Some(ocr) = document.get("ocr").and_then(KdlNode::children) {
+            if let Some(value) = ocr
+                .get_arg("mode")
+                .and_then(KdlValue::as_string)
+                .and_then(OcrMode::from_str)
+            {
+                settings.ocr.mode = value;
+            }
+            if let Some(value) = ocr.get_arg("token").and_then(KdlValue::as_string) {
+                settings.ocr.token = value.to_string();
+            }
+            if let Some(value) = ocr.get_arg("endpoint").and_then(KdlValue::as_string) {
+                settings.ocr.endpoint = value.to_string();
+            }
+            if let Some(value) = ocr.get_arg("model").and_then(KdlValue::as_string) {
+                settings.ocr.model = value.to_string();
+            }
+        }
+
         if let Some(overrides) = document.get("theme-overrides").and_then(KdlNode::children) {
             settings.overrides = PartialTheme::from_document(overrides);
         }
@@ -2322,6 +2419,18 @@ impl Settings {
                 translation_children.nodes_mut().push(providers);
             }
             document.nodes_mut().push(translation);
+        }
+
+        if self.ocr != OcrSettings::default() {
+            let mut ocr = KdlNode::new("ocr");
+            let ocr_children = ocr.ensure_children();
+            push_value_node(ocr_children, "mode", self.ocr.mode.as_str());
+            if !self.ocr.token.is_empty() {
+                push_value_node(ocr_children, "token", self.ocr.token.clone());
+            }
+            push_value_node(ocr_children, "endpoint", self.ocr.endpoint.clone());
+            push_value_node(ocr_children, "model", self.ocr.model.clone());
+            document.nodes_mut().push(ocr);
         }
 
         if !self.keybinding_overrides.is_empty() {
@@ -3170,6 +3279,59 @@ translation {
             .unwrap();
         assert!(exported_pinned.get("enabled").is_none());
         assert_eq!(parse_settings(&exported).unwrap(), settings);
+    }
+
+    #[test]
+    fn ocr_settings_use_expected_defaults() {
+        let settings = parse_settings("").unwrap();
+
+        assert_eq!(settings.ocr, OcrSettings::default());
+        assert_eq!(settings.ocr.mode, OcrMode::Always);
+        assert_eq!(settings.ocr.endpoint, DEFAULT_OCR_ENDPOINT);
+        assert_eq!(settings.ocr.model, DEFAULT_OCR_MODEL);
+        assert!(settings.ocr.token.is_empty());
+        assert!(!settings.to_kdl_string().contains("\nocr "));
+    }
+
+    #[test]
+    fn parses_sanitizes_and_exports_ocr_settings() {
+        let settings = parse_settings(
+            r#"
+ocr {
+    mode "auto"
+    token "  paddle-token  "
+    endpoint " https://ocr.example.com/ "
+    model " custom-model "
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(settings.ocr.mode, OcrMode::Auto);
+        assert_eq!(settings.ocr.token, "paddle-token");
+        assert_eq!(settings.ocr.endpoint, "https://ocr.example.com");
+        assert_eq!(settings.ocr.model, "custom-model");
+        assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+    }
+
+    #[test]
+    fn invalid_ocr_settings_fall_back_without_exposing_the_token_in_debug() {
+        let settings = parse_settings(
+            r#"
+ocr {
+    mode "sometimes"
+    token "secret-paddle-token"
+    endpoint " / "
+    model " "
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(settings.ocr.mode, OcrMode::Always);
+        assert_eq!(settings.ocr.endpoint, DEFAULT_OCR_ENDPOINT);
+        assert_eq!(settings.ocr.model, DEFAULT_OCR_MODEL);
+        assert!(!format!("{:?}", settings.ocr).contains("secret-paddle-token"));
     }
 
     #[test]

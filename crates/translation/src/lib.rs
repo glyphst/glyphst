@@ -217,6 +217,21 @@ pub struct TranslationResponse {
     pub detected_source_language: Option<LanguageCode>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SemanticTranslationUnit {
+    pub id: String,
+    pub role: String,
+    pub text: String,
+    pub context_before: Option<String>,
+    pub context_after: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticTranslation {
+    pub id: String,
+    pub text: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProviderCapabilities {
     pub supports_batches: bool,
@@ -399,6 +414,94 @@ impl TranslationService {
         Ok(translated)
     }
 
+    pub fn translate_semantic_batch(
+        &self,
+        settings: &Settings,
+        provider: TranslationProvider,
+        source_language: Option<LanguageCode>,
+        target_language: LanguageCode,
+        units: Vec<SemanticTranslationUnit>,
+    ) -> std::result::Result<Vec<SemanticTranslation>, TranslationError> {
+        if units.is_empty() {
+            return Ok(Vec::new());
+        }
+        if units.len() > MAX_BATCH_TEXTS
+            || units.iter().map(|unit| unit.text.len()).sum::<usize>() > MAX_BATCH_CHARS
+        {
+            return Err(TranslationError {
+                provider,
+                message: "semantic translation request exceeds the provider batch limit"
+                    .to_string(),
+                retryable: false,
+                retry_after: None,
+            });
+        }
+        let cache_key =
+            semantic_cache_key(provider, source_language.as_ref(), &target_language, &units);
+        if let Some(cached) = self
+            .cache
+            .lock()
+            .map_err(|_| TranslationError {
+                provider,
+                message: "translation cache is unavailable".to_string(),
+                retryable: true,
+                retry_after: None,
+            })?
+            .get(&cache_key)
+        {
+            return Ok(units
+                .into_iter()
+                .zip(cached.translations)
+                .map(|(unit, text)| SemanticTranslation { id: unit.id, text })
+                .collect());
+        }
+
+        let translations = if provider == TranslationProvider::Ai {
+            self.translate_semantic_with_ai(
+                settings,
+                source_language.as_ref(),
+                &target_language,
+                &units,
+            )?
+        } else {
+            let response = self.translate(
+                settings,
+                TranslationRequest {
+                    provider,
+                    source_language: source_language.clone(),
+                    target_language: target_language.clone(),
+                    texts: units.iter().map(|unit| unit.text.clone()).collect(),
+                    context_before: units.first().and_then(|unit| unit.context_before.clone()),
+                    context_after: units.last().and_then(|unit| unit.context_after.clone()),
+                },
+            )?;
+            units
+                .iter()
+                .zip(response.translations)
+                .map(|(unit, text)| SemanticTranslation {
+                    id: unit.id.clone(),
+                    text,
+                })
+                .collect()
+        };
+        if let Ok(mut cache) = self.cache.lock() {
+            let cached = CachedTranslation {
+                translations: translations
+                    .iter()
+                    .map(|translation| translation.text.clone())
+                    .collect(),
+                detected_source_language: source_language
+                    .as_ref()
+                    .map(|language| language.as_str().to_string()),
+                updated_at: unix_seconds(),
+            };
+            if let Err(error) = cache.insert(&cache_key, cached) {
+                eprintln!("failed to cache semantic translation: {error:#}");
+            }
+        }
+        Ok(translations)
+    }
+
     fn request_provider(
         &self,
         settings: &Settings,
@@ -410,6 +513,79 @@ impl TranslationService {
             TranslationProvider::Google => self.translate_with_google(settings, request),
             TranslationProvider::Microsoft => self.translate_with_microsoft(settings, request),
         }
+    }
+
+    fn translate_semantic_with_ai(
+        &self,
+        settings: &Settings,
+        source_language: Option<&LanguageCode>,
+        target_language: &LanguageCode,
+        units: &[SemanticTranslationUnit],
+    ) -> std::result::Result<Vec<SemanticTranslation>, TranslationError> {
+        if !settings
+            .translation
+            .provider_config(TranslationProvider::Ai)
+            .enabled
+        {
+            return Err(TranslationError {
+                provider: TranslationProvider::Ai,
+                message: "AI translation is disabled in settings".to_string(),
+                retryable: false,
+                retry_after: None,
+            });
+        }
+        let resolved = settings.ai.resolved_translation();
+        if !resolved.can_request() {
+            return Err(TranslationError {
+                provider: TranslationProvider::Ai,
+                message: resolved.missing_credentials_message(),
+                retryable: false,
+                retry_after: None,
+            });
+        }
+        let inputs = units
+            .iter()
+            .map(|unit| glyphst_ai::translation::SemanticTranslationInput {
+                id: unit.id.clone(),
+                role: unit.role.clone(),
+                text: unit.text.clone(),
+                context_before: unit.context_before.clone(),
+                context_after: unit.context_after.clone(),
+            })
+            .collect::<Vec<_>>();
+        let outputs = glyphst_ai::translation::translate_semantic_batch(
+            resolved,
+            &inputs,
+            source_language.map(LanguageCode::as_str),
+            target_language.as_str(),
+        )
+        .map_err(|_| TranslationError {
+            provider: TranslationProvider::Ai,
+            message: "AI semantic translation request failed".to_string(),
+            retryable: true,
+            retry_after: None,
+        })?;
+        let mut by_id = outputs
+            .into_iter()
+            .map(|output| (output.id, output.text))
+            .collect::<HashMap<_, _>>();
+        units
+            .iter()
+            .map(|unit| {
+                by_id
+                    .remove(&unit.id)
+                    .map(|text| SemanticTranslation {
+                        id: unit.id.clone(),
+                        text,
+                    })
+                    .ok_or_else(|| TranslationError {
+                        provider: TranslationProvider::Ai,
+                        message: "AI semantic translation response omitted a unit".to_string(),
+                        retryable: true,
+                        retry_after: None,
+                    })
+            })
+            .collect()
     }
 
     fn translate_with_ai(
@@ -825,6 +1001,21 @@ fn cache_key(request: &TranslationRequest) -> String {
     request.context_before.hash(&mut hasher);
     request.context_after.hash(&mut hasher);
     format!("v1-{:016x}", hasher.finish())
+}
+
+fn semantic_cache_key(
+    provider: TranslationProvider,
+    source_language: Option<&LanguageCode>,
+    target_language: &LanguageCode,
+    units: &[SemanticTranslationUnit],
+) -> String {
+    let mut hasher = DefaultHasher::new();
+    "semantic-v1".hash(&mut hasher);
+    provider.hash(&mut hasher);
+    source_language.hash(&mut hasher);
+    target_language.hash(&mut hasher);
+    units.hash(&mut hasher);
+    format!("semantic-v1-{:016x}", hasher.finish())
 }
 
 struct TranslationCache {

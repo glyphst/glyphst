@@ -135,6 +135,8 @@ pub mod pdf_viewer {
             GridCursorRight,
             GridOverviewConfirm,
             TranslateSelection,
+            TranslateDocument,
+            CancelDocumentTranslation,
             TogglePinnedTranslation,
             OpenTranslationSplit,
             ToggleRegionSelection,

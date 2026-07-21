@@ -38,6 +38,7 @@ use crate::theme::Theme;
 use crate::toc::{TocPalette, TocPaletteDelegate, TocPaletteEntry};
 use anyhow::{Context as _, Result, anyhow, bail};
 use arboard::{Clipboard, ImageData};
+use futures::{StreamExt as _, channel::mpsc};
 pub use glyphst_actions::pdf_viewer::*;
 use glyphst_ai::ai_chat::{
     ContextBlock, ImageContext, MAX_PAGE_IMAGE_BYTES, MentionKind, MentionReference,
@@ -50,6 +51,10 @@ use glyphst_core::{
     EpubTheme, PageIndex, PageRegion, RegionImageReference, SemanticTextAnchor,
 };
 use glyphst_pdf::{DocumentSnapshot, ReloadCoordinator, ReloadDisposition};
+use glyphst_pdf_translation::{
+    CancellationToken, PdfTranslationError, PdfTranslationProgress, PdfTranslationRequest,
+    PdfTranslationResult, PdfTranslationService, PdfTranslationStage,
+};
 use glyphst_translation::{LanguageCode, TranslationRequest, TranslationService};
 use glyphst_translation_ui::target_language_items;
 use glyphst_ui::{
@@ -65,7 +70,7 @@ use gpui::{
     Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement, Task, TextAlign, TextRun,
     TextStyle, UniformListScrollHandle, Window, WrappedLine, anchored, canvas, deferred, div, fill,
-    outline, point, prelude::*, px, rgb, rgba, size, uniform_list,
+    outline, point, prelude::*, px, relative, rgb, rgba, size, uniform_list,
 };
 use image::{Frame, RgbaImage, codecs::jpeg::JpegEncoder};
 use mupdf::text_page::{TextBlockType, TextCharFlags};
@@ -617,8 +622,18 @@ pub struct LinkedViewport {
 }
 
 #[derive(Clone, Copy)]
-pub struct LinkedBlockSelection {
+pub struct LinkedBlockAnchor {
     pub block_id: u32,
+    pub page_idx: usize,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+#[derive(Clone, Copy)]
+pub struct LinkedBlockSelection {
+    pub anchor: LinkedBlockAnchor,
     pub generation: u64,
 }
 
@@ -714,6 +729,61 @@ impl TranslationCardState {
     }
 }
 
+#[derive(Clone)]
+enum DocumentTranslationStatus {
+    Running {
+        request: PdfTranslationRequest,
+        progress: Option<PdfTranslationProgress>,
+    },
+    Error {
+        request: Option<PdfTranslationRequest>,
+        stage: Option<PdfTranslationStage>,
+        message: SharedString,
+        open_in_split: bool,
+    },
+    Succeeded {
+        output_path: PathBuf,
+    },
+}
+
+struct ActiveDocumentTranslation {
+    generation: u64,
+    cancellation: CancellationToken,
+    open_in_split: bool,
+    _task: Task<()>,
+}
+
+fn document_translation_stage_label(stage: PdfTranslationStage) -> &'static str {
+    match stage {
+        PdfTranslationStage::Preparing => "Preparing",
+        PdfTranslationStage::Ocr => "Reading text",
+        PdfTranslationStage::Normalizing => "Normalizing",
+        PdfTranslationStage::Translating => "Translating",
+        PdfTranslationStage::Layout => "Laying out",
+        PdfTranslationStage::Compiling => "Compiling",
+        PdfTranslationStage::Composing => "Composing",
+        PdfTranslationStage::Validating => "Validating",
+    }
+}
+
+fn document_translation_progress_fraction(progress: &PdfTranslationProgress) -> f32 {
+    if progress.overall_fraction.is_finite() {
+        progress.overall_fraction.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn document_translation_progress_count(progress: &PdfTranslationProgress) -> Option<String> {
+    let (completed, total) = progress.completed.zip(progress.total)?;
+    let unit = match progress.stage {
+        PdfTranslationStage::Ocr => "pages",
+        PdfTranslationStage::Translating => "units",
+        _ => "steps",
+    };
+    Some(format!("{completed} / {total} {unit}"))
+}
+
 fn reset_translation_cards_for_document_replacement(
     popup: &mut Option<TranslationCardState>,
     pinned: &mut Option<TranslationCardState>,
@@ -770,9 +840,11 @@ pub enum PdfViewEvent {
         position: Option<DocumentPosition>,
     },
     OpenSettings,
-    OpenTranslationSplit,
+    OpenTranslationSplit {
+        translated_path: PathBuf,
+    },
     ViewportChanged(LinkedViewport),
-    BlockHovered(Option<u32>),
+    BlockHovered(Option<LinkedBlockAnchor>),
     BlockSelected(Option<LinkedBlockSelection>),
 }
 
@@ -963,6 +1035,9 @@ pub struct PdfView {
     translation_popup_language_dropdown: Option<Entity<SearchableDropdown>>,
     pinned_translation_language_dropdown: Option<Entity<SearchableDropdown>>,
     translation_request_generation: u64,
+    document_translation_generation: u64,
+    document_translation_status: Option<DocumentTranslationStatus>,
+    active_document_translation: Option<ActiveDocumentTranslation>,
     pending_selection_anchor: Option<usize>,
     dragging: bool,
     hovered_link: Option<usize>,
@@ -2052,6 +2127,9 @@ impl PdfView {
             translation_popup_language_dropdown: None,
             pinned_translation_language_dropdown: None,
             translation_request_generation: 0,
+            document_translation_generation: 0,
+            document_translation_status: None,
+            active_document_translation: None,
             pending_selection_anchor: None,
             dragging: false,
             hovered_link: None,
@@ -2165,6 +2243,9 @@ impl PdfView {
         self.bookmarks_revision = store.bookmarks_revision();
 
         cx.on_release(|this, cx| {
+            if let Some(job) = this.active_document_translation.take() {
+                job.cancellation.cancel();
+            }
             if cx.has_global::<RenderCache>() {
                 let mut doc_ids = Vec::with_capacity(2);
                 doc_ids.push(this.doc_id);
@@ -4848,7 +4929,42 @@ impl PdfView {
         self.suppress_linked_events = false;
     }
 
-    pub fn apply_linked_hover(&mut self, block_id: Option<u32>, cx: &mut Context<Self>) {
+    fn linked_block_anchor(&self, block_id: u32) -> Option<LinkedBlockAnchor> {
+        let block = self.text_blocks.iter().find(|block| block.id == block_id)?;
+        Some(LinkedBlockAnchor {
+            block_id,
+            page_idx: block.page_idx,
+            x0: block.bounds.x0,
+            y0: block.bounds.y0,
+            x1: block.bounds.x1,
+            y1: block.bounds.y1,
+        })
+    }
+
+    fn map_linked_block(&self, anchor: LinkedBlockAnchor) -> Option<u32> {
+        let anchor_center = ((anchor.x0 + anchor.x1) * 0.5, (anchor.y0 + anchor.y1) * 0.5);
+        self.text_blocks
+            .iter()
+            .filter(|block| block.page_idx == anchor.page_idx)
+            .min_by(|left, right| {
+                let distance = |block: &TextBlock| {
+                    let center = (
+                        (block.bounds.x0 + block.bounds.x1) * 0.5,
+                        (block.bounds.y0 + block.bounds.y1) * 0.5,
+                    );
+                    (center.0 - anchor_center.0).powi(2) + (center.1 - anchor_center.1).powi(2)
+                };
+                distance(left).total_cmp(&distance(right))
+            })
+            .map(|block| block.id)
+    }
+
+    pub fn apply_linked_hover(
+        &mut self,
+        anchor: Option<LinkedBlockAnchor>,
+        cx: &mut Context<Self>,
+    ) {
+        let block_id = anchor.and_then(|anchor| self.map_linked_block(anchor));
         if self.external_hovered_block != block_id {
             self.external_hovered_block = block_id;
             cx.notify();
@@ -4860,7 +4976,7 @@ impl PdfView {
         selection: Option<LinkedBlockSelection>,
         cx: &mut Context<Self>,
     ) {
-        let block_id = selection.map(|selection| selection.block_id);
+        let block_id = selection.and_then(|selection| self.map_linked_block(selection.anchor));
         if self.external_selected_block != block_id {
             self.external_selected_block = block_id;
             cx.notify();
@@ -4888,7 +5004,9 @@ impl PdfView {
         if self.hovered_text_block != block_id {
             self.hovered_text_block = block_id;
             if !self.suppress_linked_events {
-                cx.emit(PdfViewEvent::BlockHovered(block_id));
+                cx.emit(PdfViewEvent::BlockHovered(
+                    block_id.and_then(|block_id| self.linked_block_anchor(block_id)),
+                ));
             }
             cx.notify();
         }
@@ -4900,9 +5018,12 @@ impl PdfView {
         }
         self.linked_selection_generation = self.linked_selection_generation.wrapping_add(1);
         let selection = self.selection_bounds().and_then(|(start, _)| {
-            self.glyphs.get(start).map(|glyph| LinkedBlockSelection {
-                block_id: glyph.block_idx,
-                generation: self.linked_selection_generation,
+            self.glyphs.get(start).and_then(|glyph| {
+                self.linked_block_anchor(glyph.block_idx)
+                    .map(|anchor| LinkedBlockSelection {
+                        anchor,
+                        generation: self.linked_selection_generation,
+                    })
             })
         });
         cx.emit(PdfViewEvent::BlockSelected(selection));
@@ -7222,6 +7343,415 @@ impl PdfView {
         self.copy_selection_as(format, cx);
     }
 
+    fn can_translate_document(&self) -> bool {
+        self.format == DocumentFormat::Pdf && self.path.is_absolute()
+    }
+
+    fn document_translation_is_running(&self) -> bool {
+        self.active_document_translation.is_some()
+    }
+
+    fn document_translation_output_path(source: &Path, target: &LanguageCode) -> PathBuf {
+        let stem = source
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or("document");
+        source
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(format!("{stem}.{}.pdf", target.as_str()))
+    }
+
+    fn replace_document_translation_status(
+        &mut self,
+        status: DocumentTranslationStatus,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(active) = self.active_document_translation.take() {
+            active.cancellation.cancel();
+        }
+        self.document_translation_generation = self.document_translation_generation.wrapping_add(1);
+        self.document_translation_status = Some(status);
+        cx.notify();
+    }
+
+    fn translate_document(&mut self, cx: &mut Context<Self>) {
+        if !self.can_translate_document() {
+            return;
+        }
+
+        let settings = cx.global::<SettingsStore>().settings.clone();
+        let source_language = settings
+            .translation
+            .source_language
+            .as_deref()
+            .and_then(|language| LanguageCode::new(language).ok());
+        let target_language = match LanguageCode::new(&settings.translation.target_language) {
+            Ok(language) => language,
+            Err(_) => {
+                self.replace_document_translation_status(
+                    DocumentTranslationStatus::Error {
+                        request: None,
+                        stage: None,
+                        message: "Choose a valid target language in Translation Settings.".into(),
+                        open_in_split: false,
+                    },
+                    cx,
+                );
+                return;
+            }
+        };
+        let source_path = self.path.clone();
+        let output_path = Self::document_translation_output_path(&source_path, &target_language);
+        let directory = output_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let suggested_name = output_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("translated.pdf")
+            .to_string();
+        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+
+        cx.spawn(async move |this, cx| {
+            let result = dialog.await;
+            _ = this.update(cx, |this, cx| match result {
+                Ok(Ok(Some(output_path))) => {
+                    let request = PdfTranslationRequest {
+                        source_path,
+                        output_path,
+                        source_language,
+                        target_language,
+                    };
+                    this.start_document_translation(settings, request, false, cx);
+                }
+                Ok(Err(error)) => {
+                    eprintln!("failed to choose translated PDF output path: {error:#}");
+                }
+                Ok(Ok(None)) | Err(_) => {}
+            });
+        })
+        .detach();
+    }
+
+    fn start_document_translation(
+        &mut self,
+        settings: crate::settings::Settings,
+        request: PdfTranslationRequest,
+        open_in_split: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_translate_document() || request.source_path != self.path {
+            return;
+        }
+
+        if normalize_path(&request.output_path) == self.path {
+            self.replace_document_translation_status(
+                DocumentTranslationStatus::Error {
+                    request: None,
+                    stage: None,
+                    message: "Choose an output path different from the source PDF.".into(),
+                    open_in_split,
+                },
+                cx,
+            );
+            return;
+        }
+
+        if !cx.has_global::<PdfTranslationService>() {
+            self.replace_document_translation_status(
+                DocumentTranslationStatus::Error {
+                    request: Some(request),
+                    stage: None,
+                    message: "Document translation is unavailable.".into(),
+                    open_in_split,
+                },
+                cx,
+            );
+            return;
+        }
+
+        if let Some(active) = self.active_document_translation.take() {
+            active.cancellation.cancel();
+        }
+        self.document_translation_generation = self.document_translation_generation.wrapping_add(1);
+        let generation = self.document_translation_generation;
+        let cancellation = CancellationToken::new();
+        let service = cx.global::<PdfTranslationService>().clone();
+        let background_request = request.clone();
+        let background_cancellation = cancellation.clone();
+        let (progress_tx, mut progress_rx) = mpsc::unbounded::<PdfTranslationProgress>();
+
+        self.document_translation_status = Some(DocumentTranslationStatus::Running {
+            request,
+            progress: None,
+        });
+
+        let task = cx.spawn(async move |this, cx| {
+            let result_task = cx.background_spawn(async move {
+                service.run(
+                    settings,
+                    background_request,
+                    background_cancellation,
+                    move |progress| {
+                        _ = progress_tx.unbounded_send(progress);
+                    },
+                )
+            });
+
+            while let Some(progress) = progress_rx.next().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.update_document_translation_progress(generation, progress, cx);
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
+            let result = result_task.await;
+            _ = this.update(cx, |this, cx| {
+                this.finish_document_translation(generation, result, cx);
+            });
+        });
+        self.active_document_translation = Some(ActiveDocumentTranslation {
+            generation,
+            cancellation,
+            open_in_split,
+            _task: task,
+        });
+        cx.notify();
+    }
+
+    fn update_document_translation_progress(
+        &mut self,
+        generation: u64,
+        progress: PdfTranslationProgress,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .active_document_translation
+            .as_ref()
+            .is_none_or(|active| active.generation != generation)
+        {
+            return;
+        }
+        if let Some(DocumentTranslationStatus::Running {
+            progress: current, ..
+        }) = self.document_translation_status.as_mut()
+        {
+            *current = Some(progress);
+            cx.notify();
+        }
+    }
+
+    fn finish_document_translation(
+        &mut self,
+        generation: u64,
+        result: std::result::Result<PdfTranslationResult, PdfTranslationError>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .active_document_translation
+            .as_ref()
+            .is_none_or(|active| active.generation != generation)
+        {
+            return;
+        }
+        let active = self.active_document_translation.take().unwrap();
+        let request = match self.document_translation_status.as_ref() {
+            Some(DocumentTranslationStatus::Running { request, .. }) => request.clone(),
+            _ => return,
+        };
+
+        match result {
+            Ok(result) => {
+                let output_path = result.output_path;
+                self.document_translation_status = Some(DocumentTranslationStatus::Succeeded {
+                    output_path: output_path.clone(),
+                });
+                if active.open_in_split {
+                    cx.emit(PdfViewEvent::OpenTranslationSplit {
+                        translated_path: output_path,
+                    });
+                } else {
+                    cx.emit(PdfViewEvent::OpenDocument {
+                        path: output_path,
+                        position: None,
+                    });
+                }
+            }
+            Err(_) if active.cancellation.is_cancelled() => {
+                self.document_translation_status = Some(DocumentTranslationStatus::Error {
+                    request: Some(request),
+                    stage: None,
+                    message: "Document translation was cancelled.".into(),
+                    open_in_split: active.open_in_split,
+                });
+            }
+            Err(error) => {
+                let stage = error.stage;
+                let message = if error.retryable {
+                    "Some content could not be translated. Check your provider settings and try again."
+                } else {
+                    "Document translation failed. Check your translation and OCR settings, then try again."
+                };
+                self.document_translation_status = Some(DocumentTranslationStatus::Error {
+                    request: Some(request),
+                    stage: Some(stage),
+                    message: message.into(),
+                    open_in_split: active.open_in_split,
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn cancel_document_translation(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active_document_translation.as_ref() else {
+            return;
+        };
+        active.cancellation.cancel();
+        cx.notify();
+    }
+
+    fn retry_document_translation(&mut self, cx: &mut Context<Self>) {
+        let (mut request, open_in_split) = match self.document_translation_status.as_ref() {
+            Some(DocumentTranslationStatus::Error {
+                request: Some(request),
+                open_in_split,
+                ..
+            }) => (Some(request.clone()), *open_in_split),
+            _ => (None, false),
+        };
+        if let Some(request) = request.as_mut() {
+            let settings = cx.global::<SettingsStore>().settings.clone();
+            let target_language = match LanguageCode::new(&settings.translation.target_language) {
+                Ok(language) => language,
+                Err(_) => {
+                    self.replace_document_translation_status(
+                        DocumentTranslationStatus::Error {
+                            request: None,
+                            stage: None,
+                            message: "Choose a valid target language in Translation Settings."
+                                .into(),
+                            open_in_split,
+                        },
+                        cx,
+                    );
+                    return;
+                }
+            };
+            request.source_language = settings
+                .translation
+                .source_language
+                .as_deref()
+                .and_then(|language| LanguageCode::new(language).ok());
+            request.target_language = target_language;
+            self.start_document_translation(settings, request.clone(), open_in_split, cx);
+        } else {
+            self.translate_document(cx);
+        }
+    }
+
+    fn open_document_translation_output(&self, cx: &mut Context<Self>) {
+        let Some(DocumentTranslationStatus::Succeeded { output_path }) =
+            self.document_translation_status.as_ref()
+        else {
+            return;
+        };
+        cx.emit(PdfViewEvent::OpenDocument {
+            path: output_path.clone(),
+            position: None,
+        });
+    }
+
+    fn open_translation_split(&mut self, cx: &mut Context<Self>) {
+        if !self.can_translate_document() || self.document_translation_is_running() {
+            return;
+        }
+        if let Some(DocumentTranslationStatus::Succeeded { output_path }) =
+            self.document_translation_status.as_ref()
+            && output_path.is_file()
+        {
+            cx.emit(PdfViewEvent::OpenTranslationSplit {
+                translated_path: output_path.clone(),
+            });
+            return;
+        }
+        if !cx.has_global::<PdfTranslationService>() {
+            self.replace_document_translation_status(
+                DocumentTranslationStatus::Error {
+                    request: None,
+                    stage: None,
+                    message: "Document translation is unavailable.".into(),
+                    open_in_split: true,
+                },
+                cx,
+            );
+            return;
+        }
+
+        let settings = cx.global::<SettingsStore>().settings.clone();
+        let source_language = settings
+            .translation
+            .source_language
+            .as_deref()
+            .and_then(|language| LanguageCode::new(language).ok());
+        let target_language = match LanguageCode::new(&settings.translation.target_language) {
+            Ok(language) => language,
+            Err(_) => {
+                self.replace_document_translation_status(
+                    DocumentTranslationStatus::Error {
+                        request: None,
+                        stage: None,
+                        message: "Choose a valid target language in Translation Settings.".into(),
+                        open_in_split: true,
+                    },
+                    cx,
+                );
+                return;
+            }
+        };
+        let service = cx.global::<PdfTranslationService>().clone();
+        let request = match service.artifact_request(
+            &settings,
+            self.path.clone(),
+            source_language,
+            target_language,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                self.replace_document_translation_status(
+                    DocumentTranslationStatus::Error {
+                        request: None,
+                        stage: Some(error.stage),
+                        message: "Could not prepare the translated PDF artifact.".into(),
+                        open_in_split: true,
+                    },
+                    cx,
+                );
+                return;
+            }
+        };
+        match service.cached_artifact(&settings, &request) {
+            Some(result) => {
+                let output_path = result.output_path;
+                self.document_translation_status = Some(DocumentTranslationStatus::Succeeded {
+                    output_path: output_path.clone(),
+                });
+                cx.emit(PdfViewEvent::OpenTranslationSplit {
+                    translated_path: output_path,
+                });
+                cx.notify();
+            }
+            None => self.start_document_translation(settings, request, true, cx),
+        }
+    }
+
     fn translate_selection(
         &mut self,
         popup_position: Option<GpuiPoint<Pixels>>,
@@ -7722,6 +8252,207 @@ impl PdfView {
                     }),
             )
             .into_any_element()
+    }
+
+    fn render_document_translation_card(
+        &self,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let status = self.document_translation_status.clone()?;
+        let cancelling = self
+            .active_document_translation
+            .as_ref()
+            .is_some_and(|active| active.cancellation.is_cancelled());
+
+        let (title, stage, detail, count, fraction, indeterminate, action) = match status {
+            DocumentTranslationStatus::Running { progress, .. } => {
+                let (stage, detail, count, fraction, indeterminate) =
+                    if let Some(progress) = progress {
+                        (
+                            document_translation_stage_label(progress.stage).to_string(),
+                            progress.detail.clone(),
+                            document_translation_progress_count(&progress),
+                            document_translation_progress_fraction(&progress),
+                            progress.indeterminate,
+                        )
+                    } else {
+                        (
+                            "Starting".to_string(),
+                            "Preparing the document translation.".to_string(),
+                            None,
+                            0.0,
+                            true,
+                        )
+                    };
+                (
+                    if cancelling {
+                        "Cancelling document translation"
+                    } else {
+                        "Translating document"
+                    }
+                    .to_string(),
+                    stage,
+                    detail,
+                    count,
+                    fraction,
+                    indeterminate,
+                    (!cancelling).then_some("cancel"),
+                )
+            }
+            DocumentTranslationStatus::Error { stage, message, .. } => (
+                "Document translation failed".to_string(),
+                stage
+                    .map(document_translation_stage_label)
+                    .unwrap_or("Translation")
+                    .to_string(),
+                message.to_string(),
+                None,
+                0.0,
+                false,
+                Some("retry"),
+            ),
+            DocumentTranslationStatus::Succeeded { output_path } => (
+                "Translated PDF is ready".to_string(),
+                "Complete".to_string(),
+                output_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Translated PDF")
+                    .to_string(),
+                None,
+                1.0,
+                false,
+                Some("open"),
+            ),
+        };
+        let progress_label = if indeterminate {
+            "Working…".to_string()
+        } else {
+            format!("{:.0}%", fraction * 100.0)
+        };
+
+        let action_button = match action {
+            Some("cancel") => Some(
+                Self::grid_overview_toolbar_button(
+                    "document-translation-cancel",
+                    "Cancel".to_string(),
+                    theme,
+                    |this, _, _, cx| this.cancel_document_translation(cx),
+                    cx,
+                )
+                .into_any_element(),
+            ),
+            Some("retry") => Some(
+                Self::grid_overview_toolbar_button(
+                    "document-translation-retry",
+                    "Retry".to_string(),
+                    theme,
+                    |this, _, _, cx| this.retry_document_translation(cx),
+                    cx,
+                )
+                .into_any_element(),
+            ),
+            Some("open") => Some(
+                Self::grid_overview_toolbar_button(
+                    "document-translation-open",
+                    "Open output".to_string(),
+                    theme,
+                    |this, _, _, cx| this.open_document_translation_output(cx),
+                    cx,
+                )
+                .into_any_element(),
+            ),
+            _ => None,
+        };
+
+        Some(
+            div()
+                .occlude()
+                .w(px(380.0))
+                .max_w_full()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.surface_background))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(ui_rems(13.0))
+                                        .text_color(rgb(theme.text))
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_size(ui_rems(11.0))
+                                        .text_color(rgb(theme.text_muted))
+                                        .child(stage)
+                                        .when_some(count, |this, count| {
+                                            this.child("·").child(count)
+                                        }),
+                                ),
+                        )
+                        .when_some(action_button, |this, button| this.child(button)),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(ui_rems(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(detail),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .h(px(4.0))
+                                .overflow_hidden()
+                                .rounded(px(2.0))
+                                .bg(rgb(theme.border_variant))
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(relative(fraction))
+                                        .rounded(px(2.0))
+                                        .bg(rgb(theme.accent)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .min_w(px(48.0))
+                                .text_align(TextAlign::Right)
+                                .text_size(ui_rems(11.0))
+                                .text_color(rgb(theme.text_muted))
+                                .child(progress_label),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn select_all(&mut self) {
@@ -12172,6 +12903,7 @@ impl PdfView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let document_translation_card = self.render_document_translation_card(theme, cx);
         div()
             .size_full()
             .flex_1()
@@ -12285,6 +13017,21 @@ impl PdfView {
                         )
                     }),
             )
+            .when_some(document_translation_card, |this, card| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .w_full()
+                        .flex()
+                        .justify_end()
+                        .px_3()
+                        .py_2()
+                        .border_t(px(1.0))
+                        .border_color(rgb(theme.border))
+                        .bg(rgb(theme.tab_active_background))
+                        .child(card),
+                )
+            })
             .child(self.render_workspace_footbar(theme, cx))
             .into_any_element()
     }
@@ -12783,12 +13530,24 @@ impl Render for PdfView {
                     cx,
                 );
             }))
+            .when(self.can_translate_document(), |this| {
+                this.on_action(cx.listener(|this, _: &TranslateDocument, _, cx| {
+                    this.translate_document(cx);
+                }))
+            })
+            .when(self.document_translation_is_running(), |this| {
+                this.on_action(
+                    cx.listener(|this, _: &CancelDocumentTranslation, _, cx| {
+                        this.cancel_document_translation(cx);
+                    }),
+                )
+            })
             .on_action(cx.listener(|this, _: &TogglePinnedTranslation, _, cx| {
                 this.toggle_pinned_translation(cx);
             }))
             .on_action(cx.listener(|this, _: &OpenTranslationSplit, _, cx| {
                 if this.capabilities.translation_split {
-                    cx.emit(PdfViewEvent::OpenTranslationSplit);
+                    this.open_translation_split(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleRegionSelection, _, cx| {
@@ -13487,13 +14246,16 @@ mod tests {
     use super::{
         Glyph, PdfPage, PdfView, RegionDragState, RegionImageExport, RenderCache, RenderKey,
         SearchState, TextChunk, TextFormatBlock, TextIndexState, TextLine, TranslationCardState,
-        TranslationStatus, clear_copied_region_selection,
-        reset_translation_cards_for_document_replacement, retain_valid_annotation_id,
+        TranslationStatus, clear_copied_region_selection, document_translation_progress_count,
+        document_translation_progress_fraction, reset_translation_cards_for_document_replacement,
+        retain_valid_annotation_id,
     };
     use glyphst_ai::ai_chat::{MentionKind, MentionReference};
     use glyphst_core::{
         DocumentLayout, DocumentRotation, EpubLayout, PageIndex, PageRegion, RegionImageReference,
     };
+    use glyphst_pdf_translation::{PdfTranslationProgress, PdfTranslationStage};
+    use glyphst_translation::LanguageCode;
     use gpui::{Modifiers, ScrollWheelEvent, point, px};
     use image::{Frame, GenericImageView, RgbaImage};
     use mupdf::{Point, Quad, Rect};
@@ -14321,6 +15083,45 @@ mod tests {
 
         assert!(popup.is_none());
         assert!(pinned.is_none());
+    }
+
+    #[test]
+    fn document_translation_default_output_uses_target_language() {
+        let target = LanguageCode::new("ZH-Hans").unwrap();
+
+        assert_eq!(
+            PdfView::document_translation_output_path(
+                std::path::Path::new("/tmp/report.v1.pdf"),
+                &target,
+            ),
+            std::path::PathBuf::from("/tmp/report.v1.zh-hans.pdf")
+        );
+    }
+
+    #[test]
+    fn document_translation_progress_maps_counts_and_fraction_safely() {
+        let progress = PdfTranslationProgress {
+            stage: PdfTranslationStage::Translating,
+            detail: "Translating".to_string(),
+            completed: Some(3),
+            total: Some(8),
+            overall_fraction: 1.2,
+            indeterminate: false,
+        };
+        assert_eq!(
+            document_translation_progress_count(&progress).as_deref(),
+            Some("3 / 8 units")
+        );
+        assert_eq!(document_translation_progress_fraction(&progress), 1.0);
+
+        let invalid = PdfTranslationProgress {
+            overall_fraction: f32::NAN,
+            completed: None,
+            total: None,
+            ..progress
+        };
+        assert_eq!(document_translation_progress_count(&invalid), None);
+        assert_eq!(document_translation_progress_fraction(&invalid), 0.0);
     }
 
     fn missing_space_glyphs() -> Vec<Glyph> {

@@ -207,9 +207,13 @@ impl Workspace {
                     }
                 }
                 PaneEvent::OpenSettings => this.open_settings_window(cx),
-                PaneEvent::OpenTranslationSplit { source } => {
+                PaneEvent::OpenTranslationSplit {
+                    source,
+                    translated_path,
+                } => {
                     this.open_translation_split(
                         source.clone(),
+                        translated_path.clone(),
                         pane_for_events.clone(),
                         window,
                         cx,
@@ -453,18 +457,13 @@ impl Workspace {
     fn open_translation_split(
         &mut self,
         original: Entity<PdfView>,
+        translated_path: PathBuf,
         source_pane: Entity<Pane>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (path, position) = {
-            let original = original.read(cx);
-            (
-                original.path().to_path_buf(),
-                original.current_document_position(),
-            )
-        };
-        let translated_pane = self.create_pane(Some(path), Some(position), window, cx);
+        let position = original.read(cx).current_document_position();
+        let translated_pane = self.create_pane(Some(translated_path), Some(position), window, cx);
         self.pane_group
             .split(&source_pane, &translated_pane, SplitDirection::Right);
         self.active_pane = translated_pane.clone();
@@ -474,7 +473,6 @@ impl Workspace {
             self.remove_pane(&translated_pane, window, cx);
             return;
         };
-        translated.update(cx, |view, cx| view.set_translated_view(true, cx));
         self.link_translation_views(original, translated, window, cx);
         translated_pane.update(cx, |pane, cx| pane.focus(window, cx));
         cx.notify();
@@ -515,7 +513,7 @@ impl Workspace {
                 }
                 PdfViewEvent::OpenDocument { .. }
                 | PdfViewEvent::OpenSettings
-                | PdfViewEvent::OpenTranslationSplit => {}
+                | PdfViewEvent::OpenTranslationSplit { .. } => {}
             },
         )
         .detach();
@@ -548,7 +546,7 @@ impl Workspace {
                 }
                 PdfViewEvent::OpenDocument { .. }
                 | PdfViewEvent::OpenSettings
-                | PdfViewEvent::OpenTranslationSplit => {}
+                | PdfViewEvent::OpenTranslationSplit { .. } => {}
             },
         )
         .detach();

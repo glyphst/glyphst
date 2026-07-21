@@ -3,10 +3,10 @@ use glyphst_ai::ai_client::{AiModelInfo, list_ai_models, test_ai_connection};
 use glyphst_keymap::keybindings;
 use glyphst_settings::{
     AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, AppLanguage, CopyFormat,
-    DEFAULT_PAGE_IMAGE_LIMIT, FontSettings, KeymapPreset, ModelRef, PageImageQuality,
-    PageTextFormat, ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility,
-    TranslationBoxCorner, TranslationProvider, TranslationProviderConfig, WindowBackgroundMode,
-    localize, setup_ui_font,
+    DEFAULT_OCR_ENDPOINT, DEFAULT_OCR_MODEL, DEFAULT_PAGE_IMAGE_LIMIT, FontSettings, KeymapPreset,
+    ModelRef, OcrMode, OcrSettings, PageImageQuality, PageTextFormat, ResolvedAiConfig, Settings,
+    SettingsStore, TabBarVisibility, TranslationBoxCorner, TranslationProvider,
+    TranslationProviderConfig, WindowBackgroundMode, localize, setup_ui_font,
     theme::{
         PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode, ThemeMetadata, ThemeSelection,
         format_rgb_hex, format_rgba_hex, parse_hex_color,
@@ -26,14 +26,18 @@ use gpui::{
     WindowBounds, WindowOptions, anchored, deferred, div, point, prelude::*, px, rgb, rgba, size,
     uniform_list,
 };
+use reqwest::StatusCode;
+use serde_json::Value;
 use std::{
+    collections::hash_map::RandomState,
+    hash::BuildHasher,
     ops::Range,
     path::Path,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 // ---- settings panel ----
@@ -53,6 +57,110 @@ const HIGHLIGHT_SWATCHES: [u32; 6] = [
 const ALPHA_SWATCHES: [u32; 6] = [
     0x00000033, 0x00000066, 0xffffff66, 0x61afef55, 0x3a3f4bcc, 0x45475a99,
 ];
+static OCR_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy)]
+enum OcrConnectionStatus {
+    Testing,
+    Succeeded,
+    InvalidAuth,
+    Retryable,
+    ProviderError(Option<i64>),
+}
+
+enum OcrProbeError {
+    InvalidAuth,
+    Retryable,
+    Provider(Option<i64>),
+}
+
+fn random_ocr_probe_job_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = OCR_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let hash = RandomState::new().hash_one((timestamp, sequence, std::process::id()));
+    format!("glyphst-connection-test-{hash:016x}")
+}
+
+fn paddle_provider_code(value: &Value) -> Option<i64> {
+    match value {
+        Value::Object(object) => {
+            for key in ["code", "errorCode", "error_code"] {
+                if let Some(value) = object.get(key) {
+                    if let Some(code) = value.as_i64() {
+                        return Some(code);
+                    }
+                    if let Some(code) = value
+                        .as_str()
+                        .and_then(|value| value.trim().parse::<i64>().ok())
+                    {
+                        return Some(code);
+                    }
+                }
+            }
+            object.values().find_map(paddle_provider_code)
+        }
+        Value::Array(values) => values.iter().find_map(paddle_provider_code),
+        _ => None,
+    }
+}
+
+fn classify_ocr_probe_response(
+    status: StatusCode,
+    provider_code: Option<i64>,
+) -> Result<(), OcrProbeError> {
+    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        return Err(OcrProbeError::InvalidAuth);
+    }
+    if status == StatusCode::NOT_FOUND || matches!(provider_code, Some(404 | 11001)) {
+        return Ok(());
+    }
+    if status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+    {
+        return Err(OcrProbeError::Retryable);
+    }
+    Err(OcrProbeError::Provider(provider_code))
+}
+
+fn test_ocr_connection_request(settings: OcrSettings) -> Result<(), OcrProbeError> {
+    if settings.token.is_empty() {
+        return Err(OcrProbeError::InvalidAuth);
+    }
+
+    let url = format!(
+        "{}/api/v2/ocr/jobs/{}",
+        settings.endpoint.trim_end_matches('/'),
+        random_ocr_probe_job_id()
+    );
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| OcrProbeError::Provider(None))?;
+    let response = client
+        .get(url)
+        .bearer_auth(settings.token)
+        .send()
+        .map_err(|error| {
+            if error.is_timeout() || error.is_connect() {
+                OcrProbeError::Retryable
+            } else {
+                OcrProbeError::Provider(None)
+            }
+        })?;
+    let status = response.status();
+    let provider_code = response
+        .text()
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        .as_ref()
+        .and_then(paddle_provider_code);
+
+    classify_ocr_probe_response(status, provider_code)
+}
 
 #[derive(Clone, Copy)]
 struct ColorRowConfig {
@@ -156,6 +264,7 @@ enum SettingsTab {
     AiGeneral,
     AiProviders,
     Translation,
+    Ocr,
 }
 
 impl SettingsTab {
@@ -167,6 +276,7 @@ impl SettingsTab {
             Self::AiGeneral => crate::fl!("settings-tab-general"),
             Self::AiProviders => crate::fl!("settings-tab-model-providers"),
             Self::Translation => crate::fl!("settings-tab-translation"),
+            Self::Ocr => crate::fl!("settings-tab-ocr"),
         }
     }
 
@@ -191,6 +301,7 @@ enum SettingsSection {
     AiGeneral,
     AiProviders,
     TranslationGeneral,
+    OcrGeneral,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,6 +320,7 @@ impl SettingsNavEntry {
             Self::Root(SettingsTab::AiGeneral) => "settings-nav-ai-general-root",
             Self::Root(SettingsTab::AiProviders) => "settings-nav-ai-providers-root",
             Self::Root(SettingsTab::Translation) => "settings-nav-translation",
+            Self::Root(SettingsTab::Ocr) => "settings-nav-ocr",
             Self::AiParent => "settings-nav-ai",
             Self::AiChild(SettingsSection::AiGeneral) => "settings-nav-ai-general",
             Self::AiChild(SettingsSection::AiProviders) => "settings-nav-ai-providers",
@@ -217,7 +329,7 @@ impl SettingsNavEntry {
     }
 }
 
-const SETTINGS_NAV_ENTRIES: [SettingsNavEntry; 7] = [
+const SETTINGS_NAV_ENTRIES: [SettingsNavEntry; 8] = [
     SettingsNavEntry::Root(SettingsTab::General),
     SettingsNavEntry::Root(SettingsTab::Keymap),
     SettingsNavEntry::Root(SettingsTab::Appearance),
@@ -225,6 +337,7 @@ const SETTINGS_NAV_ENTRIES: [SettingsNavEntry; 7] = [
     SettingsNavEntry::AiChild(SettingsSection::AiGeneral),
     SettingsNavEntry::AiChild(SettingsSection::AiProviders),
     SettingsNavEntry::Root(SettingsTab::Translation),
+    SettingsNavEntry::Root(SettingsTab::Ocr),
 ];
 
 fn visible_settings_nav_entries(ai_expanded: bool) -> impl Iterator<Item = SettingsNavEntry> {
@@ -262,6 +375,7 @@ const APPEARANCE_SECTIONS: [SettingsSection; 3] = [
 const AI_GENERAL_SECTIONS: [SettingsSection; 1] = [SettingsSection::AiGeneral];
 const AI_PROVIDER_SECTIONS: [SettingsSection; 1] = [SettingsSection::AiProviders];
 const TRANSLATION_SECTIONS: [SettingsSection; 1] = [SettingsSection::TranslationGeneral];
+const OCR_SECTIONS: [SettingsSection; 1] = [SettingsSection::OcrGeneral];
 
 impl SettingsSection {
     fn tab(self) -> SettingsTab {
@@ -280,6 +394,7 @@ impl SettingsSection {
             Self::AiGeneral => SettingsTab::AiGeneral,
             Self::AiProviders => SettingsTab::AiProviders,
             Self::TranslationGeneral => SettingsTab::Translation,
+            Self::OcrGeneral => SettingsTab::Ocr,
         }
     }
 
@@ -299,6 +414,7 @@ impl SettingsSection {
             Self::AiGeneral => crate::fl!("settings-section-general"),
             Self::AiProviders => crate::fl!("settings-section-model-providers"),
             Self::TranslationGeneral => crate::fl!("settings-tab-translation"),
+            Self::OcrGeneral => crate::fl!("settings-tab-ocr"),
         }
     }
 
@@ -310,6 +426,7 @@ impl SettingsSection {
             SettingsTab::AiGeneral => &AI_GENERAL_SECTIONS,
             SettingsTab::AiProviders => &AI_PROVIDER_SECTIONS,
             SettingsTab::Translation => &TRANSLATION_SECTIONS,
+            SettingsTab::Ocr => &OCR_SECTIONS,
         }
     }
 
@@ -430,8 +547,14 @@ pub struct SettingsWindow {
     translation_key_input: Entity<SettingsTextInput>,
     translation_base_url_input: Entity<SettingsTextInput>,
     translation_region_input: Entity<SettingsTextInput>,
+    ocr_token_input: Entity<SettingsTextInput>,
+    ocr_endpoint_input: Entity<SettingsTextInput>,
+    ocr_model_input: Entity<SettingsTextInput>,
+    ocr_connection_status: Option<OcrConnectionStatus>,
+    ocr_connection_task: Option<Task<()>>,
     translation_settings_save_generation: Arc<AtomicU64>,
     page_image_limit_save_generation: Arc<AtomicU64>,
+    ocr_settings_save_generation: Arc<AtomicU64>,
     main_model_search: Entity<SettingsTextInput>,
     title_model_search: Entity<SettingsTextInput>,
     translation_model_search: Entity<SettingsTextInput>,
@@ -475,6 +598,7 @@ impl SettingsWindow {
             translation_provider,
             translation_config,
             target_language,
+            ocr_settings,
         ) = {
             let settings = &cx.global::<SettingsStore>().settings;
             let ai = &settings.ai;
@@ -492,6 +616,7 @@ impl SettingsWindow {
                     .translation
                     .provider_config(settings.translation.active_provider),
                 settings.translation.target_language.clone(),
+                settings.ocr.clone(),
             )
         };
 
@@ -776,6 +901,52 @@ impl SettingsWindow {
         })
         .detach();
 
+        let ocr_token_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                ocr_settings.token.clone().into(),
+                crate::fl!("settings-ocr-token-placeholder").into(),
+                true,
+                cx,
+            )
+        });
+        let ocr_endpoint_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                ocr_settings.endpoint.clone().into(),
+                DEFAULT_OCR_ENDPOINT.into(),
+                false,
+                cx,
+            )
+        });
+        let ocr_model_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                ocr_settings.model.clone().into(),
+                DEFAULT_OCR_MODEL.into(),
+                false,
+                cx,
+            )
+        });
+        cx.subscribe(&ocr_token_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            settings.ocr.token = value.to_string();
+            this.persist_ocr_settings(settings, cx);
+        })
+        .detach();
+        cx.subscribe(&ocr_endpoint_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            settings.ocr.endpoint = value.to_string();
+            this.persist_ocr_settings(settings, cx);
+        })
+        .detach();
+        cx.subscribe(&ocr_model_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            settings.ocr.model = value.to_string();
+            this.persist_ocr_settings(settings, cx);
+        })
+        .detach();
+
         // Theme dropdowns for the appearance tab
         let (
             static_selected,
@@ -953,8 +1124,14 @@ impl SettingsWindow {
             translation_key_input,
             translation_base_url_input,
             translation_region_input,
+            ocr_token_input,
+            ocr_endpoint_input,
+            ocr_model_input,
+            ocr_connection_status: None,
+            ocr_connection_task: None,
             translation_settings_save_generation: Arc::new(AtomicU64::new(0)),
             page_image_limit_save_generation: Arc::new(AtomicU64::new(0)),
+            ocr_settings_save_generation: Arc::new(AtomicU64::new(0)),
             main_model_search,
             title_model_search,
             translation_model_search,
@@ -1060,6 +1237,74 @@ impl SettingsWindow {
         .detach();
         cx.refresh_windows();
         cx.notify();
+    }
+
+    fn persist_ocr_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        cx.global_mut::<SettingsStore>()
+            .set_settings_in_memory(settings);
+        self.status = None;
+        self.save_error = None;
+        self.ocr_connection_status = None;
+        let generation = self
+            .ocr_settings_save_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let save_generation = self.ocr_settings_save_generation.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+            if save_generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            let Ok(snapshot) = this.update(cx, |_, cx| {
+                cx.global::<SettingsStore>().persistence_snapshot()
+            }) else {
+                return;
+            };
+            let (path, contents) = snapshot;
+            let result = cx
+                .background_spawn(async move {
+                    SettingsStore::write_snapshot(&path, contents)
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .await;
+            if save_generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            _ = this.update(cx, |this, cx| {
+                this.save_error = result.err().map(Into::into);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.refresh_windows();
+        cx.notify();
+    }
+
+    fn test_ocr_connection(&mut self, cx: &mut Context<Self>) {
+        let settings = cx.global::<SettingsStore>().settings.ocr.clone();
+        self.ocr_connection_status = Some(OcrConnectionStatus::Testing);
+        cx.notify();
+
+        let request_settings = settings.clone();
+        self.ocr_connection_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { test_ocr_connection_request(request_settings) })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                if cx.global::<SettingsStore>().settings.ocr != settings {
+                    return;
+                }
+                this.ocr_connection_status = Some(match result {
+                    Ok(()) => OcrConnectionStatus::Succeeded,
+                    Err(OcrProbeError::InvalidAuth) => OcrConnectionStatus::InvalidAuth,
+                    Err(OcrProbeError::Retryable) => OcrConnectionStatus::Retryable,
+                    Err(OcrProbeError::Provider(code)) => OcrConnectionStatus::ProviderError(code),
+                });
+                cx.notify();
+            });
+        }));
     }
 
     fn base_url_input_content(provider: AiProvider, config: &AiProviderConfig) -> SharedString {
@@ -3857,6 +4102,182 @@ impl SettingsWindow {
         ]
     }
 
+    fn ocr_tab(
+        &self,
+        settings: &Settings,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let input_row = |label: String, input: AnyElement| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .min_h(px(42.0))
+                .gap_3()
+                .child(
+                    div()
+                        .w(px(132.0))
+                        .flex_none()
+                        .text_color(rgb(theme.text))
+                        .child(label),
+                )
+                .child(div().flex_1().min_w_0().child(input))
+                .into_any_element()
+        };
+        let mode_options = OcrMode::ALL
+            .into_iter()
+            .map(|mode| {
+                let selected = settings.ocr.mode == mode;
+                let label = match mode {
+                    OcrMode::Always => crate::fl!("settings-ocr-mode-always"),
+                    OcrMode::Auto => crate::fl!("settings-ocr-mode-auto"),
+                    OcrMode::Off => crate::fl!("settings-ocr-mode-off"),
+                };
+                div()
+                    .id(format!("settings-ocr-mode-{}", mode.as_str()))
+                    .px_3()
+                    .py_1()
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(rgb(if selected { theme.accent } else { theme.border }))
+                    .bg(rgb(if selected {
+                        theme.element_selected
+                    } else {
+                        theme.surface_background
+                    }))
+                    .text_color(rgb(theme.text))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.element_hover)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            let mut settings = cx.global::<SettingsStore>().settings.clone();
+                            settings.ocr.mode = mode;
+                            this.persist_ocr_settings(settings, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(label)
+            })
+            .collect::<Vec<_>>();
+        let testing = matches!(
+            self.ocr_connection_status,
+            Some(OcrConnectionStatus::Testing)
+        );
+        let status = self.ocr_connection_status.map(|status| {
+            let (message, color) = match status {
+                OcrConnectionStatus::Testing => (
+                    crate::fl!("settings-ocr-connection-testing"),
+                    theme.text_muted,
+                ),
+                OcrConnectionStatus::Succeeded => (
+                    crate::fl!("settings-ocr-connection-succeeded"),
+                    theme.success,
+                ),
+                OcrConnectionStatus::InvalidAuth => (
+                    crate::fl!("settings-ocr-connection-invalid-auth"),
+                    theme.error,
+                ),
+                OcrConnectionStatus::Retryable => {
+                    (crate::fl!("settings-ocr-connection-retryable"), theme.error)
+                }
+                OcrConnectionStatus::ProviderError(Some(code)) => (
+                    crate::fl!("settings-ocr-connection-provider-error-code", code = code),
+                    theme.error,
+                ),
+                OcrConnectionStatus::ProviderError(None) => (
+                    crate::fl!("settings-ocr-connection-provider-error"),
+                    theme.error,
+                ),
+            };
+            div()
+                .text_size(ui_rems(12.0))
+                .text_color(rgb(color))
+                .child(message)
+        });
+
+        vec![
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Self::section_title(
+                    crate::fl!("settings-ocr-behavior"),
+                    theme,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .min_h(px(42.0))
+                        .gap_3()
+                        .child(
+                            div()
+                                .w(px(132.0))
+                                .flex_none()
+                                .text_color(rgb(theme.text))
+                                .child(crate::fl!("settings-mode")),
+                        )
+                        .child(div().flex().flex_wrap().gap_2().children(mode_options)),
+                )
+                .child(
+                    div()
+                        .text_size(ui_rems(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(crate::fl!("settings-ocr-mode-hint")),
+                )
+                .into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Self::section_title(
+                    crate::fl!("settings-ocr-paddle"),
+                    theme,
+                ))
+                .child(input_row(
+                    crate::fl!("settings-ocr-token"),
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(self.ocr_token_input.clone())
+                        .child(self.ai_action_button(
+                            "settings-test-ocr-connection",
+                            if testing {
+                                crate::fl!("settings-ocr-testing")
+                            } else {
+                                crate::fl!("settings-test-connection")
+                            },
+                            theme,
+                            |this, cx| this.test_ocr_connection(cx),
+                            cx,
+                        ))
+                        .into_any_element(),
+                ))
+                .child(input_row(
+                    crate::fl!("settings-ocr-endpoint"),
+                    self.ocr_endpoint_input.clone().into_any_element(),
+                ))
+                .child(input_row(
+                    crate::fl!("settings-ocr-model"),
+                    self.ocr_model_input.clone().into_any_element(),
+                ))
+                .when_some(status, |this, status| this.child(status))
+                .child(
+                    div()
+                        .text_size(ui_rems(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(crate::fl!("settings-ocr-connection-hint")),
+                )
+                .into_any_element(),
+        ]
+    }
+
     fn ai_providers_tab(
         &self,
         settings: &Settings,
@@ -5309,6 +5730,7 @@ impl Render for SettingsWindow {
             SettingsTab::AiGeneral => self.ai_general_tab(&settings, resolved, cx),
             SettingsTab::AiProviders => Vec::new(),
             SettingsTab::Translation => self.translation_tab(&settings, resolved, cx),
+            SettingsTab::Ocr => self.ocr_tab(&settings, resolved, cx),
         };
         let (main_model_overlay, title_model_overlay, translation_model_overlay) =
             if self.active_tab == SettingsTab::AiGeneral {
@@ -5479,9 +5901,46 @@ impl Render for SettingsWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        SETTINGS_NAV_ENTRIES, SettingsNavEntry, SettingsSection, SettingsTab,
+        OCR_PROBE_SEQUENCE, OcrProbeError, SETTINGS_NAV_ENTRIES, SettingsNavEntry, SettingsSection,
+        SettingsTab, classify_ocr_probe_response, paddle_provider_code, random_ocr_probe_job_id,
         visible_settings_nav_entries,
     };
+    use reqwest::StatusCode;
+    use serde_json::json;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn ocr_probe_accepts_expected_missing_job_responses() {
+        assert!(classify_ocr_probe_response(StatusCode::NOT_FOUND, None).is_ok());
+        assert!(classify_ocr_probe_response(StatusCode::BAD_REQUEST, Some(404)).is_ok());
+        assert!(classify_ocr_probe_response(StatusCode::BAD_REQUEST, Some(11001)).is_ok());
+        assert!(matches!(
+            classify_ocr_probe_response(StatusCode::UNAUTHORIZED, Some(11001)),
+            Err(OcrProbeError::InvalidAuth)
+        ));
+    }
+
+    #[test]
+    fn ocr_probe_distinguishes_retryable_and_provider_errors() {
+        assert!(matches!(
+            classify_ocr_probe_response(StatusCode::TOO_MANY_REQUESTS, None),
+            Err(OcrProbeError::Retryable)
+        ));
+        assert!(matches!(
+            classify_ocr_probe_response(StatusCode::BAD_REQUEST, Some(12000)),
+            Err(OcrProbeError::Provider(Some(12000)))
+        ));
+        assert_eq!(
+            paddle_provider_code(&json!({"error": {"error_code": "11001"}})),
+            Some(11001)
+        );
+    }
+
+    #[test]
+    fn ocr_probe_job_ids_change_between_requests() {
+        OCR_PROBE_SEQUENCE.store(0, Ordering::Relaxed);
+        assert_ne!(random_ocr_probe_job_id(), random_ocr_probe_job_id());
+    }
 
     #[test]
     fn expanded_navigation_keeps_ai_children_adjacent_to_ai() {
@@ -5497,6 +5956,7 @@ mod tests {
                 SettingsNavEntry::AiChild(SettingsSection::AiGeneral),
                 SettingsNavEntry::AiChild(SettingsSection::AiProviders),
                 SettingsNavEntry::Root(SettingsTab::Translation),
+                SettingsNavEntry::Root(SettingsTab::Ocr),
             ]
         );
     }
@@ -5513,6 +5973,7 @@ mod tests {
                 SettingsNavEntry::Root(SettingsTab::Appearance),
                 SettingsNavEntry::AiParent,
                 SettingsNavEntry::Root(SettingsTab::Translation),
+                SettingsNavEntry::Root(SettingsTab::Ocr),
             ]
         );
     }

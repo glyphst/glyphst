@@ -112,6 +112,7 @@ pub(crate) enum PaneEvent {
     OpenSettings,
     OpenTranslationSplit {
         source: Entity<PdfView>,
+        translated_path: PathBuf,
     },
     TabDrop {
         dragged_tab: Box<DraggedTab>,
@@ -635,9 +636,10 @@ impl Pane {
                         });
                     }
                     PdfViewEvent::OpenSettings => cx.emit(PaneEvent::OpenSettings),
-                    PdfViewEvent::OpenTranslationSplit => {
+                    PdfViewEvent::OpenTranslationSplit { translated_path } => {
                         cx.emit(PaneEvent::OpenTranslationSplit {
                             source: pdf_view.clone(),
+                            translated_path: translated_path.clone(),
                         });
                     }
                     PdfViewEvent::ViewportChanged(_)

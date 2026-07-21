@@ -14,6 +14,7 @@ glyphst-ai-ui = { path = "../ai-ui" }
 glyphst-core = { path = "../core" }
 glyphst-library = { path = "../library" }
 glyphst-pdf = { path = "../pdf" }
+glyphst-pdf-translation = { path = "../pdf-translation" }
 glyphst-settings = { path = "../settings" }
 glyphst-translation = { path = "../translation" }
 glyphst-translation-ui = { path = "../translation-ui" }

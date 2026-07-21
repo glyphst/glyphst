@@ -97,6 +97,7 @@
               prek
               rust-analyzer
               rustToolchain
+              typst
               unzip
             ];
 

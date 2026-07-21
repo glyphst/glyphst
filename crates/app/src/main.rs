@@ -17,6 +17,7 @@ mod instance;
 
 use glyphst_keymap::keybindings;
 use glyphst_library::{DocumentPosition, LibraryStore};
+use glyphst_pdf_translation::PdfTranslationService;
 use glyphst_pdf_ui::pdf_view::RenderCache;
 use glyphst_settings::{SettingsStore, localize};
 use glyphst_translation::TranslationService;
@@ -53,6 +54,7 @@ fn main() {
             match TranslationService::new() {
                 Ok(service) => {
                     cx.set_global(service.clone());
+                    cx.set_global(PdfTranslationService::new(service.clone()));
                     cx.spawn(async move |cx| {
                         let result = cx
                             .background_spawn(async move { service.initialize_persistent_cache() })
