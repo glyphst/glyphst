@@ -2474,6 +2474,25 @@ pub struct SettingsStore {
 impl Global for SettingsStore {}
 
 impl SettingsStore {
+    pub fn memory() -> Self {
+        let settings = Settings::default();
+        let registry = ThemeRegistry::builtins();
+        let system_appearance = ThemeAppearance::Light;
+        let resolved_theme =
+            registry.resolve(settings.theme.name(system_appearance), settings.overrides);
+        Self {
+            settings,
+            registry,
+            resolved_theme,
+            system_appearance,
+            user_managed: false,
+            config_path: PathBuf::new(),
+            state_path: PathBuf::new(),
+            last_dynamic_light: None,
+            last_dynamic_dark: None,
+        }
+    }
+
     pub fn load() -> Self {
         let config_path = config_path();
         let state_path = state_path();

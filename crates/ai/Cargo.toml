@@ -9,6 +9,7 @@ base64.workspace = true
 futures.workspace = true
 glyphst-core = { path = "../core" }
 glyphst-settings = { path = "../settings" }
+httpdate.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

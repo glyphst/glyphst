@@ -38,7 +38,6 @@ use crate::theme::Theme;
 use crate::toc::{TocPalette, TocPaletteDelegate, TocPaletteEntry};
 use anyhow::{Context as _, Result, anyhow, bail};
 use arboard::{Clipboard, ImageData};
-use futures::{StreamExt as _, channel::mpsc};
 pub use glyphst_actions::pdf_viewer::*;
 use glyphst_ai::ai_chat::{
     ContextBlock, ImageContext, MAX_PAGE_IMAGE_BYTES, MentionKind, MentionReference,
@@ -51,12 +50,11 @@ use glyphst_core::{
     EpubTheme, PageIndex, PageRegion, RegionImageReference, SemanticTextAnchor,
 };
 use glyphst_pdf::{DocumentSnapshot, ReloadCoordinator, ReloadDisposition};
-use glyphst_pdf_translation::{
-    CancellationToken, PdfTranslationError, PdfTranslationProgress, PdfTranslationRequest,
-    PdfTranslationResult, PdfTranslationService, PdfTranslationStage,
-};
+use glyphst_pdf_translation::{PdfTranslationRequest, PdfTranslationService};
 use glyphst_translation::{LanguageCode, TranslationRequest, TranslationService};
-use glyphst_translation_ui::target_language_items;
+use glyphst_translation_ui::{
+    DocumentTranslationJobManager, DocumentTranslationOpenMode, target_language_items,
+};
 use glyphst_ui::{
     icons::IconButton,
     markdown::{Markdown, MarkdownElement, MarkdownStyle},
@@ -70,7 +68,7 @@ use gpui::{
     Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement, Task, TextAlign, TextRun,
     TextStyle, UniformListScrollHandle, Window, WrappedLine, anchored, canvas, deferred, div, fill,
-    outline, point, prelude::*, px, relative, rgb, rgba, size, uniform_list,
+    outline, point, prelude::*, px, rgb, rgba, size, uniform_list,
 };
 use image::{Frame, RgbaImage, codecs::jpeg::JpegEncoder};
 use mupdf::text_page::{TextBlockType, TextCharFlags};
@@ -91,6 +89,7 @@ const MAX_CACHED_RENDERS: usize = 2048;
 const MAX_CACHED_RENDER_PIXELS: u64 = 30_000_000;
 const MAX_PREFETCH_RENDER_PIXELS: u64 = MAX_CACHED_RENDER_PIXELS / 3;
 const MAX_CACHED_DISPLAY_LISTS: usize = 50;
+const MAX_PENDING_PAGE_RENDERS: usize = 6;
 const MAX_RENDER_TEXTURE_DIMENSION: u32 = 8192;
 const MAX_JUMP_HISTORY: usize = 128;
 const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
@@ -233,6 +232,7 @@ struct ReloadData {
     snapshot: Arc<DocumentSnapshot>,
     page_count: usize,
     loaded: LoadedPages,
+    toc: Vec<TocEntry>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -729,61 +729,6 @@ impl TranslationCardState {
     }
 }
 
-#[derive(Clone)]
-enum DocumentTranslationStatus {
-    Running {
-        request: PdfTranslationRequest,
-        progress: Option<PdfTranslationProgress>,
-    },
-    Error {
-        request: Option<PdfTranslationRequest>,
-        stage: Option<PdfTranslationStage>,
-        message: SharedString,
-        open_in_split: bool,
-    },
-    Succeeded {
-        output_path: PathBuf,
-    },
-}
-
-struct ActiveDocumentTranslation {
-    generation: u64,
-    cancellation: CancellationToken,
-    open_in_split: bool,
-    _task: Task<()>,
-}
-
-fn document_translation_stage_label(stage: PdfTranslationStage) -> &'static str {
-    match stage {
-        PdfTranslationStage::Preparing => "Preparing",
-        PdfTranslationStage::Ocr => "Reading text",
-        PdfTranslationStage::Normalizing => "Normalizing",
-        PdfTranslationStage::Translating => "Translating",
-        PdfTranslationStage::Layout => "Laying out",
-        PdfTranslationStage::Compiling => "Compiling",
-        PdfTranslationStage::Composing => "Composing",
-        PdfTranslationStage::Validating => "Validating",
-    }
-}
-
-fn document_translation_progress_fraction(progress: &PdfTranslationProgress) -> f32 {
-    if progress.overall_fraction.is_finite() {
-        progress.overall_fraction.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
-fn document_translation_progress_count(progress: &PdfTranslationProgress) -> Option<String> {
-    let (completed, total) = progress.completed.zip(progress.total)?;
-    let unit = match progress.stage {
-        PdfTranslationStage::Ocr => "pages",
-        PdfTranslationStage::Translating => "units",
-        _ => "steps",
-    };
-    Some(format!("{completed} / {total} {unit}"))
-}
-
 fn reset_translation_cards_for_document_replacement(
     popup: &mut Option<TranslationCardState>,
     pinned: &mut Option<TranslationCardState>,
@@ -832,6 +777,22 @@ pub struct PdfOpenOptions {
     pub target_language: String,
     pub epub_preferences: EpubReaderPreferences,
     pub rotation: DocumentRotation,
+    pub document_translation_jobs: Entity<DocumentTranslationJobManager>,
+}
+
+pub struct PreparedPdfOpen {
+    path: PathBuf,
+    file_name: SharedString,
+    format: DocumentFormat,
+    capabilities: DocumentCapabilities,
+    document_layout: DocumentLayout,
+    epub_preferences: EpubReaderPreferences,
+    document_snapshot: Arc<DocumentSnapshot>,
+    pages: Vec<PdfPage>,
+    page_count: usize,
+    max_page_width: f32,
+    content_height_doc: f32,
+    toc: Vec<TocEntry>,
 }
 
 pub enum PdfViewEvent {
@@ -840,9 +801,6 @@ pub enum PdfViewEvent {
         position: Option<DocumentPosition>,
     },
     OpenSettings,
-    OpenTranslationSplit {
-        translated_path: PathBuf,
-    },
     ViewportChanged(LinkedViewport),
     BlockHovered(Option<LinkedBlockAnchor>),
     BlockSelected(Option<LinkedBlockSelection>),
@@ -1035,9 +993,7 @@ pub struct PdfView {
     translation_popup_language_dropdown: Option<Entity<SearchableDropdown>>,
     pinned_translation_language_dropdown: Option<Entity<SearchableDropdown>>,
     translation_request_generation: u64,
-    document_translation_generation: u64,
-    document_translation_status: Option<DocumentTranslationStatus>,
-    active_document_translation: Option<ActiveDocumentTranslation>,
+    document_translation_jobs: Entity<DocumentTranslationJobManager>,
     pending_selection_anchor: Option<usize>,
     dragging: bool,
     hovered_link: Option<usize>,
@@ -1135,8 +1091,6 @@ pub struct PdfView {
     document_edit_revision: DocumentEditRevision,
     bookmarks_revision: u64,
     _image_clipboard: Option<Clipboard>,
-    // Must drop after pending render tasks because they can hold document-backed display lists.
-    _document: mupdf::Document,
 }
 
 pub type DocumentView = PdfView;
@@ -1989,14 +1943,11 @@ impl PdfView {
         }
     }
 
-    pub fn open(
+    pub fn prepare_open(
         path: impl AsRef<Path>,
-        focus_handle: FocusHandle,
-        behavior: BehaviorSettings,
-        window_settings: WindowSettings,
-        theme: Theme,
-        options: PdfOpenOptions,
-    ) -> Result<Self> {
+        epub_preferences: EpubReaderPreferences,
+        page_gap: f32,
+    ) -> Result<PreparedPdfOpen> {
         let path = normalize_path(path.as_ref());
         let mut file_name: SharedString = path
             .file_name()
@@ -2007,7 +1958,7 @@ impl PdfView {
 
         let document_snapshot = Arc::new(DocumentSnapshot::read(&path)?);
         let format = document_snapshot.format();
-        let epub_preferences = options.epub_preferences.sanitized();
+        let epub_preferences = epub_preferences.sanitized();
         let requested_layout = if format == DocumentFormat::Epub {
             DocumentLayout::Reflow(epub_preferences.layout_for_viewport(720.0, 960.0))
         } else {
@@ -2016,11 +1967,6 @@ impl PdfView {
         let opened_document = document_snapshot.open_with_layout(requested_layout)?;
         let capabilities = opened_document.capabilities();
         let document_layout = opened_document.layout();
-        let rotation = if capabilities.reflow {
-            DocumentRotation::default()
-        } else {
-            options.rotation
-        };
         if format == DocumentFormat::Epub
             && let Ok(title) = opened_document.inner().metadata(mupdf::MetadataName::Title)
             && !title.trim().is_empty()
@@ -2042,43 +1988,55 @@ impl PdfView {
         let toc = Self::flatten_toc(outlines, page_count as usize);
 
         let page_count = page_count as usize;
-        let provisional_pages = if capabilities.reflow {
-            document
-                .load_page((page_count / 2) as i32)
-                .and_then(|page| page.bounds())
-                .map_err(anyhow::Error::from)
-                .and_then(|bounds| {
-                    Self::provisional_reflow_pages(page_count, bounds, theme.page_gap)
-                })
-                .map(Some)
-                .unwrap_or_else(|error| {
-                    eprintln!("failed to build provisional EPUB pages: {error:#}");
-                    None
-                })
+        let loaded = Self::load_pages_from_document(&document, page_count, page_gap)?;
+
+        Ok(PreparedPdfOpen {
+            path,
+            file_name,
+            format,
+            capabilities,
+            document_layout,
+            epub_preferences,
+            document_snapshot,
+            pages: loaded.pages,
+            page_count,
+            max_page_width: loaded.max_page_width.max(1.0),
+            content_height_doc: loaded.content_height_doc,
+            toc,
+        })
+    }
+
+    pub fn from_prepared(
+        prepared: PreparedPdfOpen,
+        focus_handle: FocusHandle,
+        behavior: BehaviorSettings,
+        window_settings: WindowSettings,
+        options: PdfOpenOptions,
+    ) -> Result<Self> {
+        let PreparedPdfOpen {
+            path,
+            file_name,
+            format,
+            capabilities,
+            document_layout,
+            epub_preferences,
+            document_snapshot,
+            pages,
+            page_count,
+            max_page_width,
+            content_height_doc,
+            toc,
+        } = prepared;
+        let rotation = if capabilities.reflow {
+            DocumentRotation::default()
         } else {
-            None
+            options.rotation
         };
-        let loading = provisional_pages.is_none();
-        let (pages, max_page_width, content_height_doc, page_image_bounds) =
-            if let Some(loaded) = provisional_pages {
-                let page_image_bounds = (0..loaded.pages.len()).map(|_| None).collect();
-                (
-                    loaded.pages,
-                    loaded.max_page_width.max(1.0),
-                    loaded.content_height_doc,
-                    page_image_bounds,
-                )
-            } else {
-                (Vec::new(), 1.0, 0.0, Vec::new())
-            };
+        let page_image_bounds = (0..pages.len()).map(|_| None).collect();
         let sidebar_widths = options
             .sidebar_widths
             .map(Self::sanitize_sidebar_widths)
             .unwrap_or_else(Self::default_sidebar_widths);
-        let mut reload_coordinator = ReloadCoordinator::default();
-        if loading {
-            reload_coordinator.begin_initial_load();
-        }
 
         let mut view = Self {
             doc_id: next_document_id(),
@@ -2127,9 +2085,7 @@ impl PdfView {
             translation_popup_language_dropdown: None,
             pinned_translation_language_dropdown: None,
             translation_request_generation: 0,
-            document_translation_generation: 0,
-            document_translation_status: None,
-            active_document_translation: None,
+            document_translation_jobs: options.document_translation_jobs,
             pending_selection_anchor: None,
             dragging: false,
             hovered_link: None,
@@ -2200,7 +2156,7 @@ impl PdfView {
             transparency_enabled: window_settings.transparency_enabled_by_default(),
             window_settings,
             search: SearchState::default(),
-            loading,
+            loading: false,
             loading_error: None,
             pending_initial_position: options.initial_position,
             pending_semantic_position: None,
@@ -2208,7 +2164,7 @@ impl PdfView {
             reflow_resize_task: None,
             file_watch_task: None,
             reload_task: None,
-            reload_coordinator,
+            reload_coordinator: ReloadCoordinator::default(),
             previous_doc_id: None,
             previous_doc_evict_task: None,
             diff_flashes: Vec::new(),
@@ -2227,11 +2183,8 @@ impl PdfView {
             document_edit_revision: DocumentEditRevision::default(),
             bookmarks_revision: 0,
             _image_clipboard: None,
-            _document: document,
         };
-        if !view.loading
-            && let Some(position) = view.pending_initial_position.take()
-        {
+        if let Some(position) = view.pending_initial_position.take() {
             view.restore_position(position);
         }
         Ok(view)
@@ -2243,9 +2196,6 @@ impl PdfView {
         self.bookmarks_revision = store.bookmarks_revision();
 
         cx.on_release(|this, cx| {
-            if let Some(job) = this.active_document_translation.take() {
-                job.cancellation.cancel();
-            }
             if cx.has_global::<RenderCache>() {
                 let mut doc_ids = Vec::with_capacity(2);
                 doc_ids.push(this.doc_id);
@@ -2452,12 +2402,26 @@ impl PdfView {
         page_gap: f32,
     ) -> Result<ReloadData> {
         let snapshot = Arc::new(DocumentSnapshot::read(path)?);
-        let (page_count, loaded) = Self::load_document_pages(&snapshot, document_layout, page_gap)?;
+        let document = snapshot.open_with_layout(document_layout)?.into_inner();
+        let page_count = document.page_count()?;
+        if page_count <= 0 {
+            bail!("document has no readable content");
+        }
+        let page_count = page_count as usize;
+        let toc = match document.outlines() {
+            Ok(outlines) => Self::flatten_toc(outlines, page_count),
+            Err(error) => {
+                eprintln!("failed to read PDF table of contents: {error:#}");
+                Vec::new()
+            }
+        };
+        let loaded = Self::load_pages_from_document(&document, page_count, page_gap)?;
 
         Ok(ReloadData {
             snapshot,
             page_count,
             loaded,
+            toc,
         })
     }
 
@@ -2497,30 +2461,6 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let pending_position = self.pending_initial_position.take();
-        let document = reload
-            .snapshot
-            .open_with_layout(self.document_layout)?
-            .into_inner();
-        let document_page_count = document.page_count()?;
-        if document_page_count <= 0 {
-            bail!("document has no readable content");
-        }
-        let document_page_count = document_page_count as usize;
-        if document_page_count != reload.page_count {
-            bail!(
-                "PDF changed while reloading: loaded {} pages, reopened {} pages",
-                reload.page_count,
-                document_page_count
-            );
-        }
-
-        let toc = match document.outlines() {
-            Ok(outlines) => Self::flatten_toc(outlines, reload.page_count),
-            Err(error) => {
-                eprintln!("failed to read PDF table of contents: {error:#}");
-                Vec::new()
-            }
-        };
         let diff_pending_pages = if self.capabilities.reload_diff {
             self.page_image_bounds
                 .iter()
@@ -2544,10 +2484,9 @@ impl PdfView {
         self.doc_id = next_document_id();
         self.schedule_previous_document_eviction(previous_doc_id, cx);
 
-        self._document = document;
         self.document_snapshot = reload.snapshot;
         self.page_count = reload.page_count;
-        self.toc = toc;
+        self.toc = reload.toc;
         self.toc_collapsed
             .retain(|entry_ix| *entry_ix < self.toc.len());
         if self
@@ -2686,6 +2625,15 @@ impl PdfView {
             bail!("document has no readable content");
         }
         let page_count = page_count as usize;
+        let loaded = Self::load_pages_from_document(&document, page_count, page_gap)?;
+        Ok((page_count, loaded))
+    }
+
+    fn load_pages_from_document(
+        document: &mupdf::Document,
+        page_count: usize,
+        page_gap: f32,
+    ) -> Result<LoadedPages> {
         let mut pages = Vec::with_capacity(page_count);
         let mut max_page_width = 0.0_f32;
 
@@ -2715,9 +2663,10 @@ impl PdfView {
             page_gap,
         )
         .map_err(anyhow::Error::msg)?;
-        Ok((page_count, loaded))
+        Ok(loaded)
     }
 
+    #[cfg(test)]
     fn provisional_reflow_pages(
         page_count: usize,
         page_bounds: Rect,
@@ -3100,9 +3049,7 @@ impl PdfView {
         }
         if self.capabilities.reflow {
             self.record_current_history_position(cx);
-            if let Err(error) = cx.global::<LibraryStore>().save() {
-                eprintln!("failed to save document history: {error:#}");
-            }
+            Self::persist_history_entry(&self.path, cx);
         }
         self.recompute_search();
         self.search.active = self.nearest_search_match_index();
@@ -4211,6 +4158,7 @@ impl PdfView {
             .filter(DocumentPosition::is_reflow)
             .unwrap_or_else(|| self.current_document_position());
         self.pending_initial_position = Some(position);
+        self.pending_renders.clear();
         self.document_layout = DocumentLayout::Reflow(layout);
         self.request_reload(cx);
     }
@@ -4244,6 +4192,7 @@ impl PdfView {
             .filter(DocumentPosition::is_reflow)
             .unwrap_or_else(|| self.current_document_position());
         self.pending_initial_position = Some(position);
+        self.pending_renders.clear();
         self.document_layout = DocumentLayout::Reflow(
             preferences.layout_for_viewport(self.viewport_width.max(240.0), 960.0),
         );
@@ -4445,6 +4394,15 @@ impl PdfView {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn set_document_translation_jobs(
+        &mut self,
+        jobs: Entity<DocumentTranslationJobManager>,
+        cx: &mut Context<Self>,
+    ) {
+        self.document_translation_jobs = jobs;
+        cx.notify();
     }
 
     pub fn format(&self) -> DocumentFormat {
@@ -5038,9 +4996,7 @@ impl PdfView {
 
     pub fn flush_current_history_position(&mut self, cx: &mut Context<Self>) {
         self.stage_current_history_position(cx);
-        if let Err(error) = cx.global::<LibraryStore>().save() {
-            eprintln!("failed to save document history: {error:#}");
-        }
+        Self::persist_history_entry(&self.path, cx);
     }
 
     pub fn stage_current_history_position(&mut self, cx: &mut Context<Self>) {
@@ -5061,6 +5017,20 @@ impl PdfView {
             .record_history(&self.path, position);
     }
 
+    fn persist_history_entry(path: &Path, cx: &mut Context<Self>) {
+        if let Some(snapshot) = cx
+            .global::<LibraryStore>()
+            .history_entry_persistence_snapshot(path)
+        {
+            cx.background_spawn(async move {
+                if let Err(error) = snapshot.persist() {
+                    eprintln!("failed to save document history: {error:#}");
+                }
+            })
+            .detach();
+        }
+    }
+
     fn schedule_position_save(&mut self, cx: &mut Context<Self>) {
         self.pending_semantic_position = None;
         self.pending_initial_position = None;
@@ -5069,10 +5039,8 @@ impl PdfView {
             cx.background_executor()
                 .timer(Duration::from_millis(1000))
                 .await;
-            _ = this.update(cx, |_, cx| {
-                if let Err(error) = cx.global::<LibraryStore>().save() {
-                    eprintln!("failed to save document history: {error:#}");
-                }
+            _ = this.update(cx, |this, cx| {
+                Self::persist_history_entry(&this.path, cx);
             });
         }));
     }
@@ -5224,31 +5192,10 @@ impl PdfView {
         }
     }
 
-    #[ztracing::instrument(skip_all, fields(page_idx))]
-    fn get_or_create_display_list(
-        &mut self,
-        page_idx: usize,
-        cx: &mut Context<Self>,
-    ) -> Result<Arc<DisplayList>> {
-        if let Some(display_list) = cx
-            .global_mut::<RenderCache>()
-            .display_list(self.doc_id, page_idx)
-        {
-            return Ok(display_list);
-        }
-
-        let page = self._document.load_page(page_idx as i32)?;
-        let page_bounds = self.pages[page_idx].bounds;
-        let display_list = Arc::new(DisplayList::new(page_bounds)?);
-        let device = Device::from_display_list(&display_list)?;
-        page.run(&device, &Matrix::IDENTITY)?;
-
-        Ok(cx
-            .global_mut::<RenderCache>()
-            .insert_display_list(self.doc_id, page_idx, display_list))
-    }
-
     fn start_background_render(&mut self, key: RenderKey, cx: &mut Context<Self>) {
+        if self.reload_task.is_some() {
+            return;
+        }
         if self.pending_renders.iter().any(|pending| {
             pending.key.page_idx == key.page_idx && pending.key.rotation == key.rotation
         }) {
@@ -5256,24 +5203,34 @@ impl PdfView {
         }
         self.pending_renders
             .retain(|pending| pending.key.page_idx != key.page_idx);
+        if self.pending_renders.len() >= MAX_PENDING_PAGE_RENDERS {
+            return;
+        }
 
         let page = &self.pages[key.page_idx];
         let page_bounds = page.bounds;
         let source_page_width = page.width;
         let source_page_height = page.height;
         let (page_width, page_height) = Self::page_dimensions_for(page, key.rotation);
-        let display_list = match self.get_or_create_display_list(key.page_idx, cx) {
-            Ok(display_list) => display_list,
-            Err(error) => {
-                eprintln!("failed to load PDF page for render: {error:#}");
-                return;
-            }
-        };
+        let cached_display_list = cx
+            .global_mut::<RenderCache>()
+            .display_list(self.doc_id, key.page_idx);
+        let snapshot = self.document_snapshot.clone();
+        let document_layout = self.document_layout;
 
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    Self::render_page(
+                    let display_list = match cached_display_list {
+                        Some(display_list) => display_list,
+                        None => Self::create_display_list(
+                            &snapshot,
+                            document_layout,
+                            key.page_idx,
+                            page_bounds,
+                        )?,
+                    };
+                    let image = Self::render_page(
                         &display_list,
                         page_bounds,
                         source_page_width,
@@ -5281,7 +5238,8 @@ impl PdfView {
                         key.rotation,
                         key.physical_width,
                         key.physical_height,
-                    )
+                    )?;
+                    Ok::<_, anyhow::Error>((display_list, image))
                 })
                 .await;
 
@@ -5297,7 +5255,12 @@ impl PdfView {
                     this.pending_renders.remove(index);
 
                     match result {
-                        Ok(image) => {
+                        Ok((display_list, image)) => {
+                            cx.global_mut::<RenderCache>().insert_display_list(
+                                key.doc_id,
+                                key.page_idx,
+                                display_list,
+                            );
                             let previous_image = this.take_previous_render_for_diff(key, cx);
                             this.insert_cached_render(key, image.clone(), cx);
                             if let Some(previous_image) = previous_image {
@@ -5324,6 +5287,48 @@ impl PdfView {
 
         self.pending_renders
             .push(PendingRender { key, _task: task });
+    }
+
+    fn get_or_create_display_list(
+        &self,
+        page_idx: usize,
+        cx: &mut Context<Self>,
+    ) -> Result<Arc<DisplayList>> {
+        if let Some(display_list) = cx
+            .global_mut::<RenderCache>()
+            .display_list(self.doc_id, page_idx)
+        {
+            return Ok(display_list);
+        }
+
+        let page_bounds = self
+            .pages
+            .get(page_idx)
+            .ok_or_else(|| anyhow::anyhow!("PDF page index {page_idx} is out of bounds"))?
+            .bounds;
+        let display_list = Self::create_display_list(
+            &self.document_snapshot,
+            self.document_layout,
+            page_idx,
+            page_bounds,
+        )?;
+        Ok(cx
+            .global_mut::<RenderCache>()
+            .insert_display_list(self.doc_id, page_idx, display_list))
+    }
+
+    fn create_display_list(
+        snapshot: &DocumentSnapshot,
+        document_layout: DocumentLayout,
+        page_idx: usize,
+        page_bounds: Rect,
+    ) -> Result<Arc<DisplayList>> {
+        let document = snapshot.open_with_layout(document_layout)?.into_inner();
+        let page = document.load_page(page_idx as i32)?;
+        let display_list = Arc::new(DisplayList::new(page_bounds)?);
+        let device = Device::from_display_list(&display_list)?;
+        page.run(&device, &Matrix::IDENTITY)?;
+        Ok(display_list)
     }
 
     fn take_previous_render_for_diff(
@@ -7347,10 +7352,6 @@ impl PdfView {
         self.format == DocumentFormat::Pdf && self.path.is_absolute()
     }
 
-    fn document_translation_is_running(&self) -> bool {
-        self.active_document_translation.is_some()
-    }
-
     fn document_translation_output_path(source: &Path, target: &LanguageCode) -> PathBuf {
         let stem = source
             .file_stem()
@@ -7363,21 +7364,15 @@ impl PdfView {
             .join(format!("{stem}.{}.pdf", target.as_str()))
     }
 
-    fn replace_document_translation_status(
-        &mut self,
-        status: DocumentTranslationStatus,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(active) = self.active_document_translation.take() {
-            active.cancellation.cancel();
-        }
-        self.document_translation_generation = self.document_translation_generation.wrapping_add(1);
-        self.document_translation_status = Some(status);
-        cx.notify();
-    }
-
     fn translate_document(&mut self, cx: &mut Context<Self>) {
         if !self.can_translate_document() {
+            return;
+        }
+        let source_path = self.path.clone();
+        if self
+            .document_translation_jobs
+            .update(cx, |jobs, cx| jobs.reveal_for_source(&source_path, cx))
+        {
             return;
         }
 
@@ -7390,15 +7385,15 @@ impl PdfView {
         let target_language = match LanguageCode::new(&settings.translation.target_language) {
             Ok(language) => language,
             Err(_) => {
-                self.replace_document_translation_status(
-                    DocumentTranslationStatus::Error {
-                        request: None,
-                        stage: None,
-                        message: "Choose a valid target language in Translation Settings.".into(),
-                        open_in_split: false,
-                    },
-                    cx,
-                );
+                let source_path = self.path.clone();
+                self.document_translation_jobs.update(cx, |jobs, cx| {
+                    jobs.report_preflight_error(
+                        source_path,
+                        DocumentTranslationOpenMode::Document,
+                        "Choose a valid target language in Translation Settings.",
+                        cx,
+                    );
+                });
                 return;
             }
         };
@@ -7425,7 +7420,12 @@ impl PdfView {
                         source_language,
                         target_language,
                     };
-                    this.start_document_translation(settings, request, false, cx);
+                    this.start_document_translation(
+                        settings,
+                        request,
+                        DocumentTranslationOpenMode::Document,
+                        cx,
+                    );
                 }
                 Ok(Err(error)) => {
                     eprintln!("failed to choose translated PDF output path: {error:#}");
@@ -7440,258 +7440,79 @@ impl PdfView {
         &mut self,
         settings: crate::settings::Settings,
         request: PdfTranslationRequest,
-        open_in_split: bool,
+        open_mode: DocumentTranslationOpenMode,
         cx: &mut Context<Self>,
     ) {
         if !self.can_translate_document() || request.source_path != self.path {
             return;
         }
+        let source_path = self.path.clone();
+        if self
+            .document_translation_jobs
+            .update(cx, |jobs, cx| jobs.reveal_for_source(&source_path, cx))
+        {
+            return;
+        }
 
         if normalize_path(&request.output_path) == self.path {
-            self.replace_document_translation_status(
-                DocumentTranslationStatus::Error {
-                    request: None,
-                    stage: None,
-                    message: "Choose an output path different from the source PDF.".into(),
-                    open_in_split,
-                },
-                cx,
-            );
+            let source_path = self.path.clone();
+            self.document_translation_jobs.update(cx, |jobs, cx| {
+                jobs.report_preflight_error(
+                    source_path,
+                    open_mode,
+                    "Choose an output path different from the source PDF.",
+                    cx,
+                );
+            });
             return;
         }
 
         if !cx.has_global::<PdfTranslationService>() {
-            self.replace_document_translation_status(
-                DocumentTranslationStatus::Error {
-                    request: Some(request),
-                    stage: None,
-                    message: "Document translation is unavailable.".into(),
-                    open_in_split,
-                },
-                cx,
-            );
-            return;
-        }
-
-        if let Some(active) = self.active_document_translation.take() {
-            active.cancellation.cancel();
-        }
-        self.document_translation_generation = self.document_translation_generation.wrapping_add(1);
-        let generation = self.document_translation_generation;
-        let cancellation = CancellationToken::new();
-        let service = cx.global::<PdfTranslationService>().clone();
-        let background_request = request.clone();
-        let background_cancellation = cancellation.clone();
-        let (progress_tx, mut progress_rx) = mpsc::unbounded::<PdfTranslationProgress>();
-
-        self.document_translation_status = Some(DocumentTranslationStatus::Running {
-            request,
-            progress: None,
-        });
-
-        let task = cx.spawn(async move |this, cx| {
-            let result_task = cx.background_spawn(async move {
-                service.run(
-                    settings,
-                    background_request,
-                    background_cancellation,
-                    move |progress| {
-                        _ = progress_tx.unbounded_send(progress);
-                    },
-                )
+            let source_path = self.path.clone();
+            self.document_translation_jobs.update(cx, |jobs, cx| {
+                jobs.report_preflight_error(
+                    source_path,
+                    open_mode,
+                    "Document translation is unavailable.",
+                    cx,
+                );
             });
-
-            while let Some(progress) = progress_rx.next().await {
-                if this
-                    .update(cx, |this, cx| {
-                        this.update_document_translation_progress(generation, progress, cx);
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-
-            let result = result_task.await;
-            _ = this.update(cx, |this, cx| {
-                this.finish_document_translation(generation, result, cx);
-            });
-        });
-        self.active_document_translation = Some(ActiveDocumentTranslation {
-            generation,
-            cancellation,
-            open_in_split,
-            _task: task,
-        });
-        cx.notify();
-    }
-
-    fn update_document_translation_progress(
-        &mut self,
-        generation: u64,
-        progress: PdfTranslationProgress,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .active_document_translation
-            .as_ref()
-            .is_none_or(|active| active.generation != generation)
-        {
             return;
         }
-        if let Some(DocumentTranslationStatus::Running {
-            progress: current, ..
-        }) = self.document_translation_status.as_mut()
-        {
-            *current = Some(progress);
-            cx.notify();
-        }
-    }
 
-    fn finish_document_translation(
-        &mut self,
-        generation: u64,
-        result: std::result::Result<PdfTranslationResult, PdfTranslationError>,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .active_document_translation
-            .as_ref()
-            .is_none_or(|active| active.generation != generation)
-        {
-            return;
-        }
-        let active = self.active_document_translation.take().unwrap();
-        let request = match self.document_translation_status.as_ref() {
-            Some(DocumentTranslationStatus::Running { request, .. }) => request.clone(),
-            _ => return,
-        };
-
-        match result {
-            Ok(result) => {
-                let output_path = result.output_path;
-                self.document_translation_status = Some(DocumentTranslationStatus::Succeeded {
-                    output_path: output_path.clone(),
-                });
-                if active.open_in_split {
-                    cx.emit(PdfViewEvent::OpenTranslationSplit {
-                        translated_path: output_path,
-                    });
-                } else {
-                    cx.emit(PdfViewEvent::OpenDocument {
-                        path: output_path,
-                        position: None,
-                    });
-                }
-            }
-            Err(_) if active.cancellation.is_cancelled() => {
-                self.document_translation_status = Some(DocumentTranslationStatus::Error {
-                    request: Some(request),
-                    stage: None,
-                    message: "Document translation was cancelled.".into(),
-                    open_in_split: active.open_in_split,
-                });
-            }
-            Err(error) => {
-                let stage = error.stage;
-                let message = if error.retryable {
-                    "Some content could not be translated. Check your provider settings and try again."
-                } else {
-                    "Document translation failed. Check your translation and OCR settings, then try again."
-                };
-                self.document_translation_status = Some(DocumentTranslationStatus::Error {
-                    request: Some(request),
-                    stage: Some(stage),
-                    message: message.into(),
-                    open_in_split: active.open_in_split,
-                });
-            }
-        }
-        cx.notify();
+        self.document_translation_jobs.update(cx, |jobs, cx| {
+            jobs.submit(settings, request, open_mode, cx);
+        });
     }
 
     fn cancel_document_translation(&mut self, cx: &mut Context<Self>) {
-        let Some(active) = self.active_document_translation.as_ref() else {
-            return;
-        };
-        active.cancellation.cancel();
-        cx.notify();
-    }
-
-    fn retry_document_translation(&mut self, cx: &mut Context<Self>) {
-        let (mut request, open_in_split) = match self.document_translation_status.as_ref() {
-            Some(DocumentTranslationStatus::Error {
-                request: Some(request),
-                open_in_split,
-                ..
-            }) => (Some(request.clone()), *open_in_split),
-            _ => (None, false),
-        };
-        if let Some(request) = request.as_mut() {
-            let settings = cx.global::<SettingsStore>().settings.clone();
-            let target_language = match LanguageCode::new(&settings.translation.target_language) {
-                Ok(language) => language,
-                Err(_) => {
-                    self.replace_document_translation_status(
-                        DocumentTranslationStatus::Error {
-                            request: None,
-                            stage: None,
-                            message: "Choose a valid target language in Translation Settings."
-                                .into(),
-                            open_in_split,
-                        },
-                        cx,
-                    );
-                    return;
-                }
-            };
-            request.source_language = settings
-                .translation
-                .source_language
-                .as_deref()
-                .and_then(|language| LanguageCode::new(language).ok());
-            request.target_language = target_language;
-            self.start_document_translation(settings, request.clone(), open_in_split, cx);
-        } else {
-            self.translate_document(cx);
-        }
-    }
-
-    fn open_document_translation_output(&self, cx: &mut Context<Self>) {
-        let Some(DocumentTranslationStatus::Succeeded { output_path }) =
-            self.document_translation_status.as_ref()
-        else {
-            return;
-        };
-        cx.emit(PdfViewEvent::OpenDocument {
-            path: output_path.clone(),
-            position: None,
+        let source_path = self.path.clone();
+        self.document_translation_jobs.update(cx, |jobs, cx| {
+            jobs.cancel_for_source(&source_path, cx);
         });
     }
 
     fn open_translation_split(&mut self, cx: &mut Context<Self>) {
-        if !self.can_translate_document() || self.document_translation_is_running() {
+        if !self.can_translate_document() {
             return;
         }
-        if let Some(DocumentTranslationStatus::Succeeded { output_path }) =
-            self.document_translation_status.as_ref()
-            && output_path.is_file()
+        let source_path = self.path.clone();
+        if self
+            .document_translation_jobs
+            .update(cx, |jobs, cx| jobs.reveal_for_source(&source_path, cx))
         {
-            cx.emit(PdfViewEvent::OpenTranslationSplit {
-                translated_path: output_path.clone(),
-            });
             return;
         }
         if !cx.has_global::<PdfTranslationService>() {
-            self.replace_document_translation_status(
-                DocumentTranslationStatus::Error {
-                    request: None,
-                    stage: None,
-                    message: "Document translation is unavailable.".into(),
-                    open_in_split: true,
-                },
-                cx,
-            );
+            let source_path = self.path.clone();
+            self.document_translation_jobs.update(cx, |jobs, cx| {
+                jobs.report_preflight_error(
+                    source_path,
+                    DocumentTranslationOpenMode::Split,
+                    "Document translation is unavailable.",
+                    cx,
+                );
+            });
             return;
         }
 
@@ -7704,15 +7525,15 @@ impl PdfView {
         let target_language = match LanguageCode::new(&settings.translation.target_language) {
             Ok(language) => language,
             Err(_) => {
-                self.replace_document_translation_status(
-                    DocumentTranslationStatus::Error {
-                        request: None,
-                        stage: None,
-                        message: "Choose a valid target language in Translation Settings.".into(),
-                        open_in_split: true,
-                    },
-                    cx,
-                );
+                let source_path = self.path.clone();
+                self.document_translation_jobs.update(cx, |jobs, cx| {
+                    jobs.report_preflight_error(
+                        source_path,
+                        DocumentTranslationOpenMode::Split,
+                        "Choose a valid target language in Translation Settings.",
+                        cx,
+                    );
+                });
                 return;
             }
         };
@@ -7725,30 +7546,37 @@ impl PdfView {
         ) {
             Ok(request) => request,
             Err(error) => {
-                self.replace_document_translation_status(
-                    DocumentTranslationStatus::Error {
-                        request: None,
-                        stage: Some(error.stage),
-                        message: "Could not prepare the translated PDF artifact.".into(),
-                        open_in_split: true,
-                    },
-                    cx,
-                );
+                let source_path = self.path.clone();
+                let message = error.message;
+                self.document_translation_jobs.update(cx, |jobs, cx| {
+                    jobs.report_preflight_error(
+                        source_path,
+                        DocumentTranslationOpenMode::Split,
+                        message,
+                        cx,
+                    );
+                });
                 return;
             }
         };
         match service.cached_artifact(&settings, &request) {
             Some(result) => {
-                let output_path = result.output_path;
-                self.document_translation_status = Some(DocumentTranslationStatus::Succeeded {
-                    output_path: output_path.clone(),
+                self.document_translation_jobs.update(cx, |jobs, cx| {
+                    jobs.open_cached_output(
+                        settings,
+                        request,
+                        DocumentTranslationOpenMode::Split,
+                        result.output_path,
+                        cx,
+                    );
                 });
-                cx.emit(PdfViewEvent::OpenTranslationSplit {
-                    translated_path: output_path,
-                });
-                cx.notify();
             }
-            None => self.start_document_translation(settings, request, true, cx),
+            None => self.start_document_translation(
+                settings,
+                request,
+                DocumentTranslationOpenMode::Split,
+                cx,
+            ),
         }
     }
 
@@ -8252,207 +8080,6 @@ impl PdfView {
                     }),
             )
             .into_any_element()
-    }
-
-    fn render_document_translation_card(
-        &self,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let status = self.document_translation_status.clone()?;
-        let cancelling = self
-            .active_document_translation
-            .as_ref()
-            .is_some_and(|active| active.cancellation.is_cancelled());
-
-        let (title, stage, detail, count, fraction, indeterminate, action) = match status {
-            DocumentTranslationStatus::Running { progress, .. } => {
-                let (stage, detail, count, fraction, indeterminate) =
-                    if let Some(progress) = progress {
-                        (
-                            document_translation_stage_label(progress.stage).to_string(),
-                            progress.detail.clone(),
-                            document_translation_progress_count(&progress),
-                            document_translation_progress_fraction(&progress),
-                            progress.indeterminate,
-                        )
-                    } else {
-                        (
-                            "Starting".to_string(),
-                            "Preparing the document translation.".to_string(),
-                            None,
-                            0.0,
-                            true,
-                        )
-                    };
-                (
-                    if cancelling {
-                        "Cancelling document translation"
-                    } else {
-                        "Translating document"
-                    }
-                    .to_string(),
-                    stage,
-                    detail,
-                    count,
-                    fraction,
-                    indeterminate,
-                    (!cancelling).then_some("cancel"),
-                )
-            }
-            DocumentTranslationStatus::Error { stage, message, .. } => (
-                "Document translation failed".to_string(),
-                stage
-                    .map(document_translation_stage_label)
-                    .unwrap_or("Translation")
-                    .to_string(),
-                message.to_string(),
-                None,
-                0.0,
-                false,
-                Some("retry"),
-            ),
-            DocumentTranslationStatus::Succeeded { output_path } => (
-                "Translated PDF is ready".to_string(),
-                "Complete".to_string(),
-                output_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("Translated PDF")
-                    .to_string(),
-                None,
-                1.0,
-                false,
-                Some("open"),
-            ),
-        };
-        let progress_label = if indeterminate {
-            "Working…".to_string()
-        } else {
-            format!("{:.0}%", fraction * 100.0)
-        };
-
-        let action_button = match action {
-            Some("cancel") => Some(
-                Self::grid_overview_toolbar_button(
-                    "document-translation-cancel",
-                    "Cancel".to_string(),
-                    theme,
-                    |this, _, _, cx| this.cancel_document_translation(cx),
-                    cx,
-                )
-                .into_any_element(),
-            ),
-            Some("retry") => Some(
-                Self::grid_overview_toolbar_button(
-                    "document-translation-retry",
-                    "Retry".to_string(),
-                    theme,
-                    |this, _, _, cx| this.retry_document_translation(cx),
-                    cx,
-                )
-                .into_any_element(),
-            ),
-            Some("open") => Some(
-                Self::grid_overview_toolbar_button(
-                    "document-translation-open",
-                    "Open output".to_string(),
-                    theme,
-                    |this, _, _, cx| this.open_document_translation_output(cx),
-                    cx,
-                )
-                .into_any_element(),
-            ),
-            _ => None,
-        };
-
-        Some(
-            div()
-                .occlude()
-                .w(px(380.0))
-                .max_w_full()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_3()
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(rgb(theme.border))
-                .bg(rgb(theme.surface_background))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(ui_rems(13.0))
-                                        .text_color(rgb(theme.text))
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .text_size(ui_rems(11.0))
-                                        .text_color(rgb(theme.text_muted))
-                                        .child(stage)
-                                        .when_some(count, |this, count| {
-                                            this.child("·").child(count)
-                                        }),
-                                ),
-                        )
-                        .when_some(action_button, |this, button| this.child(button)),
-                )
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(ui_rems(12.0))
-                        .text_color(rgb(theme.text_muted))
-                        .child(detail),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_1()
-                                .h(px(4.0))
-                                .overflow_hidden()
-                                .rounded(px(2.0))
-                                .bg(rgb(theme.border_variant))
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .w(relative(fraction))
-                                        .rounded(px(2.0))
-                                        .bg(rgb(theme.accent)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .min_w(px(48.0))
-                                .text_align(TextAlign::Right)
-                                .text_size(ui_rems(11.0))
-                                .text_color(rgb(theme.text_muted))
-                                .child(progress_label),
-                        ),
-                )
-                .into_any_element(),
-        )
     }
 
     fn select_all(&mut self) {
@@ -12903,7 +12530,6 @@ impl PdfView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let document_translation_card = self.render_document_translation_card(theme, cx);
         div()
             .size_full()
             .flex_1()
@@ -13017,26 +12643,14 @@ impl PdfView {
                         )
                     }),
             )
-            .when_some(document_translation_card, |this, card| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .w_full()
-                        .flex()
-                        .justify_end()
-                        .px_3()
-                        .py_2()
-                        .border_t(px(1.0))
-                        .border_color(rgb(theme.border))
-                        .bg(rgb(theme.tab_active_background))
-                        .child(card),
-                )
-            })
             .child(self.render_workspace_footbar(theme, cx))
             .into_any_element()
     }
 
     pub fn render_workspace_footbar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let document_translation_activity = self
+            .document_translation_jobs
+            .update(cx, |jobs, cx| jobs.render_footbar_activity(theme, cx));
         div()
             .flex()
             .flex_row()
@@ -13078,6 +12692,9 @@ impl PdfView {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .when_some(document_translation_activity, |this, activity| {
+                        this.child(activity)
+                    })
                     .child(Self::page_counter_label(
                         self.current_page(),
                         self.pages.len(),
@@ -13535,13 +13152,18 @@ impl Render for PdfView {
                     this.translate_document(cx);
                 }))
             })
-            .when(self.document_translation_is_running(), |this| {
+            .when(
+                self.document_translation_jobs
+                    .read(cx)
+                    .has_job_for_source(&self.path),
+                |this| {
                 this.on_action(
                     cx.listener(|this, _: &CancelDocumentTranslation, _, cx| {
                         this.cancel_document_translation(cx);
                     }),
                 )
-            })
+                },
+            )
             .on_action(cx.listener(|this, _: &TogglePinnedTranslation, _, cx| {
                 this.toggle_pinned_translation(cx);
             }))
@@ -14246,15 +13868,13 @@ mod tests {
     use super::{
         Glyph, PdfPage, PdfView, RegionDragState, RegionImageExport, RenderCache, RenderKey,
         SearchState, TextChunk, TextFormatBlock, TextIndexState, TextLine, TranslationCardState,
-        TranslationStatus, clear_copied_region_selection, document_translation_progress_count,
-        document_translation_progress_fraction, reset_translation_cards_for_document_replacement,
-        retain_valid_annotation_id,
+        TranslationStatus, clear_copied_region_selection,
+        reset_translation_cards_for_document_replacement, retain_valid_annotation_id,
     };
     use glyphst_ai::ai_chat::{MentionKind, MentionReference};
     use glyphst_core::{
         DocumentLayout, DocumentRotation, EpubLayout, PageIndex, PageRegion, RegionImageReference,
     };
-    use glyphst_pdf_translation::{PdfTranslationProgress, PdfTranslationStage};
     use glyphst_translation::LanguageCode;
     use gpui::{Modifiers, ScrollWheelEvent, point, px};
     use image::{Frame, GenericImageView, RgbaImage};
@@ -15096,32 +14716,6 @@ mod tests {
             ),
             std::path::PathBuf::from("/tmp/report.v1.zh-hans.pdf")
         );
-    }
-
-    #[test]
-    fn document_translation_progress_maps_counts_and_fraction_safely() {
-        let progress = PdfTranslationProgress {
-            stage: PdfTranslationStage::Translating,
-            detail: "Translating".to_string(),
-            completed: Some(3),
-            total: Some(8),
-            overall_fraction: 1.2,
-            indeterminate: false,
-        };
-        assert_eq!(
-            document_translation_progress_count(&progress).as_deref(),
-            Some("3 / 8 units")
-        );
-        assert_eq!(document_translation_progress_fraction(&progress), 1.0);
-
-        let invalid = PdfTranslationProgress {
-            overall_fraction: f32::NAN,
-            completed: None,
-            total: None,
-            ..progress
-        };
-        assert_eq!(document_translation_progress_count(&invalid), None);
-        assert_eq!(document_translation_progress_fraction(&invalid), 0.0);
     }
 
     fn missing_space_glyphs() -> Vec<Glyph> {

@@ -39,6 +39,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "49ad06c1
     "wayland",
     "x11",
 ] }
+httpdate = "1"
 image = "0.25"
 i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system"] }
 i18n-embed-fl = "0.10"

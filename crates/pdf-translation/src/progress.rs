@@ -53,6 +53,14 @@ pub struct PdfTranslationProgress {
     pub detail: String,
     pub completed: Option<u32>,
     pub total: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translated: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrying: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<u32>,
     pub overall_fraction: f32,
     pub indeterminate: bool,
 }
@@ -102,8 +110,44 @@ impl ProgressTracker {
             detail: detail.into(),
             completed,
             total,
+            translated: None,
+            cached: None,
+            retrying: None,
+            failed: None,
             overall_fraction: self.last_fraction,
             indeterminate: total.is_none(),
+        });
+    }
+
+    pub fn report_translation(
+        &mut self,
+        detail: impl Into<String>,
+        translated: u32,
+        cached: u32,
+        retrying: u32,
+        failed: u32,
+        total: u32,
+    ) {
+        let completed = translated.saturating_add(cached).min(total);
+        let stage = PdfTranslationStage::Translating;
+        let stage_fraction = if total > 0 {
+            completed as f32 / total as f32
+        } else {
+            1.0
+        };
+        let computed = stage.completed_weight_before() + stage.weight() * stage_fraction;
+        self.last_fraction = self.last_fraction.max(computed).clamp(0.0, 1.0);
+        self.sink.publish(PdfTranslationProgress {
+            stage,
+            detail: detail.into(),
+            completed: Some(completed),
+            total: Some(total),
+            translated: Some(translated),
+            cached: Some(cached),
+            retrying: Some(retrying),
+            failed: Some(failed),
+            overall_fraction: self.last_fraction,
+            indeterminate: false,
         });
     }
 
@@ -118,6 +162,10 @@ impl ProgressTracker {
             detail: detail.into(),
             completed: Some(1),
             total: Some(1),
+            translated: None,
+            cached: None,
+            retrying: None,
+            failed: None,
             overall_fraction: 1.0,
             indeterminate: false,
         });
@@ -161,5 +209,43 @@ mod tests {
             .collect();
         assert!(fractions.windows(2).all(|pair| pair[0] <= pair[1]));
         assert_eq!(fractions.last().copied(), Some(1.0));
+    }
+
+    #[test]
+    fn translation_progress_counts_only_resolved_units_as_completed() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let mut tracker = ProgressTracker::new(move |progress| {
+            captured.lock().unwrap().push(progress);
+        });
+
+        tracker.report_translation("recovering", 3, 2, 1, 4, 10);
+
+        let progress = events.lock().unwrap()[0].clone();
+        assert_eq!(progress.completed, Some(5));
+        assert_eq!(progress.translated, Some(3));
+        assert_eq!(progress.cached, Some(2));
+        assert_eq!(progress.retrying, Some(1));
+        assert_eq!(progress.failed, Some(4));
+    }
+
+    #[test]
+    fn progress_deserializes_without_new_optional_counters() {
+        let progress: PdfTranslationProgress = serde_json::from_str(
+            r#"{
+                "stage":"translating",
+                "detail":"legacy",
+                "completed":1,
+                "total":2,
+                "overall_fraction":0.5,
+                "indeterminate":false
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(progress.translated, None);
+        assert_eq!(progress.cached, None);
+        assert_eq!(progress.retrying, None);
+        assert_eq!(progress.failed, None);
     }
 }

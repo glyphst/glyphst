@@ -727,6 +727,7 @@ mod tests {
                 role: block_lookup[&block.id],
                 source_text: block.content.text.clone(),
                 translated_text: "这是用于验证 PDF 合成与字体嵌入的测试译文。".to_string(),
+                semantic_hash: 0,
             })
             .collect();
         let translated = TranslatedDocument { document, units };

@@ -768,7 +768,7 @@ impl ThemeRegistry {
             .collect()
     }
 
-    fn builtins() -> Self {
+    pub(crate) fn builtins() -> Self {
         let mut registry = Self { themes: Vec::new() };
 
         for (id, source) in BUILTIN_THEMES {

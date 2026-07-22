@@ -1,8 +1,11 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, VecDeque},
+    fs,
+    hash::{DefaultHasher, Hash, Hasher},
     ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
+    time::UNIX_EPOCH,
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -11,7 +14,7 @@ use gpui::{
     Render, RenderImage, SharedString, UniformListScrollHandle, Window, canvas, div, fill, point,
     prelude::*, px, rgb, rgba, uniform_list,
 };
-use image::{Frame, RgbaImage};
+use image::{Frame, ImageFormat, RgbaImage};
 use mupdf::{Colorspace, Device, DisplayList, Matrix, Pixmap, Rect};
 use smallvec::smallvec;
 
@@ -37,6 +40,8 @@ const VIEWPORT_WIDTH_EPSILON: f32 = 0.5;
 const DEFAULT_COLS: usize = 3;
 const NEW_TAB_ROW_HEIGHT: f32 = CARD_HEIGHT + GRID_GAP;
 const NEW_TAB_HEADER_HEIGHT: f32 = 40.0;
+const THUMBNAIL_CACHE_VERSION: &str = "v1";
+const MAX_PERSISTENT_THUMBNAILS: usize = 256;
 
 fn with_alpha(rgb: u32, alpha: u8) -> u32 {
     ((rgb & 0x00ff_ffff) << 8) | alpha as u32
@@ -47,6 +52,82 @@ struct ThumbnailImage {
     image: Arc<RenderImage>,
     width: f32,
     height: f32,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct ThumbnailCacheKey {
+    path: PathBuf,
+    size: u64,
+    modified_nanos: u128,
+}
+
+impl ThumbnailCacheKey {
+    fn for_path(path: &Path) -> Result<Self> {
+        let metadata = fs::metadata(path)
+            .with_context(|| format!("failed to read metadata for {}", path.display()))?;
+        let modified_nanos = metadata
+            .modified()
+            .unwrap_or(UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        Ok(Self {
+            path: path.to_path_buf(),
+            size: metadata.len(),
+            modified_nanos,
+        })
+    }
+
+    fn disk_path(&self) -> PathBuf {
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        thumbnail_cache_dir().join(format!("{:016x}.png", hasher.finish()))
+    }
+}
+
+pub struct ThumbnailCache {
+    images: HashMap<ThumbnailCacheKey, ThumbnailImage>,
+    order: VecDeque<ThumbnailCacheKey>,
+}
+
+impl gpui::Global for ThumbnailCache {}
+
+impl ThumbnailCache {
+    pub fn new() -> Self {
+        Self {
+            images: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, key: &ThumbnailCacheKey) -> Option<ThumbnailImage> {
+        let image = self.images.get(key).cloned()?;
+        self.order.retain(|candidate| candidate != key);
+        self.order.push_back(key.clone());
+        Some(image)
+    }
+
+    fn insert(&mut self, key: ThumbnailCacheKey, image: ThumbnailImage) {
+        self.images
+            .retain(|existing, _| existing.path != key.path || existing == &key);
+        self.order
+            .retain(|existing| existing.path != key.path || existing == &key);
+        self.images.insert(key.clone(), image);
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key);
+        while self.images.len() > MAX_PERSISTENT_THUMBNAILS {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.images.remove(&oldest);
+        }
+    }
+}
+
+impl Default for ThumbnailCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone)]
@@ -84,6 +165,9 @@ impl NewTab {
     pub const WINDOW_HEIGHT: f32 = BOARD_HEIGHT;
 
     pub(crate) fn new(focus_handle: FocusHandle, cx: &mut Context<Self>) -> Self {
+        if !cx.has_global::<ThumbnailCache>() {
+            cx.set_global(ThumbnailCache::new());
+        }
         let entries = {
             let store = cx.global_mut::<LibraryStore>();
             if let Err(error) = store.remove_missing_history_entries() {
@@ -117,14 +201,32 @@ impl NewTab {
         if self.thumbnails.contains_key(&path) {
             return;
         }
+        let key = match ThumbnailCacheKey::for_path(&path) {
+            Ok(key) => key,
+            Err(error) => {
+                eprintln!(
+                    "failed to fingerprint new tab preview for {}: {error:#}",
+                    path.display()
+                );
+                self.thumbnails.insert(path, ThumbnailState::Failed);
+                return;
+            }
+        };
+        if let Some(image) = cx.global_mut::<ThumbnailCache>().get(&key) {
+            self.thumbnails.insert(path, ThumbnailState::Ready(image));
+            return;
+        }
 
         self.thumbnails
             .insert(path.clone(), ThumbnailState::Loading);
 
         cx.spawn(async move |this, cx| {
             let render_path = path.clone();
+            let render_key = key.clone();
             let result = cx
-                .background_spawn(async move { render_cover_thumbnail(&render_path) })
+                .background_spawn(async move {
+                    load_or_render_cover_thumbnail(&render_path, &render_key)
+                })
                 .await;
 
             let state = match result {
@@ -139,6 +241,9 @@ impl NewTab {
             };
 
             let _ = this.update(cx, |this, cx| {
+                if let ThumbnailState::Ready(image) = &state {
+                    cx.global_mut::<ThumbnailCache>().insert(key, image.clone());
+                }
                 this.thumbnails.insert(path, state);
                 cx.notify();
             });
@@ -543,8 +648,9 @@ impl Render for NewTab {
                         rows,
                         cx.processor(move |this, visible_range: Range<usize>, _window, cx| {
                             let theme = cx.global::<SettingsStore>().resolved_theme;
-                            let visible_paths = visible_range
-                                .clone()
+                            let prewarm_range = visible_range.start.saturating_sub(1)
+                                ..(visible_range.end + 1).min(rows);
+                            let visible_paths = prewarm_range
                                 .flat_map(|row_ix| {
                                     let first_entry_ix = row_ix * cols;
                                     first_entry_ix..first_entry_ix + cols
@@ -718,7 +824,64 @@ impl Render for NewTab {
     }
 }
 
-fn render_cover_thumbnail(path: &Path) -> Result<ThumbnailImage> {
+fn thumbnail_cache_dir() -> PathBuf {
+    glyphst_core::paths::state_dir()
+        .join("thumbnails")
+        .join(THUMBNAIL_CACHE_VERSION)
+}
+
+fn load_or_render_cover_thumbnail(path: &Path, key: &ThumbnailCacheKey) -> Result<ThumbnailImage> {
+    let cache_path = key.disk_path();
+    if cache_path.is_file()
+        && let Ok(image) = image::open(&cache_path)
+    {
+        let rgba = image.into_rgba8();
+        let width = rgba.width() as f32;
+        let height = rgba.height() as f32;
+        return Ok(ThumbnailImage {
+            image: Arc::new(RenderImage::new(smallvec![Frame::new(rgba)])),
+            width,
+            height,
+        });
+    }
+    render_cover_thumbnail(path, Some(&cache_path))
+}
+
+fn persist_cover_thumbnail(path: &Path, image: &RgbaImage) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        bail!("thumbnail cache path has no parent");
+    };
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create thumbnail cache {}", parent.display()))?;
+    image
+        .save_with_format(path, ImageFormat::Png)
+        .with_context(|| format!("failed to save thumbnail cache {}", path.display()))?;
+
+    let mut entries = fs::read_dir(parent)?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            metadata
+                .is_file()
+                .then(|| (metadata.modified().unwrap_or(UNIX_EPOCH), entry.path()))
+        })
+        .collect::<Vec<_>>();
+    if entries.len() > MAX_PERSISTENT_THUMBNAILS {
+        entries.sort_by_key(|(modified, _)| *modified);
+        let remove_count = entries.len() - MAX_PERSISTENT_THUMBNAILS;
+        for (_, path) in entries.into_iter().take(remove_count) {
+            if let Err(error) = fs::remove_file(&path) {
+                eprintln!(
+                    "failed to prune cached new tab preview {}: {error:#}",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_cover_thumbnail(path: &Path, cache_path: Option<&Path>) -> Result<ThumbnailImage> {
     let mut document = mupdf::Document::open(path)?;
     if document.is_reflowable()? {
         document.layout(480.0, 640.0, 16.0)?;
@@ -791,14 +954,79 @@ fn render_cover_thumbnail(path: &Path) -> Result<ThumbnailImage> {
         bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
     }
 
-    let image = Arc::new(RenderImage::new(smallvec![Frame::new(
-        RgbaImage::from_raw(width, height, bgra)
-            .context("failed to create preview image from pixmap")?,
-    )]));
+    let rgba = RgbaImage::from_raw(width, height, bgra)
+        .context("failed to create preview image from pixmap")?;
+    if let Some(cache_path) = cache_path
+        && let Err(error) = persist_cover_thumbnail(cache_path, &rgba)
+    {
+        eprintln!(
+            "failed to cache new tab preview for {}: {error:#}",
+            path.display()
+        );
+    }
+    let image = Arc::new(RenderImage::new(smallvec![Frame::new(rgba)]));
 
     Ok(ThumbnailImage {
         image,
         width: logical_width,
         height: logical_height,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs::{self, OpenOptions},
+        io::Write as _,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use image::Rgba;
+
+    use super::{ThumbnailCacheKey, persist_cover_thumbnail};
+
+    fn temporary_directory(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "glyphst-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn thumbnail_fingerprint_changes_when_the_document_changes() {
+        let directory = temporary_directory("thumbnail-fingerprint");
+        fs::create_dir(&directory).unwrap();
+        let document = directory.join("document.pdf");
+        fs::write(&document, b"first").unwrap();
+        let first = ThumbnailCacheKey::for_path(&document).unwrap();
+
+        OpenOptions::new()
+            .append(true)
+            .open(&document)
+            .unwrap()
+            .write_all(b"-changed")
+            .unwrap();
+        let changed = ThumbnailCacheKey::for_path(&document).unwrap();
+
+        assert_ne!(first, changed);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn persistent_thumbnail_round_trips_png_pixels() {
+        let directory = temporary_directory("thumbnail-persistence");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("thumbnail.png");
+        let image = image::RgbaImage::from_pixel(3, 2, Rgba([10, 20, 30, 255]));
+
+        persist_cover_thumbnail(&path, &image).unwrap();
+        let restored = image::open(&path).unwrap().into_rgba8();
+
+        assert_eq!(restored, image);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+futures.workspace = true
+glyphst-pdf-translation = { path = "../pdf-translation" }
 glyphst-settings = { path = "../settings" }
 glyphst-translation = { path = "../translation" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

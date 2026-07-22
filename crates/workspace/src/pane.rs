@@ -8,13 +8,14 @@ use std::{
 
 use anyhow::{Result, bail};
 use glyphst_core::DocumentFormat;
+use glyphst_translation_ui::{DocumentTranslationJobId, DocumentTranslationJobManager};
 use gpui::{
     Along, AnyElement, App, AppContext, Axis, BorderStyle, Bounds, Context, CursorStyle,
     DispatchPhase, DragMoveEvent, Element, ElementId, Entity, EntityId, EventEmitter, FocusHandle,
     GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, SharedString, Style,
-    Styled, Window, WindowHandle, div, fill, point, prelude::*, px, quad, relative, rgb, rgba,
-    size, transparent_black,
+    Styled, Task, Window, WindowHandle, div, fill, point, prelude::*, px, quad, relative, rgb,
+    rgba, size, transparent_black,
 };
 use smallvec::SmallVec;
 
@@ -27,7 +28,7 @@ use crate::{
     icons::{Icon, IconName},
     library::{DocumentPosition, LibraryStore, normalize_path},
     new_tab::{NewTab, NewTabEvent},
-    pdf_view::{PdfAnnotations, PdfOpenOptions, PdfView, PdfViewEvent},
+    pdf_view::{PdfAnnotations, PdfOpenOptions, PdfView, PdfViewEvent, PreparedPdfOpen},
     settings::{SettingsStore, TabBarVisibility, ui_rems},
     theme::Theme,
     workspace::Workspace,
@@ -49,8 +50,59 @@ const RESIZE_STEP: f32 = 80.0;
 #[allow(clippy::enum_variant_names)]
 pub(crate) enum Tab {
     NewTab(Entity<NewTab>),
+    LoadingDocument(Entity<LoadingDocumentView>),
     Document(Entity<PdfView>),
     Keymap(Entity<KeymapEditor>),
+}
+
+pub(crate) struct LoadingDocumentView {
+    path: PathBuf,
+    focus_handle: FocusHandle,
+    job_ids: Vec<DocumentTranslationJobId>,
+    error: Option<SharedString>,
+    _task: Option<Task<()>>,
+}
+
+impl Render for LoadingDocumentView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let detail = self.error.clone().unwrap_or_else(|| {
+            format!(
+                "Loading {}…",
+                self.path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("document")
+            )
+            .into()
+        });
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .bg(rgb(theme.background))
+            .text_color(rgb(if self.error.is_some() {
+                theme.error
+            } else {
+                theme.text_muted
+            }))
+            .child(Icon::new(
+                if self.error.is_some() {
+                    IconName::TriangleAlert
+                } else {
+                    IconName::Circle
+                },
+                ui_rems(14.0),
+                rgb(if self.error.is_some() {
+                    theme.error
+                } else {
+                    theme.accent
+                }),
+            ))
+            .child(detail)
+    }
 }
 
 #[derive(Clone)]
@@ -109,11 +161,11 @@ pub(crate) enum PaneEvent {
         position: Option<DocumentPosition>,
         replace_active_new_tab: bool,
     },
-    OpenSettings,
-    OpenTranslationSplit {
-        source: Entity<PdfView>,
-        translated_path: PathBuf,
+    DocumentOpenFinished {
+        job_id: DocumentTranslationJobId,
+        result: std::result::Result<(), SharedString>,
     },
+    OpenSettings,
     TabDrop {
         dragged_tab: Box<DraggedTab>,
         target: PaneDropTarget,
@@ -125,53 +177,27 @@ pub(crate) struct Pane {
     tabs: Vec<Tab>,
     active_tab: usize,
     focus_handle: FocusHandle,
+    document_translation_jobs: Entity<DocumentTranslationJobManager>,
     tab_focus_handles: HashMap<EntityId, FocusHandle>,
     drag_split_direction: Option<SplitDirection>,
     force_show_tab_bar: bool,
 }
 
 impl Pane {
-    pub(crate) fn new(
-        initial_path: Option<PathBuf>,
-        initial_position: Option<DocumentPosition>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let mut pane = Self {
-            tabs: Vec::new(),
-            active_tab: 0,
-            focus_handle: cx.focus_handle(),
-            tab_focus_handles: HashMap::new(),
-            drag_split_direction: None,
-            force_show_tab_bar: false,
-        };
-
-        let initial_tab = initial_path
-            .and_then(
-                |path| match pane.create_document_tab(path, initial_position, window, cx) {
-                    Ok(tab) => Some(tab),
-                    Err(error) => {
-                        eprintln!("failed to open document: {error:#}");
-                        None
-                    }
-                },
-            )
-            .unwrap_or_else(|| pane.create_new_tab(window, cx));
-        pane.tabs.push(initial_tab);
-        pane.sync_active_focus_handle();
-        pane
-    }
-
     pub(crate) fn focus_handle(&self) -> FocusHandle {
         self.active_tab_focus_handle()
             .unwrap_or_else(|| self.focus_handle.clone())
     }
 
-    pub(crate) fn empty(focus_handle: FocusHandle) -> Self {
+    pub(crate) fn empty(
+        focus_handle: FocusHandle,
+        document_translation_jobs: Entity<DocumentTranslationJobManager>,
+    ) -> Self {
         Self {
             tabs: Vec::new(),
             active_tab: 0,
             focus_handle,
+            document_translation_jobs,
             tab_focus_handles: HashMap::new(),
             drag_split_direction: None,
             force_show_tab_bar: false,
@@ -215,7 +241,9 @@ impl Pane {
     pub(crate) fn active_document_label(&self, cx: &App) -> Option<SharedString> {
         match self.tabs.get(self.active_tab) {
             Some(Tab::Document(pdf_view)) => Some(pdf_view.read(cx).file_name()),
-            Some(Tab::NewTab(_)) | Some(Tab::Keymap(_)) | None => None,
+            Some(Tab::NewTab(_)) | Some(Tab::LoadingDocument(_)) | Some(Tab::Keymap(_)) | None => {
+                None
+            }
         }
     }
 
@@ -228,14 +256,18 @@ impl Pane {
                     pdf_view.current_document_position(),
                 ))
             }
-            Some(Tab::NewTab(_)) | Some(Tab::Keymap(_)) | None => None,
+            Some(Tab::NewTab(_)) | Some(Tab::LoadingDocument(_)) | Some(Tab::Keymap(_)) | None => {
+                None
+            }
         }
     }
 
     pub(crate) fn active_pdf_view(&self) -> Option<Entity<PdfView>> {
         match self.tabs.get(self.active_tab) {
             Some(Tab::Document(pdf_view)) => Some(pdf_view.clone()),
-            Some(Tab::NewTab(_)) | Some(Tab::Keymap(_)) | None => None,
+            Some(Tab::NewTab(_)) | Some(Tab::LoadingDocument(_)) | Some(Tab::Keymap(_)) | None => {
+                None
+            }
         }
     }
 
@@ -254,6 +286,7 @@ impl Pane {
         let path = normalize_path(path);
         self.tabs.iter().position(|tab| match tab {
             Tab::Document(pdf_view) => pdf_view.read(cx).path() == path.as_path(),
+            Tab::LoadingDocument(loading) => loading.read(cx).path == path,
             Tab::NewTab(_) | Tab::Keymap(_) => false,
         })
     }
@@ -296,6 +329,28 @@ impl Pane {
         cx.notify();
     }
 
+    pub(crate) fn associate_open_job(
+        &mut self,
+        tab_ix: usize,
+        job_id: DocumentTranslationJobId,
+        cx: &mut Context<Self>,
+    ) {
+        match self.tabs.get(tab_ix) {
+            Some(Tab::Document(_)) => cx.emit(PaneEvent::DocumentOpenFinished {
+                job_id,
+                result: Ok(()),
+            }),
+            Some(Tab::LoadingDocument(loading)) => {
+                loading.update(cx, |loading, _| {
+                    if !loading.job_ids.contains(&job_id) {
+                        loading.job_ids.push(job_id);
+                    }
+                });
+            }
+            Some(Tab::NewTab(_)) | Some(Tab::Keymap(_)) | None => {}
+        }
+    }
+
     pub(crate) fn focus_or_open_document(
         &mut self,
         path: PathBuf,
@@ -304,13 +359,103 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
+        self.focus_or_open_document_inner(path, position, replace_active_new_tab, None, window, cx)
+    }
+
+    pub(crate) fn focus_or_open_document_for_job(
+        &mut self,
+        path: PathBuf,
+        position: Option<DocumentPosition>,
+        replace_active_new_tab: bool,
+        job_id: DocumentTranslationJobId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        self.focus_or_open_document_inner(
+            path,
+            position,
+            replace_active_new_tab,
+            Some(job_id),
+            window,
+            cx,
+        )
+    }
+
+    fn focus_or_open_document_inner(
+        &mut self,
+        path: PathBuf,
+        position: Option<DocumentPosition>,
+        replace_active_new_tab: bool,
+        job_id: Option<DocumentTranslationJobId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
         let path = normalize_path(&path);
         if let Some(tab_ix) = self.document_tab_ix(&path, cx) {
             self.activate_existing_document(tab_ix, position, replace_active_new_tab, window, cx);
+            if let Some(job_id) = job_id {
+                self.associate_open_job(tab_ix, job_id, cx);
+            }
             return Ok(());
         }
 
-        let tab = self.create_document_tab(path, position, window, cx)?;
+        if !path.exists() {
+            bail!("document no longer exists: {}", path.display());
+        }
+        if !Self::is_supported_document_path(&path) {
+            bail!("unsupported file type: {}", path.display());
+        }
+        let (behavior, window_settings, theme) = {
+            let store = cx.global::<SettingsStore>();
+            (
+                store.settings.behavior,
+                store.settings.window,
+                store.resolved_theme,
+            )
+        };
+        let initial_position = position
+            .or_else(|| cx.global::<LibraryStore>().history_position(&path))
+            .unwrap_or_else(|| DocumentPosition::fixed(0.0, 0.0, behavior.default_zoom, 1));
+        let annotations = PdfAnnotations {
+            highlights: cx.global::<LibraryStore>().highlights_for(&path),
+            notes: cx.global::<LibraryStore>().notes_for(&path),
+        };
+        let sidebar_widths = cx.global::<LibraryStore>().sidebar_widths();
+        let target_language = cx
+            .global::<LibraryStore>()
+            .document_target_language(&path)
+            .unwrap_or_else(|| {
+                cx.global::<SettingsStore>()
+                    .settings
+                    .translation
+                    .target_language
+                    .clone()
+            });
+        let epub_preferences = cx
+            .global::<LibraryStore>()
+            .epub_reader_preferences(&path)
+            .unwrap_or_else(|| cx.global::<SettingsStore>().settings.reading);
+        let rotation = cx.global::<LibraryStore>().document_rotation(&path);
+        let options = PdfOpenOptions {
+            initial_position: Some(initial_position.clone()),
+            sidebar_widths,
+            annotations,
+            target_language,
+            epub_preferences,
+            rotation,
+            document_translation_jobs: self.document_translation_jobs.clone(),
+        };
+        let loading = cx.new(|_cx| LoadingDocumentView {
+            path: path.clone(),
+            focus_handle: self.focus_handle.clone(),
+            job_ids: job_id.into_iter().collect(),
+            error: None,
+            _task: None,
+        });
+        let loading_id = loading.entity_id();
+        let tab = Tab::LoadingDocument(loading.clone());
+        self.register_tab_focus_handle(&tab, loading.read(cx).focus_handle.clone());
+        self.subscribe_to_tab(&tab, window, cx);
         if replace_active_new_tab && self.active_tab_is_new_tab() {
             let replaced_tab = std::mem::replace(&mut self.tabs[self.active_tab], tab);
             self.remove_tab_focus_handle(&replaced_tab);
@@ -322,6 +467,31 @@ impl Pane {
         self.sync_active_focus_handle();
         self.focus(window, cx);
         cx.notify();
+
+        let prepare_path = path.clone();
+        let prepare_preferences = epub_preferences;
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    PdfView::prepare_open(prepare_path, prepare_preferences, theme.page_gap)
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .await;
+            _ = this.update_in(cx, |this, window, cx| {
+                this.finish_document_open(
+                    loading_id,
+                    path,
+                    initial_position,
+                    behavior,
+                    window_settings,
+                    options,
+                    result,
+                    window,
+                    cx,
+                );
+            });
+        });
+        loading.update(cx, |loading, _| loading._task = Some(task));
         Ok(())
     }
 
@@ -368,6 +538,15 @@ impl Pane {
 
         self.flush_tab(tab_ix, cx);
         let removed_tab = self.tabs.remove(tab_ix);
+        if let Tab::LoadingDocument(loading) = &removed_tab {
+            let job_ids = loading.read(cx).job_ids.clone();
+            for job_id in job_ids {
+                cx.emit(PaneEvent::DocumentOpenFinished {
+                    job_id,
+                    result: Err("Opening the translated document was cancelled.".into()),
+                });
+            }
+        }
         self.remove_tab_focus_handle(&removed_tab);
 
         if self.active_tab > tab_ix {
@@ -443,6 +622,12 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         self.flush_active_tab(cx);
+        if let Tab::Document(pdf_view) = &transfer.tab {
+            let jobs = self.document_translation_jobs.clone();
+            pdf_view.update(cx, |pdf_view, cx| {
+                pdf_view.set_document_translation_jobs(jobs, cx);
+            });
+        }
         self.subscribe_to_tab(&transfer.tab, window, cx);
         let tab_ix = to.min(self.tabs.len());
         if let Some(focus_handle) = transfer.focus_handle {
@@ -493,6 +678,97 @@ impl Pane {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn finish_document_open(
+        &mut self,
+        loading_id: EntityId,
+        path: PathBuf,
+        initial_position: DocumentPosition,
+        behavior: glyphst_settings::BehaviorSettings,
+        window_settings: glyphst_settings::WindowSettings,
+        options: PdfOpenOptions,
+        result: std::result::Result<PreparedPdfOpen, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_ix) = self.tab_ix_for_entity_id(loading_id) else {
+            return;
+        };
+        let job_ids = match self.tabs.get(tab_ix) {
+            Some(Tab::LoadingDocument(loading)) => loading.read(cx).job_ids.clone(),
+            _ => return,
+        };
+        let prepared = match result {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                for job_id in job_ids.iter().copied() {
+                    cx.emit(PaneEvent::DocumentOpenFinished {
+                        job_id,
+                        result: Err(error.clone().into()),
+                    });
+                }
+                if let Some(Tab::LoadingDocument(loading)) = self.tabs.get(tab_ix) {
+                    loading.update(cx, |loading, cx| {
+                        loading.error = Some(error.into());
+                        loading._task = None;
+                        cx.notify();
+                    });
+                }
+                return;
+            }
+        };
+        let mut pdf_view = match PdfView::from_prepared(
+            prepared,
+            self.focus_handle.clone(),
+            behavior,
+            window_settings,
+            options,
+        ) {
+            Ok(pdf_view) => pdf_view,
+            Err(error) => {
+                for job_id in job_ids.iter().copied() {
+                    cx.emit(PaneEvent::DocumentOpenFinished {
+                        job_id,
+                        result: Err(format!("{error:#}").into()),
+                    });
+                }
+                if let Some(Tab::LoadingDocument(loading)) = self.tabs.get(tab_ix) {
+                    loading.update(cx, |loading, cx| {
+                        loading.error = Some(format!("{error:#}").into());
+                        loading._task = None;
+                        cx.notify();
+                    });
+                }
+                return;
+            }
+        };
+        let pdf_view = cx.new(|cx| {
+            pdf_view.register_cache_eviction(cx);
+            pdf_view.start_loading(cx);
+            pdf_view
+        });
+        self.subscribe_to_pdf_view(&pdf_view, window, cx);
+
+        let tab = Tab::Document(pdf_view);
+        let replaced_tab = std::mem::replace(&mut self.tabs[tab_ix], tab.clone());
+        self.remove_tab_focus_handle(&replaced_tab);
+        self.register_tab_focus_handle(&tab, self.focus_handle.clone());
+        if self.active_tab == tab_ix {
+            self.sync_active_focus_handle();
+            self.focus(window, cx);
+        }
+
+        cx.global_mut::<LibraryStore>()
+            .record_history(&path, initial_position);
+        for job_id in job_ids {
+            cx.emit(PaneEvent::DocumentOpenFinished {
+                job_id,
+                result: Ok(()),
+            });
+        }
+        cx.notify();
+    }
+
     fn create_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Tab {
         let focus_handle = self.focus_handle.clone();
         let new_tab = cx.new(|cx| NewTab::new(focus_handle.clone(), cx));
@@ -507,85 +783,6 @@ impl Pane {
         let tab = Tab::Keymap(cx.new(|cx| KeymapEditor::new(focus_handle.clone(), cx)));
         self.register_tab_focus_handle(&tab, focus_handle);
         tab
-    }
-
-    fn create_document_tab(
-        &mut self,
-        path: PathBuf,
-        position: Option<DocumentPosition>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<Tab> {
-        let path = normalize_path(&path);
-        if !path.exists() {
-            bail!("document no longer exists: {}", path.display());
-        }
-        if !Self::is_supported_document_path(&path) {
-            bail!("unsupported file type: {}", path.display());
-        }
-
-        let (behavior, window_settings, theme) = {
-            let store = cx.global::<SettingsStore>();
-            (
-                store.settings.behavior,
-                store.settings.window,
-                store.resolved_theme,
-            )
-        };
-        let initial_position = position
-            .or_else(|| cx.global::<LibraryStore>().history_position(&path))
-            .unwrap_or_else(|| DocumentPosition::fixed(0.0, 0.0, behavior.default_zoom, 1));
-        let annotations = PdfAnnotations {
-            highlights: cx.global::<LibraryStore>().highlights_for(&path),
-            notes: cx.global::<LibraryStore>().notes_for(&path),
-        };
-        let sidebar_widths = cx.global::<LibraryStore>().sidebar_widths();
-        let target_language = cx
-            .global::<LibraryStore>()
-            .document_target_language(&path)
-            .unwrap_or_else(|| {
-                cx.global::<SettingsStore>()
-                    .settings
-                    .translation
-                    .target_language
-                    .clone()
-            });
-        let epub_preferences = cx
-            .global::<LibraryStore>()
-            .epub_reader_preferences(&path)
-            .unwrap_or_else(|| cx.global::<SettingsStore>().settings.reading);
-        let rotation = cx.global::<LibraryStore>().document_rotation(&path);
-        let mut pdf_view = PdfView::open(
-            &path,
-            self.focus_handle.clone(),
-            behavior,
-            window_settings,
-            theme,
-            PdfOpenOptions {
-                initial_position: Some(initial_position.clone()),
-                sidebar_widths,
-                annotations,
-                target_language,
-                epub_preferences,
-                rotation,
-            },
-        )?;
-        let pdf_view = cx.new(|cx| {
-            pdf_view.register_cache_eviction(cx);
-            pdf_view.start_loading(cx);
-            pdf_view
-        });
-        self.subscribe_to_pdf_view(&pdf_view, window, cx);
-
-        cx.global_mut::<LibraryStore>()
-            .record_history(&path, initial_position);
-        if let Err(error) = cx.global::<LibraryStore>().save() {
-            eprintln!("failed to save PDF history: {error:#}");
-        }
-
-        let tab = Tab::Document(pdf_view);
-        self.register_tab_focus_handle(&tab, self.focus_handle.clone());
-        Ok(tab)
     }
 
     fn subscribe_to_new_tab(
@@ -623,7 +820,7 @@ impl Pane {
         cx.subscribe_in(
             pdf_view,
             window,
-            move |pane, pdf_view, event: &PdfViewEvent, _, cx| {
+            move |pane, _pdf_view, event: &PdfViewEvent, _, cx| {
                 if !pane.has_tab_id(pdf_view_id) {
                     return;
                 }
@@ -636,12 +833,6 @@ impl Pane {
                         });
                     }
                     PdfViewEvent::OpenSettings => cx.emit(PaneEvent::OpenSettings),
-                    PdfViewEvent::OpenTranslationSplit { translated_path } => {
-                        cx.emit(PaneEvent::OpenTranslationSplit {
-                            source: pdf_view.clone(),
-                            translated_path: translated_path.clone(),
-                        });
-                    }
                     PdfViewEvent::ViewportChanged(_)
                     | PdfViewEvent::BlockHovered(_)
                     | PdfViewEvent::BlockSelected(_) => {}
@@ -655,6 +846,9 @@ impl Pane {
     fn subscribe_to_tab(&self, tab: &Tab, window: &mut Window, cx: &mut Context<Self>) {
         match tab {
             Tab::NewTab(new_tab) => self.subscribe_to_new_tab(new_tab, window, cx),
+            Tab::LoadingDocument(loading) => {
+                cx.observe(loading, |_, _, cx| cx.notify()).detach();
+            }
             Tab::Document(pdf_view) => self.subscribe_to_pdf_view(pdf_view, window, cx),
             Tab::Keymap(_) => {}
         }
@@ -718,21 +912,34 @@ impl Pane {
     fn tab_label(&self, tab_ix: usize, cx: &App) -> SharedString {
         match self.tabs.get(tab_ix) {
             Some(Tab::Document(pdf_view)) => pdf_view.read(cx).file_name(),
+            Some(Tab::LoadingDocument(loading)) => loading
+                .read(cx)
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Loading…")
+                .to_string()
+                .into(),
             Some(Tab::Keymap(_)) => crate::fl!("keymap-title").into(),
             Some(Tab::NewTab(_)) | None => crate::fl!("new-tab-title").into(),
         }
     }
 
-    fn tab_is_draggable(&self, tab_ix: usize) -> bool {
-        matches!(
-            self.tabs.get(tab_ix),
-            Some(Tab::Document(_)) | Some(Tab::NewTab(_))
-        )
+    fn tab_is_draggable(&self, tab_ix: usize, cx: &App) -> bool {
+        match self.tabs.get(tab_ix) {
+            Some(Tab::Document(pdf_view)) => !self
+                .document_translation_jobs
+                .read(cx)
+                .has_job_for_source(pdf_view.read(cx).path()),
+            Some(Tab::NewTab(_)) => true,
+            Some(Tab::LoadingDocument(_)) | Some(Tab::Keymap(_)) | None => false,
+        }
     }
 
     fn tab_entity_id(tab: &Tab) -> EntityId {
         match tab {
             Tab::NewTab(new_tab) => new_tab.entity_id(),
+            Tab::LoadingDocument(loading) => loading.entity_id(),
             Tab::Document(pdf_view) => pdf_view.entity_id(),
             Tab::Keymap(keymap_editor) => keymap_editor.entity_id(),
         }
@@ -741,6 +948,7 @@ impl Pane {
     fn active_tab_content(&self) -> AnyElement {
         match self.tabs.get(self.active_tab) {
             Some(Tab::Document(pdf_view)) => pdf_view.clone().into_any_element(),
+            Some(Tab::LoadingDocument(loading)) => loading.clone().into_any_element(),
             Some(Tab::NewTab(new_tab)) => new_tab.clone().into_any_element(),
             Some(Tab::Keymap(keymap_editor)) => keymap_editor.clone().into_any_element(),
             None => div().into_any_element(),
@@ -757,7 +965,7 @@ impl Pane {
     ) -> AnyElement {
         let selected = tab_ix == self.active_tab;
         let label = self.tab_label(tab_ix, cx);
-        let draggable = self.tab_is_draggable(tab_ix);
+        let draggable = self.tab_is_draggable(tab_ix, cx);
         let tab_id = self
             .tabs
             .get(tab_ix)
@@ -2051,7 +2259,53 @@ impl ParentElement for PaneAxisElement {
 
 #[cfg(test)]
 mod tests {
-    use super::resize_axis_sizes;
+    use std::fs;
+
+    use gpui::{AppContext as _, TestAppContext};
+
+    use super::{Pane, Tab, resize_axis_sizes};
+    use crate::{library::LibraryStore, pdf_view::RenderCache, settings::SettingsStore};
+    use glyphst_translation_ui::DocumentTranslationJobManager;
+
+    fn temporary_pdf_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "glyphst-{label}-{}-{}.pdf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn write_minimal_pdf(path: &std::path::Path) {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >>",
+            "<< /Length 0 >>\nstream\n\nendstream",
+        ];
+        let mut bytes = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        bytes.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        fs::write(path, bytes).unwrap();
+    }
 
     #[test]
     fn resizing_a_divider_preserves_unrelated_panes() {
@@ -2075,5 +2329,87 @@ mod tests {
 
         assert_eq!(resize_axis_sizes(&mut sizes, 0, -80.0, 200.0), -20.0);
         assert_eq!(sizes, [200.0, 320.0, 300.0]);
+    }
+
+    #[gpui::test]
+    fn document_open_stages_a_loading_tab_without_blocking_tab_switches(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let jobs = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let path = temporary_pdf_path("loading-tab");
+        fs::create_dir(&path).unwrap();
+
+        let (pane, cx) =
+            cx.add_window_view(|_window, cx| Pane::empty(cx.focus_handle(), jobs.clone()));
+        pane.update_in(cx, |pane, window, cx| {
+            pane.focus_or_open_document(path.clone(), None, true, window, cx)
+                .unwrap();
+            assert!(matches!(pane.tabs.as_slice(), [Tab::LoadingDocument(_)]));
+
+            pane.open_new_tab(window, cx);
+            assert!(matches!(
+                pane.tabs.get(pane.active_tab),
+                Some(Tab::NewTab(_))
+            ));
+            assert!(
+                pane.tabs
+                    .iter()
+                    .any(|tab| matches!(tab, Tab::LoadingDocument(_)))
+            );
+        });
+
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, cx| {
+            assert!(matches!(
+                pane.tabs.get(pane.active_tab),
+                Some(Tab::NewTab(_))
+            ));
+            let loading = pane
+                .tabs
+                .iter()
+                .find_map(|tab| match tab {
+                    Tab::LoadingDocument(loading) => Some(loading),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(loading.read(cx).error.is_some());
+        });
+
+        fs::remove_dir(path).unwrap();
+    }
+
+    #[gpui::test]
+    fn successful_document_preparation_replaces_the_loading_tab(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let jobs = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let path = temporary_pdf_path("loading-success");
+        write_minimal_pdf(&path);
+
+        let (pane, cx) =
+            cx.add_window_view(|_window, cx| Pane::empty(cx.focus_handle(), jobs.clone()));
+        pane.update_in(cx, |pane, window, cx| {
+            pane.focus_or_open_document(path.clone(), None, true, window, cx)
+                .unwrap();
+            assert!(matches!(pane.tabs.as_slice(), [Tab::LoadingDocument(_)]));
+            pane.associate_open_job(0, 42, cx);
+            let Tab::LoadingDocument(loading) = &pane.tabs[0] else {
+                unreachable!();
+            };
+            assert_eq!(loading.read(cx).job_ids, vec![42]);
+        });
+
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| {
+            assert!(matches!(pane.tabs.as_slice(), [Tab::Document(_)]));
+        });
+
+        fs::remove_file(path).unwrap();
     }
 }

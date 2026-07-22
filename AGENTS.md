@@ -12,7 +12,7 @@ Relevent projects are cloned in `probe` directory for reference purpose:
 - `cherry-studio` (An AI chat application)
 - `lucide` (Icon)
 - `gpui-component` (Third-party GPUI Components)
-- `ratain-pdf` (high quality PDF translation project)
+- `ratain-pdf` (quality PDF translation project)
 
 ## Dev Note
 

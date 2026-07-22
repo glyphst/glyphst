@@ -1,4 +1,8 @@
+use std::fmt;
+use std::time::{Duration, SystemTime};
+
 use anyhow::{Context as _, Result, anyhow};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -21,6 +25,34 @@ pub struct SemanticTranslationOutput {
     pub text: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiTranslationErrorCategory {
+    Authentication,
+    RateLimited,
+    ServiceUnavailable,
+    Timeout,
+    InvalidRequest,
+    InvalidResponse,
+    Network,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiTranslationError {
+    pub category: AiTranslationErrorCategory,
+    pub message: String,
+    pub status: Option<u16>,
+    pub retryable: bool,
+    pub retry_after: Option<Duration>,
+}
+
+impl fmt::Display for AiTranslationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.message.fmt(formatter)
+    }
+}
+
+impl std::error::Error for AiTranslationError {}
+
 pub fn translate_batch(
     settings: ResolvedAiConfig,
     texts: &[String],
@@ -38,12 +70,30 @@ pub fn translate_batch(
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .context("failed to create AI translation client")?;
+    translate_batch_with_client(&client, settings, texts, source_language, target_language)
+        .map_err(Into::into)
+}
+
+pub fn translate_batch_with_client(
+    client: &reqwest::blocking::Client,
+    settings: ResolvedAiConfig,
+    texts: &[String],
+    source_language: Option<&str>,
+    target_language: &str,
+) -> std::result::Result<Vec<String>, AiTranslationError> {
+    if !settings.can_request() {
+        return Err(configuration_error(settings.missing_credentials_message()));
+    }
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let system = translation_system_prompt(source_language, target_language);
     let response = match settings.provider.api_style() {
-        AiApiStyle::OpenAi => request_openai(&client, &settings, &system, texts),
-        AiApiStyle::Anthropic => request_anthropic(&client, &settings, &system, texts),
+        AiApiStyle::OpenAi => request_openai(client, &settings, &system, texts),
+        AiApiStyle::Anthropic => request_anthropic(client, &settings, &system, texts),
     }?;
-    parse_translations(&response, texts.len())
+    parse_translations(&response, texts.len()).map_err(invalid_response)
 }
 
 pub fn translate_semantic_batch(
@@ -63,6 +113,24 @@ pub fn translate_semantic_batch(
         .timeout(std::time::Duration::from_secs(90))
         .build()
         .context("failed to create AI translation client")?;
+    translate_semantic_batch_with_client(&client, settings, units, source_language, target_language)
+        .map_err(Into::into)
+}
+
+pub fn translate_semantic_batch_with_client(
+    client: &reqwest::blocking::Client,
+    settings: ResolvedAiConfig,
+    units: &[SemanticTranslationInput],
+    source_language: Option<&str>,
+    target_language: &str,
+) -> std::result::Result<Vec<SemanticTranslationOutput>, AiTranslationError> {
+    if !settings.can_request() {
+        return Err(configuration_error(settings.missing_credentials_message()));
+    }
+    if units.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let source = source_language.unwrap_or("the detected source language");
     let system = format!(
         "You are a precise document translator. Translate every unit from {source} to \
@@ -74,12 +142,37 @@ only valid JSON in this exact shape: \
 {{\"translations\":[{{\"id\":\"unit-id\",\"text\":\"translated text\"}}]}}. Return every input ID \
 exactly once and do not add IDs."
     );
-    let payload = serde_json::to_value(units)?;
+    let payload = serde_json::to_value(units)
+        .map_err(|error| configuration_error(format!("failed to encode request: {error}")))?;
     let response = match settings.provider.api_style() {
-        AiApiStyle::OpenAi => request_openai_payload(&client, &settings, &system, payload),
-        AiApiStyle::Anthropic => request_anthropic_payload(&client, &settings, &system, payload),
+        AiApiStyle::OpenAi => request_openai_payload(client, &settings, &system, payload),
+        AiApiStyle::Anthropic => request_anthropic_payload(client, &settings, &system, payload),
     }?;
-    parse_semantic_translations(&response, units)
+    parse_semantic_translations(&response, units).map_err(invalid_response)
+}
+
+pub fn translate_semantic_single_with_client(
+    client: &reqwest::blocking::Client,
+    settings: ResolvedAiConfig,
+    unit: &SemanticTranslationInput,
+    source_language: Option<&str>,
+    target_language: &str,
+) -> std::result::Result<SemanticTranslationOutput, AiTranslationError> {
+    if !settings.can_request() {
+        return Err(configuration_error(settings.missing_credentials_message()));
+    }
+    let input = vec![unit.text.clone()];
+    let mut outputs =
+        translate_batch_with_client(client, settings, &input, source_language, target_language)?;
+    if outputs.len() != 1 {
+        return Err(invalid_response(anyhow!(
+            "AI translation recovery omitted the semantic unit"
+        )));
+    }
+    Ok(SemanticTranslationOutput {
+        id: unit.id.clone(),
+        text: outputs.remove(0),
+    })
 }
 
 fn translation_system_prompt(source_language: Option<&str>, target_language: &str) -> String {
@@ -97,8 +190,10 @@ fn request_openai(
     settings: &ResolvedAiConfig,
     system: &str,
     texts: &[String],
-) -> Result<String> {
-    request_openai_payload(client, settings, system, serde_json::to_value(texts)?)
+) -> std::result::Result<String, AiTranslationError> {
+    let payload = serde_json::to_value(texts)
+        .map_err(|error| configuration_error(format!("failed to encode request: {error}")))?;
+    request_openai_payload(client, settings, system, payload)
 }
 
 fn request_openai_payload(
@@ -106,16 +201,39 @@ fn request_openai_payload(
     settings: &ResolvedAiConfig,
     system: &str,
     payload: Value,
-) -> Result<String> {
+) -> std::result::Result<String, AiTranslationError> {
+    match request_openai_payload_inner(client, settings, system, &payload, true) {
+        Err(error)
+            if error.category == AiTranslationErrorCategory::InvalidRequest
+                && matches!(error.status, Some(400 | 404 | 422)) =>
+        {
+            request_openai_payload_inner(client, settings, system, &payload, false)
+        }
+        result => result,
+    }
+}
+
+fn request_openai_payload_inner(
+    client: &reqwest::blocking::Client,
+    settings: &ResolvedAiConfig,
+    system: &str,
+    payload: &Value,
+    structured_output: bool,
+) -> std::result::Result<String, AiTranslationError> {
     let url = openai_chat_url(&settings.base_url);
-    let mut request = client.post(url).json(&json!({
+    let mut body = json!({
         "model": settings.model,
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": serde_json::to_string(&payload)?}
+            {"role": "user", "content": serde_json::to_string(payload).map_err(|error|
+                configuration_error(format!("failed to encode request: {error}"))) ?}
         ],
         "temperature": 0,
-    }));
+    });
+    if structured_output {
+        body["response_format"] = json!({"type": "json_object"});
+    }
+    let mut request = client.post(url).json(&body);
     if !settings.api_key.is_empty() {
         request = request.bearer_auth(&settings.api_key);
     }
@@ -125,12 +243,7 @@ fn request_openai_payload(
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| {
-            anyhow!(
-                "{} response did not include text content",
-                settings.provider.label()
-            )
-        })
+        .ok_or_else(|| invalid_response_message(settings.provider.label()))
 }
 
 fn request_anthropic(
@@ -138,8 +251,10 @@ fn request_anthropic(
     settings: &ResolvedAiConfig,
     system: &str,
     texts: &[String],
-) -> Result<String> {
-    request_anthropic_payload(client, settings, system, serde_json::to_value(texts)?)
+) -> std::result::Result<String, AiTranslationError> {
+    let payload = serde_json::to_value(texts)
+        .map_err(|error| configuration_error(format!("failed to encode request: {error}")))?;
+    request_anthropic_payload(client, settings, system, payload)
 }
 
 fn request_anthropic_payload(
@@ -147,8 +262,9 @@ fn request_anthropic_payload(
     settings: &ResolvedAiConfig,
     system: &str,
     payload: Value,
-) -> Result<String> {
+) -> std::result::Result<String, AiTranslationError> {
     let url = anthropic_messages_url(&settings.base_url);
+    let max_tokens = anthropic_max_tokens(&payload);
     let response = client
         .post(url)
         .header("x-api-key", &settings.api_key)
@@ -158,9 +274,10 @@ fn request_anthropic_payload(
             "system": system,
             "messages": [{
                 "role": "user",
-                "content": serde_json::to_string(&payload)?,
+                "content": serde_json::to_string(&payload).map_err(|error|
+                    configuration_error(format!("failed to encode request: {error}"))) ?,
             }],
-            "max_tokens": 4096,
+            "max_tokens": max_tokens,
             "temperature": 0,
         }));
 
@@ -169,12 +286,7 @@ fn request_anthropic_payload(
         .pointer("/content/0/text")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| {
-            anyhow!(
-                "{} response did not include text content",
-                settings.provider.label()
-            )
-        })
+        .ok_or_else(|| invalid_response_message(settings.provider.label()))
 }
 
 fn parse_semantic_translations(
@@ -182,53 +294,146 @@ fn parse_semantic_translations(
     expected: &[SemanticTranslationInput],
 ) -> Result<Vec<SemanticTranslationOutput>> {
     let value = parse_json_object(content)?;
-    let translations = value
-        .get("translations")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("AI translation response is missing translations"))?
-        .iter()
-        .map(|value| {
-            serde_json::from_value::<SemanticTranslationOutput>(value.clone())
-                .context("AI translation response contains an invalid semantic item")
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if translations.len() != expected.len() {
-        return Err(anyhow!(
-            "AI translation response returned {} items, expected {}",
-            translations.len(),
-            expected.len()
-        ));
-    }
     let expected_ids = expected
         .iter()
         .map(|unit| unit.id.as_str())
         .collect::<std::collections::HashSet<_>>();
-    let actual_ids = translations
+    let mut translations = std::collections::HashMap::new();
+    let mut duplicate_ids = std::collections::HashSet::new();
+    for output in value
+        .get("translations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("AI translation response is missing translations"))?
         .iter()
-        .map(|unit| unit.id.as_str())
-        .collect::<std::collections::HashSet<_>>();
-    if actual_ids.len() != translations.len() || actual_ids != expected_ids {
-        return Err(anyhow!(
-            "AI translation response did not preserve semantic unit IDs"
-        ));
+        .filter_map(|value| {
+            serde_json::from_value::<SemanticTranslationOutput>(value.clone())
+                .ok()
+                .filter(|output| expected_ids.contains(output.id.as_str()))
+        })
+    {
+        let id = output.id.clone();
+        if translations.insert(id.clone(), output).is_some() {
+            duplicate_ids.insert(id);
+        }
     }
-    Ok(translations)
+    for id in duplicate_ids {
+        translations.remove(&id);
+    }
+    Ok(translations.into_values().collect())
 }
 
-fn send_json(request: reqwest::blocking::RequestBuilder, provider: &str) -> Result<Value> {
+fn send_json(
+    request: reqwest::blocking::RequestBuilder,
+    provider: &str,
+) -> std::result::Result<Value, AiTranslationError> {
     let response = request
         .send()
-        .with_context(|| format!("failed to send {provider} translation request"))?;
+        .map_err(|error| request_error(provider, error))?;
     let status = response.status();
-    let body = response
-        .text()
-        .with_context(|| format!("failed to read {provider} translation response"))?;
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(retry_after_duration);
+    let body = response.text().map_err(|_| AiTranslationError {
+        category: AiTranslationErrorCategory::Network,
+        message: format!("failed to read {provider} translation response"),
+        status: Some(status.as_u16()),
+        retryable: true,
+        retry_after: None,
+    })?;
     if !status.is_success() {
-        return Err(anyhow!(
-            "{provider} translation request failed with status {status}"
-        ));
+        let category = match status {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                AiTranslationErrorCategory::Authentication
+            }
+            StatusCode::TOO_MANY_REQUESTS => AiTranslationErrorCategory::RateLimited,
+            StatusCode::REQUEST_TIMEOUT => AiTranslationErrorCategory::Timeout,
+            status if status.is_server_error() => AiTranslationErrorCategory::ServiceUnavailable,
+            _ => AiTranslationErrorCategory::InvalidRequest,
+        };
+        return Err(AiTranslationError {
+            category,
+            message: format!("{provider} translation request failed with status {status}"),
+            status: Some(status.as_u16()),
+            retryable: matches!(
+                status,
+                StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+            ) || status.is_server_error(),
+            retry_after,
+        });
     }
-    serde_json::from_str(&body).context("failed to parse AI translation response")
+    serde_json::from_str(&body).map_err(|_| AiTranslationError {
+        category: AiTranslationErrorCategory::InvalidResponse,
+        message: format!("{provider} returned an invalid JSON response"),
+        status: Some(status.as_u16()),
+        retryable: true,
+        retry_after: None,
+    })
+}
+
+pub fn retry_after_duration(value: &str) -> Option<Duration> {
+    const MAX_RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        return Some(Duration::from_secs(seconds).min(MAX_RETRY_AFTER));
+    }
+    let deadline = httpdate::parse_http_date(value).ok()?;
+    Some(
+        deadline
+            .duration_since(SystemTime::now())
+            .unwrap_or_default()
+            .min(MAX_RETRY_AFTER),
+    )
+}
+
+fn request_error(provider: &str, error: reqwest::Error) -> AiTranslationError {
+    let timeout = error.is_timeout();
+    AiTranslationError {
+        category: if timeout {
+            AiTranslationErrorCategory::Timeout
+        } else {
+            AiTranslationErrorCategory::Network
+        },
+        message: format!("{provider} translation request could not be completed"),
+        status: error.status().map(|status| status.as_u16()),
+        retryable: timeout || error.is_connect(),
+        retry_after: None,
+    }
+}
+
+fn configuration_error(message: String) -> AiTranslationError {
+    AiTranslationError {
+        category: AiTranslationErrorCategory::InvalidRequest,
+        message,
+        status: None,
+        retryable: false,
+        retry_after: None,
+    }
+}
+
+fn invalid_response(error: anyhow::Error) -> AiTranslationError {
+    AiTranslationError {
+        category: AiTranslationErrorCategory::InvalidResponse,
+        message: error.to_string(),
+        status: None,
+        retryable: true,
+        retry_after: None,
+    }
+}
+
+fn invalid_response_message(provider: &str) -> AiTranslationError {
+    AiTranslationError {
+        category: AiTranslationErrorCategory::InvalidResponse,
+        message: format!("{provider} response did not include text content"),
+        status: None,
+        retryable: true,
+        retry_after: None,
+    }
+}
+
+fn anthropic_max_tokens(payload: &Value) -> u32 {
+    let characters = payload.to_string().chars().count() as u32;
+    (characters.saturating_mul(2).saturating_add(1024)).clamp(4096, 8192)
 }
 
 fn openai_chat_url(base_url: &str) -> String {
@@ -345,7 +550,89 @@ mod tests {
                 r#"{"translations":[{"id":"wrong","text":"target"}]}"#,
                 &expected
             )
-            .is_err()
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn semantic_responses_retain_valid_partial_items() {
+        let expected = vec![
+            SemanticTranslationInput {
+                id: "unit-1".to_string(),
+                role: "body".to_string(),
+                text: "first".to_string(),
+                context_before: None,
+                context_after: None,
+            },
+            SemanticTranslationInput {
+                id: "unit-2".to_string(),
+                role: "body".to_string(),
+                text: "second".to_string(),
+                context_before: None,
+                context_after: None,
+            },
+        ];
+
+        let parsed = parse_semantic_translations(
+            r#"{"translations":[{"id":"unit-2","text":"target"},{"id":"unit-1"},{"bad":true}]}"#,
+            &expected,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "unit-2");
+    }
+
+    #[test]
+    fn semantic_responses_reject_duplicate_ids() {
+        let expected = vec![
+            SemanticTranslationInput {
+                id: "unit-1".to_string(),
+                role: "body".to_string(),
+                text: "first".to_string(),
+                context_before: None,
+                context_after: None,
+            },
+            SemanticTranslationInput {
+                id: "unit-2".to_string(),
+                role: "body".to_string(),
+                text: "second".to_string(),
+                context_before: None,
+                context_after: None,
+            },
+        ];
+
+        let parsed = parse_semantic_translations(
+            r#"{"translations":[{"id":"unit-1","text":"first target"},{"id":"unit-1","text":"duplicate target"},{"id":"unit-2","text":"second target"}]}"#,
+            &expected,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "unit-2");
+    }
+
+    #[test]
+    fn retry_after_supports_seconds_and_http_dates() {
+        assert_eq!(retry_after_duration("20"), Some(Duration::from_secs(20)));
+        assert_eq!(
+            retry_after_duration("Sun, 06 Nov 1994 08:49:37 GMT"),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            retry_after_duration("999999999"),
+            Some(Duration::from_secs(15 * 60))
+        );
+    }
+
+    #[test]
+    fn anthropic_output_limit_scales_with_payload() {
+        assert_eq!(anthropic_max_tokens(&json!({"text": "short"})), 4096);
+        assert!(anthropic_max_tokens(&json!({"text": "x".repeat(4000)})) > 4096);
+        assert_eq!(
+            anthropic_max_tokens(&json!({"text": "x".repeat(20_000)})),
+            8192
         );
     }
 }

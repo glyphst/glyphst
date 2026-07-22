@@ -13,8 +13,12 @@ glyphst-pdf = { path = "../pdf" }
 glyphst-pdf-ui = { path = "../pdf-ui" }
 glyphst-settings = { path = "../settings" }
 glyphst-settings-ui = { path = "../settings-ui" }
+glyphst-translation-ui = { path = "../translation-ui" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
 image.workspace = true
 mupdf.workspace = true
 smallvec.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

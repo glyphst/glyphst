@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use glyphst_translation_ui::{
+    DocumentTranslationJobEvent, DocumentTranslationJobId, DocumentTranslationJobManager,
+};
 use gpui::{
     AnyElement, App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString,
@@ -18,7 +21,7 @@ pub use glyphst_actions::workspace::{
 use crate::{
     command_palette::{CommandPalette, CommandPaletteDelegate},
     icons::{Icon, IconName},
-    library::{DocumentPosition, LibraryStore, normalize_path},
+    library::{DocumentPosition, normalize_path},
     pane::{
         DraggedTab, Pane, PaneDropTarget, PaneEvent, PaneGroup, SplitDirection, SplitDown,
         SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical, TabTransfer,
@@ -58,6 +61,8 @@ pub struct Workspace {
     active_pane: Entity<Pane>,
     callbacks: WorkspaceCallbacks,
     focus_handle: FocusHandle,
+    document_translation_jobs: Entity<DocumentTranslationJobManager>,
+    pending_translation_splits: Vec<PendingTranslationSplit>,
     command_palette: Option<Entity<CommandPalette>>,
     command_palette_previous_focus_handle: Option<FocusHandle>,
     theme_selector: Option<Entity<ThemeSelector>>,
@@ -66,6 +71,23 @@ pub struct Workspace {
     toolbar_open_menu: Option<ToolbarMenu>,
     dragged_tab_outside_window: Option<DraggedTab>,
     should_move_window: bool,
+}
+
+struct PendingTranslationSplit {
+    job_id: DocumentTranslationJobId,
+    stage: PendingTranslationSplitStage,
+}
+
+enum PendingTranslationSplitStage {
+    OpeningSource {
+        source_path: PathBuf,
+        translated_path: PathBuf,
+        source_pane: Entity<Pane>,
+    },
+    OpeningTranslated {
+        original: Entity<PdfView>,
+        translated_pane: Entity<Pane>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -95,8 +117,28 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let pane = cx.new(|cx| Pane::new(initial_path, initial_position, window, cx));
-        Self::with_pane(pane, callbacks, window, cx)
+        let document_translation_jobs = cx.new(DocumentTranslationJobManager::new);
+        let jobs = document_translation_jobs.clone();
+        let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs));
+        let mut workspace = Self::with_pane(
+            pane.clone(),
+            document_translation_jobs,
+            callbacks,
+            window,
+            cx,
+        );
+        match initial_path {
+            Some(path) => {
+                if let Err(error) =
+                    workspace.focus_or_open_document(path, initial_position, true, window, cx)
+                {
+                    eprintln!("failed to open initial document: {error:#}");
+                    pane.update(cx, |pane, cx| pane.ensure_new_tab(window, cx));
+                }
+            }
+            None => pane.update(cx, |pane, cx| pane.ensure_new_tab(window, cx)),
+        }
+        workspace
     }
 
     pub fn new_empty(
@@ -104,12 +146,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let pane = cx.new(|cx| Pane::empty(cx.focus_handle()));
-        Self::with_pane(pane, callbacks, window, cx)
+        let document_translation_jobs = cx.new(DocumentTranslationJobManager::new);
+        let jobs = document_translation_jobs.clone();
+        let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs));
+        Self::with_pane(pane, document_translation_jobs, callbacks, window, cx)
     }
 
     fn with_pane(
         pane: Entity<Pane>,
+        document_translation_jobs: Entity<DocumentTranslationJobManager>,
         callbacks: WorkspaceCallbacks,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -120,6 +165,8 @@ impl Workspace {
             active_pane: pane.clone(),
             callbacks,
             focus_handle,
+            document_translation_jobs: document_translation_jobs.clone(),
+            pending_translation_splits: Vec::new(),
             command_palette: None,
             command_palette_previous_focus_handle: None,
             theme_selector: None,
@@ -131,6 +178,47 @@ impl Workspace {
         };
 
         workspace.subscribe_to_pane(&pane, window, cx);
+        cx.observe(&document_translation_jobs, |_, _, cx| cx.notify())
+            .detach();
+        cx.subscribe_in(
+            &document_translation_jobs,
+            window,
+            |this, _, event: &DocumentTranslationJobEvent, window, cx| match event {
+                DocumentTranslationJobEvent::OpenDocument { id, path } => {
+                    let replace_active_new_tab = this.active_pane.read(cx).active_tab_is_new_tab();
+                    if let Err(error) = this.focus_or_open_document_for_job(
+                        path.clone(),
+                        None,
+                        replace_active_new_tab,
+                        *id,
+                        window,
+                        cx,
+                    ) {
+                        this.document_translation_jobs.update(cx, |jobs, cx| {
+                            jobs.finish_open(*id, Err(format!("{error:#}").into()), cx);
+                        });
+                    }
+                }
+                DocumentTranslationJobEvent::OpenSplit {
+                    id,
+                    source_path,
+                    translated_path,
+                } => {
+                    if let Err(error) = this.begin_translation_split_open(
+                        *id,
+                        source_path.clone(),
+                        translated_path.clone(),
+                        window,
+                        cx,
+                    ) {
+                        this.document_translation_jobs.update(cx, |jobs, cx| {
+                            jobs.finish_open(*id, Err(format!("{error:#}").into()), cx);
+                        });
+                    }
+                }
+            },
+        )
+        .detach();
         workspace.focus_active_pane(window, cx);
         cx.observe_global::<SettingsStore>(|_, cx| cx.notify())
             .detach();
@@ -154,9 +242,6 @@ impl Workspace {
         cx.on_release(|this, cx| {
             for pane in this.pane_group.panes() {
                 pane.update(cx, |pane, cx| pane.stage_all_tab_positions(cx));
-            }
-            if let Err(error) = cx.global::<LibraryStore>().save() {
-                eprintln!("failed to save document library: {error:#}");
             }
         })
         .detach();
@@ -206,19 +291,14 @@ impl Workspace {
                         eprintln!("failed to open document: {error:#}");
                     }
                 }
-                PaneEvent::OpenSettings => this.open_settings_window(cx),
-                PaneEvent::OpenTranslationSplit {
-                    source,
-                    translated_path,
-                } => {
-                    this.open_translation_split(
-                        source.clone(),
-                        translated_path.clone(),
-                        pane_for_events.clone(),
-                        window,
-                        cx,
-                    );
+                PaneEvent::DocumentOpenFinished { job_id, result } => {
+                    if !this.continue_translation_split_open(*job_id, result.clone(), window, cx) {
+                        this.document_translation_jobs.update(cx, |jobs, cx| {
+                            jobs.finish_open(*job_id, result.clone(), cx);
+                        });
+                    }
                 }
+                PaneEvent::OpenSettings => this.open_settings_window(cx),
                 PaneEvent::TabDrop {
                     dragged_tab,
                     target,
@@ -273,20 +353,9 @@ impl Workspace {
         }
     }
 
-    fn create_pane(
-        &mut self,
-        initial_path: Option<PathBuf>,
-        initial_position: Option<DocumentPosition>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<Pane> {
-        let pane = cx.new(|cx| Pane::new(initial_path, initial_position, window, cx));
-        self.subscribe_to_pane(&pane, window, cx);
-        pane
-    }
-
     fn create_empty_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Pane> {
-        let pane = cx.new(|cx| Pane::empty(cx.focus_handle()));
+        let document_translation_jobs = self.document_translation_jobs.clone();
+        let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), document_translation_jobs));
         self.subscribe_to_pane(&pane, window, cx);
         pane
     }
@@ -360,6 +429,46 @@ impl Workspace {
         Ok(())
     }
 
+    fn focus_or_open_document_for_job(
+        &mut self,
+        path: PathBuf,
+        position: Option<DocumentPosition>,
+        replace_active_new_tab: bool,
+        job_id: DocumentTranslationJobId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let path = normalize_path(&path);
+        if let Some((pane, tab_ix)) = self.document_location(&path, cx) {
+            self.active_pane = pane.clone();
+            pane.update(cx, |pane, cx| {
+                pane.activate_existing_document(
+                    tab_ix,
+                    position,
+                    replace_active_new_tab,
+                    window,
+                    cx,
+                );
+                pane.associate_open_job(tab_ix, job_id, cx);
+            });
+            cx.notify();
+            return Ok(());
+        }
+
+        let active_pane = self.active_pane.clone();
+        active_pane.update(cx, |pane, cx| {
+            pane.focus_or_open_document_for_job(
+                path,
+                position,
+                replace_active_new_tab,
+                job_id,
+                window,
+                cx,
+            )
+        })?;
+        Ok(())
+    }
+
     fn document_location(&self, path: &Path, cx: &Context<Self>) -> Option<(Entity<Pane>, usize)> {
         let path = normalize_path(path);
         self.pane_group.panes().into_iter().find_map(|pane| {
@@ -416,6 +525,7 @@ impl Workspace {
             .iter()
             .position(|candidate| candidate == pane)
             .unwrap_or(0);
+        self.cancel_pending_translation_splits_for_pane(pane, cx);
         if !self.pane_group.remove(pane) {
             return;
         }
@@ -434,6 +544,37 @@ impl Workspace {
         cx.notify();
     }
 
+    fn cancel_pending_translation_splits_for_pane(
+        &mut self,
+        pane: &Entity<Pane>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut cancelled = Vec::new();
+        self.pending_translation_splits.retain(|pending| {
+            let matches = match &pending.stage {
+                PendingTranslationSplitStage::OpeningSource { source_pane, .. } => {
+                    source_pane == pane
+                }
+                PendingTranslationSplitStage::OpeningTranslated {
+                    translated_pane, ..
+                } => translated_pane == pane,
+            };
+            if matches {
+                cancelled.push(pending.job_id);
+            }
+            !matches
+        });
+        for job_id in cancelled {
+            self.document_translation_jobs.update(cx, |jobs, cx| {
+                jobs.finish_open(
+                    job_id,
+                    Err("Opening the translated document was cancelled.".into()),
+                    cx,
+                );
+            });
+        }
+    }
+
     fn split_active_pane(
         &mut self,
         direction: SplitDirection,
@@ -446,36 +587,208 @@ impl Workspace {
             .active_document_state(cx)
             .map(|(path, position)| (Some(path), Some(position)))
             .unwrap_or((None, None));
-        let new_pane = self.create_pane(initial_path, initial_position, window, cx);
+        let new_pane = self.create_empty_pane(window, cx);
         self.pane_group.split(&active_pane, &new_pane, direction);
         self.active_pane = new_pane.clone();
         self.sync_tab_bar_visibility(cx);
+        if let Some(path) = initial_path
+            && let Err(error) = new_pane.update(cx, |pane, cx| {
+                pane.focus_or_open_document(path, initial_position, true, window, cx)
+            })
+        {
+            eprintln!("failed to open document in split pane: {error:#}");
+            new_pane.update(cx, |pane, cx| pane.ensure_new_tab(window, cx));
+        }
         new_pane.update(cx, |pane, cx| pane.focus(window, cx));
         cx.notify();
     }
 
-    fn open_translation_split(
+    fn begin_translation_split_open(
         &mut self,
+        job_id: DocumentTranslationJobId,
+        source_path: PathBuf,
+        translated_path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let source_path = normalize_path(&source_path);
+        if let Some((source_pane, tab_ix)) = self.document_location(&source_path, cx) {
+            self.active_pane = source_pane.clone();
+            source_pane.update(cx, |pane, cx| {
+                pane.activate_existing_document(tab_ix, None, false, window, cx);
+            });
+            let Some(original) = source_pane.read(cx).active_pdf_view() else {
+                return Err(anyhow::anyhow!(
+                    "translation source is still opening; retry when it is ready"
+                ));
+            };
+            return self.start_translated_split_open(
+                job_id,
+                original,
+                translated_path,
+                source_pane,
+                window,
+                cx,
+            );
+        }
+
+        let source_pane = self.active_pane.clone();
+        self.pending_translation_splits
+            .push(PendingTranslationSplit {
+                job_id,
+                stage: PendingTranslationSplitStage::OpeningSource {
+                    source_path: source_path.clone(),
+                    translated_path,
+                    source_pane: source_pane.clone(),
+                },
+            });
+        let replace_active_new_tab = source_pane.read(cx).active_tab_is_new_tab();
+        if let Err(error) = source_pane.update(cx, |pane, cx| {
+            pane.focus_or_open_document_for_job(
+                source_path,
+                None,
+                replace_active_new_tab,
+                job_id,
+                window,
+                cx,
+            )
+        }) {
+            self.pending_translation_splits
+                .retain(|pending| pending.job_id != job_id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn start_translated_split_open(
+        &mut self,
+        job_id: DocumentTranslationJobId,
         original: Entity<PdfView>,
         translated_path: PathBuf,
         source_pane: Entity<Pane>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let position = original.read(cx).current_document_position();
-        let translated_pane = self.create_pane(Some(translated_path), Some(position), window, cx);
+    ) -> Result<()> {
+        let translated_pane = self.create_empty_pane(window, cx);
         self.pane_group
             .split(&source_pane, &translated_pane, SplitDirection::Right);
         self.active_pane = translated_pane.clone();
         self.sync_tab_bar_visibility(cx);
 
-        let Some(translated) = translated_pane.read(cx).active_pdf_view() else {
+        let position = original.read(cx).current_document_position();
+        self.pending_translation_splits
+            .push(PendingTranslationSplit {
+                job_id,
+                stage: PendingTranslationSplitStage::OpeningTranslated {
+                    original,
+                    translated_pane: translated_pane.clone(),
+                },
+            });
+        if let Err(error) = translated_pane.update(cx, |pane, cx| {
+            pane.focus_or_open_document_for_job(
+                translated_path,
+                Some(position),
+                true,
+                job_id,
+                window,
+                cx,
+            )
+        }) {
+            self.pending_translation_splits
+                .retain(|pending| pending.job_id != job_id);
             self.remove_pane(&translated_pane, window, cx);
-            return;
-        };
-        self.link_translation_views(original, translated, window, cx);
-        translated_pane.update(cx, |pane, cx| pane.focus(window, cx));
+            return Err(error);
+        }
         cx.notify();
+        Ok(())
+    }
+
+    fn continue_translation_split_open(
+        &mut self,
+        job_id: DocumentTranslationJobId,
+        result: std::result::Result<(), SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self
+            .pending_translation_splits
+            .iter()
+            .position(|pending| pending.job_id == job_id)
+        else {
+            return false;
+        };
+        let pending = self.pending_translation_splits.remove(index);
+        if let Err(error) = result {
+            if let PendingTranslationSplitStage::OpeningTranslated {
+                translated_pane, ..
+            } = pending.stage
+            {
+                self.remove_pane(&translated_pane, window, cx);
+            }
+            self.document_translation_jobs.update(cx, |jobs, cx| {
+                jobs.finish_open(job_id, Err(error), cx);
+            });
+            return true;
+        }
+
+        match pending.stage {
+            PendingTranslationSplitStage::OpeningSource {
+                source_path,
+                translated_path,
+                source_pane: _,
+            } => {
+                let result = self
+                    .document_location(&source_path, cx)
+                    .and_then(|(source_pane, tab_ix)| {
+                        source_pane.update(cx, |pane, cx| {
+                            pane.activate_existing_document(tab_ix, None, false, window, cx);
+                        });
+                        source_pane
+                            .read(cx)
+                            .active_pdf_view()
+                            .map(|original| (original, source_pane))
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("translation source did not finish opening"))
+                    .and_then(|(original, source_pane)| {
+                        self.start_translated_split_open(
+                            job_id,
+                            original,
+                            translated_path,
+                            source_pane,
+                            window,
+                            cx,
+                        )
+                    });
+                if let Err(error) = result {
+                    self.document_translation_jobs.update(cx, |jobs, cx| {
+                        jobs.finish_open(job_id, Err(format!("{error:#}").into()), cx);
+                    });
+                }
+            }
+            PendingTranslationSplitStage::OpeningTranslated {
+                original,
+                translated_pane,
+            } => {
+                let Some(translated) = translated_pane.read(cx).active_pdf_view() else {
+                    self.remove_pane(&translated_pane, window, cx);
+                    self.document_translation_jobs.update(cx, |jobs, cx| {
+                        jobs.finish_open(
+                            job_id,
+                            Err("translated document did not finish opening".into()),
+                            cx,
+                        );
+                    });
+                    return true;
+                };
+                self.link_translation_views(original, translated, window, cx);
+                translated_pane.update(cx, |pane, cx| pane.focus(window, cx));
+                self.document_translation_jobs.update(cx, |jobs, cx| {
+                    jobs.finish_open(job_id, Ok(()), cx);
+                });
+                cx.notify();
+            }
+        };
+        true
     }
 
     fn link_translation_views(
@@ -511,9 +824,7 @@ impl Workspace {
                         });
                     }
                 }
-                PdfViewEvent::OpenDocument { .. }
-                | PdfViewEvent::OpenSettings
-                | PdfViewEvent::OpenTranslationSplit { .. } => {}
+                PdfViewEvent::OpenDocument { .. } | PdfViewEvent::OpenSettings => {}
             },
         )
         .detach();
@@ -544,9 +855,7 @@ impl Workspace {
                         });
                     }
                 }
-                PdfViewEvent::OpenDocument { .. }
-                | PdfViewEvent::OpenSettings
-                | PdfViewEvent::OpenTranslationSplit { .. } => {}
+                PdfViewEvent::OpenDocument { .. } | PdfViewEvent::OpenSettings => {}
             },
         )
         .detach();
@@ -613,6 +922,7 @@ impl Workspace {
     fn close_other_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for pane in self.pane_group.panes() {
             if pane != self.active_pane {
+                self.cancel_pending_translation_splits_for_pane(&pane, cx);
                 pane.update(cx, |pane, cx| pane.flush_all_tabs(cx));
             }
         }
@@ -676,7 +986,35 @@ impl Workspace {
             }
         }
 
-        center
+        let activity = self
+            .document_translation_jobs
+            .update(cx, |jobs, cx| jobs.render_footbar_activity(theme, cx));
+        if let Some(activity) = activity {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().overflow_hidden().child(center))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .w_full()
+                        .flex_none()
+                        .h(ui_rems(26.0))
+                        .px_3()
+                        .border_t(px(1.0))
+                        .border_color(rgb(theme.border))
+                        .bg(rgb(theme.tab_bar_background))
+                        .text_size(ui_rems(12.0))
+                        .text_color(rgb(theme.footer_text))
+                        .child(activity),
+                )
+                .into_any_element()
+        } else {
+            center
+        }
     }
 
     fn handle_dragged_tab_drop(
@@ -1541,6 +1879,12 @@ impl Render for Workspace {
             .active_pdf_view()
             .is_some_and(|pdf_view| pdf_view.read(cx).is_presentation_mode());
         let is_fullscreen = window.is_fullscreen();
+        let document_translation_notification = (!active_pdf_is_presentation)
+            .then(|| {
+                self.document_translation_jobs
+                    .update(cx, |jobs, cx| jobs.render_notification(theme, cx))
+            })
+            .flatten();
 
         div()
             .id("workspace")
@@ -1699,5 +2043,51 @@ impl Render for Workspace {
                     cx,
                 ))
             })
+            .when_some(document_translation_notification, |this, notification| {
+                this.child(
+                    div()
+                        .absolute()
+                        .right_3()
+                        .bottom(px(38.0))
+                        .child(notification),
+                )
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+
+    use super::{Workspace, WorkspaceCallbacks, WorkspaceWindowRequest};
+    use crate::{library::LibraryStore, pdf_view::RenderCache, settings::SettingsStore};
+
+    fn unavailable_workspace_window(
+        _: WorkspaceWindowRequest,
+        _: &mut gpui::App,
+    ) -> anyhow::Result<gpui::WindowHandle<Workspace>> {
+        anyhow::bail!("not available in tests")
+    }
+
+    fn ignore_settings_window(_: &mut gpui::App) {}
+
+    #[gpui::test]
+    fn documentless_workspace_starts_on_a_new_tab(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, callbacks, window, cx));
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.active_pane.read(cx).active_tab_is_new_tab());
+        });
     }
 }

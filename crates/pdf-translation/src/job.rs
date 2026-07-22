@@ -10,16 +10,21 @@ use glyphst_translation::{LanguageCode, TranslationService};
 use mupdf::{Document, TextPageFlags};
 use serde::{Deserialize, Serialize};
 
+use crate::translate::{
+    TranslatedUnit, TranslationFailureDiagnostic, TranslationQueueStats, TranslationRunProgress,
+    TranslationRunSnapshot, translate_document_resuming,
+};
 use crate::{
     BoundingBox, CancellationToken, DocumentV1, GlyphstTranslationBackend, LayoutDocument,
     PaddleClient, PaddleClientConfig, PdfComposer, PdfTranslationStage, ProgressTracker,
     TranslatedDocument, TranslationProgressSink, TypstCompiler, TypstCompilerConfig, build_layout,
     extract_native_document, inspect_pdf, normalize_paddle_payload, reconcile_ocr_geometry,
-    sanitize_source_pdf, translate_document,
+    sanitize_source_pdf,
 };
 
 const ARTIFACT_VERSION: u32 = 1;
-const PIPELINE_VERSION: &str = "native-rust-v3";
+const PIPELINE_VERSION: &str = "native-rust-v4";
+const CHECKPOINT_VERSION: u32 = 1;
 
 #[derive(Clone)]
 pub struct PdfTranslationService {
@@ -46,8 +51,18 @@ impl PdfTranslationService {
         cancellation: CancellationToken,
         progress_sink: impl TranslationProgressSink + 'static,
     ) -> Result<PdfTranslationResult, PdfTranslationError> {
-        let fingerprint = request_fingerprint(&settings, &request)?;
+        let (fingerprint, source_bytes) = request_fingerprint_with_source(&settings, &request)?;
         let job_directory = create_job_directory(&fingerprint)?;
+        let source_path = job_directory.join("source-original.pdf");
+        fs::write(&source_path, source_bytes).map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Preparing,
+                "Could not snapshot the source PDF",
+                error,
+            )
+        })?;
+        let mut pipeline_request = request.clone();
+        pipeline_request.source_path = source_path;
         let mut progress = ProgressTracker::new(progress_sink);
         progress.report(
             PdfTranslationStage::Preparing,
@@ -58,13 +73,14 @@ impl PdfTranslationService {
         cancellation
             .check()
             .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Preparing))?;
-        let inspection = inspect_pdf(&request.source_path, &cancellation).map_err(|error| {
-            PdfTranslationError::stage(
-                PdfTranslationStage::Preparing,
-                "Could not inspect the source PDF",
-                error,
-            )
-        })?;
+        let inspection =
+            inspect_pdf(&pipeline_request.source_path, &cancellation).map_err(|error| {
+                PdfTranslationError::stage(
+                    PdfTranslationStage::Preparing,
+                    "Could not inspect the source PDF",
+                    error,
+                )
+            })?;
         let target_pages = inspection
             .pages
             .iter()
@@ -72,51 +88,64 @@ impl PdfTranslationService {
             .collect::<Vec<_>>();
         progress.finish_stage(PdfTranslationStage::Preparing, "Source PDF inspected");
 
-        let document = match settings.ocr.mode {
-            OcrMode::Always => self.run_paddle_ocr(
-                &settings,
-                &request,
-                &target_pages,
-                &job_directory,
-                &cancellation,
-                &mut progress,
-            )?,
-            OcrMode::Auto if inspection.recommends_ocr => self.run_paddle_ocr(
-                &settings,
-                &request,
-                &target_pages,
-                &job_directory,
-                &cancellation,
-                &mut progress,
-            )?,
-            OcrMode::Auto | OcrMode::Off => {
-                progress.report(
-                    PdfTranslationStage::Ocr,
-                    "Extracting editable PDF text with MuPDF",
-                    None,
-                    None,
-                );
-                let document = extract_native_document(
-                    &request.source_path,
-                    fingerprint.clone(),
+        let document_path = job_directory.join("document.v1.json");
+        let document = if let Some(document) =
+            load_normalized_document(&document_path, &fingerprint)
+        {
+            progress.finish_stage(PdfTranslationStage::Ocr, "Reused extracted document");
+            progress.finish_stage(
+                PdfTranslationStage::Normalizing,
+                "Reused normalized document",
+            );
+            document
+        } else {
+            let document = match settings.ocr.mode {
+                OcrMode::Always => self.run_paddle_ocr(
+                    &settings,
+                    &pipeline_request,
+                    &target_pages,
+                    &job_directory,
                     &cancellation,
-                )
-                .map_err(|error| {
-                    PdfTranslationError::stage(
+                    &mut progress,
+                )?,
+                OcrMode::Auto if inspection.recommends_ocr => self.run_paddle_ocr(
+                    &settings,
+                    &pipeline_request,
+                    &target_pages,
+                    &job_directory,
+                    &cancellation,
+                    &mut progress,
+                )?,
+                OcrMode::Auto | OcrMode::Off => {
+                    progress.report(
                         PdfTranslationStage::Ocr,
-                        "Could not extract native PDF text",
-                        error,
+                        "Extracting editable PDF text with MuPDF",
+                        None,
+                        None,
+                    );
+                    let document = extract_native_document(
+                        &pipeline_request.source_path,
+                        fingerprint.clone(),
+                        &cancellation,
                     )
-                })?;
-                progress.finish_stage(PdfTranslationStage::Ocr, "Native PDF text extracted");
-                progress.finish_stage(
-                    PdfTranslationStage::Normalizing,
-                    "Native document normalized",
-                );
-                document
-            }
+                    .map_err(|error| {
+                        PdfTranslationError::stage(
+                            PdfTranslationStage::Ocr,
+                            "Could not extract native PDF text",
+                            error,
+                        )
+                    })?;
+                    progress.finish_stage(PdfTranslationStage::Ocr, "Native PDF text extracted");
+                    progress.finish_stage(
+                        PdfTranslationStage::Normalizing,
+                        "Native document normalized",
+                    );
+                    document
+                }
+            };
+            write_json(&document_path, &document)?;
+            document
         };
-        write_json(job_directory.join("document.v1.json"), &document)?;
 
         progress.report(
             PdfTranslationStage::Translating,
@@ -130,23 +159,68 @@ impl PdfTranslationService {
             request.source_language.clone(),
             request.target_language.clone(),
         );
-        let translated =
-            translate_document(document, &backend, &cancellation, |completed, total| {
-                progress.report(
-                    PdfTranslationStage::Translating,
-                    format!("Translated {completed} of {total} semantic units"),
-                    Some(completed as u32),
-                    Some(total as u32),
+        let checkpoint_identity =
+            TranslationCheckpointIdentity::new(&settings, &request, &fingerprint, &document);
+        let checkpoint_path = job_directory.join("translated-document.partial.json");
+        let diagnostics_path = job_directory.join("translation-diagnostics.json");
+        let resumed_units = load_translation_checkpoint(&checkpoint_path, &checkpoint_identity);
+        let mut last_checkpoint_resolved = resumed_units.len();
+        let mut last_terminal_failures = 0usize;
+        let mut final_translation_counts = TranslationRunProgress::default();
+        let translated = translate_document_resuming(
+            document,
+            &backend,
+            &cancellation,
+            resumed_units,
+            |snapshot| {
+                let counts = &snapshot.progress;
+                final_translation_counts = counts.clone();
+                let resolved = snapshot.resolved_units.len();
+                let should_persist = resolved == counts.total
+                    || resolved.saturating_sub(last_checkpoint_resolved) >= 8
+                    || counts.failed != last_terminal_failures;
+                if should_persist {
+                    write_translation_checkpoint(&checkpoint_path, &checkpoint_identity, snapshot)
+                        .map_err(|error| error.message)?;
+                    write_translation_diagnostics(
+                        &diagnostics_path,
+                        &checkpoint_identity,
+                        snapshot,
+                    )
+                    .map_err(|error| error.message)?;
+                    last_checkpoint_resolved = resolved;
+                    last_terminal_failures = counts.failed;
+                }
+                progress.report_translation(
+                    format!(
+                        "Translated {}, cached {}, retrying {}, failed {} of {} semantic units",
+                        counts.translated,
+                        counts.cached,
+                        counts.retrying,
+                        counts.failed,
+                        counts.total
+                    ),
+                    counts.translated as u32,
+                    counts.cached as u32,
+                    counts.retrying as u32,
+                    counts.failed as u32,
+                    counts.total as u32,
                 );
-            })
-            .map_err(|error| PdfTranslationError {
-                stage: PdfTranslationStage::Translating,
-                message: error.message,
-                retryable: !error.unresolved_unit_ids.is_empty(),
-            })?;
-        progress.finish_stage(
-            PdfTranslationStage::Translating,
+                Ok(())
+            },
+        )
+        .map_err(|error| PdfTranslationError {
+            stage: PdfTranslationStage::Translating,
+            message: error.message,
+            retryable: error.retryable,
+        })?;
+        progress.report_translation(
             "Document translation complete",
+            final_translation_counts.translated as u32,
+            final_translation_counts.cached as u32,
+            0,
+            0,
+            final_translation_counts.total as u32,
         );
         write_json(job_directory.join("translated-document.json"), &translated)?;
 
@@ -168,7 +242,7 @@ impl PdfTranslationService {
         );
         let sanitized_source_path = job_directory.join("source-sanitized.pdf");
         sanitize_source_pdf(
-            &request.source_path,
+            &pipeline_request.source_path,
             &sanitized_source_path,
             &layout,
             &cancellation,
@@ -202,7 +276,7 @@ impl PdfTranslationService {
         let composed_path = job_directory.join("translated-final.pdf");
         self.composer
             .compose(
-                &request.source_path,
+                &pipeline_request.source_path,
                 &typst_output.pdf_path,
                 &composed_path,
                 &layout,
@@ -222,7 +296,12 @@ impl PdfTranslationService {
             Some(0),
             Some(1),
         );
-        validate_output(&request.source_path, &composed_path, &translated, &layout)?;
+        validate_output(
+            &pipeline_request.source_path,
+            &composed_path,
+            &translated,
+            &layout,
+        )?;
         cancellation
             .check()
             .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Validating))?;
@@ -435,6 +514,56 @@ impl fmt::Display for PdfTranslationError {
 
 impl std::error::Error for PdfTranslationError {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TranslationCheckpointIdentity {
+    pipeline_version: String,
+    fingerprint: String,
+    document_id: String,
+    source_language: Option<String>,
+    target_language: String,
+    provider_identity: String,
+}
+
+impl TranslationCheckpointIdentity {
+    fn new(
+        settings: &Settings,
+        request: &PdfTranslationRequest,
+        fingerprint: &str,
+        document: &DocumentV1,
+    ) -> Self {
+        Self {
+            pipeline_version: PIPELINE_VERSION.to_string(),
+            fingerprint: fingerprint.to_string(),
+            document_id: document.metadata.document_id.clone(),
+            source_language: request
+                .source_language
+                .as_ref()
+                .map(|language| language.as_str().to_string()),
+            target_language: request.target_language.as_str().to_string(),
+            provider_identity: translation_provider_identity(settings),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct TranslationCheckpoint {
+    version: u32,
+    identity: TranslationCheckpointIdentity,
+    resolved_units: Vec<TranslatedUnit>,
+    failures: Vec<TranslationFailureDiagnostic>,
+    progress: TranslationRunProgress,
+    queue: TranslationQueueStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct TranslationDiagnostics {
+    version: u32,
+    identity: TranslationCheckpointIdentity,
+    failures: Vec<TranslationFailureDiagnostic>,
+    progress: TranslationRunProgress,
+    queue: TranslationQueueStats,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PdfTranslationArtifactManifest {
     pub version: u32,
@@ -590,6 +719,13 @@ fn request_fingerprint(
     settings: &Settings,
     request: &PdfTranslationRequest,
 ) -> Result<String, PdfTranslationError> {
+    request_fingerprint_with_source(settings, request).map(|(fingerprint, _)| fingerprint)
+}
+
+fn request_fingerprint_with_source(
+    settings: &Settings,
+    request: &PdfTranslationRequest,
+) -> Result<(String, Vec<u8>), PdfTranslationError> {
     let source_bytes = fs::read(&request.source_path).map_err(|error| {
         PdfTranslationError::stage(
             PdfTranslationStage::Preparing,
@@ -607,12 +743,98 @@ fn request_fingerprint(
     settings.ocr.endpoint.hash(&mut hasher);
     settings.ocr.model.hash(&mut hasher);
     settings.translation.active_provider.hash(&mut hasher);
-    if settings.translation.active_provider == glyphst_settings::TranslationProvider::Ai {
+    translation_provider_identity(settings).hash(&mut hasher);
+    Ok((format!("{:016x}", hasher.finish()), source_bytes))
+}
+
+fn translation_provider_identity(settings: &Settings) -> String {
+    let provider = settings.translation.active_provider;
+    if provider == glyphst_settings::TranslationProvider::Ai {
         let resolved = settings.ai.resolved_translation();
-        resolved.provider.as_str().hash(&mut hasher);
-        resolved.model.hash(&mut hasher);
+        return format!(
+            "{}|{}|{}",
+            resolved.provider.as_str(),
+            resolved.model.trim(),
+            normalize_endpoint(&resolved.base_url)
+        );
     }
-    Ok(format!("{:016x}", hasher.finish()))
+    let config = settings.translation.provider_config(provider);
+    format!(
+        "{}|{}|{}",
+        provider.as_str(),
+        normalize_endpoint(
+            config
+                .base_url
+                .as_deref()
+                .or_else(|| provider.default_base_url())
+                .unwrap_or_default()
+        ),
+        config.region.as_deref().unwrap_or_default().trim()
+    )
+}
+
+fn normalize_endpoint(endpoint: &str) -> String {
+    endpoint.trim().trim_end_matches('/').to_string()
+}
+
+fn load_normalized_document(path: &Path, fingerprint: &str) -> Option<DocumentV1> {
+    let document = serde_json::from_slice::<DocumentV1>(&fs::read(path).ok()?).ok()?;
+    (document.metadata.document_id == fingerprint && document.validate().is_ok())
+        .then_some(document)
+}
+
+fn load_translation_checkpoint(
+    path: &Path,
+    identity: &TranslationCheckpointIdentity,
+) -> Vec<TranslatedUnit> {
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(checkpoint) = serde_json::from_slice::<TranslationCheckpoint>(&bytes) else {
+        return Vec::new();
+    };
+    if checkpoint.version == CHECKPOINT_VERSION && checkpoint.identity == *identity {
+        checkpoint.resolved_units
+    } else {
+        Vec::new()
+    }
+}
+
+fn write_translation_checkpoint(
+    path: &Path,
+    identity: &TranslationCheckpointIdentity,
+    snapshot: &TranslationRunSnapshot,
+) -> Result<(), PdfTranslationError> {
+    write_json_atomically(
+        path,
+        &TranslationCheckpoint {
+            version: CHECKPOINT_VERSION,
+            identity: identity.clone(),
+            resolved_units: snapshot.resolved_units.clone(),
+            failures: snapshot.failures.clone(),
+            progress: snapshot.progress.clone(),
+            queue: snapshot.queue.clone(),
+        },
+        PdfTranslationStage::Translating,
+    )
+}
+
+fn write_translation_diagnostics(
+    path: &Path,
+    identity: &TranslationCheckpointIdentity,
+    snapshot: &TranslationRunSnapshot,
+) -> Result<(), PdfTranslationError> {
+    write_json_atomically(
+        path,
+        &TranslationDiagnostics {
+            version: CHECKPOINT_VERSION,
+            identity: identity.clone(),
+            failures: snapshot.failures.clone(),
+            progress: snapshot.progress.clone(),
+            queue: snapshot.queue.clone(),
+        },
+        PdfTranslationStage::Translating,
+    )
 }
 
 fn create_job_directory(fingerprint: &str) -> Result<PathBuf, PdfTranslationError> {
@@ -649,6 +871,35 @@ fn write_json(path: impl AsRef<Path>, value: &impl Serialize) -> Result<(), PdfT
     })
 }
 
+fn write_json_atomically(
+    path: &Path,
+    value: &impl Serialize,
+    stage: PdfTranslationStage,
+) -> Result<(), PdfTranslationError> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+        PdfTranslationError::stage(stage, "Could not serialize a translation checkpoint", error)
+    })?;
+    let parent = path.parent().ok_or_else(|| {
+        PdfTranslationError::message(stage, "Translation checkpoint path has no parent")
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("checkpoint.json");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = parent.join(format!(".{file_name}.{nonce:x}.tmp"));
+    fs::write(&temporary, bytes).map_err(|error| {
+        PdfTranslationError::stage(stage, "Could not stage a translation checkpoint", error)
+    })?;
+    replace_file(&temporary, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        PdfTranslationError::stage(stage, "Could not publish a translation checkpoint", error)
+    })
+}
+
 fn publish_atomically(source: &Path, destination: &Path) -> Result<(), PdfTranslationError> {
     let parent = destination.parent().ok_or_else(|| {
         PdfTranslationError::message(
@@ -672,7 +923,7 @@ fn publish_atomically(source: &Path, destination: &Path) -> Result<(), PdfTransl
             error,
         )
     })?;
-    fs::rename(&temporary, destination).map_err(|error| {
+    replace_file(&temporary, destination).map_err(|error| {
         let _ = fs::remove_file(&temporary);
         PdfTranslationError::stage(
             PdfTranslationStage::Validating,
@@ -680,6 +931,24 @@ fn publish_atomically(source: &Path, destination: &Path) -> Result<(), PdfTransl
             error,
         )
     })
+}
+
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::rename(source, destination)
+    }
+    #[cfg(not(unix))]
+    {
+        match fs::rename(source, destination) {
+            Ok(()) => Ok(()),
+            Err(_) if destination.exists() => {
+                fs::remove_file(destination)?;
+                fs::rename(source, destination)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 fn create_private_directory(path: &Path) -> std::io::Result<()> {
@@ -725,5 +994,91 @@ mod tests {
 
         assert!(!fingerprint.contains("paddle-secret"));
         assert!(!fingerprint.contains("google-secret"));
+    }
+
+    #[test]
+    fn normalized_document_cache_requires_matching_fingerprint() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("glyphst-document-cache-{nonce:x}"));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("document.v1.json");
+        let document = DocumentV1::new(
+            crate::DocumentMetadata {
+                document_id: "matching".to_string(),
+                source_path: PathBuf::from("source.pdf"),
+                provider: "test".to_string(),
+                provider_version: "1".to_string(),
+                extra: Default::default(),
+            },
+            Vec::new(),
+        );
+        write_json(&path, &document).unwrap();
+
+        assert_eq!(load_normalized_document(&path, "matching"), Some(document));
+        assert!(load_normalized_document(&path, "different").is_none());
+    }
+
+    #[test]
+    fn matching_checkpoint_resumes_and_mismatched_identity_is_ignored() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("glyphst-checkpoint-{nonce:x}"));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("translated-document.partial.json");
+        let identity = TranslationCheckpointIdentity {
+            pipeline_version: PIPELINE_VERSION.to_string(),
+            fingerprint: "fingerprint".to_string(),
+            document_id: "document".to_string(),
+            source_language: Some("en".to_string()),
+            target_language: "fr".to_string(),
+            provider_identity: "ai|model|endpoint".to_string(),
+        };
+        let unit = TranslatedUnit {
+            id: "unit-1".to_string(),
+            member_block_ids: vec!["block-1".to_string()],
+            role: crate::BlockRole::Body,
+            source_text: "source".to_string(),
+            translated_text: "target".to_string(),
+            semantic_hash: 1,
+        };
+        let snapshot = TranslationRunSnapshot {
+            resolved_units: vec![unit.clone()],
+            failures: Vec::new(),
+            progress: TranslationRunProgress {
+                translated: 1,
+                cached: 0,
+                retrying: 0,
+                failed: 0,
+                total: 2,
+            },
+            queue: TranslationQueueStats {
+                planned_requests: 2,
+                completed_requests: 1,
+                ..TranslationQueueStats::default()
+            },
+        };
+
+        write_translation_checkpoint(&path, &identity, &snapshot).unwrap();
+        let mut updated = snapshot;
+        updated.resolved_units[0].translated_text = "updated target".to_string();
+        write_translation_checkpoint(&path, &identity, &updated).unwrap();
+
+        let mut expected = unit;
+        expected.translated_text = "updated target".to_string();
+        assert_eq!(load_translation_checkpoint(&path, &identity), [expected]);
+        let mut mismatched = identity.clone();
+        mismatched.target_language = "de".to_string();
+        assert!(load_translation_checkpoint(&path, &mismatched).is_empty());
+        assert_eq!(
+            fs::read_dir(&directory).unwrap().count(),
+            1,
+            "atomic checkpoint write left a staging file behind"
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 }

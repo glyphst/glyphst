@@ -3,6 +3,7 @@ use std::{
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -1181,11 +1182,42 @@ pub struct Library {
 
 pub struct LibraryStore {
     pub library: Library,
-    database: Option<Database>,
+    database: Option<Arc<Database>>,
     startup_error: Option<String>,
     document_edit_histories: HashMap<PathBuf, DocumentEditHistory>,
     next_document_edit_sequence: u64,
     bookmarks_revision: u64,
+    history_entry_revisions: Arc<Mutex<HashMap<PathBuf, u64>>>,
+}
+
+pub struct HistoryEntryPersistenceSnapshot {
+    database: Arc<Database>,
+    entry: HistoryEntry,
+    latest_revisions: Arc<Mutex<HashMap<PathBuf, u64>>>,
+    revision: u64,
+}
+
+impl HistoryEntryPersistenceSnapshot {
+    pub fn persist(self) -> Result<()> {
+        let write_txn = self.database.begin_write()?;
+        let is_current = self
+            .latest_revisions
+            .lock()
+            .expect("history persistence revisions lock poisoned")
+            .get(&self.entry.path)
+            .is_some_and(|revision| *revision == self.revision);
+        if !is_current {
+            return Ok(());
+        }
+        {
+            let mut table = write_txn.open_table(HISTORY_V2_TABLE)?;
+            let key = history_key(&self.entry.path);
+            let encoded = encode(&StoredHistoryEntryV2::from(&self.entry))?;
+            table.insert(key.as_slice(), encoded.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
 }
 
 impl Global for LibraryStore {}
@@ -1296,20 +1328,27 @@ impl fmt::Display for DocumentEditConflict {
 impl Error for DocumentEditConflict {}
 
 impl LibraryStore {
+    pub fn memory() -> Self {
+        Self {
+            library: Library::default(),
+            database: None,
+            startup_error: None,
+            document_edit_histories: HashMap::new(),
+            next_document_edit_sequence: 0,
+            bookmarks_revision: 0,
+            history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
     pub fn load() -> Self {
         let path = library_path();
         match Self::open(path) {
             Ok(store) => store,
             Err(error) => {
                 eprintln!("failed to open document library database: {error:#}");
-                Self {
-                    library: Library::default(),
-                    database: None,
-                    startup_error: Some(format!("{error:#}")),
-                    document_edit_histories: HashMap::new(),
-                    next_document_edit_sequence: 0,
-                    bookmarks_revision: 0,
-                }
+                let mut store = Self::memory();
+                store.startup_error = Some(format!("{error:#}"));
+                store
             }
         }
     }
@@ -1333,11 +1372,12 @@ impl LibraryStore {
 
         let store = Self {
             library,
-            database: Some(database),
+            database: Some(Arc::new(database)),
             startup_error: None,
             document_edit_histories: HashMap::new(),
             next_document_edit_sequence: 0,
             bookmarks_revision: 0,
+            history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
         };
         if let Err(error) = store.prune_ai_session_rows() {
             eprintln!("failed to prune expired AI sessions: {error:#}");
@@ -2150,6 +2190,34 @@ impl LibraryStore {
         self.write_history()
     }
 
+    pub fn history_entry_persistence_snapshot(
+        &self,
+        path: &Path,
+    ) -> Option<HistoryEntryPersistenceSnapshot> {
+        let path = normalize_path(path);
+        let entry = self
+            .library
+            .history
+            .iter()
+            .find(|entry| entry.path == path)?
+            .clone();
+        let revision = {
+            let mut revisions = self
+                .history_entry_revisions
+                .lock()
+                .expect("history persistence revisions lock poisoned");
+            let revision = revisions.entry(path).or_default();
+            *revision = revision.wrapping_add(1);
+            *revision
+        };
+        Some(HistoryEntryPersistenceSnapshot {
+            database: self.database.clone()?,
+            entry,
+            latest_revisions: self.history_entry_revisions.clone(),
+            revision,
+        })
+    }
+
     fn write_history(&self) -> Result<()> {
         self.write_history_entries(&self.library.history)
     }
@@ -2158,6 +2226,17 @@ impl LibraryStore {
         let Some(database) = &self.database else {
             return Err(anyhow!("document library database is unavailable"));
         };
+        self.history_entry_revisions
+            .lock()
+            .expect("history persistence revisions lock poisoned")
+            .clear();
+        Self::write_history_entries_to_database(database, history)
+    }
+
+    fn write_history_entries_to_database(
+        database: &Database,
+        history: &[HistoryEntry],
+    ) -> Result<()> {
         let valid_paths = history
             .iter()
             .map(|entry| history_key(&entry.path))
@@ -3464,6 +3543,31 @@ mod tests {
     }
 
     #[test]
+    fn stale_background_history_writes_do_not_overwrite_newer_positions() {
+        let database_path = temp_library_path("ordered-history-persistence");
+        let document_path = Path::new("/tmp/ordered-history.pdf");
+
+        {
+            let mut store = LibraryStore::open(database_path.clone()).unwrap();
+            store.record_history(document_path, position(1));
+            let stale = store
+                .history_entry_persistence_snapshot(document_path)
+                .unwrap();
+            store.record_history(document_path, position(2));
+            let current = store
+                .history_entry_persistence_snapshot(document_path)
+                .unwrap();
+
+            current.persist().unwrap();
+            stale.persist().unwrap();
+        }
+
+        let store = LibraryStore::open(database_path.clone()).unwrap();
+        assert_eq!(store.history_position(document_path).unwrap().page, 2);
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
     fn removes_missing_history_entries() {
         let database_path = temp_library_path("missing-history");
         let existing_path = temp_library_path("existing-history").with_extension("pdf");
@@ -3976,6 +4080,7 @@ mod tests {
             document_edit_histories: HashMap::new(),
             next_document_edit_sequence: 0,
             bookmarks_revision: 0,
+            history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
         };
         assert!(
             unavailable
@@ -4564,6 +4669,7 @@ mod tests {
             document_edit_histories: HashMap::new(),
             next_document_edit_sequence: 0,
             bookmarks_revision: 0,
+            history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
         };
         store.record_history(document_path, position(1));
 
@@ -4594,6 +4700,7 @@ mod tests {
             document_edit_histories: HashMap::new(),
             next_document_edit_sequence: 0,
             bookmarks_revision: 0,
+            history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let language_error = store
