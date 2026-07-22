@@ -2371,6 +2371,7 @@ dependencies = [
  "glyphst-ai",
  "glyphst-core",
  "glyphst-keymap",
+ "glyphst-pdf-translation",
  "glyphst-settings",
  "glyphst-translation-ui",
  "glyphst-ui",

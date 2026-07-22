@@ -21,7 +21,7 @@ use glyphst_pdf_translation::PdfTranslationService;
 use glyphst_pdf_ui::pdf_view::RenderCache;
 use glyphst_settings::{SettingsStore, localize};
 use glyphst_translation::TranslationService;
-use glyphst_ui::{assets, fonts};
+use glyphst_ui::{assets, fonts, notification_center, prompt};
 use glyphst_workspace::{NewTab, Workspace, WorkspaceCallbacks, WorkspaceWindowRequest};
 
 fn main() {
@@ -49,6 +49,8 @@ fn main() {
             let settings_store = SettingsStore::load();
             localize::select_language(settings_store.settings.language);
             cx.set_global(settings_store);
+            prompt::init(cx);
+            notification_center::init(cx);
             cx.set_global(LibraryStore::load());
             cx.set_global(RenderCache::new());
             match TranslationService::new() {

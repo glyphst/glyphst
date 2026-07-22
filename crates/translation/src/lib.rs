@@ -341,6 +341,13 @@ impl TranslationService {
         Ok(())
     }
 
+    pub fn clear_cache(&self) -> Result<()> {
+        self.cache
+            .lock()
+            .map_err(|_| anyhow!("translation cache is unavailable"))?
+            .clear()
+    }
+
     pub fn provider_metadata(provider: TranslationProvider) -> ProviderMetadata {
         ProviderMetadata {
             provider,
@@ -1865,6 +1872,10 @@ impl TranslationCache {
 
     fn open() -> Result<Self> {
         let path = glyphst_core::paths::state_dir().join("translations.redb");
+        Self::open_at(&path)
+    }
+
+    fn open_at(path: &std::path::Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             create_private_cache_directory(parent)?;
         }
@@ -1887,6 +1898,19 @@ impl TranslationCache {
             database: Some(database),
             ..Self::memory()
         })
+    }
+
+    fn clear(&mut self) -> Result<()> {
+        if let Some(database) = &self.database {
+            let write_txn = database.begin_write()?;
+            {
+                let mut table = write_txn.open_table(CACHE_TABLE)?;
+                table.retain(|_, _| false)?;
+            }
+            write_txn.commit()?;
+        }
+        self.memory.clear();
+        Ok(())
     }
 
     fn get(&mut self, key: &str) -> Option<CachedTranslation> {
@@ -2550,6 +2574,32 @@ mod tests {
             cache.get("key").map(|cached| cached.translations),
             Some(vec!["hello".to_string()])
         );
+    }
+
+    #[test]
+    fn clear_removes_memory_and_persistent_cache_entries() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("glyphst-translation-cache-{nonce:x}"));
+        let path = directory.join("translations.redb");
+        let mut cache = TranslationCache::open_at(&path).unwrap();
+        let cached = CachedTranslation {
+            translations: vec!["bonjour".to_string()],
+            detected_source_language: Some("en".to_string()),
+            updated_at: 1,
+        };
+
+        cache.insert("before-clear", cached.clone()).unwrap();
+        assert!(cache.get("before-clear").is_some());
+        cache.clear().unwrap();
+        assert!(cache.get("before-clear").is_none());
+
+        cache.insert("after-clear", cached).unwrap();
+        assert!(cache.get("after-clear").is_some());
+        drop(cache);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -2,9 +2,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::{Context as _, anyhow};
 use glyphst_settings::{OcrMode, Settings};
 use glyphst_translation::{LanguageCode, TranslationService};
 use mupdf::{Document, TextPageFlags};
@@ -31,6 +34,24 @@ pub struct PdfTranslationService {
     translation: TranslationService,
     typst: TypstCompiler,
     composer: PdfComposer,
+    artifact_cache_state: Arc<Mutex<ArtifactCacheState>>,
+}
+
+#[derive(Default)]
+struct ArtifactCacheState {
+    active_runs: usize,
+}
+
+struct ArtifactRunGuard {
+    state: Arc<Mutex<ArtifactCacheState>>,
+}
+
+impl Drop for ArtifactRunGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.active_runs = state.active_runs.saturating_sub(1);
+        }
+    }
 }
 
 impl gpui::Global for PdfTranslationService {}
@@ -41,7 +62,70 @@ impl PdfTranslationService {
             translation,
             typst: TypstCompiler::new(TypstCompilerConfig::default()),
             composer: PdfComposer,
+            artifact_cache_state: Arc::new(Mutex::new(ArtifactCacheState::default())),
         }
+    }
+
+    pub fn clear_translation_data(&self) -> anyhow::Result<()> {
+        self.clear_translation_data_at(&artifact_root(), &legacy_artifact_root(), true)
+    }
+
+    fn clear_translation_data_at(
+        &self,
+        artifact_root: &Path,
+        legacy_artifact_root: &Path,
+        clear_provider_cache: bool,
+    ) -> anyhow::Result<()> {
+        let state = self
+            .artifact_cache_state
+            .lock()
+            .map_err(|_| anyhow!("PDF translation cache state is unavailable"))?;
+        if state.active_runs > 0 {
+            return Err(anyhow!(
+                "A PDF translation is active. Cancel it or wait for it to finish before clearing translation data."
+            ));
+        }
+
+        let mut errors = Vec::new();
+        if clear_provider_cache {
+            if let Err(error) = self.translation.clear_cache() {
+                errors.push(format!(
+                    "could not clear cached provider responses: {error:#}"
+                ));
+            }
+        }
+        for (label, path) in [
+            ("PDF translation artifacts", artifact_root),
+            (
+                "legacy document translation artifacts",
+                legacy_artifact_root,
+            ),
+        ] {
+            if let Err(error) = remove_artifact_directory(path) {
+                errors.push(format!("could not clear {label}: {error:#}"));
+            }
+        }
+        drop(state);
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(errors.join("; ")))
+        }
+    }
+
+    fn begin_run(&self) -> Result<ArtifactRunGuard, PdfTranslationError> {
+        let mut state = self.artifact_cache_state.lock().map_err(|_| {
+            PdfTranslationError::message(
+                PdfTranslationStage::Preparing,
+                "PDF translation cache state is unavailable",
+            )
+        })?;
+        state.active_runs = state.active_runs.saturating_add(1);
+        drop(state);
+        Ok(ArtifactRunGuard {
+            state: self.artifact_cache_state.clone(),
+        })
     }
 
     pub fn run(
@@ -51,6 +135,7 @@ impl PdfTranslationService {
         cancellation: CancellationToken,
         progress_sink: impl TranslationProgressSink + 'static,
     ) -> Result<PdfTranslationResult, PdfTranslationError> {
+        let _run_guard = self.begin_run()?;
         let (fingerprint, source_bytes) = request_fingerprint_with_source(&settings, &request)?;
         let job_directory = create_job_directory(&fingerprint)?;
         let source_path = job_directory.join("source-original.pdf");
@@ -331,6 +416,7 @@ impl PdfTranslationService {
         settings: &Settings,
         request: &PdfTranslationRequest,
     ) -> Option<PdfTranslationResult> {
+        let _state = self.artifact_cache_state.lock().ok()?;
         let fingerprint = request_fingerprint(settings, request).ok()?;
         let job_directory = artifact_root().join(&fingerprint);
         let manifest_path = job_directory.join("artifact-manifest.json");
@@ -853,6 +939,18 @@ fn artifact_root() -> PathBuf {
     glyphst_core::paths::state_dir().join("pdf-translations")
 }
 
+fn legacy_artifact_root() -> PathBuf {
+    glyphst_core::paths::state_dir().join("document-translation")
+}
+
+fn remove_artifact_directory(path: &Path) -> anyhow::Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
+}
+
 fn write_json(path: impl AsRef<Path>, value: &impl Serialize) -> Result<(), PdfTranslationError> {
     let path = path.as_ref();
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
@@ -1079,6 +1177,61 @@ mod tests {
             1,
             "atomic checkpoint write left a staging file behind"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn clearing_translation_data_removes_current_and_legacy_artifacts() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("glyphst-clear-cache-{nonce:x}"));
+        let artifacts = directory.join("pdf-translations");
+        let legacy = directory.join("document-translation");
+        fs::create_dir_all(artifacts.join("job")).unwrap();
+        fs::create_dir_all(legacy.join("ocr")).unwrap();
+        fs::write(artifacts.join("job/translated.pdf"), b"pdf").unwrap();
+        fs::write(legacy.join("ocr/result.json"), b"{}").unwrap();
+        let service = PdfTranslationService::new(TranslationService::new().unwrap());
+
+        service
+            .clear_translation_data_at(&artifacts, &legacy, false)
+            .unwrap();
+        assert!(!artifacts.exists());
+        assert!(!legacy.exists());
+
+        service
+            .clear_translation_data_at(&artifacts, &legacy, false)
+            .unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn active_translation_prevents_artifact_clearing() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("glyphst-active-cache-{nonce:x}"));
+        let artifacts = directory.join("pdf-translations");
+        let legacy = directory.join("document-translation");
+        fs::create_dir_all(&artifacts).unwrap();
+        fs::write(artifacts.join("checkpoint.json"), b"{}").unwrap();
+        let service = PdfTranslationService::new(TranslationService::new().unwrap());
+        let run = service.begin_run().unwrap();
+
+        let error = service
+            .clear_translation_data_at(&artifacts, &legacy, false)
+            .unwrap_err();
+        assert!(error.to_string().contains("PDF translation is active"));
+        assert!(artifacts.exists());
+
+        drop(run);
+        service
+            .clear_translation_data_at(&artifacts, &legacy, false)
+            .unwrap();
+        assert!(!artifacts.exists());
         fs::remove_dir_all(directory).unwrap();
     }
 }

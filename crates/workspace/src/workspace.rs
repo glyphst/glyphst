@@ -4,6 +4,7 @@ use anyhow::Result;
 use glyphst_translation_ui::{
     DocumentTranslationJobEvent, DocumentTranslationJobId, DocumentTranslationJobManager,
 };
+use glyphst_ui::notification_center::NotificationCenter;
 use gpui::{
     AnyElement, App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString,
@@ -180,6 +181,10 @@ impl Workspace {
         workspace.subscribe_to_pane(&pane, window, cx);
         cx.observe(&document_translation_jobs, |_, _, cx| cx.notify())
             .detach();
+        if let Some(notification_center) = NotificationCenter::try_global(cx) {
+            cx.observe(&notification_center, |_, _, cx| cx.notify())
+                .detach();
+        }
         cx.subscribe_in(
             &document_translation_jobs,
             window,
@@ -986,9 +991,8 @@ impl Workspace {
             }
         }
 
-        let activity = self
-            .document_translation_jobs
-            .update(cx, |jobs, cx| jobs.render_footbar_activity(theme, cx));
+        let activity = NotificationCenter::try_global(cx)
+            .and_then(|center| center.update(cx, |center, cx| center.render_activity(theme, cx)));
         if let Some(activity) = activity {
             div()
                 .size_full()
@@ -1885,6 +1889,30 @@ impl Render for Workspace {
                     .update(cx, |jobs, cx| jobs.render_notification(theme, cx))
             })
             .flatten();
+        let center_notifications = (!active_pdf_is_presentation && window.is_window_active())
+            .then(|| {
+                NotificationCenter::try_global(cx).and_then(|center| {
+                    center.update(cx, |center, cx| center.render_notifications(theme, cx))
+                })
+            })
+            .flatten();
+        let notification_stack = {
+            let mut notifications = Vec::new();
+            if let Some(notification) = document_translation_notification {
+                notifications.push(notification);
+            }
+            if let Some(notification) = center_notifications {
+                notifications.push(notification);
+            }
+            (!notifications.is_empty()).then(|| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .items_end()
+                    .children(notifications)
+            })
+        };
 
         div()
             .id("workspace")
@@ -2043,13 +2071,13 @@ impl Render for Workspace {
                     cx,
                 ))
             })
-            .when_some(document_translation_notification, |this, notification| {
+            .when_some(notification_stack, |this, notifications| {
                 this.child(
                     div()
                         .absolute()
                         .right_3()
                         .bottom(px(38.0))
-                        .child(notification),
+                        .child(notifications),
                 )
             })
     }

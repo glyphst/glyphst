@@ -58,6 +58,7 @@ use glyphst_translation_ui::{
 use glyphst_ui::{
     icons::IconButton,
     markdown::{Markdown, MarkdownElement, MarkdownStyle},
+    notification_center::NotificationCenter,
     searchable_dropdown::{SearchableDropdown, SearchableDropdownEvent},
     tooltip::text_tooltip,
 };
@@ -12648,9 +12649,8 @@ impl PdfView {
     }
 
     pub fn render_workspace_footbar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
-        let document_translation_activity = self
-            .document_translation_jobs
-            .update(cx, |jobs, cx| jobs.render_footbar_activity(theme, cx));
+        let background_activity = NotificationCenter::try_global(cx)
+            .and_then(|center| center.update(cx, |center, cx| center.render_activity(theme, cx)));
         div()
             .flex()
             .flex_row()
@@ -12692,9 +12692,7 @@ impl PdfView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .when_some(document_translation_activity, |this, activity| {
-                        this.child(activity)
-                    })
+                    .when_some(background_activity, |this, activity| this.child(activity))
                     .child(Self::page_counter_label(
                         self.current_page(),
                         self.pages.len(),

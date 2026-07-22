@@ -1,6 +1,7 @@
 use glyphst_actions::settings_panel::PanelClose;
 use glyphst_ai::ai_client::{AiModelInfo, list_ai_models, test_ai_connection};
 use glyphst_keymap::keybindings;
+use glyphst_pdf_translation::PdfTranslationService;
 use glyphst_settings::{
     AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, AppLanguage, CopyFormat,
     DEFAULT_OCR_ENDPOINT, DEFAULT_OCR_MODEL, DEFAULT_PAGE_IMAGE_LIMIT, FontSettings, KeymapPreset,
@@ -15,16 +16,21 @@ use glyphst_settings::{
 };
 use glyphst_translation_ui::target_language_items;
 use glyphst_ui::{
+    notification_center::{
+        BackgroundTaskEntry, NotificationCenter, NotificationEntry, NotificationLevel,
+        SUCCESS_NOTICE_DURATION,
+    },
     scrollbar::{WithScrollbar as _, uniform_list_scrollbar_for},
     searchable_dropdown::{SearchableDropdown, SearchableDropdownEvent, SearchableItem},
     settings_input::{SettingsInputEvent, SettingsTextInput},
+    tooltip::text_tooltip,
 };
 use gpui::{
     Anchor, AnyElement, App, AppContext, Bounds, Context, ElementId, Entity, FocusHandle,
-    Focusable, IntoElement, MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, Render,
-    ScrollHandle, SharedString, Task, TitlebarOptions, UniformListScrollHandle, Window,
-    WindowBounds, WindowOptions, anchored, deferred, div, point, prelude::*, px, rgb, rgba, size,
-    uniform_list,
+    Focusable, IntoElement, MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, PromptButton,
+    PromptLevel, Render, ScrollHandle, SharedString, Task, TitlebarOptions,
+    UniformListScrollHandle, Window, WindowBounds, WindowOptions, anchored, deferred, div, point,
+    prelude::*, px, rgb, rgba, size, uniform_list,
 };
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -552,6 +558,8 @@ pub struct SettingsWindow {
     ocr_model_input: Entity<SettingsTextInput>,
     ocr_connection_status: Option<OcrConnectionStatus>,
     ocr_connection_task: Option<Task<()>>,
+    translation_data_clear_pending: bool,
+    translation_data_clear_running: bool,
     translation_settings_save_generation: Arc<AtomicU64>,
     page_image_limit_save_generation: Arc<AtomicU64>,
     ocr_settings_save_generation: Arc<AtomicU64>,
@@ -1094,6 +1102,10 @@ impl SettingsWindow {
             cx.notify();
         })
         .detach();
+        if let Some(notification_center) = NotificationCenter::try_global(cx) {
+            cx.observe(&notification_center, |_, _, cx| cx.notify())
+                .detach();
+        }
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -1129,6 +1141,8 @@ impl SettingsWindow {
             ocr_model_input,
             ocr_connection_status: None,
             ocr_connection_task: None,
+            translation_data_clear_pending: false,
+            translation_data_clear_running: false,
             translation_settings_save_generation: Arc::new(AtomicU64::new(0)),
             page_image_limit_save_generation: Arc::new(AtomicU64::new(0)),
             ocr_settings_save_generation: Arc::new(AtomicU64::new(0)),
@@ -1305,6 +1319,101 @@ impl SettingsWindow {
                 cx.notify();
             });
         }));
+    }
+
+    fn clear_translation_data(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.translation_data_clear_pending {
+            return;
+        }
+        if !cx.has_global::<PdfTranslationService>() || NotificationCenter::try_global(cx).is_none()
+        {
+            self.status = None;
+            self.save_error = Some("Translation data service is unavailable.".into());
+            cx.notify();
+            return;
+        }
+
+        let service = cx.global::<PdfTranslationService>().clone();
+        let notification_center = NotificationCenter::global(cx);
+        let confirmation = window.prompt(
+            PromptLevel::Warning,
+            "Clear all translation data?",
+            Some(
+                "This deletes cached provider responses, generated translated PDFs, OCR results, and resumable checkpoints. Source PDFs and settings are not changed.",
+            ),
+            &[
+                PromptButton::ok("Clear translation data"),
+                PromptButton::cancel("Cancel"),
+            ],
+            cx,
+        );
+        self.status = None;
+        self.save_error = None;
+        self.translation_data_clear_pending = true;
+        cx.spawn(async move |this, cx| {
+            if confirmation.await != Ok(0) {
+                _ = this.update(cx, |this, cx| {
+                    this.translation_data_clear_pending = false;
+                    this.translation_data_clear_running = false;
+                    cx.notify();
+                });
+                return;
+            }
+
+            let task_id = notification_center.update(cx, |center, cx| {
+                center.add_task(
+                    BackgroundTaskEntry::new(
+                        "Clearing translation data",
+                        "Removing cached responses, generated PDFs, OCR results, and checkpoints.",
+                    ),
+                    cx,
+                )
+            });
+            _ = this.update(cx, |this, cx| {
+                this.translation_data_clear_running = true;
+                cx.notify();
+            });
+
+            let result = cx
+                .background_spawn(async move {
+                    service
+                        .clear_translation_data()
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .await;
+            notification_center.update(cx, |center, cx| {
+                center.remove_task(task_id, cx);
+                match &result {
+                    Ok(()) => {
+                        center.show_notification(
+                            NotificationEntry::new(
+                                NotificationLevel::Success,
+                                "Translation data cleared",
+                            ),
+                            Some(SUCCESS_NOTICE_DURATION),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        let mut notification = NotificationEntry::new(
+                            NotificationLevel::Error,
+                            "Could not clear translation data",
+                        );
+                        notification.detail = Some(error.clone().into());
+                        center.show_notification(notification, None, cx);
+                    }
+                }
+            });
+            _ = this.update(cx, |this, cx| {
+                this.translation_data_clear_pending = false;
+                this.translation_data_clear_running = false;
+                this.status = None;
+                this.save_error = None;
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn base_url_input_content(provider: AiProvider, config: &AiProviderConfig) -> SharedString {
@@ -4099,6 +4208,68 @@ impl SettingsWindow {
                         ),
                 )
                 .into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Self::section_title("Translation data", theme))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_4()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(ui_rems(12.0))
+                                .text_color(rgb(theme.text_muted))
+                                .child(
+                                    "Clear cached provider responses, generated translated PDFs, OCR results, and resumable checkpoints.",
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("settings-clear-translation-data")
+                                .h(px(28.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .px_3()
+                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(rgb(if self.translation_data_clear_pending {
+                                    theme.border_variant
+                                } else {
+                                    theme.error
+                                }))
+                                .bg(rgb(theme.surface_background))
+                                .text_color(rgb(if self.translation_data_clear_pending {
+                                    theme.text_muted
+                                } else {
+                                    theme.error
+                                }))
+                                .when(!self.translation_data_clear_pending, |this| {
+                                    this.cursor_pointer()
+                                        .hover(move |style| style.bg(rgb(theme.element_hover)))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, window, cx| {
+                                                this.clear_translation_data(window, cx);
+                                                cx.stop_propagation();
+                                            }),
+                                        )
+                                })
+                                .when(self.translation_data_clear_running, |this| {
+                                    this.tooltip(text_tooltip("Clearing translation data"))
+                                })
+                                .child("Clear"),
+                        ),
+                )
+                .into_any_element(),
         ]
     }
 
@@ -5781,6 +5952,17 @@ impl Render for SettingsWindow {
         } else {
             None
         };
+        let background_activity = NotificationCenter::try_global(cx).and_then(|center| {
+            center.update(cx, |center, cx| center.render_activity(resolved, cx))
+        });
+        let center_notifications = window
+            .is_window_active()
+            .then(|| {
+                NotificationCenter::try_global(cx).and_then(|center| {
+                    center.update(cx, |center, cx| center.render_notifications(resolved, cx))
+                })
+            })
+            .flatten();
 
         div()
             .key_context("SettingsPanel")
@@ -5877,7 +6059,8 @@ impl Render for SettingsWindow {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .justify_end()
+                            .justify_between()
+                            .when_some(background_activity, |this, activity| this.child(activity))
                             .child(self.export_button(resolved, cx)),
                     )
                     .when_some(self.status.clone(), |this, status| {
@@ -5895,6 +6078,15 @@ impl Render for SettingsWindow {
             .when_some(provider_model_overlay, |this, overlay| this.child(overlay))
             .when_some(font_picker_overlay, |this, overlay| this.child(overlay))
             .when_some(color_picker_overlay, |this, overlay| this.child(overlay))
+            .when_some(center_notifications, |this, notifications| {
+                this.child(
+                    div()
+                        .absolute()
+                        .right_3()
+                        .bottom(px(72.0))
+                        .child(notifications),
+                )
+            })
     }
 }
 
