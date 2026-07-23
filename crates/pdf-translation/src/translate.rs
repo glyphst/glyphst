@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Block, BlockRole, CancellationToken, DocumentV1, TextStyle};
+use crate::{Block, BlockRole, BoundingBox, CancellationToken, DocumentV1, Line, TextStyle};
 
 const MAX_BATCH_UNITS: usize = 6;
 const MAX_BATCH_CHARACTERS: usize = 6_000;
@@ -135,7 +135,13 @@ impl ProtectedText {
         let mut restored = translated.to_string();
         for token in &self.tokens {
             if restored.contains(&token.placeholder) {
-                restored = restored.replace(&token.placeholder, &token.original);
+                restored = restored.replace(
+                    &token.placeholder,
+                    token
+                        .styled_restoration
+                        .as_deref()
+                        .unwrap_or(&token.original),
+                );
             }
         }
         restored = strip_style_placeholders(&restored);
@@ -151,6 +157,8 @@ pub struct ProtectedToken {
     pub placeholder: String,
     pub original: String,
     pub kind: ProtectedTokenKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub styled_restoration: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +169,7 @@ pub enum ProtectedTokenKind {
     Url,
     NumericLiteral,
     Identifier,
+    LineBreak,
     StyleStart,
     StyleEnd,
 }
@@ -257,8 +266,18 @@ pub struct TranslationQueueStats {
     pub dispatched_requests: usize,
     pub completed_requests: usize,
     pub retry_requests: usize,
+    #[serde(default)]
+    pub provider_retry_requests: usize,
+    #[serde(default)]
+    pub validation_retry_requests: usize,
     pub peak_active_requests: usize,
     pub peak_active_complex_requests: usize,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    #[serde(default)]
+    pub total_request_latency_ms: u64,
+    #[serde(default)]
+    pub max_request_latency_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,6 +336,7 @@ pub fn translate_document_resuming(
     resumed_units: Vec<TranslatedUnit>,
     mut on_update: impl FnMut(&TranslationRunSnapshot) -> Result<(), String>,
 ) -> Result<TranslatedDocument, TranslationDocumentError> {
+    let started_at = Instant::now();
     let units = build_translation_units(&document);
     let total = units.len();
     if total == 0 {
@@ -373,7 +393,7 @@ pub fn translate_document_resuming(
         &failures,
         &retrying_ids,
         &cached_ids,
-        queue.clone(),
+        queue_snapshot(&queue, started_at),
     );
     on_update(&initial).map_err(|message| TranslationDocumentError {
         message,
@@ -406,6 +426,7 @@ pub fn translate_document_resuming(
                     queue.peak_active_complex_requests.max(active_complex);
                 let sender = sender.clone();
                 scope.spawn(move || {
+                    let request_started_at = Instant::now();
                     let result =
                         catch_unwind(AssertUnwindSafe(|| execute_request(backend, &request)))
                             .unwrap_or_else(|_| {
@@ -417,7 +438,11 @@ pub fn translate_document_resuming(
                                     retry_after: None,
                                 })
                             });
-                    let _ = sender.send(CompletedRequest { request, result });
+                    let _ = sender.send(CompletedRequest {
+                        request,
+                        result,
+                        duration_ms: duration_millis(request_started_at.elapsed()),
+                    });
                 });
             }
 
@@ -451,6 +476,10 @@ pub fn translate_document_resuming(
             active -= 1;
             active_complex -= usize::from(completed.request.plan.complex);
             queue.completed_requests += 1;
+            queue.total_request_latency_ms = queue
+                .total_request_latency_ms
+                .saturating_add(completed.duration_ms);
+            queue.max_request_latency_ms = queue.max_request_latency_ms.max(completed.duration_ms);
             let mut state = TranslationResolutionState {
                 resolved: &mut resolved,
                 failures: &mut failures,
@@ -464,7 +493,7 @@ pub fn translate_document_resuming(
                 &failures,
                 &retrying_ids,
                 &cached_ids,
-                queue.clone(),
+                queue_snapshot(&queue, started_at),
             );
             on_update(&snapshot).map_err(|message| TranslationDocumentError {
                 message,
@@ -533,6 +562,7 @@ struct PendingRequest {
 struct CompletedRequest {
     request: PendingRequest,
     result: Result<Vec<TranslationUnitOutput>, TranslationBackendError>,
+    duration_ms: u64,
 }
 
 struct TranslationResolutionState<'a> {
@@ -564,6 +594,7 @@ fn process_completed_request(
 ) {
     let mut outputs = HashMap::new();
     let mut cache_entries = Vec::new();
+    let provider_request_failed = completed.result.is_err();
     let request_error = match completed.result {
         Ok(request_outputs) => {
             let mut duplicate_ids = HashSet::new();
@@ -666,6 +697,11 @@ fn process_completed_request(
                 if can_retry {
                     state.retrying_ids.insert(unit.id.clone());
                     queue.retry_requests += 1;
+                    if provider_request_failed {
+                        queue.provider_retry_requests += 1;
+                    } else {
+                        queue.validation_retry_requests += 1;
+                    }
                     let now = Instant::now();
                     let delay = retry_delay(attempt, failure.retry_after);
                     pending.push_back(PendingRequest {
@@ -685,6 +721,16 @@ fn process_completed_request(
         }
     }
     backend.cache_validated_translations(&cache_entries);
+}
+
+fn queue_snapshot(queue: &TranslationQueueStats, started_at: Instant) -> TranslationQueueStats {
+    let mut snapshot = queue.clone();
+    snapshot.elapsed_ms = duration_millis(started_at.elapsed());
+    snapshot
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 struct UnitFailure {
@@ -780,12 +826,13 @@ pub fn protect_text(text: &str) -> ProtectedText {
 }
 
 fn protect_text_for_role(text: &str, role: BlockRole) -> ProtectedText {
-    protect_text_with_identifier_policy(
+    protect_text_with_policies(
         text,
         !matches!(
             role,
             BlockRole::Title | BlockRole::Heading | BlockRole::TableOfContents
         ),
+        preserves_role_line_breaks(role),
     )
 }
 
@@ -796,10 +843,18 @@ struct StyleBoundary {
     start: bool,
 }
 
-fn protect_block_text(block: &Block, role: BlockRole) -> (ProtectedText, Vec<StyleDefinition>) {
+fn protect_block_text(
+    block: &Block,
+    role: BlockRole,
+) -> (String, ProtectedText, Vec<StyleDefinition>) {
     let source = block.content.text.trim();
     let Some(dominant) = dominant_text_style(block) else {
-        return (protect_text_for_role(source, role), Vec::new());
+        let source = normalize_pdf_hard_wraps(source, role);
+        return (
+            source.clone(),
+            protect_text_for_role(&source, role),
+            Vec::new(),
+        );
     };
     let mut definitions = Vec::<StyleDefinition>::new();
     let mut boundaries = Vec::<StyleBoundary>::new();
@@ -818,8 +873,9 @@ fn protect_block_text(block: &Block, role: BlockRole) -> (ProtectedText, Vec<Sty
             let start = segment_offset + relative_segment_start;
             let end = start + segment_text.len();
             segment_offset = end;
-            if segment_text.trim().is_empty()
-                || !meaningful_style_difference(&dominant, &segment.style)
+            let styled_start = start + segment_text.len() - segment_text.trim_start().len();
+            let styled_end = end - (segment_text.len() - segment_text.trim_end().len());
+            if styled_start >= styled_end || !meaningful_style_difference(&dominant, &segment.style)
             {
                 continue;
             }
@@ -836,12 +892,12 @@ fn protect_block_text(block: &Block, role: BlockRole) -> (ProtectedText, Vec<Sty
                     id
                 });
             boundaries.push(StyleBoundary {
-                offset: start,
+                offset: styled_start,
                 style_id,
                 start: true,
             });
             boundaries.push(StyleBoundary {
-                offset: end,
+                offset: styled_end,
                 style_id,
                 start: false,
             });
@@ -853,20 +909,347 @@ fn protect_block_text(block: &Block, role: BlockRole) -> (ProtectedText, Vec<Sty
             .cmp(&right.offset)
             .then(left.start.cmp(&right.start))
     });
-    if boundaries.is_empty() {
-        return (protect_text_for_role(source, role), Vec::new());
-    }
-    (
+    let normalized = normalize_styled_source(source, &boundaries, role, &block.content.lines);
+    let protected = if normalized.boundaries.is_empty() {
+        protect_text_for_role(&normalized.text, role)
+    } else {
         protect_text_with_style_boundaries(
-            source,
+            &normalized.text,
             !matches!(
                 role,
                 BlockRole::Title | BlockRole::Heading | BlockRole::TableOfContents
             ),
-            &boundaries,
-        ),
-        definitions,
-    )
+            preserves_role_line_breaks(role),
+            &normalized.boundaries,
+        )
+    };
+    (normalized.text, protected, definitions)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StyledSourceCharacter {
+    character: char,
+    style_id: Option<usize>,
+}
+
+struct NormalizedStyledSource {
+    text: String,
+    boundaries: Vec<StyleBoundary>,
+}
+
+fn normalize_styled_source(
+    source: &str,
+    boundaries: &[StyleBoundary],
+    role: BlockRole,
+    source_lines: &[Line],
+) -> NormalizedStyledSource {
+    let annotated = annotate_source_styles(source, boundaries);
+    let mut lines = vec![Vec::<StyledSourceCharacter>::new()];
+    for character in annotated {
+        match character.character {
+            '\r' => {}
+            '\n' => lines.push(Vec::new()),
+            _ => lines
+                .last_mut()
+                .expect("at least one styled line exists")
+                .push(character),
+        }
+    }
+
+    let normalized = match role {
+        BlockRole::Dialogue => normalize_styled_dialogue_lines(lines),
+        BlockRole::Prompt => normalize_styled_prompt_lines(lines, source_lines),
+        _ if preserves_semantic_line_breaks(role, source) => normalize_styled_verbatim_lines(lines),
+        _ => normalize_styled_visual_lines(lines),
+    };
+    styled_characters_to_source(normalized)
+}
+
+fn annotate_source_styles(
+    source: &str,
+    boundaries: &[StyleBoundary],
+) -> Vec<StyledSourceCharacter> {
+    let mut characters = Vec::with_capacity(source.chars().count());
+    let mut boundary_index = 0usize;
+    let mut active_style = None;
+    for (offset, character) in source.char_indices() {
+        while let Some(boundary) = boundaries.get(boundary_index)
+            && boundary.offset <= offset
+        {
+            if boundary.start {
+                active_style = Some(boundary.style_id);
+            } else if active_style == Some(boundary.style_id) {
+                active_style = None;
+            }
+            boundary_index += 1;
+        }
+        characters.push(StyledSourceCharacter {
+            character,
+            style_id: active_style,
+        });
+    }
+    characters
+}
+
+fn normalize_styled_verbatim_lines(
+    mut lines: Vec<Vec<StyledSourceCharacter>>,
+) -> Vec<StyledSourceCharacter> {
+    for line in &mut lines {
+        trim_styled_line_end(line);
+    }
+    while lines.first().is_some_and(|line| line.is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    let mut output = Vec::new();
+    for (index, line) in lines.into_iter().enumerate() {
+        if index > 0 {
+            output.push(unstyled_character('\n'));
+        }
+        output.extend(line);
+    }
+    trim_styled_output(&mut output);
+    output
+}
+
+fn normalize_styled_visual_lines(
+    mut lines: Vec<Vec<StyledSourceCharacter>>,
+) -> Vec<StyledSourceCharacter> {
+    for line in &mut lines {
+        trim_styled_line(line);
+    }
+    let mut output = Vec::new();
+    let mut paragraph_has_text = false;
+    let mut previous_was_empty = true;
+    for line in lines {
+        if line.is_empty() {
+            if paragraph_has_text {
+                previous_was_empty = true;
+            }
+            continue;
+        }
+        if previous_was_empty && paragraph_has_text {
+            output.push(unstyled_character('\n'));
+            output.push(unstyled_character('\n'));
+        } else if paragraph_has_text {
+            let dehyphenate = output
+                .last()
+                .is_some_and(|character| character.character == '-')
+                && line
+                    .first()
+                    .is_some_and(|character| character.character.is_lowercase());
+            if dehyphenate {
+                output.pop();
+            } else if !output
+                .last()
+                .is_some_and(|character| character.character.is_whitespace())
+            {
+                output.push(unstyled_character(' '));
+            }
+        }
+        output.extend(line);
+        paragraph_has_text = true;
+        previous_was_empty = false;
+    }
+    trim_styled_output(&mut output);
+    output
+}
+
+fn normalize_styled_dialogue_lines(
+    mut lines: Vec<Vec<StyledSourceCharacter>>,
+) -> Vec<StyledSourceCharacter> {
+    for line in &mut lines {
+        trim_styled_line(line);
+    }
+    let mut output = Vec::new();
+    for line in lines.into_iter().filter(|line| !line.is_empty()) {
+        let line_text = styled_line_text(&line);
+        let starts_turn = looks_like_speaker_turn(&line_text);
+        if output.is_empty() {
+            output.extend(line);
+        } else if starts_turn {
+            output.push(unstyled_character('\n'));
+            output.extend(line);
+        } else {
+            append_styled_visual_line(&mut output, line);
+        }
+    }
+    trim_styled_output(&mut output);
+    output
+}
+
+fn normalize_styled_prompt_lines(
+    mut lines: Vec<Vec<StyledSourceCharacter>>,
+    source_lines: &[Line],
+) -> Vec<StyledSourceCharacter> {
+    for line in &mut lines {
+        trim_styled_line(line);
+    }
+    let block_width = source_lines
+        .iter()
+        .map(|line| line.bbox)
+        .reduce(BoundingBox::union)
+        .map_or(0.0, BoundingBox::width);
+    let mut output = Vec::new();
+    let mut previous_text = String::new();
+    let mut previous_source_line = None::<&Line>;
+    for (line_index, line) in lines.into_iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let line_text = styled_line_text(&line);
+        let source_line = source_lines.get(line_index);
+        let strong_boundary = looks_like_prompt_boundary(&line_text)
+            || looks_like_bracketed_prompt_heading(&previous_text)
+            || prompt_sentence_boundary(&previous_text, &line_text);
+        let visual_continuation =
+            source_line
+                .zip(previous_source_line)
+                .is_some_and(|(current, previous)| {
+                    prompt_line_is_visual_continuation(previous, current, block_width, &line_text)
+                });
+        let structural_break = !output.is_empty() && strong_boundary && !visual_continuation;
+        if structural_break {
+            output.push(unstyled_character('\n'));
+            output.extend(line);
+        } else if output.is_empty() {
+            output.extend(line);
+        } else {
+            append_styled_visual_line(&mut output, line);
+        }
+        previous_text = line_text;
+        previous_source_line = source_line;
+    }
+    trim_styled_output(&mut output);
+    output
+}
+
+fn prompt_line_is_visual_continuation(
+    previous: &Line,
+    current: &Line,
+    block_width: f32,
+    current_text: &str,
+) -> bool {
+    if looks_like_bracketed_prompt_heading(current_text)
+        || looks_like_numbered_prompt_item(current_text)
+        || looks_like_speaker_turn(current_text)
+    {
+        return false;
+    }
+    let left_tolerance = previous
+        .bbox
+        .height()
+        .max(current.bbox.height())
+        .mul_add(0.35, 1.0);
+    let aligned = (previous.bbox.x0 - current.bbox.x0).abs() <= left_tolerance;
+    let previous_fills_line = block_width > 0.0 && previous.bbox.width() >= block_width * 0.82;
+    let starts_lowercase = current_text
+        .chars()
+        .find(|character| character.is_alphabetic())
+        .is_some_and(|character| character.is_lowercase());
+    aligned && (previous_fills_line || starts_lowercase)
+}
+
+fn append_styled_visual_line(
+    output: &mut Vec<StyledSourceCharacter>,
+    line: Vec<StyledSourceCharacter>,
+) {
+    let dehyphenate = output
+        .last()
+        .is_some_and(|character| character.character == '-')
+        && line
+            .first()
+            .is_some_and(|character| character.character.is_lowercase());
+    if dehyphenate {
+        output.pop();
+    } else if !output
+        .last()
+        .is_some_and(|character| character.character.is_whitespace())
+    {
+        output.push(unstyled_character(' '));
+    }
+    output.extend(line);
+}
+
+fn styled_line_text(line: &[StyledSourceCharacter]) -> String {
+    line.iter().map(|character| character.character).collect()
+}
+
+fn trim_styled_line(line: &mut Vec<StyledSourceCharacter>) {
+    while line
+        .first()
+        .is_some_and(|character| character.character.is_whitespace())
+    {
+        line.remove(0);
+    }
+    trim_styled_line_end(line);
+}
+
+fn trim_styled_line_end(line: &mut Vec<StyledSourceCharacter>) {
+    while line
+        .last()
+        .is_some_and(|character| character.character.is_whitespace())
+    {
+        line.pop();
+    }
+}
+
+fn trim_styled_output(output: &mut Vec<StyledSourceCharacter>) {
+    while output
+        .first()
+        .is_some_and(|character| character.character.is_whitespace())
+    {
+        output.remove(0);
+    }
+    while output
+        .last()
+        .is_some_and(|character| character.character.is_whitespace())
+    {
+        output.pop();
+    }
+}
+
+fn unstyled_character(character: char) -> StyledSourceCharacter {
+    StyledSourceCharacter {
+        character,
+        style_id: None,
+    }
+}
+
+fn styled_characters_to_source(characters: Vec<StyledSourceCharacter>) -> NormalizedStyledSource {
+    let mut text = String::new();
+    let mut boundaries = Vec::new();
+    let mut active_style = None;
+    for character in characters {
+        if character.style_id != active_style {
+            if let Some(style_id) = active_style {
+                boundaries.push(StyleBoundary {
+                    offset: text.len(),
+                    style_id,
+                    start: false,
+                });
+            }
+            if let Some(style_id) = character.style_id {
+                boundaries.push(StyleBoundary {
+                    offset: text.len(),
+                    style_id,
+                    start: true,
+                });
+            }
+            active_style = character.style_id;
+        }
+        text.push(character.character);
+    }
+    if let Some(style_id) = active_style {
+        boundaries.push(StyleBoundary {
+            offset: text.len(),
+            style_id,
+            start: false,
+        });
+    }
+    NormalizedStyledSource { text, boundaries }
 }
 
 fn dominant_text_style(block: &Block) -> Option<TextStyle> {
@@ -902,6 +1285,7 @@ fn dominant_text_style(block: &Block) -> Option<TextStyle> {
 
 fn meaningful_style_difference(left: &TextStyle, right: &TextStyle) -> bool {
     left.font_class != right.font_class
+        || left.baseline_position != right.baseline_position
         || left.bold != right.bold
         || left.italic != right.italic
         || left.underline != right.underline
@@ -915,12 +1299,21 @@ fn meaningful_style_difference(left: &TextStyle, right: &TextStyle) -> bool {
 }
 
 fn protect_text_with_identifier_policy(text: &str, protect_identifiers: bool) -> ProtectedText {
-    protect_text_with_style_boundaries(text, protect_identifiers, &[])
+    protect_text_with_policies(text, protect_identifiers, false)
+}
+
+fn protect_text_with_policies(
+    text: &str,
+    protect_identifiers: bool,
+    protect_line_breaks: bool,
+) -> ProtectedText {
+    protect_text_with_style_boundaries(text, protect_identifiers, protect_line_breaks, &[])
 }
 
 fn protect_text_with_style_boundaries(
     text: &str,
     protect_identifiers: bool,
+    protect_line_breaks: bool,
     boundaries: &[StyleBoundary],
 ) -> ProtectedText {
     let mut protected = String::with_capacity(text.len());
@@ -943,6 +1336,7 @@ fn protect_text_with_style_boundaries(
                 placeholder,
                 original,
                 kind,
+                styled_restoration: None,
             });
             boundary_index += 1;
         }
@@ -950,14 +1344,42 @@ fn protect_text_with_style_boundaries(
             break;
         }
         let rest = &text[cursor..];
-        if let Some((kind, length)) = protected_prefix(rest, protect_identifiers) {
-            let original = &rest[..length];
+        if protect_line_breaks && rest.starts_with('\n') {
+            let original = "\n";
+            let kind = ProtectedTokenKind::LineBreak;
             let placeholder = placeholder(kind, tokens.len(), original);
             protected.push_str(&placeholder);
             tokens.push(ProtectedToken {
                 placeholder,
                 original: original.to_string(),
                 kind,
+                styled_restoration: None,
+            });
+            cursor += original.len();
+            continue;
+        }
+        if let Some((kind, length)) = protected_prefix(rest, protect_identifiers) {
+            let original = &rest[..length];
+            let placeholder = placeholder(kind, tokens.len(), original);
+            let end = cursor + length;
+            let mut restoration = String::with_capacity(length);
+            let mut restoration_cursor = cursor;
+            while let Some(boundary) = boundaries.get(boundary_index)
+                && boundary.offset < end
+            {
+                restoration.push_str(&text[restoration_cursor..boundary.offset]);
+                restoration.push_str(&style_marker(boundary.style_id, boundary.start));
+                restoration_cursor = boundary.offset;
+                boundary_index += 1;
+            }
+            restoration.push_str(&text[restoration_cursor..end]);
+            let styled_restoration = (restoration != original).then_some(restoration);
+            protected.push_str(&placeholder);
+            tokens.push(ProtectedToken {
+                placeholder,
+                original: original.to_string(),
+                kind,
+                styled_restoration,
             });
             cursor += length;
             continue;
@@ -1106,6 +1528,113 @@ fn trim_styled_runs(runs: &mut Vec<StyledRun>) {
     runs.retain(|run| !run.text.is_empty());
 }
 
+fn normalize_cjk_styled_spacing(runs: &mut Vec<StyledRun>) {
+    let characters = runs
+        .iter()
+        .flat_map(|run| {
+            run.text
+                .chars()
+                .map(|character| (character, run.style.clone()))
+        })
+        .collect::<Vec<_>>();
+    if !characters
+        .iter()
+        .any(|(character, _)| is_cjk_character(*character))
+    {
+        return;
+    }
+
+    let mut normalized = Vec::<(char, Option<TextStyle>)>::with_capacity(characters.len());
+    let mut index = 0usize;
+    while index < characters.len() {
+        let (character, style) = &characters[index];
+        if !is_horizontal_whitespace(*character) {
+            normalized.push((*character, style.clone()));
+            index += 1;
+            continue;
+        }
+
+        let whitespace_style = style.clone();
+        let mut next_index = index + 1;
+        while next_index < characters.len() && is_horizontal_whitespace(characters[next_index].0) {
+            next_index += 1;
+        }
+        let previous = normalized.last().map(|(character, _)| *character);
+        let next = characters.get(next_index).map(|(character, _)| *character);
+        let remove = previous
+            .zip(next)
+            .is_some_and(|(left, right)| cjk_boundary_needs_no_space(left, right));
+        if !remove
+            && !normalized
+                .last()
+                .is_some_and(|(character, _)| is_horizontal_whitespace(*character))
+        {
+            normalized.push((' ', whitespace_style));
+        }
+        index = next_index;
+    }
+
+    runs.clear();
+    for (character, style) in normalized {
+        let mut encoded = [0; 4];
+        append_styled_run(runs, character.encode_utf8(&mut encoded), style);
+    }
+    trim_styled_runs(runs);
+}
+
+fn is_horizontal_whitespace(character: char) -> bool {
+    character.is_whitespace() && !matches!(character, '\n' | '\r')
+}
+
+fn cjk_boundary_needs_no_space(left: char, right: char) -> bool {
+    (is_cjk_character(left) && (is_cjk_character(right) || right.is_ascii_alphanumeric()))
+        || (left.is_ascii_alphanumeric() && is_cjk_character(right))
+        || is_cjk_closing_punctuation(right)
+        || is_cjk_opening_punctuation(left)
+}
+
+fn is_cjk_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x2e80..=0x2fff
+            | 0x3040..=0x30ff
+            | 0x3100..=0x312f
+            | 0x31a0..=0x31bf
+            | 0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xac00..=0xd7af
+            | 0xf900..=0xfaff
+            | 0x20000..=0x2fa1f
+    )
+}
+
+fn is_cjk_closing_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '，' | '。'
+            | '、'
+            | '；'
+            | '：'
+            | '！'
+            | '？'
+            | '）'
+            | '】'
+            | '》'
+            | '〉'
+            | '」'
+            | '』'
+            | '”'
+            | '’'
+    )
+}
+
+fn is_cjk_opening_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '（' | '【' | '《' | '〈' | '「' | '『' | '“' | '‘'
+    )
+}
+
 fn strip_style_markers(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut remaining = value;
@@ -1150,9 +1679,7 @@ fn build_translation_units(document: &DocumentV1) -> Vec<TranslationUnit> {
             let id = continuation_id
                 .clone()
                 .unwrap_or_else(|| format!("unit-{}", block.id));
-            let source_text = normalize_pdf_hard_wraps(&block.content.text, block.role);
-            let (mut protected, style_definitions) = protect_block_text(block, block.role);
-            protected.text = normalize_pdf_hard_wraps(&protected.text, block.role);
+            let (source_text, protected, style_definitions) = protect_block_text(block, block.role);
             let unit_index = units.len();
             units.push(TranslationUnit {
                 id,
@@ -1205,8 +1732,10 @@ fn plan_translation_requests(units: &[TranslationUnit]) -> Vec<PlannedRequest> {
     for unit in units {
         let characters = unit.protected.text.chars().count();
         let placeholders = unit.protected.tokens.len();
-        let batchable = matches!(unit.role, BlockRole::Body | BlockRole::Abstract)
-            && characters <= MAX_BATCHABLE_UNIT_CHARACTERS
+        let batchable = matches!(
+            unit.role,
+            BlockRole::Body | BlockRole::Abstract | BlockRole::Prompt | BlockRole::Dialogue
+        ) && characters <= MAX_BATCHABLE_UNIT_CHARACTERS
             && placeholders <= MAX_BATCHABLE_UNIT_PLACEHOLDERS;
         if !batchable {
             flush_batch(
@@ -1253,6 +1782,9 @@ fn semantic_unit_hash(unit: &TranslationUnit) -> u64 {
     role_name(unit.role).hash(&mut hasher);
     unit.source_text.hash(&mut hasher);
     unit.protected.text.hash(&mut hasher);
+    if let Ok(tokens) = serde_json::to_string(&unit.protected.tokens) {
+        tokens.hash(&mut hasher);
+    }
     if let Ok(styles) = serde_json::to_string(&unit.style_definitions) {
         styles.hash(&mut hasher);
     }
@@ -1284,8 +1816,10 @@ fn validate_translation(
     reject_unchanged: bool,
 ) -> Result<ValidatedTranslation, String> {
     let (restored, marker_fallback) = unit.protected.restore_translation(translated)?;
-    let (plain, runs, parse_fallback) =
+    let (_plain, mut runs, parse_fallback) =
         parse_styled_translation(&restored, &unit.style_definitions);
+    normalize_cjk_styled_spacing(&mut runs);
+    let plain = runs.iter().map(|run| run.text.as_str()).collect::<String>();
     if reject_unchanged
         && should_reject_unchanged(&unit.source_text)
         && normalize_for_comparison(&plain) == normalize_for_comparison(&unit.source_text)
@@ -1532,6 +2066,7 @@ fn placeholder(kind: ProtectedTokenKind, index: usize, original: &str) -> String
         ProtectedTokenKind::Url => "URL",
         ProtectedTokenKind::NumericLiteral => "NUMBER",
         ProtectedTokenKind::Identifier => "IDENTIFIER",
+        ProtectedTokenKind::LineBreak => "LINE_BREAK",
         ProtectedTokenKind::StyleStart => "STYLE_START",
         ProtectedTokenKind::StyleEnd => "STYLE_END",
     };
@@ -1570,6 +2105,12 @@ fn append_continuation_text(target: &mut String, continuation: &str) {
 
 fn normalize_pdf_hard_wraps(text: &str, role: BlockRole) -> String {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if role == BlockRole::Dialogue {
+        return normalize_dialogue_lines(&text);
+    }
+    if role == BlockRole::Prompt {
+        return normalize_prompt_lines(&text);
+    }
     if preserves_semantic_line_breaks(role, &text) {
         return text
             .lines()
@@ -1629,6 +2170,121 @@ fn join_visual_lines(lines: &[&str]) -> String {
     joined
 }
 
+fn normalize_dialogue_lines(text: &str) -> String {
+    let mut turns = Vec::<String>::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if turns.is_empty() || looks_like_speaker_turn(line) {
+            turns.push(line.to_string());
+        } else {
+            append_continuation_text(
+                turns.last_mut().expect("dialogue has a previous turn"),
+                line,
+            );
+        }
+    }
+    turns.join("\n")
+}
+
+fn normalize_prompt_lines(text: &str) -> String {
+    let mut parts = Vec::<String>::new();
+    let mut previous = String::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if parts.is_empty()
+            || looks_like_prompt_boundary(line)
+            || looks_like_bracketed_prompt_heading(&previous)
+            || prompt_sentence_boundary(&previous, line)
+        {
+            parts.push(line.to_string());
+        } else {
+            append_continuation_text(parts.last_mut().expect("prompt has a previous part"), line);
+        }
+        previous = line.to_string();
+    }
+    parts.join("\n")
+}
+
+fn looks_like_speaker_turn(line: &str) -> bool {
+    speaker_label(line).is_some()
+}
+
+fn speaker_label(line: &str) -> Option<String> {
+    let (speaker, text) = line.split_once([':', '：'])?;
+    let speaker = speaker.trim();
+    let words = speaker.split_whitespace().collect::<Vec<_>>();
+    (!text.trim().is_empty()
+        && speaker.chars().count() <= 24
+        && (1..=3).contains(&words.len())
+        && words.iter().all(|word| {
+            word.chars()
+                .all(|character| character.is_alphabetic() || matches!(character, '-' | '\'' | '’'))
+        }))
+    .then(|| speaker.to_lowercase())
+}
+
+fn looks_like_prompt_boundary(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() {
+        return false;
+    }
+    if looks_like_bracketed_prompt_heading(line) {
+        return true;
+    }
+    if looks_like_numbered_prompt_item(line) {
+        return true;
+    }
+    line.split_once([':', '：']).is_some_and(|(label, _)| {
+        let label = label.trim();
+        !label.is_empty()
+            && label.chars().count() <= 48
+            && label.split_whitespace().count() <= 7
+            && !label.contains(['.', '?', '!'])
+            && label_starts_like_prompt_field(label)
+    })
+}
+
+fn looks_like_numbered_prompt_item(line: &str) -> bool {
+    line.trim()
+        .split_once([')', '）', '.', '．'])
+        .is_some_and(|(prefix, _)| {
+            !prefix.is_empty()
+                && prefix.len() <= 3
+                && prefix.chars().all(|character| character.is_ascii_digit())
+        })
+}
+
+fn label_starts_like_prompt_field(label: &str) -> bool {
+    let Some(character) = label.chars().find(|character| character.is_alphabetic()) else {
+        return false;
+    };
+    if character.is_uppercase() {
+        return true;
+    }
+    !character.is_lowercase() && is_cjk_character(character)
+}
+
+fn looks_like_bracketed_prompt_heading(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with('[') && line.ends_with(']') && line.find(']').is_some_and(|end| end <= 80)
+}
+
+fn prompt_sentence_boundary(previous: &str, line: &str) -> bool {
+    let previous = previous.trim_end();
+    let line = line.trim_start();
+    previous.ends_with(['.', '?', '!', '。', '？', '！'])
+        && (line.ends_with('?')
+            || line.ends_with('？')
+            || line.starts_with("Should ")
+            || line.starts_with("Is ")
+            || line.starts_with("Are ")
+            || line.starts_with("Can ")
+            || line.starts_with("Could ")
+            || line.starts_with("Would ")
+            || line.starts_with("Will ")
+            || line.starts_with("What ")
+            || line.starts_with("How ")
+            || line.starts_with("Which "))
+}
+
 fn normalize_translated_whitespace(translated: &str, source: &str, role: BlockRole) -> String {
     let translated = translated.replace("\r\n", "\n").replace('\r', "\n");
     if preserves_semantic_line_breaks(role, source) {
@@ -1658,24 +2314,19 @@ fn normalize_translated_whitespace(translated: &str, source: &str, role: BlockRo
 }
 
 fn preserves_semantic_line_breaks(role: BlockRole, text: &str) -> bool {
-    matches!(role, BlockRole::TableOfContents | BlockRole::Code) || looks_like_dialogue(text)
+    preserves_role_line_breaks(role) || looks_like_dialogue(text)
+}
+
+fn preserves_role_line_breaks(role: BlockRole) -> bool {
+    matches!(
+        role,
+        BlockRole::Prompt | BlockRole::Dialogue | BlockRole::TableOfContents | BlockRole::Code
+    )
 }
 
 fn looks_like_dialogue(text: &str) -> bool {
-    let lines = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect::<Vec<_>>();
-    lines.len() >= 2
-        && lines
-            .iter()
-            .filter(|line| {
-                line.split_once([':', '：']).is_some_and(|(speaker, _)| {
-                    !speaker.trim().is_empty() && speaker.chars().count() <= 24
-                })
-            })
-            .count()
-            >= 2
+    let labels = text.lines().filter_map(speaker_label).collect::<Vec<_>>();
+    labels.len() >= 3 && labels.iter().collect::<HashSet<_>>().len() >= 2
 }
 
 fn context_excerpt(text: &str) -> String {
@@ -1708,6 +2359,8 @@ fn role_name(role: BlockRole) -> &'static str {
         BlockRole::Heading => "heading",
         BlockRole::Body => "body",
         BlockRole::Abstract => "abstract",
+        BlockRole::Prompt => "prompt",
+        BlockRole::Dialogue => "dialogue",
         BlockRole::TableOfContents => "table_of_contents",
         BlockRole::FigureCaption => "figure_caption",
         BlockRole::TableCaption => "table_caption",
@@ -1736,7 +2389,7 @@ mod tests {
     use super::*;
     use crate::{
         Block, BlockContent, BlockKind, BoundingBox, DocumentMetadata, Line, Page, PageGeometry,
-        SourceProvenance, TranslationPolicy,
+        Segment, SegmentKind, SourceProvenance, TranslationPolicy,
     };
 
     struct EchoBackend {
@@ -1898,6 +2551,135 @@ mod tests {
     }
 
     #[test]
+    fn dialogue_units_preserve_speaker_turns_but_join_visual_wraps() {
+        let document = test_document_with_blocks(vec![(
+            BlockRole::Dialogue,
+            "Interviewer: How does this\nsystem work?\nKlaus Mueller: It remembers prior events."
+                .to_string(),
+        )]);
+
+        let unit = build_translation_units(&document).remove(0);
+
+        assert_eq!(
+            unit.source_text,
+            "Interviewer: How does this system work?\nKlaus Mueller: It remembers prior events."
+        );
+        assert!(!unit.protected.text.contains('\n'));
+        assert_eq!(
+            unit.protected
+                .tokens
+                .iter()
+                .filter(|token| token.kind == ProtectedTokenKind::LineBreak)
+                .count(),
+            1
+        );
+        let translated = unit
+            .protected
+            .text
+            .replace(
+                "Interviewer: How does this system work?",
+                "采访者：这个系统如何工作？",
+            )
+            .replace(
+                "Klaus Mueller: It remembers prior events.",
+                "克劳斯·穆勒：它会记住先前的事件。",
+            );
+        let validated = validate_translation(&unit, &translated, false).unwrap();
+        assert_eq!(
+            validated.text,
+            "采访者：这个系统如何工作？\n克劳斯·穆勒：它会记住先前的事件。"
+        );
+    }
+
+    #[test]
+    fn prompt_units_preserve_structural_lines_and_join_wrapped_prose() {
+        let document = test_document_with_blocks(vec![(
+            BlockRole::Prompt,
+            "[Agent’s Summary Description]\nIt is February 13.\nObservation: John saw Eddy taking a short walk\naround his workplace.\nSummary of relevant context from John’s memory:\nEddy likes music.\nShould John react?"
+                .to_string(),
+        )]);
+
+        let unit = build_translation_units(&document).remove(0);
+
+        assert_eq!(
+            unit.source_text,
+            "[Agent’s Summary Description]\nIt is February 13.\nObservation: John saw Eddy taking a short walk around his workplace.\nSummary of relevant context from John’s memory: Eddy likes music.\nShould John react?"
+        );
+        assert_eq!(
+            unit.protected
+                .tokens
+                .iter()
+                .filter(|token| token.kind == ProtectedTokenKind::LineBreak)
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn prompt_geometry_does_not_promote_a_lowercase_wrapped_colon_to_a_field() {
+        let styled_line = |text: &str| {
+            text.chars()
+                .map(unstyled_character)
+                .collect::<Vec<StyledSourceCharacter>>()
+        };
+        let source_line = |text: &str, y: f32, x1: f32| Line {
+            bbox: BoundingBox::new(10.0, y, x1, y + 10.0),
+            text: text.to_string(),
+            segments: Vec::new(),
+            baseline_y: Some(y + 8.0),
+            line_height: Some(10.0),
+        };
+        let lines = vec![
+            styled_line("[Agent’s Plan]"),
+            styled_line("Today is Wednesday. Here is Eddy’s"),
+            styled_line("plan today in broad strokes: 1)"),
+        ];
+        let source_lines = vec![
+            source_line("[Agent’s Plan]", 10.0, 80.0),
+            source_line("Today is Wednesday. Here is Eddy’s", 20.0, 190.0),
+            source_line("plan today in broad strokes: 1)", 30.0, 165.0),
+        ];
+
+        let normalized =
+            styled_characters_to_source(normalize_styled_prompt_lines(lines, &source_lines));
+
+        assert_eq!(
+            normalized.text,
+            "[Agent’s Plan]\nToday is Wednesday. Here is Eddy’s plan today in broad strokes: 1)"
+        );
+    }
+
+    #[test]
+    fn cjk_spacing_is_normalized_across_style_boundaries() {
+        let mut runs = vec![
+            StyledRun {
+                text: "我们使用了  ".to_string(),
+                style: None,
+            },
+            StyledRun {
+                text: "300".to_string(),
+                style: Some(TextStyle {
+                    font_class: Some(crate::FontFamilyClass::Math),
+                    ..TextStyle::default()
+                }),
+            },
+            StyledRun {
+                text: " 维的GloVe 用于WMD。".to_string(),
+                style: None,
+            },
+        ];
+
+        normalize_cjk_styled_spacing(&mut runs);
+
+        assert_eq!(
+            runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+            "我们使用了300维的GloVe用于WMD。"
+        );
+        assert_eq!(runs[1].text, "300");
+        assert!(runs[1].style.is_some());
+    }
+
+    #[test]
     fn invented_ai_paragraph_breaks_are_flattened_for_single_paragraph_sources() {
         let normalized = normalize_translated_whitespace(
             "生成式智能体醒来。\n\n它们做早餐。\n\n然后规划一天。",
@@ -1931,6 +2713,61 @@ mod tests {
         assert_eq!(runs[1].text, "重点");
         assert!(runs[1].style.as_ref().is_some_and(|style| {
             style.bold && style.italic && style.color_argb == Some(0xff44_5566)
+        }));
+    }
+
+    #[test]
+    fn protected_citations_restore_internal_color_boundaries() {
+        let mut document = test_document("Compare (Joachims, 1998) carefully in this discussion.");
+        let bbox = document.pages[0].blocks[0].bbox;
+        let plain_style = TextStyle {
+            color_argb: Some(0xff00_0000),
+            ..TextStyle::default()
+        };
+        let purple_style = TextStyle {
+            color_argb: Some(0xff00_00ff),
+            ..TextStyle::default()
+        };
+        let segment = |text: &str, style: TextStyle| Segment {
+            kind: SegmentKind::Text,
+            text: text.to_string(),
+            bbox,
+            style,
+        };
+        let segments = vec![
+            segment("Compare (", plain_style.clone()),
+            segment("Joachims, 1998", purple_style.clone()),
+            segment(") carefully in this discussion.", plain_style),
+        ];
+        document.pages[0].blocks[0].content.lines[0].segments = segments.clone();
+        document.pages[0].blocks[0].content.segments = segments;
+
+        let unit = build_translation_units(&document).remove(0);
+        let citation = unit
+            .protected
+            .tokens
+            .iter()
+            .find(|token| token.kind == ProtectedTokenKind::Citation)
+            .unwrap();
+        assert!(
+            citation
+                .styled_restoration
+                .as_deref()
+                .is_some_and(|restoration| restoration.contains('\u{e000}'))
+        );
+
+        let translated = unit
+            .protected
+            .text
+            .replace("Compare ", "比较")
+            .replace(" carefully in this discussion.", "。");
+        let validated = validate_translation(&unit, &translated, false).unwrap();
+        assert!(validated.runs.iter().any(|run| {
+            run.text == "Joachims, 1998"
+                && run
+                    .style
+                    .as_ref()
+                    .is_some_and(|style| style.color_argb == purple_style.color_argb)
         }));
     }
 
@@ -2020,6 +2857,14 @@ mod tests {
         let snapshot = last_snapshot.lock().unwrap().clone().unwrap();
         assert_eq!(snapshot.progress.failed, 1);
         assert_eq!(snapshot.failures[0].attempts, MAX_UNIT_ATTEMPTS);
+        assert_eq!(snapshot.queue.retry_requests, MAX_UNIT_ATTEMPTS - 1);
+        assert_eq!(
+            snapshot.queue.validation_retry_requests,
+            MAX_UNIT_ATTEMPTS - 1
+        );
+        assert_eq!(snapshot.queue.provider_retry_requests, 0);
+        assert_eq!(snapshot.queue.completed_requests, MAX_UNIT_ATTEMPTS);
+        assert!(snapshot.queue.max_request_latency_ms <= snapshot.queue.total_request_latency_ms);
     }
 
     #[test]
@@ -2127,15 +2972,28 @@ mod tests {
             }
         }
 
-        let error = translate_document(
+        let last_snapshot = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&last_snapshot);
+        let error = translate_document_resuming(
             test_document("This paragraph must be translated."),
             &PanicBackend,
             &CancellationToken::new(),
-            |_, _| {},
+            Vec::new(),
+            move |snapshot| {
+                *captured.lock().unwrap() = Some(snapshot.clone());
+                Ok(())
+            },
         )
         .unwrap_err();
 
         assert!(error.retryable);
+        let snapshot = last_snapshot.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            snapshot.queue.provider_retry_requests,
+            MAX_UNIT_ATTEMPTS - 1
+        );
+        assert_eq!(snapshot.queue.validation_retry_requests, 0);
+        assert!(snapshot.queue.elapsed_ms >= 500);
     }
 
     #[test]
@@ -2429,11 +3287,13 @@ mod tests {
                         placeholder: "[[GLYPHST_STYLE_START_0000_AAAAAAAA]]".to_string(),
                         original: style_marker(0, true),
                         kind: ProtectedTokenKind::StyleStart,
+                        styled_restoration: None,
                     },
                     ProtectedToken {
                         placeholder: "[[GLYPHST_STYLE_END_0001_BBBBBBBB]]".to_string(),
                         original: style_marker(0, false),
                         kind: ProtectedTokenKind::StyleEnd,
+                        styled_restoration: None,
                     },
                 ],
             },

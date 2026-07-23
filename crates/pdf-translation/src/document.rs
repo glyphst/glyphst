@@ -151,6 +151,8 @@ pub enum BlockRole {
     Heading,
     Body,
     Abstract,
+    Prompt,
+    Dialogue,
     TableOfContents,
     FigureCaption,
     TableCaption,
@@ -175,6 +177,8 @@ impl BlockRole {
             Self::Heading => "heading",
             Self::Body => "body",
             Self::Abstract => "abstract",
+            Self::Prompt => "prompt",
+            Self::Dialogue => "dialogue",
             Self::TableOfContents => "table_of_contents",
             Self::FigureCaption => "figure_caption",
             Self::TableCaption => "table_caption",
@@ -256,6 +260,23 @@ pub struct TextStyle {
     pub strikeout: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_argb: Option<u32>,
+    #[serde(default, skip_serializing_if = "BaselinePosition::is_normal")]
+    pub baseline_position: BaselinePosition,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BaselinePosition {
+    #[default]
+    Normal,
+    Superscript,
+    Subscript,
+}
+
+impl BaselinePosition {
+    pub const fn is_normal(&self) -> bool {
+        matches!(self, Self::Normal)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -148,6 +148,7 @@ fn semantic_unit(unit: &TranslationUnit) -> SemanticTranslationUnit {
                         SemanticProtectedTokenKind::NumericLiteral
                     }
                     ProtectedTokenKind::Identifier => SemanticProtectedTokenKind::Identifier,
+                    ProtectedTokenKind::LineBreak => SemanticProtectedTokenKind::LineBreak,
                     ProtectedTokenKind::StyleStart | ProtectedTokenKind::StyleEnd => {
                         SemanticProtectedTokenKind::StyleBoundary
                     }
@@ -200,10 +201,20 @@ fn validate_target_script(
             "translation left source-language text attached to a protected token: {residue}"
         ));
     }
+    if cjk_target
+        && unit.role == glyphst_pdf_translation::BlockRole::Prompt
+        && let Some(heading) = unchanged_prompt_heading(unit, translated)
+    {
+        return Err(format!(
+            "translation left a prompt heading unchanged: {heading}"
+        ));
+    }
     if !matches!(
         unit.role,
         glyphst_pdf_translation::BlockRole::Body
             | glyphst_pdf_translation::BlockRole::Abstract
+            | glyphst_pdf_translation::BlockRole::Prompt
+            | glyphst_pdf_translation::BlockRole::Dialogue
             | glyphst_pdf_translation::BlockRole::FigureCaption
             | glyphst_pdf_translation::BlockRole::TableCaption
             | glyphst_pdf_translation::BlockRole::Footnote
@@ -247,6 +258,20 @@ fn validate_target_script(
     } else {
         Ok(())
     }
+}
+
+fn unchanged_prompt_heading(unit: &TranslationUnit, translated: &str) -> Option<String> {
+    let source_heading = unit.source_text.lines().next()?.trim();
+    let translated_heading = translated.lines().next()?.trim();
+    (source_heading.starts_with('[')
+        && source_heading.ends_with(']')
+        && source_heading
+            .chars()
+            .filter(|character| character.is_ascii_alphabetic())
+            .count()
+            >= 8
+        && source_heading.eq_ignore_ascii_case(translated_heading))
+    .then(|| source_heading.to_string())
 }
 
 fn attached_source_language_residue(unit: &TranslationUnit, translated: &str) -> Option<String> {
@@ -319,6 +344,12 @@ mod tests {
         }
     }
 
+    fn prompt_unit(source: &str) -> TranslationUnit {
+        let mut unit = body_unit(source);
+        unit.role = BlockRole::Prompt;
+        unit
+    }
+
     #[test]
     fn rejects_long_english_residue_for_chinese_targets() {
         let source = "This is a sufficiently long English paragraph that should be translated into Chinese before it reaches layout.";
@@ -355,5 +386,28 @@ mod tests {
         footnote.role = BlockRole::Footnote;
         assert!(validate_target_script(&footnote, "3This 环境由人工创建。", "zh-hans").is_err());
         assert!(validate_target_script(&footnote, "3该环境由人工创建。", "zh-hans").is_ok());
+    }
+
+    #[test]
+    fn rejects_an_unchanged_natural_language_prompt_heading() {
+        let unit =
+            prompt_unit("[Agent’s Summary Description]\nObservation: John saw Eddy taking a walk.");
+
+        assert!(
+            validate_target_script(
+                &unit,
+                "[Agent’s Summary Description]\n观察：约翰看到艾迪在散步。",
+                "zh-hans"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_target_script(
+                &unit,
+                "[智能体摘要描述]\n观察：约翰看到艾迪在散步。",
+                "zh-hans"
+            )
+            .is_ok()
+        );
     }
 }

@@ -9,8 +9,8 @@ use std::time::Duration;
 use mupdf::{Colorspace, Document, Matrix};
 
 use crate::{
-    BoundingBox, CancellationToken, FontFamilyClass, LayoutDocument, LayoutItem, OverflowPolicy,
-    StyledRun, TextStyle,
+    BaselinePosition, BoundingBox, CancellationToken, FontFamilyClass, LayoutDocument, LayoutItem,
+    OverflowPolicy, StyledRun, TextStyle,
 };
 
 #[derive(Debug, Clone)]
@@ -296,26 +296,20 @@ pub fn generate_typst_source(layout: &LayoutDocument) -> String {
       body(text-size)
     }]
     let fits(text-size, leading) = measure(width: size.width, render(text-size, leading)).height <= allowed-height
-    let emergency-leading = calc.max(0.20em, min-leading * 0.75)
-    if not fits(emergency-min-size, emergency-leading) {
-      panic("GLYPHST_OVERFLOW:" + diagnostic)
-    }
-    if strict and not fits(min-size, min-leading) {
+    let size-floor = if strict { min-size } else { calc.min(emergency-min-size, 1pt) }
+    let leading-floor = if strict { min-leading } else { 0em }
+    if not fits(size-floor, leading-floor) {
       panic("GLYPHST_OVERFLOW:" + diagnostic)
     }
     let chosen-size = if fits(max-size, max-leading) {
       max-size
-    } else if fits(min-size, min-leading) {
-      glyphst_fit_size(min-size, max-size, 0.08pt, size => fits(size, min-leading))
     } else {
-      glyphst_fit_size(emergency-min-size, min-size, 0.08pt, size => fits(size, emergency-leading))
+      glyphst_fit_size(size-floor, max-size, 0.08pt, size => fits(size, leading-floor))
     }
-    let leading-floor = if fits(chosen-size, min-leading) { min-leading } else { emergency-leading }
-    let leading-cap = if fits(chosen-size, max-leading) { max-leading } else { min-leading }
-    let chosen-leading = if fits(chosen-size, leading-cap) {
-      leading-cap
+    let chosen-leading = if fits(chosen-size, max-leading) {
+      max-leading
     } else {
-      glyphst_fit_leading(leading-floor, leading-cap, 0.01em, leading => fits(chosen-size, leading))
+      glyphst_fit_leading(leading-floor, max-leading, 0.01em, leading => fits(chosen-size, leading))
     }
     render(chosen-size, chosen-leading)
   })
@@ -419,6 +413,7 @@ fn append_typst_layout_item(
         underline: item.underline,
         strikeout: item.strikeout,
         color_argb: Some(item.color_argb),
+        baseline_position: BaselinePosition::Normal,
     };
     let fallback_runs = [StyledRun {
         text: item.text.clone(),
@@ -429,7 +424,7 @@ fn append_typst_layout_item(
     } else {
         item.styled_runs.as_slice()
     };
-    source.push_str(&format!("#let {name}_content(text-size) = [\n"));
+    source.push_str(&format!("#let {name}_content(text-size) = ["));
     let mut index = 0usize;
     while index < runs.len() {
         let run = &runs[index];
@@ -443,12 +438,9 @@ fn append_typst_layout_item(
                     break;
                 }
                 append_typst_styled_run(source, run, &style, item);
-                if source.ends_with('\n') {
-                    source.pop();
-                }
                 index += 1;
             }
-            source.push_str("]\n");
+            source.push(']');
         } else {
             append_typst_styled_run(source, run, &style, item);
             index += 1;
@@ -492,6 +484,7 @@ fn merged_text_style(base: &TextStyle, override_style: Option<&TextStyle>) -> Te
         underline: override_style.underline,
         strikeout: override_style.strikeout,
         color_argb: override_style.color_argb.or(base.color_argb),
+        baseline_position: override_style.baseline_position,
     }
 }
 
@@ -504,18 +497,39 @@ fn append_typst_styled_run(
     if run.text.is_empty() {
         return;
     }
-    let markdown = if item.preserve_line_breaks {
-        run.text.replace('\n', "  \n")
+    let parts = if item.preserve_line_breaks {
+        run.text.split('\n').collect::<Vec<_>>()
     } else {
-        run.text.clone()
+        vec![run.text.as_str()]
     };
-    let markdown = normalize_markdown_math(&markdown);
+    for (index, part) in parts.into_iter().enumerate() {
+        if index > 0 {
+            source.push_str("#linebreak()");
+        }
+        let text = if item.preserve_line_breaks {
+            part.to_string()
+        } else {
+            part.replace('\n', " ")
+        };
+        if text.is_empty() {
+            continue;
+        }
+        append_typst_styled_text(source, &text, style, item);
+    }
+}
+
+fn append_typst_styled_text(source: &mut String, text: &str, style: &TextStyle, item: &LayoutItem) {
+    let markdown = normalize_markdown_math(text);
     let font = typst_font_name(style.font_class.unwrap_or(FontFamilyClass::Serif));
     let source_size = style
         .font_size
         .filter(|size| size.is_finite() && *size > 0.0)
         .unwrap_or(item.source_font_size_pt);
-    let size_ratio = (source_size / item.source_font_size_pt.max(0.1)).clamp(0.55, 2.4);
+    let size_ratio = if style.baseline_position == BaselinePosition::Normal {
+        (source_size / item.source_font_size_pt.max(0.1)).clamp(0.55, 2.4)
+    } else {
+        1.0
+    };
     let [red, green, blue] = argb_to_rgb(style.color_argb.unwrap_or(0xff00_0000));
     let escaped = escape_typst_string(&markdown);
     let mut content = if style.font_class == Some(FontFamilyClass::Math) {
@@ -529,8 +543,13 @@ fn append_typst_styled_run(
     if style.underline {
         content = format!("#underline[{content}]");
     }
+    if style.baseline_position == BaselinePosition::Superscript {
+        content = format!("#super[{content}]");
+    } else if style.baseline_position == BaselinePosition::Subscript {
+        content = format!("#sub[{content}]");
+    }
     source.push_str(&format!(
-        "#text(font: \"{}\", size: text-size * {:.4}, weight: \"{}\", style: \"{}\", fill: rgb({}, {}, {}))[{}]\n",
+        "#text(font: \"{}\", size: text-size * {:.4}, weight: \"{}\", style: \"{}\", fill: rgb({}, {}, {}))[{}]",
         font,
         size_ratio,
         if style.bold { "bold" } else { "regular" },
@@ -790,6 +809,7 @@ mod tests {
                             text: "3".to_string(),
                             style: Some(TextStyle {
                                 font_size: Some(8.0),
+                                baseline_position: BaselinePosition::Superscript,
                                 ..math_style.clone()
                             }),
                         },
@@ -822,8 +842,57 @@ mod tests {
         assert!(source.contains("#box["));
         assert!(source.contains("#text(\"+n2d)\")"));
         assert!(!source.contains("cmarker.render(\"+n2d)\""));
-        assert!(!source.contains("#text(\"O(n\")\n#text(\"3\")"));
+        assert!(source.contains("#super[#text(\"3\")]"));
+        assert!(!source.contains("#text(\"O(n\")\n#super"));
         assert!(!source.contains("clip: true"));
+        assert!(source.contains("let size-floor = if strict"));
+        assert!(source.contains("else { 0em }"));
+    }
+
+    #[test]
+    fn semantic_newlines_use_explicit_typst_linebreaks() {
+        let item = LayoutItem {
+            unit_id: "dialogue".to_string(),
+            block_id: "dialogue-block".to_string(),
+            page_index: 0,
+            source_bbox: BoundingBox::new(10.0, 10.0, 190.0, 100.0),
+            source_regions: Vec::new(),
+            bbox: BoundingBox::new(10.0, 10.0, 190.0, 100.0),
+            text: "甲：第一句。\n乙：第二句。".to_string(),
+            role: crate::BlockRole::Dialogue,
+            source_font_size_pt: 10.0,
+            font_size_pt: 10.0,
+            minimum_font_size_pt: 7.0,
+            emergency_minimum_font_size_pt: 5.0,
+            leading_em: 0.58,
+            minimum_leading_em: 0.4,
+            font_weight: FontWeight::Regular,
+            font_class: FontFamilyClass::Serif,
+            italic: false,
+            underline: false,
+            strikeout: false,
+            color_argb: 0xff00_0000,
+            styled_runs: Vec::new(),
+            first_line_indent_pt: 0.0,
+            justify: false,
+            preserve_line_breaks: true,
+        };
+        let layout = LayoutDocument {
+            pages: vec![LayoutPage {
+                page_index: 0,
+                geometry: PageGeometry::new(200.0, 200.0),
+                items: vec![item],
+            }],
+            warnings: Vec::new(),
+            preserved_on_overflow: Vec::new(),
+            overflow_policy: OverflowPolicy::Adaptive,
+        };
+
+        let source = generate_typst_source(&layout);
+
+        assert!(source.contains("第一句。"));
+        assert!(source.contains("#linebreak()"));
+        assert!(!source.contains("  \n"));
     }
 
     #[test]

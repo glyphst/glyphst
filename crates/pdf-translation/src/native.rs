@@ -9,9 +9,10 @@ use serde_json::json;
 
 use crate::policy::enforce_page_protected_regions;
 use crate::{
-    Block, BlockContent, BlockKind, BlockRole, BoundingBox, CancellationToken, DocumentMetadata,
-    DocumentV1, FontFamilyClass, Line, Page, PageGeometry, PolicyDecisionSource, ProtectedRegion,
-    ProtectedRegionKind, Segment, SegmentKind, SourceProvenance, TextStyle, TranslationPolicy,
+    BaselinePosition, Block, BlockContent, BlockKind, BlockRole, BoundingBox, CancellationToken,
+    DocumentMetadata, DocumentV1, FontFamilyClass, Line, Page, PageGeometry, PolicyDecisionSource,
+    ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind, SourceProvenance, TextStyle,
+    TranslationPolicy,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -216,6 +217,9 @@ pub fn extract_native_document(
                         });
                     }
                 }
+                let baseline_y = median(baselines);
+                let line_font_size = median(line_font_sizes);
+                annotate_baseline_positions(&mut segments);
                 trim_segments(&mut segments);
                 restore_segment_spaces(&mut segments);
                 let text = segments
@@ -230,8 +234,6 @@ pub fn extract_native_document(
                     .map(|segment| segment.bbox)
                     .reduce(BoundingBox::union)
                     .unwrap_or_else(|| bounding_box(line.bounds()));
-                let baseline_y = median(baselines);
-                let line_font_size = median(line_font_sizes);
                 let line_bbox = match (baseline_y, line_font_size) {
                     (Some(baseline), Some(font_size)) => BoundingBox::new(
                         horizontal_bbox.x0,
@@ -287,6 +289,10 @@ pub fn extract_native_document(
                 monospaced_ratio: monospaced_chars as f32 / styled_chars.max(1) as f32,
             });
         }
+        let extracted = extracted
+            .into_iter()
+            .flat_map(split_native_paragraphs)
+            .collect::<Vec<_>>();
 
         let body_font_size = weighted_median(
             extracted
@@ -308,7 +314,10 @@ pub fn extract_native_document(
         .unwrap_or(10.0);
         let mut in_references = false;
         let mut blocks = Vec::with_capacity(extracted.len());
-        for (order, extracted) in extracted.into_iter().enumerate() {
+        for (order, mut extracted) in extracted.into_iter().enumerate() {
+            for line in &mut extracted.lines {
+                annotate_baseline_positions(&mut line.segments);
+            }
             let compact = extracted
                 .text
                 .split_whitespace()
@@ -404,6 +413,8 @@ pub fn extract_native_document(
             metadata: BTreeMap::new(),
         };
         enforce_page_protected_regions(&mut page);
+        reclassify_standalone_prompt_blocks(&mut page);
+        reclassify_dialogue_blocks(&mut page);
         pages.push(page);
     }
 
@@ -419,6 +430,160 @@ pub fn extract_native_document(
     );
     document.validate()?;
     Ok(document)
+}
+
+fn split_native_paragraphs(block: NativeBlock) -> Vec<NativeBlock> {
+    if block.lines.len() < 6
+        || block.monospaced_ratio >= 0.25
+        || native_text_looks_like_dialogue(&block.text)
+        || native_text_looks_like_prompt(&block.text)
+        || block
+            .text
+            .chars()
+            .filter(|character| character.is_alphabetic())
+            .count()
+            < 100
+    {
+        return vec![block];
+    }
+
+    let dominant_left = median(
+        block
+            .lines
+            .iter()
+            .map(|line| line.bbox.x0)
+            .filter(|value| value.is_finite())
+            .collect(),
+    )
+    .unwrap_or(block.bbox.x0);
+    let median_pitch = median(
+        block
+            .lines
+            .windows(2)
+            .filter_map(|pair| Some(pair[1].baseline_y? - pair[0].baseline_y?))
+            .filter(|pitch| pitch.is_finite() && *pitch > 0.0)
+            .collect(),
+    );
+    let indent_threshold = (block.average_font_size * 0.65).max(6.0);
+    let mut boundaries = vec![0usize];
+    for index in 1..block.lines.len().saturating_sub(1) {
+        let previous = &block.lines[index - 1];
+        let current = &block.lines[index];
+        let indent = current.bbox.x0 - dominant_left;
+        let starts_paragraph = current
+            .text
+            .trim_start()
+            .chars()
+            .find(|character| character.is_alphabetic())
+            .is_some_and(|character| !character.is_lowercase());
+        let previous_ends_sentence = previous
+            .text
+            .trim_end()
+            .trim_end_matches(['"', '\'', '”', '’', ')', ']'])
+            .ends_with(['.', '?', '!', '。', '？', '！']);
+        let short_previous = previous.bbox.width() <= block.bbox.width() * 0.92;
+        let wide_vertical_gap = median_pitch
+            .zip(previous.baseline_y.zip(current.baseline_y))
+            .is_some_and(|(pitch, (previous_y, current_y))| current_y - previous_y >= pitch * 1.12);
+        let enough_lines_before = index - boundaries.last().copied().unwrap_or_default() >= 2;
+        if indent >= indent_threshold
+            && starts_paragraph
+            && previous_ends_sentence
+            && (short_previous || wide_vertical_gap)
+            && enough_lines_before
+        {
+            boundaries.push(index);
+        }
+    }
+    if boundaries.len() == 1 {
+        return vec![block];
+    }
+    boundaries.push(block.lines.len());
+
+    let NativeBlock {
+        lines,
+        bold_ratio,
+        italic_ratio,
+        monospaced_ratio,
+        ..
+    } = block;
+    boundaries
+        .windows(2)
+        .filter_map(|range| {
+            let paragraph_lines = lines[range[0]..range[1]].to_vec();
+            native_block_from_lines(paragraph_lines, bold_ratio, italic_ratio, monospaced_ratio)
+        })
+        .collect()
+}
+
+fn native_block_from_lines(
+    lines: Vec<Line>,
+    fallback_bold_ratio: f32,
+    fallback_italic_ratio: f32,
+    fallback_monospaced_ratio: f32,
+) -> Option<NativeBlock> {
+    let bbox = lines
+        .iter()
+        .map(|line| line.bbox)
+        .reduce(BoundingBox::union)?;
+    let text = lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let mut styled_characters = 0usize;
+    let mut bold_characters = 0usize;
+    let mut italic_characters = 0usize;
+    let mut monospaced_characters = 0usize;
+    let mut weighted_font_size = 0.0f32;
+    let mut font_size_weight = 0usize;
+    for segment in lines.iter().flat_map(|line| &line.segments) {
+        let characters = segment
+            .text
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .count();
+        if characters == 0 {
+            continue;
+        }
+        styled_characters += characters;
+        bold_characters += usize::from(segment.style.bold) * characters;
+        italic_characters += usize::from(segment.style.italic) * characters;
+        monospaced_characters +=
+            usize::from(segment.style.font_class == Some(FontFamilyClass::Monospace)) * characters;
+        if let Some(font_size) = segment
+            .style
+            .font_size
+            .filter(|font_size| font_size.is_finite() && *font_size > 0.0)
+        {
+            weighted_font_size += font_size * characters as f32;
+            font_size_weight += characters;
+        }
+    }
+    let ratio = |count: usize, fallback: f32| {
+        if styled_characters == 0 {
+            fallback
+        } else {
+            count as f32 / styled_characters as f32
+        }
+    };
+    Some(NativeBlock {
+        bbox,
+        text,
+        lines,
+        average_font_size: if font_size_weight == 0 {
+            0.0
+        } else {
+            weighted_font_size / font_size_weight as f32
+        },
+        bold_ratio: ratio(bold_characters, fallback_bold_ratio),
+        italic_ratio: ratio(italic_characters, fallback_italic_ratio),
+        monospaced_ratio: ratio(monospaced_characters, fallback_monospaced_ratio),
+    })
 }
 
 fn merge_inline_native_lines(lines: Vec<Line>) -> Vec<Line> {
@@ -626,6 +791,7 @@ pub fn fuse_native_with_ocr(mut native: DocumentV1, ocr: &DocumentV1) -> Documen
         };
         page.protected_regions
             .extend(ocr_page.protected_regions.iter().cloned());
+        reclassify_prompt_code_regions(page);
         enforce_page_protected_regions(page);
         let original_native_count = page.blocks.len();
         let mut matched_ocr = vec![false; ocr_page.blocks.len()];
@@ -722,6 +888,8 @@ pub fn fuse_native_with_ocr(mut native: DocumentV1, ocr: &DocumentV1) -> Documen
             page.blocks.push(inserted);
         }
         enforce_page_protected_regions(page);
+        reclassify_standalone_prompt_blocks(page);
+        reclassify_dialogue_blocks(page);
         page.blocks.sort_by(|left, right| {
             left.bbox
                 .y0
@@ -743,6 +911,250 @@ pub fn fuse_native_with_ocr(mut native: DocumentV1, ocr: &DocumentV1) -> Documen
     native
 }
 
+fn reclassify_prompt_code_regions(page: &mut Page) {
+    let prompt_boxes = page
+        .protected_regions
+        .iter()
+        .filter(|region| {
+            region.kind == ProtectedRegionKind::Code
+                && region.source.to_ascii_lowercase().contains("paddle")
+        })
+        .filter(|region| {
+            page.blocks.iter().any(|block| {
+                block.kind == BlockKind::Text
+                    && prompt_region_overlap(block.bbox, region.bbox) >= 0.55
+                    && native_block_looks_like_prompt(block)
+            })
+        })
+        .map(|region| region.bbox)
+        .collect::<Vec<_>>();
+    if prompt_boxes.is_empty() {
+        return;
+    }
+
+    page.protected_regions.retain(|region| {
+        region.kind != ProtectedRegionKind::Code
+            || !region.source.to_ascii_lowercase().contains("paddle")
+            || !prompt_boxes.contains(&region.bbox)
+    });
+    for block in &mut page.blocks {
+        if block.kind != BlockKind::Text
+            || !native_block_looks_like_prompt(block)
+            || !prompt_boxes
+                .iter()
+                .any(|bbox| prompt_region_overlap(block.bbox, *bbox) >= 0.55)
+        {
+            continue;
+        }
+        block.role = BlockRole::Prompt;
+        block.policy = policy_for_role(BlockRole::Prompt);
+        block.policy.source = PolicyDecisionSource::OcrSemantic;
+        block
+            .tags
+            .push("ocr_code_reclassified_as_prompt".to_string());
+        block.metadata.insert(
+            "ocr_code_reclassified_as_prompt".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+}
+
+fn prompt_region_overlap(block: BoundingBox, region: BoundingBox) -> f32 {
+    block.intersection(region).map_or(0.0, |intersection| {
+        intersection.area() / block.area().min(region.area()).max(1.0)
+    })
+}
+
+fn native_block_looks_like_prompt(block: &Block) -> bool {
+    let monospaced_ratio = block
+        .metadata
+        .get("monospaced_ratio")
+        .and_then(|value| value.as_f64())
+        .unwrap_or_default();
+    if monospaced_ratio >= 0.35 {
+        return false;
+    }
+    let text = block.content.text.trim();
+    let alphabetic_words = text
+        .split(|character: char| !character.is_alphabetic())
+        .filter(|word| word.chars().count() >= 2)
+        .count();
+    if alphabetic_words < 8 || looks_like_executable_code(text) {
+        return false;
+    }
+    let lowercase = text.to_lowercase();
+    text.contains('?')
+        || text.lines().any(|line| {
+            let line = line.trim();
+            (line.starts_with('[') && line.contains(']'))
+                || line.split_once([':', '：']).is_some_and(|(label, value)| {
+                    !label.trim().is_empty()
+                        && label.chars().count() <= 48
+                        && !value.trim().is_empty()
+                })
+        })
+        || [
+            "today is ",
+            "plan today",
+            "broad strokes",
+            "should ",
+            "observation",
+            "summary description",
+        ]
+        .iter()
+        .any(|cue| lowercase.contains(cue))
+}
+
+fn looks_like_executable_code(text: &str) -> bool {
+    if ["{", "}", "=>", "::", ":=", "</", "/>"]
+        .iter()
+        .any(|cue| text.contains(cue))
+    {
+        return true;
+    }
+    text.lines().any(|line| {
+        let line = line.trim_start().to_ascii_lowercase();
+        [
+            "def ",
+            "class ",
+            "fn ",
+            "let ",
+            "const ",
+            "var ",
+            "import ",
+            "from ",
+            "use ",
+            "pub ",
+            "function ",
+        ]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+    })
+}
+
+fn reclassify_dialogue_blocks(page: &mut Page) {
+    for block in &mut page.blocks {
+        if block.kind != BlockKind::Text
+            || block.policy.locked
+            || !block.policy.translate
+            || !native_block_looks_like_dialogue(block)
+        {
+            continue;
+        }
+        block.role = BlockRole::Dialogue;
+        block.policy = policy_for_role(BlockRole::Dialogue);
+        if !block.tags.iter().any(|tag| tag == "native_dialogue") {
+            block.tags.push("native_dialogue".to_string());
+        }
+        block.metadata.insert(
+            "semantic_line_structure".to_string(),
+            json!("speaker_turns"),
+        );
+    }
+}
+
+fn reclassify_standalone_prompt_blocks(page: &mut Page) {
+    for block in &mut page.blocks {
+        if block.kind != BlockKind::Text
+            || block.policy.locked
+            || !block.policy.translate
+            || native_block_looks_like_dialogue(block)
+            || !native_block_looks_like_standalone_prompt(block)
+        {
+            continue;
+        }
+        block.role = BlockRole::Prompt;
+        block.policy = policy_for_role(BlockRole::Prompt);
+        if !block.tags.iter().any(|tag| tag == "native_prompt") {
+            block.tags.push("native_prompt".to_string());
+        }
+        block.metadata.insert(
+            "semantic_line_structure".to_string(),
+            json!("prompt_fields"),
+        );
+    }
+}
+
+fn native_block_looks_like_standalone_prompt(block: &Block) -> bool {
+    native_text_looks_like_prompt(&block.content.text)
+}
+
+fn native_text_looks_like_prompt(text: &str) -> bool {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines
+        .first()
+        .is_some_and(|line| native_bracketed_prompt_heading(line))
+    {
+        return true;
+    }
+    lines
+        .iter()
+        .take(4)
+        .filter(|line| native_prompt_field_label(line))
+        .count()
+        >= 2
+}
+
+fn native_bracketed_prompt_heading(line: &str) -> bool {
+    line.starts_with('[')
+        && line.ends_with(']')
+        && line
+            .chars()
+            .filter(|character| character.is_alphabetic())
+            .count()
+            >= 4
+        && line.chars().count() <= 80
+}
+
+fn native_prompt_field_label(line: &str) -> bool {
+    let Some((label, _)) = line.split_once([':', '：']) else {
+        return false;
+    };
+    let words = label.split_whitespace().collect::<Vec<_>>();
+    !label.is_empty()
+        && label.chars().count() <= 40
+        && (1..=5).contains(&words.len())
+        && words.iter().all(|word| {
+            word.chars()
+                .all(|character| character.is_alphabetic() || matches!(character, '-' | '\'' | '’'))
+        })
+}
+
+fn native_block_looks_like_dialogue(block: &Block) -> bool {
+    native_text_looks_like_dialogue(&block.content.text)
+}
+
+fn native_text_looks_like_dialogue(text: &str) -> bool {
+    let labels = text
+        .lines()
+        .filter_map(native_speaker_label)
+        .collect::<Vec<_>>();
+    labels.len() >= 3
+        && labels
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            >= 2
+}
+
+fn native_speaker_label(line: &str) -> Option<String> {
+    let (speaker, text) = line.split_once([':', '：'])?;
+    let speaker = speaker.trim();
+    let words = speaker.split_whitespace().collect::<Vec<_>>();
+    (!text.trim().is_empty()
+        && speaker.chars().count() <= 24
+        && (1..=3).contains(&words.len())
+        && words.iter().all(|word| {
+            word.chars()
+                .all(|character| character.is_alphabetic() || matches!(character, '-' | '\'' | '’'))
+        }))
+    .then(|| speaker.to_lowercase())
+}
+
 fn ocr_role_is_textual(role: BlockRole) -> bool {
     matches!(
         role,
@@ -750,6 +1162,8 @@ fn ocr_role_is_textual(role: BlockRole) -> bool {
             | BlockRole::Heading
             | BlockRole::Body
             | BlockRole::Abstract
+            | BlockRole::Prompt
+            | BlockRole::Dialogue
             | BlockRole::TableOfContents
             | BlockRole::FigureCaption
             | BlockRole::TableCaption
@@ -953,6 +1367,18 @@ fn policy_for_role(role: BlockRole) -> TranslationPolicy {
             PolicyDecisionSource::NativeHeuristic,
             0.92,
         ),
+        BlockRole::Prompt => TranslationPolicy::candidate(
+            true,
+            "native_prompt_candidate",
+            PolicyDecisionSource::NativeHeuristic,
+            0.94,
+        ),
+        BlockRole::Dialogue => TranslationPolicy::candidate(
+            true,
+            "native_dialogue_candidate",
+            PolicyDecisionSource::NativeHeuristic,
+            0.94,
+        ),
         BlockRole::TableOfContents => TranslationPolicy::candidate(
             true,
             "native_toc_candidate",
@@ -1053,6 +1479,58 @@ fn styles_are_equivalent(left: &TextStyle, right: &TextStyle) -> bool {
         && left.underline == right.underline
         && left.strikeout == right.strikeout
         && left.color_argb == right.color_argb
+        && left.baseline_position == right.baseline_position
+}
+
+fn annotate_baseline_positions(segments: &mut [Segment]) {
+    let Some(dominant_font_size) = weighted_median(
+        segments
+            .iter()
+            .filter_map(|segment| {
+                let font_size = segment
+                    .style
+                    .font_size
+                    .filter(|size| size.is_finite() && *size > 0.0)?;
+                let weight = segment
+                    .text
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .count();
+                (weight > 0).then_some((font_size, weight))
+            })
+            .collect(),
+    ) else {
+        return;
+    };
+    let normal_centers = segments
+        .iter()
+        .filter(|segment| {
+            segment
+                .style
+                .font_size
+                .is_some_and(|size| size >= dominant_font_size * 0.90)
+        })
+        .map(|segment| (segment.bbox.y0 + segment.bbox.y1) * 0.5)
+        .filter(|center| center.is_finite())
+        .collect::<Vec<_>>();
+    let Some(normal_center) = median(normal_centers) else {
+        return;
+    };
+    let shift_threshold = (dominant_font_size * 0.12).max(0.8);
+    for segment in segments {
+        let Some(size) = segment.style.font_size else {
+            continue;
+        };
+        if !size.is_finite() || size > dominant_font_size * 0.90 {
+            continue;
+        }
+        let center_shift = (segment.bbox.y0 + segment.bbox.y1) * 0.5 - normal_center;
+        if center_shift <= -shift_threshold {
+            segment.style.baseline_position = BaselinePosition::Superscript;
+        } else if center_shift >= shift_threshold {
+            segment.style.baseline_position = BaselinePosition::Subscript;
+        }
+    }
 }
 
 fn quad_bbox(quad: mupdf::Quad) -> BoundingBox {
@@ -1195,6 +1673,103 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "effectiveness of WORDTOUR");
         assert_eq!(merged[0].segments.len(), 3);
+    }
+
+    #[test]
+    fn distinguishes_superscripts_from_baseline_small_caps() {
+        let segment = |text: &str, bbox: BoundingBox, font_size: f32| Segment {
+            kind: SegmentKind::Text,
+            text: text.to_string(),
+            bbox,
+            style: TextStyle {
+                font_size: Some(font_size),
+                ..TextStyle::default()
+            },
+        };
+        let mut formula = vec![
+            segment("n", BoundingBox::new(0.0, 10.0, 6.0, 21.0), 11.0),
+            segment("3", BoundingBox::new(6.0, 8.0, 10.0, 16.0), 8.0),
+            segment("+n", BoundingBox::new(10.0, 10.0, 22.0, 21.0), 11.0),
+        ];
+        annotate_baseline_positions(&mut formula);
+        assert_eq!(
+            formula[1].style.baseline_position,
+            BaselinePosition::Superscript
+        );
+
+        let mut small_caps = vec![
+            segment("W", BoundingBox::new(0.0, 10.0, 7.0, 21.0), 11.0),
+            segment("ORD", BoundingBox::new(7.0, 12.0, 20.0, 20.5), 8.5),
+            segment("T", BoundingBox::new(20.0, 10.0, 27.0, 21.0), 11.0),
+        ];
+        annotate_baseline_positions(&mut small_caps);
+        assert_eq!(
+            small_caps[1].style.baseline_position,
+            BaselinePosition::Normal
+        );
+    }
+
+    #[test]
+    fn splits_indented_prose_paragraphs_without_dropping_lines() {
+        let style = TextStyle {
+            font_size: Some(10.0),
+            font_class: Some(FontFamilyClass::Serif),
+            ..TextStyle::default()
+        };
+        let line = |index: usize, x0: f32, x1: f32, text: &str| {
+            let y0 = 10.0 + index as f32 * 12.0;
+            let bbox = BoundingBox::new(x0, y0, x1, y0 + 10.0);
+            Line {
+                bbox,
+                text: text.to_string(),
+                segments: vec![Segment {
+                    kind: SegmentKind::Text,
+                    text: text.to_string(),
+                    bbox,
+                    style: style.clone(),
+                }],
+                baseline_y: Some(y0 + 8.0),
+                line_height: Some(10.0),
+            }
+        };
+        let lines = vec![
+            line(
+                0,
+                10.0,
+                100.0,
+                "This is a sufficiently long opening paragraph",
+            ),
+            line(
+                1,
+                10.0,
+                100.0,
+                "whose visual lines continue at the left edge",
+            ),
+            line(2, 10.0, 82.0, "and finish with a complete sentence."),
+            line(3, 18.0, 100.0, "The second paragraph begins with an indent"),
+            line(
+                4,
+                10.0,
+                100.0,
+                "and returns to the dominant left edge before",
+            ),
+            line(5, 10.0, 88.0, "ending without losing any source text."),
+        ];
+        let block = native_block_from_lines(lines, 0.0, 0.0, 0.0).unwrap();
+
+        let paragraphs = split_native_paragraphs(block);
+
+        assert_eq!(paragraphs.len(), 2);
+        assert!(paragraphs[0].text.ends_with("complete sentence."));
+        assert!(paragraphs[1].text.starts_with("The second paragraph"));
+        assert_eq!(
+            paragraphs
+                .iter()
+                .flat_map(|paragraph| paragraph.lines.iter())
+                .count(),
+            6
+        );
+        assert!((paragraphs[1].lines[0].bbox.x0 - paragraphs[1].bbox.x0) >= 7.5);
     }
 
     #[test]
@@ -1345,6 +1920,104 @@ mod tests {
         assert_eq!(added_title.role, BlockRole::Title);
         assert_eq!(added_title.content.text, "Missing title");
         assert!(added_title.tags.contains(&"ocr_only".to_string()));
+    }
+
+    #[test]
+    fn ocr_code_region_is_demoted_for_non_monospace_prompt_prose() {
+        let bbox = BoundingBox::new(10.0, 20.0, 90.0, 80.0);
+        let mut native_block = fusion_block(
+            "native-prompt",
+            bbox,
+            BlockRole::Body,
+            "[Agent’s Summary Description]\nObservation: John saw Eddy taking a short walk.\nShould John react to the observation?",
+            TextStyle::default(),
+        );
+        native_block
+            .metadata
+            .insert("monospaced_ratio".to_string(), json!(0.0));
+        let native = fusion_document("native", vec![native_block]);
+        let mut ocr = fusion_document("paddleocr-vl", Vec::new());
+        ocr.pages[0].protected_regions.push(ProtectedRegion {
+            id: "ocr-code".to_string(),
+            page_index: 0,
+            kind: ProtectedRegionKind::Code,
+            bbox,
+            source: "paddleocr-vl".to_string(),
+            confidence: 0.99,
+            reason: "provider_non_text:code".to_string(),
+        });
+
+        let fused = fuse_native_with_ocr(native, &ocr);
+        let prompt = &fused.pages[0].blocks[0];
+
+        assert_eq!(prompt.role, BlockRole::Prompt);
+        assert!(prompt.policy.translate);
+        assert!(!prompt.policy.locked);
+        assert!(
+            prompt
+                .tags
+                .contains(&"ocr_code_reclassified_as_prompt".to_string())
+        );
+        assert!(fused.pages[0].protected_regions.is_empty());
+    }
+
+    #[test]
+    fn ocr_code_region_remains_locked_for_executable_code() {
+        let bbox = BoundingBox::new(10.0, 20.0, 90.0, 80.0);
+        let native = fusion_document(
+            "native",
+            vec![fusion_block(
+                "native-code",
+                bbox,
+                BlockRole::Body,
+                "fn main() { println!(\"hello\"); }",
+                TextStyle::default(),
+            )],
+        );
+        let mut ocr = fusion_document("paddleocr-vl", Vec::new());
+        ocr.pages[0].protected_regions.push(ProtectedRegion {
+            id: "ocr-code".to_string(),
+            page_index: 0,
+            kind: ProtectedRegionKind::Code,
+            bbox,
+            source: "paddleocr-vl".to_string(),
+            confidence: 0.99,
+            reason: "provider_non_text:code".to_string(),
+        });
+
+        let fused = fuse_native_with_ocr(native, &ocr);
+        let code = &fused.pages[0].blocks[0];
+
+        assert_eq!(code.role, BlockRole::Code);
+        assert!(!code.policy.translate);
+        assert!(code.policy.locked);
+        assert_eq!(fused.pages[0].protected_regions.len(), 1);
+    }
+
+    #[test]
+    fn native_dialogue_is_classified_by_speaker_turns() {
+        let bbox = BoundingBox::new(10.0, 20.0, 90.0, 80.0);
+        let native = fusion_document(
+            "native",
+            vec![fusion_block(
+                "native-dialogue",
+                bbox,
+                BlockRole::Body,
+                "Interviewer: How are you?\nKlaus Mueller: I am doing well.\nInterviewer: What are you working on?",
+                TextStyle::default(),
+            )],
+        );
+        let ocr = fusion_document("ocr", Vec::new());
+
+        let fused = fuse_native_with_ocr(native, &ocr);
+
+        assert_eq!(fused.pages[0].blocks[0].role, BlockRole::Dialogue);
+        assert_eq!(
+            fused.pages[0].blocks[0]
+                .metadata
+                .get("semantic_line_structure"),
+            Some(&json!("speaker_turns"))
+        );
     }
 
     fn fusion_document(provider: &str, blocks: Vec<Block>) -> DocumentV1 {

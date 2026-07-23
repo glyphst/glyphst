@@ -20,7 +20,7 @@ const MAX_CACHE_ENTRIES: usize = 10_000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_BATCH_TEXTS: usize = 64;
 const MAX_BATCH_CHARS: usize = 24_000;
-const SEMANTIC_PROTOCOL_VERSION: &str = "semantic-v4-json-items-adjacency-prompt-v4";
+const SEMANTIC_PROTOCOL_VERSION: &str = "semantic-v5-json-items-adjacency-styles-structured-lines";
 const GOOGLE_SEMANTIC_PROTOCOL_VERSION: &str = "google-semantic-v3-html-spans-segmented-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,6 +243,7 @@ pub enum SemanticProtectedTokenKind {
     Url,
     NumericLiteral,
     Identifier,
+    LineBreak,
     StyleBoundary,
 }
 
@@ -1464,6 +1465,7 @@ fn prepare_google_semantic_unit(
             SemanticProtectedTokenKind::Formula
                 | SemanticProtectedTokenKind::Citation
                 | SemanticProtectedTokenKind::Url
+                | SemanticProtectedTokenKind::LineBreak
                 | SemanticProtectedTokenKind::StyleBoundary
         );
         if no_translate {
@@ -1735,7 +1737,7 @@ fn semantic_cache_key(
     let prefix = if provider == TranslationProvider::Google {
         "google-semantic-v3"
     } else {
-        "semantic-v4"
+        "semantic-v5"
     };
     format!("{prefix}-{:016x}", hasher.finish())
 }
@@ -2207,6 +2209,31 @@ mod tests {
     }
 
     #[test]
+    fn google_semantic_html_round_trips_protected_line_breaks() {
+        let placeholder = "[[GLYPHST_LINE_BREAK_0000_AAAAAAAA]]";
+        let unit = test_semantic_unit(
+            "unit-google-line-break",
+            &format!("Speaker one: Hello.{placeholder}Speaker two: Hi."),
+            vec![test_semantic_token(
+                placeholder,
+                "\n",
+                SemanticProtectedTokenKind::LineBreak,
+            )],
+        );
+
+        let prepared = prepare_google_semantic_unit(&unit).unwrap();
+        assert!(
+            prepared
+                .html
+                .contains("<span translate=\"no\" class=\"notranslate\">\n</span>")
+        );
+        assert_eq!(
+            restore_google_semantic_html(&prepared, &prepared.html, "batch HTML").unwrap(),
+            unit.text
+        );
+    }
+
+    #[test]
     fn google_segmented_recovery_reassembles_natural_language_deterministically() {
         let unit = test_semantic_unit(
             "unit-google-segments",
@@ -2643,7 +2670,7 @@ mod tests {
             base_key,
             semantic_cache_key(&changed_endpoint, provider, None, &target, &unit)
         );
-        assert!(base_key.starts_with("semantic-v4-"));
+        assert!(base_key.starts_with("semantic-v5-"));
     }
 
     #[test]

@@ -14,10 +14,10 @@ pub use composition::{
     PdfComposer, PdfCompositionError, PdfCompositionReport, sanitize_source_pdf,
 };
 pub use document::{
-    Block, BlockContent, BlockKind, BlockRole, BoundingBox, ContinuationHint, ContinuationScope,
-    DocumentMetadata, DocumentV1, FontFamilyClass, Line, Page, PageGeometry, PolicyDecisionSource,
-    ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind, SourceProvenance, TextStyle,
-    TranslationPolicy,
+    BaselinePosition, Block, BlockContent, BlockKind, BlockRole, BoundingBox, ContinuationHint,
+    ContinuationScope, DocumentMetadata, DocumentV1, FontFamilyClass, Line, Page, PageGeometry,
+    PolicyDecisionSource, ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind,
+    SourceProvenance, TextStyle, TranslationPolicy,
 };
 pub use layout::{
     FontWeight, LayoutDocument, LayoutItem, LayoutOptions, LayoutPage, LayoutWarning,

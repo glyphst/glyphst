@@ -6,7 +6,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::settings::{AiApiStyle, ResolvedAiConfig};
+use crate::settings::{AiApiStyle, AiProvider, AiThinkingLevel, ResolvedAiConfig};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticTranslationInput {
@@ -185,7 +185,9 @@ continuations, but translate only its text field. Preserve every token matching 
 [[GLYPHST_TYPE_INDEX_CHECKSUM]] exactly, including brackets, spelling, order, and count. Preserve \
 adjacency too: when two placeholders touch in the input, return them touching with no inserted \
 text or whitespace. Translate every natural-language word, including words immediately beside a \
-placeholder. Preserve \
+placeholder. For prompt and dialogue roles, translate natural-language bracketed headings, field \
+labels, and speaker labels too. Their line boundaries are semantic and are represented by protected \
+line-break placeholders, so preserve them exactly. Preserve \
 equations, citations, URLs, names, reference markers, identifiers, and paragraph meaning. PDF \
 line wrapping has already been normalized: do not introduce line breaks merely for visual \
 wrapping, do not put each sentence on a separate line or paragraph, and preserve blank-line \
@@ -287,6 +289,7 @@ fn request_openai_payload_inner(
     if structured_output {
         body["response_format"] = json!({"type": "json_object"});
     }
+    apply_translation_thinking_mode(&mut body, settings);
     let mut request = client.post(url).json(&body);
     if !settings.api_key.is_empty() {
         request = request.bearer_auth(&settings.api_key);
@@ -298,6 +301,13 @@ fn request_openai_payload_inner(
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| invalid_response_message(settings.provider.label()))
+}
+
+fn apply_translation_thinking_mode(body: &mut Value, settings: &ResolvedAiConfig) {
+    if settings.provider == AiProvider::DeepSeek && settings.thinking_level == AiThinkingLevel::Off
+    {
+        body["thinking"] = json!({"type": "disabled"});
+    }
 }
 
 fn request_anthropic(
@@ -736,5 +746,22 @@ mod tests {
             anthropic_max_tokens(&json!({"text": "x".repeat(20_000)})),
             8192
         );
+    }
+
+    #[test]
+    fn deepseek_translation_explicitly_disables_thinking() {
+        let settings = ResolvedAiConfig {
+            provider: AiProvider::DeepSeek,
+            model: "deepseek-v4-flash".to_string(),
+            api_key: String::new(),
+            base_url: "https://api.deepseek.com".to_string(),
+            base_url_overridden: false,
+            thinking_level: AiThinkingLevel::Off,
+        };
+        let mut body = json!({"model": settings.model});
+
+        apply_translation_thinking_mode(&mut body, &settings);
+
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
     }
 }

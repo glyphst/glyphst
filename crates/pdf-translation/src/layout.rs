@@ -17,32 +17,6 @@ pub struct LayoutDocument {
     pub overflow_policy: OverflowPolicy,
 }
 
-impl LayoutDocument {
-    pub fn preserve_block_on_overflow(&mut self, block_id: &str) -> bool {
-        for page in &mut self.pages {
-            let Some(index) = page.items.iter().position(|item| item.block_id == block_id) else {
-                continue;
-            };
-            let item = page.items.remove(index);
-            if !self
-                .preserved_on_overflow
-                .iter()
-                .any(|preserved| preserved == block_id)
-            {
-                self.preserved_on_overflow.push(block_id.to_string());
-            }
-            self.warnings.push(LayoutWarning {
-                unit_id: item.unit_id,
-                message: format!(
-                    "preserved_on_overflow: source block {block_id} was retained unchanged"
-                ),
-            });
-            return true;
-        }
-        false
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayoutPage {
     pub page_index: usize,
@@ -398,7 +372,9 @@ fn role_base_font(role: BlockRole, body_font: f32) -> f32 {
     match role {
         BlockRole::Title => (body_font * 1.85).clamp(15.0, 24.0),
         BlockRole::Heading => (body_font * 1.28).clamp(11.0, 17.0),
-        BlockRole::Abstract | BlockRole::Body => body_font,
+        BlockRole::Abstract | BlockRole::Body | BlockRole::Prompt | BlockRole::Dialogue => {
+            body_font
+        }
         BlockRole::TableOfContents => (body_font * 0.92).clamp(8.0, 11.0),
         BlockRole::FigureCaption | BlockRole::TableCaption => (body_font * 0.86).clamp(7.5, 10.5),
         BlockRole::Footnote => (body_font * 0.78).clamp(6.8, 9.0),
@@ -520,20 +496,23 @@ fn source_typography(block: &Block, body_font: f32) -> SourceTypography {
         .metadata
         .get("justify")
         .and_then(|value| value.as_bool())
-        .unwrap_or(block.role == BlockRole::Body);
+        .unwrap_or(matches!(block.role, BlockRole::Body | BlockRole::Prompt));
     SourceTypography {
         style,
         font_size_pt: round(font_size),
         leading_em: round(leading_em),
         first_line_indent_pt: round(first_line_indent_pt),
         justify,
-        preserve_line_breaks: matches!(block.role, BlockRole::TableOfContents | BlockRole::Code)
-            || looks_like_dialogue(&block.content.text),
+        preserve_line_breaks: matches!(
+            block.role,
+            BlockRole::Prompt | BlockRole::Dialogue | BlockRole::TableOfContents | BlockRole::Code
+        ) || looks_like_dialogue(&block.content.text),
     }
 }
 
 fn typography_styles_match(left: &TextStyle, right: &TextStyle) -> bool {
     left.font_class == right.font_class
+        && left.baseline_position == right.baseline_position
         && left.bold == right.bold
         && left.italic == right.italic
         && left.underline == right.underline
@@ -547,19 +526,28 @@ fn typography_styles_match(left: &TextStyle, right: &TextStyle) -> bool {
 }
 
 fn looks_like_dialogue(text: &str) -> bool {
-    let lines = text
+    let labels = text
         .lines()
-        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let (speaker, text) = line.split_once([':', '：'])?;
+            let speaker = speaker.trim();
+            let words = speaker.split_whitespace().collect::<Vec<_>>();
+            (!text.trim().is_empty()
+                && speaker.chars().count() <= 24
+                && (1..=3).contains(&words.len())
+                && words.iter().all(|word| {
+                    word.chars().all(|character| {
+                        character.is_alphabetic() || matches!(character, '-' | '\'' | '’')
+                    })
+                }))
+            .then(|| speaker.to_lowercase())
+        })
         .collect::<Vec<_>>();
-    lines.len() >= 2
-        && lines
+    labels.len() >= 3
+        && labels
             .iter()
-            .filter(|line| {
-                line.split_once([':', '：']).is_some_and(|(speaker, _)| {
-                    !speaker.trim().is_empty() && speaker.chars().count() <= 24
-                })
-            })
-            .count()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
             >= 2
 }
 
@@ -647,50 +635,5 @@ mod tests {
         );
         assert!(!parts[0].is_empty());
         assert!(!parts[1].is_empty());
-    }
-
-    #[test]
-    fn overflowing_block_can_fall_back_to_its_preserved_source() {
-        let mut layout = LayoutDocument {
-            pages: vec![LayoutPage {
-                page_index: 0,
-                geometry: PageGeometry::new(100.0, 100.0),
-                items: vec![LayoutItem {
-                    unit_id: "unit-block".to_string(),
-                    block_id: "block".to_string(),
-                    page_index: 0,
-                    source_bbox: BoundingBox::new(10.0, 10.0, 90.0, 30.0),
-                    source_regions: Vec::new(),
-                    bbox: BoundingBox::new(10.0, 10.0, 90.0, 30.0),
-                    text: "translated text".to_string(),
-                    role: BlockRole::Body,
-                    source_font_size_pt: 10.0,
-                    font_size_pt: 10.0,
-                    minimum_font_size_pt: 7.0,
-                    emergency_minimum_font_size_pt: 5.0,
-                    leading_em: 1.2,
-                    minimum_leading_em: 0.9,
-                    font_weight: FontWeight::Regular,
-                    font_class: FontFamilyClass::Serif,
-                    italic: false,
-                    underline: false,
-                    strikeout: false,
-                    color_argb: 0xff00_0000,
-                    styled_runs: Vec::new(),
-                    first_line_indent_pt: 0.0,
-                    justify: true,
-                    preserve_line_breaks: false,
-                }],
-            }],
-            warnings: Vec::new(),
-            preserved_on_overflow: Vec::new(),
-            overflow_policy: OverflowPolicy::Adaptive,
-        };
-
-        assert!(layout.preserve_block_on_overflow("block"));
-        assert!(layout.pages[0].items.is_empty());
-        assert_eq!(layout.preserved_on_overflow, ["block"]);
-        assert!(layout.warnings[0].message.contains("preserved_on_overflow"));
-        assert!(!layout.preserve_block_on_overflow("block"));
     }
 }

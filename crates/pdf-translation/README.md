@@ -25,9 +25,10 @@ style boundaries while producing repeatable CJK-shaped text, so geometry, typogr
 cleanup, and overflow can be tested without network access or API keys. The run is strict: any
 block that cannot fit at its normal minimum size fails with a `GLYPHST_OVERFLOW` diagnostic.
 
-The application uses adaptive fitting and, if a translated block still cannot fit, preserves that
-one source block instead of failing the entire PDF. The deterministic gate remains strict so layout
-regressions cannot hide behind that fallback.
+The application uses adaptive exact fitting: it bisects for the largest font size that fits, then
+the largest line leading at that size. Its technical floor is intentionally lower than the strict
+sample gate, and it never removes a translated block or silently restores source text after an
+overflow. Structural and searchable-text validation reject incomplete output.
 
 ## Design reference
 

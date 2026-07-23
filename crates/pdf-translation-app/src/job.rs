@@ -1,4 +1,4 @@
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -29,7 +29,7 @@ use crate::backend::GlyphstTranslationBackend;
 use crate::reviewer::GlyphstPolicyReviewer;
 
 const ARTIFACT_VERSION: u32 = 3;
-const PIPELINE_VERSION: &str = "native-rust-v12-protected-layout";
+const PIPELINE_VERSION: &str = "native-rust-v14-exact-fit";
 const CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone)]
@@ -333,8 +333,8 @@ impl PdfTranslationService {
             Some(0),
             Some(1),
         );
-        let mut layout =
-            build_layout_with_options(&translated, LayoutOptions::application_default());
+        let layout = build_layout_with_options(&translated, LayoutOptions::application_default());
+        validate_layout_completeness(&translated, &layout)?;
         write_json(job_directory.join("layout.json"), &layout)?;
         progress.finish_stage(PdfTranslationStage::Layout, "Translated layout prepared");
 
@@ -344,54 +344,31 @@ impl PdfTranslationService {
             None,
             None,
         );
-        let initial_layout_items = layout
-            .pages
-            .iter()
-            .map(|page| page.items.len())
-            .sum::<usize>();
-        let mut overflow_attempt = 0usize;
-        let typst_output = loop {
-            let sanitized_source_path = job_directory.join(if overflow_attempt == 0 {
-                "source-sanitized.pdf".to_string()
-            } else {
-                format!("source-sanitized-fallback-{overflow_attempt}.pdf")
-            });
-            sanitize_source_pdf(
-                &pipeline_request.source_path,
-                &sanitized_source_path,
-                &layout,
-                &cancellation,
-            )
-            .map_err(|error| PdfTranslationError {
-                stage: PdfTranslationStage::Compiling,
-                message: format!("Could not remove source text from translated regions: {error}"),
-                retryable: false,
-            })?;
-            match self.typst.compile_translated_pdf(
+        let sanitized_source_path = job_directory.join("source-sanitized.pdf");
+        sanitize_source_pdf(
+            &pipeline_request.source_path,
+            &sanitized_source_path,
+            &layout,
+            &cancellation,
+        )
+        .map_err(|error| PdfTranslationError {
+            stage: PdfTranslationStage::Compiling,
+            message: format!("Could not remove source text from translated regions: {error}"),
+            retryable: false,
+        })?;
+        let typst_output = self
+            .typst
+            .compile_translated_pdf(
                 &sanitized_source_path,
                 &layout,
                 &job_directory,
                 &cancellation,
-            ) {
-                Ok(output) => break output,
-                Err(error)
-                    if overflow_attempt < initial_layout_items
-                        && typst_overflow_block_id(&error.message).is_some_and(|block_id| {
-                            layout.preserve_block_on_overflow(&block_id)
-                        }) =>
-                {
-                    overflow_attempt += 1;
-                    write_json(job_directory.join("layout.json"), &layout)?;
-                }
-                Err(error) => {
-                    return Err(PdfTranslationError {
-                        stage: PdfTranslationStage::Compiling,
-                        message: error.message,
-                        retryable: false,
-                    });
-                }
-            }
-        };
+            )
+            .map_err(|error| PdfTranslationError {
+                stage: PdfTranslationStage::Compiling,
+                message: error.message,
+                retryable: false,
+            })?;
         write_json(job_directory.join("layout.json"), &layout)?;
         progress.finish_stage(PdfTranslationStage::Compiling, "Typst PDF compiled");
 
@@ -767,6 +744,7 @@ fn validate_output(
     translated: &TranslatedDocument,
     layout: &LayoutDocument,
 ) -> Result<(), PdfTranslationError> {
+    validate_layout_completeness(translated, layout)?;
     let source = Document::open(source_path).map_err(|error| {
         PdfTranslationError::stage(
             PdfTranslationStage::Validating,
@@ -801,7 +779,7 @@ fn validate_output(
             "Translated PDF page count does not match the source",
         ));
     }
-    let mut extracted_text = String::new();
+    let mut extracted_pages = Vec::with_capacity(output_pages as usize);
     for page_index in 0..output_pages {
         let page = output.load_page(page_index).map_err(|error| {
             PdfTranslationError::stage(
@@ -820,54 +798,80 @@ fn validate_output(
                     error,
                 )
             })?;
-        extracted_text.push_str(&text);
+        extracted_pages.push(normalize_searchable_text(&text));
     }
-    let rendered_blocks = layout
-        .pages
-        .iter()
-        .flat_map(|page| page.items.iter())
-        .map(|item| item.block_id.as_str())
-        .collect::<std::collections::HashSet<_>>();
-    let expected = translated
-        .units
-        .iter()
-        .filter(|unit| {
-            unit.member_block_ids
-                .iter()
-                .any(|block_id| rendered_blocks.contains(block_id.as_str()))
-        })
-        .filter(|unit| unit.translated_text.chars().count() >= 4)
-        .take(8)
-        .collect::<Vec<_>>();
-    let found = expected
-        .iter()
-        .filter(|unit| {
-            let sample = unit
-                .translated_text
-                .split_whitespace()
-                .take(5)
-                .collect::<Vec<_>>()
-                .join(" ");
-            !sample.is_empty() && extracted_text.contains(&sample)
-        })
-        .count();
-    if !expected.is_empty() && found == 0 {
-        return Err(PdfTranslationError::message(
-            PdfTranslationStage::Validating,
-            "Translated PDF does not contain searchable translated text",
-        ));
+    for page in &layout.pages {
+        let Some(extracted) = extracted_pages.get(page.page_index) else {
+            continue;
+        };
+        for item in &page.items {
+            let expected = normalize_searchable_text(&item.text);
+            if expected.chars().count() < 2 || extracted.contains(&expected) {
+                continue;
+            }
+            let preview = expected.chars().take(48).collect::<String>();
+            return Err(PdfTranslationError::message(
+                PdfTranslationStage::Validating,
+                format!(
+                    "Translated PDF is missing searchable content for block {} ({preview})",
+                    item.block_id
+                ),
+            ));
+        }
     }
     Ok(())
 }
 
-fn typst_overflow_block_id(message: &str) -> Option<String> {
-    let marker = "GLYPHST_OVERFLOW:";
-    let start = message.find(marker)? + marker.len();
-    let id = message[start..]
-        .chars()
-        .take_while(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-        .collect::<String>();
-    (!id.is_empty()).then_some(id)
+fn validate_layout_completeness(
+    translated: &TranslatedDocument,
+    layout: &LayoutDocument,
+) -> Result<(), PdfTranslationError> {
+    if !layout.preserved_on_overflow.is_empty() {
+        return Err(PdfTranslationError::message(
+            PdfTranslationStage::Layout,
+            "Translated layout attempted to preserve source text after overflow",
+        ));
+    }
+    let items = layout
+        .pages
+        .iter()
+        .flat_map(|page| page.items.iter())
+        .map(|item| (item.block_id.as_str(), item))
+        .collect::<HashMap<_, _>>();
+    for unit in &translated.units {
+        let rendered = unit
+            .member_block_ids
+            .iter()
+            .filter_map(|block_id| items.get(block_id.as_str()))
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let expected = normalize_layout_text(&unit.translated_text);
+        let rendered = normalize_layout_text(&rendered);
+        if expected.is_empty() || expected != rendered {
+            return Err(PdfTranslationError::message(
+                PdfTranslationStage::Layout,
+                format!(
+                    "Translated layout does not contain the complete text for unit {}",
+                    unit.id
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_layout_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+fn normalize_searchable_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn request_fingerprint(
@@ -1146,17 +1150,6 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extracts_only_the_overflowing_block_id_from_typst_diagnostics() {
-        assert_eq!(
-            typst_overflow_block_id(
-                "error: panicked with: GLYPHST_OVERFLOW:p001-b0029-s01\n  ┌─ file.typ"
-            ),
-            Some("p001-b0029-s01".to_string())
-        );
-        assert_eq!(typst_overflow_block_id("ordinary Typst error"), None);
-    }
 
     #[test]
     fn fingerprint_does_not_include_ocr_or_translation_secrets() {
