@@ -13,6 +13,7 @@ Relevent projects are cloned in `probe` directory for reference purpose:
 - `lucide` (Icon)
 - `gpui-component` (Third-party GPUI Components)
 - `ratain-pdf` (quality PDF translation project)
+- `typst` (Typst)
 
 ## Dev Note
 
