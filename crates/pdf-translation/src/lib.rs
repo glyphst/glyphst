@@ -1,10 +1,10 @@
 mod cancellation;
 mod composition;
 mod document;
-mod job;
 mod layout;
 mod native;
 mod paddle;
+mod policy;
 mod progress;
 mod translate;
 mod typst;
@@ -15,32 +15,36 @@ pub use composition::{
 };
 pub use document::{
     Block, BlockContent, BlockKind, BlockRole, BoundingBox, ContinuationHint, ContinuationScope,
-    DocumentMetadata, DocumentV1, Line, Page, PageGeometry, Segment, SegmentKind, SourceProvenance,
-    TextStyle, TranslationPolicy,
-};
-pub use job::{
-    ArtifactGeometry, PdfTranslationArtifactManifest, PdfTranslationError, PdfTranslationRequest,
-    PdfTranslationResult, PdfTranslationService,
+    DocumentMetadata, DocumentV1, FontFamilyClass, Line, Page, PageGeometry, PolicyDecisionSource,
+    ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind, SourceProvenance, TextStyle,
+    TranslationPolicy,
 };
 pub use layout::{
-    FontWeight, LayoutDocument, LayoutItem, LayoutPage, LayoutWarning, build_layout,
-    split_text_for_layout_boxes,
+    FontWeight, LayoutDocument, LayoutItem, LayoutOptions, LayoutPage, LayoutWarning,
+    OverflowPolicy, build_layout, build_layout_with_options, split_text_for_layout_boxes,
 };
 pub use native::{
-    PdfInspection, PdfPageProfile, extract_native_document, inspect_pdf, reconcile_ocr_geometry,
+    PdfInspection, PdfPageProfile, extract_native_document, fuse_native_with_ocr, inspect_pdf,
+    reconcile_ocr_geometry,
 };
 pub use paddle::{
     PaddleClient, PaddleClientConfig, PaddleError, PaddleErrorCategory, PaddleJobProgress,
     PaddleProbeResult, normalize_paddle_payload,
 };
+pub use policy::{
+    POLICY_REVIEW_CONFIDENCE_THRESHOLD, PolicyReviewBlock, PolicyReviewDecision, PolicyReviewError,
+    PolicyReviewRequest, TranslationPolicyReviewer, enforce_protected_regions,
+    review_translation_policies,
+};
 pub use progress::{
     PdfTranslationProgress, PdfTranslationStage, ProgressTracker, TranslationProgressSink,
 };
 pub use translate::{
-    GlyphstTranslationBackend, ProtectedText, ProtectedToken, ProtectedTokenKind,
+    ProtectedText, ProtectedToken, ProtectedTokenKind, StyleDefinition, StyledRun,
     TranslatedDocument, TranslatedUnit, TranslationBackend, TranslationBackendError,
-    TranslationDocumentError, TranslationUnit, TranslationUnitOutput, protect_text,
-    translate_document,
+    TranslationDocumentError, TranslationErrorCategory, TranslationFailureDiagnostic,
+    TranslationQueueStats, TranslationRunProgress, TranslationRunSnapshot, TranslationUnit,
+    TranslationUnitOutput, protect_text, translate_document, translate_document_resuming,
 };
 pub use typst::{
     TypstCompiler, TypstCompilerConfig, TypstError, TypstOutput, generate_translated_pdf_source,

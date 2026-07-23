@@ -6,14 +6,9 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use glyphst_settings::{Settings, TranslationProvider};
-use glyphst_translation::{
-    LanguageCode, SemanticProtectedToken, SemanticProtectedTokenKind, SemanticTranslationUnit,
-    TranslationError, TranslationErrorCategory, TranslationService,
-};
 use serde::{Deserialize, Serialize};
 
-use crate::{BlockRole, CancellationToken, DocumentV1};
+use crate::{Block, BlockRole, CancellationToken, DocumentV1, TextStyle};
 
 const MAX_BATCH_UNITS: usize = 6;
 const MAX_BATCH_CHARACTERS: usize = 6_000;
@@ -31,6 +26,8 @@ pub struct TranslationUnit {
     pub role: BlockRole,
     pub source_text: String,
     pub protected: ProtectedText,
+    #[serde(default)]
+    pub style_definitions: Vec<StyleDefinition>,
     pub context_before: Option<String>,
     pub context_after: Option<String>,
 }
@@ -51,7 +48,24 @@ pub struct TranslatedUnit {
     pub source_text: String,
     pub translated_text: String,
     #[serde(default)]
+    pub styled_runs: Vec<StyledRun>,
+    #[serde(default)]
+    pub style_fallback: bool,
+    #[serde(default)]
     pub semantic_hash: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StyleDefinition {
+    pub id: usize,
+    pub style: TextStyle,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StyledRun {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<TextStyle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -89,6 +103,47 @@ impl ProtectedText {
         }
         Ok(restored)
     }
+
+    fn restore_translation(&self, translated: &str) -> Result<(String, bool), String> {
+        if translated.trim().is_empty() {
+            return Err("translation is empty".to_string());
+        }
+        let mut style_fallback = false;
+        for token in &self.tokens {
+            let count = translated.matches(&token.placeholder).count();
+            if matches!(
+                token.kind,
+                ProtectedTokenKind::StyleStart | ProtectedTokenKind::StyleEnd
+            ) {
+                style_fallback |= count != 1;
+            } else if count != 1 {
+                return Err(format!(
+                    "placeholder {} occurred {count} times",
+                    token.placeholder
+                ));
+            }
+        }
+        for pair in self.tokens.windows(2) {
+            let adjacent = format!("{}{}", pair[0].placeholder, pair[1].placeholder);
+            if self.text.contains(&adjacent) && !translated.contains(&adjacent) {
+                return Err(format!(
+                    "adjacent placeholders {} and {} were separated",
+                    pair[0].placeholder, pair[1].placeholder
+                ));
+            }
+        }
+        let mut restored = translated.to_string();
+        for token in &self.tokens {
+            if restored.contains(&token.placeholder) {
+                restored = restored.replace(&token.placeholder, &token.original);
+            }
+        }
+        restored = strip_style_placeholders(&restored);
+        if restored.contains("[[GLYPHST_") {
+            return Err("translation contains an unresolved placeholder".to_string());
+        }
+        Ok((restored, style_fallback))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +161,21 @@ pub enum ProtectedTokenKind {
     Url,
     NumericLiteral,
     Identifier,
+    StyleStart,
+    StyleEnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationErrorCategory {
+    Authentication,
+    RateLimited,
+    ServiceUnavailable,
+    Timeout,
+    InvalidRequest,
+    InvalidResponse,
+    Network,
+    Cache,
 }
 
 pub trait TranslationBackend: Sync {
@@ -116,6 +186,14 @@ pub trait TranslationBackend: Sync {
 
     fn reject_unchanged_output(&self) -> bool {
         true
+    }
+
+    fn validate_translated_text(
+        &self,
+        _unit: &TranslationUnit,
+        _translated: &str,
+    ) -> Result<(), String> {
+        Ok(())
     }
 
     fn cache_validated_translation(&self, _unit: &TranslationUnit, _translated: &str) {}
@@ -165,129 +243,6 @@ impl fmt::Display for TranslationBackendError {
 }
 
 impl std::error::Error for TranslationBackendError {}
-
-impl From<TranslationError> for TranslationBackendError {
-    fn from(error: TranslationError) -> Self {
-        Self {
-            category: Some(error.category),
-            message: error.message,
-            status: error.status,
-            retryable: error.retryable,
-            retry_after: error.retry_after,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct GlyphstTranslationBackend {
-    service: TranslationService,
-    settings: Settings,
-    provider: TranslationProvider,
-    source_language: Option<LanguageCode>,
-    target_language: LanguageCode,
-}
-
-impl GlyphstTranslationBackend {
-    pub fn new(
-        service: TranslationService,
-        settings: Settings,
-        source_language: Option<LanguageCode>,
-        target_language: LanguageCode,
-    ) -> Self {
-        let provider = settings.translation.active_provider;
-        Self {
-            service,
-            settings,
-            provider,
-            source_language,
-            target_language,
-        }
-    }
-}
-
-impl TranslationBackend for GlyphstTranslationBackend {
-    fn translate_batch(
-        &self,
-        units: &[TranslationUnit],
-    ) -> Result<Vec<TranslationUnitOutput>, TranslationBackendError> {
-        let semantic_units = units.iter().map(semantic_unit).collect();
-        self.service
-            .translate_semantic_batch(
-                &self.settings,
-                self.provider,
-                self.source_language.clone(),
-                self.target_language.clone(),
-                semantic_units,
-            )
-            .map(|translations| {
-                translations
-                    .into_iter()
-                    .map(|translation| TranslationUnitOutput {
-                        id: translation.id,
-                        text: translation.text,
-                        cached: translation.cached,
-                        validation_error: translation.validation_error,
-                    })
-                    .collect()
-            })
-            .map_err(Into::into)
-    }
-
-    fn reject_unchanged_output(&self) -> bool {
-        self.source_language
-            .as_ref()
-            .is_none_or(|source| source != &self.target_language)
-    }
-
-    fn cache_validated_translation(&self, unit: &TranslationUnit, translated: &str) {
-        self.service.cache_validated_semantic_translation(
-            &self.settings,
-            self.provider,
-            self.source_language.as_ref(),
-            &self.target_language,
-            &semantic_unit(unit),
-            translated,
-        );
-    }
-
-    fn cache_validated_translations(&self, translations: &[(TranslationUnit, String)]) {
-        let semantic_translations = translations
-            .iter()
-            .map(|(unit, translated)| (semantic_unit(unit), translated.clone()))
-            .collect::<Vec<_>>();
-        self.service.cache_validated_semantic_translations(
-            &self.settings,
-            self.provider,
-            self.source_language.as_ref(),
-            &self.target_language,
-            &semantic_translations,
-        );
-    }
-
-    fn supports_final_single_recovery(&self) -> bool {
-        self.provider == TranslationProvider::Ai
-    }
-
-    fn translate_single_recovery(
-        &self,
-        unit: &TranslationUnit,
-    ) -> Result<TranslationUnitOutput, TranslationBackendError> {
-        self.service
-            .translate_semantic_single_recovery(
-                &self.settings,
-                self.source_language.as_ref(),
-                &self.target_language,
-                semantic_unit(unit),
-            )
-            .map(|translation| TranslationUnitOutput {
-                id: translation.id,
-                text: translation.text,
-                cached: translation.cached,
-                validation_error: translation.validation_error,
-            })
-            .map_err(Into::into)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranslationDocumentError {
@@ -630,8 +585,15 @@ fn process_completed_request(
         let output = outputs.remove(&unit.id);
         let result = match output {
             Some(output) if output.validation_error.is_none() => {
-                validate_translation(&unit, &output.text, backend.reject_unchanged_output())
-                    .map(|translated| (translated, output.cached, output.text))
+                let normalized_output =
+                    normalize_translated_whitespace(&output.text, &unit.source_text, unit.role);
+                validate_translation(&unit, &normalized_output, backend.reject_unchanged_output())
+                    .and_then(|translated| {
+                        backend
+                            .validate_translated_text(&unit, &translated.text)
+                            .map(|()| translated)
+                    })
+                    .map(|translated| (translated, output.cached, normalized_output))
                     .map_err(|message| UnitFailure {
                         message,
                         retryable: true,
@@ -664,7 +626,7 @@ fn process_completed_request(
         };
 
         match result {
-            Ok((translated_text, cached, validated_output)) => {
+            Ok((translated, cached, validated_output)) => {
                 if !cached {
                     cache_entries.push((unit.clone(), validated_output));
                 } else {
@@ -680,7 +642,9 @@ fn process_completed_request(
                         member_block_ids: unit.member_block_ids,
                         role: unit.role,
                         source_text: unit.source_text,
-                        translated_text,
+                        translated_text: translated.text,
+                        styled_runs: translated.runs,
+                        style_fallback: translated.style_fallback,
                         semantic_hash,
                     },
                 );
@@ -825,11 +789,166 @@ fn protect_text_for_role(text: &str, role: BlockRole) -> ProtectedText {
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StyleBoundary {
+    offset: usize,
+    style_id: usize,
+    start: bool,
+}
+
+fn protect_block_text(block: &Block, role: BlockRole) -> (ProtectedText, Vec<StyleDefinition>) {
+    let source = block.content.text.trim();
+    let Some(dominant) = dominant_text_style(block) else {
+        return (protect_text_for_role(source, role), Vec::new());
+    };
+    let mut definitions = Vec::<StyleDefinition>::new();
+    let mut boundaries = Vec::<StyleBoundary>::new();
+    let mut search_from = 0usize;
+    for line in &block.content.lines {
+        let Some(relative_line_start) = source[search_from..].find(line.text.trim()) else {
+            continue;
+        };
+        let line_start = search_from + relative_line_start;
+        let mut segment_offset = line_start;
+        for segment in &line.segments {
+            let segment_text = segment.text.as_str();
+            let Some(relative_segment_start) = source[segment_offset..].find(segment_text) else {
+                continue;
+            };
+            let start = segment_offset + relative_segment_start;
+            let end = start + segment_text.len();
+            segment_offset = end;
+            if segment_text.trim().is_empty()
+                || !meaningful_style_difference(&dominant, &segment.style)
+            {
+                continue;
+            }
+            let style_id = definitions
+                .iter()
+                .find(|definition| definition.style == segment.style)
+                .map(|definition| definition.id)
+                .unwrap_or_else(|| {
+                    let id = definitions.len();
+                    definitions.push(StyleDefinition {
+                        id,
+                        style: segment.style.clone(),
+                    });
+                    id
+                });
+            boundaries.push(StyleBoundary {
+                offset: start,
+                style_id,
+                start: true,
+            });
+            boundaries.push(StyleBoundary {
+                offset: end,
+                style_id,
+                start: false,
+            });
+        }
+        search_from = line_start + line.text.trim().len();
+    }
+    boundaries.sort_by(|left, right| {
+        left.offset
+            .cmp(&right.offset)
+            .then(left.start.cmp(&right.start))
+    });
+    if boundaries.is_empty() {
+        return (protect_text_for_role(source, role), Vec::new());
+    }
+    (
+        protect_text_with_style_boundaries(
+            source,
+            !matches!(
+                role,
+                BlockRole::Title | BlockRole::Heading | BlockRole::TableOfContents
+            ),
+            &boundaries,
+        ),
+        definitions,
+    )
+}
+
+fn dominant_text_style(block: &Block) -> Option<TextStyle> {
+    let mut candidates = Vec::<(TextStyle, usize)>::new();
+    for segment in block
+        .content
+        .lines
+        .iter()
+        .flat_map(|line| line.segments.iter())
+    {
+        let weight = segment
+            .text
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .count();
+        if weight == 0 {
+            continue;
+        }
+        if let Some((_, total)) = candidates
+            .iter_mut()
+            .find(|(style, _)| !meaningful_style_difference(style, &segment.style))
+        {
+            *total += weight;
+        } else {
+            candidates.push((segment.style.clone(), weight));
+        }
+    }
+    candidates
+        .into_iter()
+        .max_by_key(|(_, weight)| *weight)
+        .map(|(style, _)| style)
+}
+
+fn meaningful_style_difference(left: &TextStyle, right: &TextStyle) -> bool {
+    left.font_class != right.font_class
+        || left.bold != right.bold
+        || left.italic != right.italic
+        || left.underline != right.underline
+        || left.strikeout != right.strikeout
+        || left.color_argb != right.color_argb
+        || match (left.font_size, right.font_size) {
+            (Some(left), Some(right)) => (left - right).abs() > 0.5,
+            (None, None) => false,
+            _ => true,
+        }
+}
+
 fn protect_text_with_identifier_policy(text: &str, protect_identifiers: bool) -> ProtectedText {
+    protect_text_with_style_boundaries(text, protect_identifiers, &[])
+}
+
+fn protect_text_with_style_boundaries(
+    text: &str,
+    protect_identifiers: bool,
+    boundaries: &[StyleBoundary],
+) -> ProtectedText {
     let mut protected = String::with_capacity(text.len());
     let mut tokens = Vec::new();
     let mut cursor = 0;
-    while cursor < text.len() {
+    let mut boundary_index = 0;
+    while cursor <= text.len() {
+        while let Some(boundary) = boundaries.get(boundary_index)
+            && boundary.offset <= cursor
+        {
+            let kind = if boundary.start {
+                ProtectedTokenKind::StyleStart
+            } else {
+                ProtectedTokenKind::StyleEnd
+            };
+            let original = style_marker(boundary.style_id, boundary.start);
+            let placeholder = placeholder(kind, tokens.len(), &original);
+            protected.push_str(&placeholder);
+            tokens.push(ProtectedToken {
+                placeholder,
+                original,
+                kind,
+            });
+            boundary_index += 1;
+        }
+        if cursor == text.len() {
+            break;
+        }
         let rest = &text[cursor..];
         if let Some((kind, length)) = protected_prefix(rest, protect_identifiers) {
             let original = &rest[..length];
@@ -856,6 +975,153 @@ fn protect_text_with_identifier_policy(text: &str, protect_identifiers: bool) ->
     }
 }
 
+fn style_marker(style_id: usize, start: bool) -> String {
+    format!(
+        "\u{e000}{}{:04}\u{e001}",
+        if start { 'S' } else { 'E' },
+        style_id
+    )
+}
+
+fn strip_style_placeholders(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut remaining = value;
+    while let Some(start) = remaining.find("[[GLYPHST_STYLE_") {
+        output.push_str(&remaining[..start]);
+        let token = &remaining[start..];
+        let Some(end) = token.find("]]") else {
+            output.push_str(token);
+            return output;
+        };
+        remaining = &token[end + 2..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+fn parse_styled_translation(
+    value: &str,
+    definitions: &[StyleDefinition],
+) -> (String, Vec<StyledRun>, bool) {
+    let mut runs = Vec::<StyledRun>::new();
+    let mut active_style = None::<usize>;
+    let mut cursor = 0usize;
+    let mut invalid = false;
+    while let Some(relative_start) = value[cursor..].find('\u{e000}') {
+        let start = cursor + relative_start;
+        append_styled_run(
+            &mut runs,
+            &value[cursor..start],
+            active_style.and_then(|id| {
+                definitions
+                    .iter()
+                    .find(|definition| definition.id == id)
+                    .map(|definition| definition.style.clone())
+            }),
+        );
+        let marker = &value[start + '\u{e000}'.len_utf8()..];
+        let Some(relative_end) = marker.find('\u{e001}') else {
+            invalid = true;
+            break;
+        };
+        let marker_text = &marker[..relative_end];
+        let marker_end = start + '\u{e000}'.len_utf8() + relative_end + '\u{e001}'.len_utf8();
+        let parsed = marker_text
+            .get(1..)
+            .and_then(|value| value.parse::<usize>().ok());
+        match (marker_text.chars().next(), parsed) {
+            (Some('S'), Some(style_id))
+                if active_style.is_none()
+                    && definitions
+                        .iter()
+                        .any(|definition| definition.id == style_id) =>
+            {
+                active_style = Some(style_id);
+            }
+            (Some('E'), Some(style_id)) if active_style == Some(style_id) => {
+                active_style = None;
+            }
+            _ => invalid = true,
+        }
+        cursor = marker_end;
+    }
+    if !invalid {
+        append_styled_run(
+            &mut runs,
+            &value[cursor..],
+            active_style.and_then(|id| {
+                definitions
+                    .iter()
+                    .find(|definition| definition.id == id)
+                    .map(|definition| definition.style.clone())
+            }),
+        );
+        invalid |= active_style.is_some();
+    }
+    if invalid {
+        let plain = strip_style_markers(value).trim().to_string();
+        let runs = (!plain.is_empty())
+            .then(|| StyledRun {
+                text: plain.clone(),
+                style: None,
+            })
+            .into_iter()
+            .collect();
+        return (plain, runs, true);
+    }
+    trim_styled_runs(&mut runs);
+    let plain = runs.iter().map(|run| run.text.as_str()).collect::<String>();
+    (plain, runs, false)
+}
+
+fn append_styled_run(runs: &mut Vec<StyledRun>, text: &str, style: Option<TextStyle>) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = runs.last_mut()
+        && last.style == style
+    {
+        last.text.push_str(text);
+    } else {
+        runs.push(StyledRun {
+            text: text.to_string(),
+            style,
+        });
+    }
+}
+
+fn trim_styled_runs(runs: &mut Vec<StyledRun>) {
+    while runs.first().is_some_and(|run| run.text.trim().is_empty()) {
+        runs.remove(0);
+    }
+    while runs.last().is_some_and(|run| run.text.trim().is_empty()) {
+        runs.pop();
+    }
+    if let Some(first) = runs.first_mut() {
+        first.text = first.text.trim_start().to_string();
+    }
+    if let Some(last) = runs.last_mut() {
+        last.text = last.text.trim_end().to_string();
+    }
+    runs.retain(|run| !run.text.is_empty());
+}
+
+fn strip_style_markers(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut remaining = value;
+    while let Some(start) = remaining.find('\u{e000}') {
+        output.push_str(&remaining[..start]);
+        let marker = &remaining[start + '\u{e000}'.len_utf8()..];
+        let Some(end) = marker.find('\u{e001}') else {
+            output.push_str(marker);
+            return output;
+        };
+        remaining = &marker[end + '\u{e001}'.len_utf8()..];
+    }
+    output.push_str(remaining);
+    output
+}
+
 fn build_translation_units(document: &DocumentV1) -> Vec<TranslationUnit> {
     let mut units = Vec::<TranslationUnit>::new();
     let mut continuation_units = HashMap::<String, usize>::new();
@@ -872,21 +1138,28 @@ fn build_translation_units(document: &DocumentV1) -> Vec<TranslationUnit> {
                 && let Some(unit_index) = continuation_units.get(group_id).copied()
             {
                 let unit = &mut units[unit_index];
-                append_continuation_text(&mut unit.source_text, &block.content.text);
+                append_continuation_text(
+                    &mut unit.source_text,
+                    &normalize_pdf_hard_wraps(&block.content.text, block.role),
+                );
                 unit.member_block_ids.push(block.id.clone());
                 unit.protected = protect_text_for_role(&unit.source_text, unit.role);
+                unit.style_definitions.clear();
                 continue;
             }
             let id = continuation_id
                 .clone()
                 .unwrap_or_else(|| format!("unit-{}", block.id));
-            let source_text = block.content.text.trim().to_string();
+            let source_text = normalize_pdf_hard_wraps(&block.content.text, block.role);
+            let (mut protected, style_definitions) = protect_block_text(block, block.role);
+            protected.text = normalize_pdf_hard_wraps(&protected.text, block.role);
             let unit_index = units.len();
             units.push(TranslationUnit {
                 id,
                 member_block_ids: vec![block.id.clone()],
                 role: block.role,
-                protected: protect_text_for_role(&source_text, block.role),
+                protected,
+                style_definitions,
                 source_text,
                 context_before: None,
                 context_after: None,
@@ -973,36 +1246,6 @@ fn plan_translation_requests(units: &[TranslationUnit]) -> Vec<PlannedRequest> {
     requests
 }
 
-fn semantic_unit(unit: &TranslationUnit) -> SemanticTranslationUnit {
-    SemanticTranslationUnit {
-        id: unit.id.clone(),
-        role: role_name(unit.role).to_string(),
-        text: unit.protected.text.clone(),
-        protected_tokens: unit
-            .protected
-            .tokens
-            .iter()
-            .map(|token| SemanticProtectedToken {
-                placeholder: token.placeholder.clone(),
-                original: token.original.clone(),
-                kind: semantic_protected_token_kind(token.kind),
-            })
-            .collect(),
-        context_before: unit.context_before.clone(),
-        context_after: unit.context_after.clone(),
-    }
-}
-
-fn semantic_protected_token_kind(kind: ProtectedTokenKind) -> SemanticProtectedTokenKind {
-    match kind {
-        ProtectedTokenKind::Formula => SemanticProtectedTokenKind::Formula,
-        ProtectedTokenKind::Citation => SemanticProtectedTokenKind::Citation,
-        ProtectedTokenKind::Url => SemanticProtectedTokenKind::Url,
-        ProtectedTokenKind::NumericLiteral => SemanticProtectedTokenKind::NumericLiteral,
-        ProtectedTokenKind::Identifier => SemanticProtectedTokenKind::Identifier,
-    }
-}
-
 fn semantic_unit_hash(unit: &TranslationUnit) -> u64 {
     let mut hasher = DefaultHasher::new();
     unit.id.hash(&mut hasher);
@@ -1010,6 +1253,9 @@ fn semantic_unit_hash(unit: &TranslationUnit) -> u64 {
     role_name(unit.role).hash(&mut hasher);
     unit.source_text.hash(&mut hasher);
     unit.protected.text.hash(&mut hasher);
+    if let Ok(styles) = serde_json::to_string(&unit.style_definitions) {
+        styles.hash(&mut hasher);
+    }
     unit.context_before.hash(&mut hasher);
     unit.context_after.hash(&mut hasher);
     hasher.finish()
@@ -1026,26 +1272,38 @@ fn sleep_cancellable(duration: Duration, cancellation: &CancellationToken) -> Re
     Ok(())
 }
 
+struct ValidatedTranslation {
+    text: String,
+    runs: Vec<StyledRun>,
+    style_fallback: bool,
+}
+
 fn validate_translation(
     unit: &TranslationUnit,
     translated: &str,
     reject_unchanged: bool,
-) -> Result<String, String> {
-    let restored = unit.protected.validate_and_restore(translated)?;
+) -> Result<ValidatedTranslation, String> {
+    let (restored, marker_fallback) = unit.protected.restore_translation(translated)?;
+    let (plain, runs, parse_fallback) =
+        parse_styled_translation(&restored, &unit.style_definitions);
     if reject_unchanged
         && should_reject_unchanged(&unit.source_text)
-        && normalize_for_comparison(&restored) == normalize_for_comparison(&unit.source_text)
+        && normalize_for_comparison(&plain) == normalize_for_comparison(&unit.source_text)
     {
         return Err("translation is unchanged from the source".to_string());
     }
-    let lowercase = restored.trim().to_ascii_lowercase();
+    let lowercase = plain.trim().to_ascii_lowercase();
     if lowercase.starts_with("i cannot translate")
         || lowercase.starts_with("i can't translate")
         || lowercase.starts_with("unable to translate")
     {
         return Err("translation provider refused the unit".to_string());
     }
-    Ok(restored.trim().to_string())
+    Ok(ValidatedTranslation {
+        text: plain.trim().to_string(),
+        runs,
+        style_fallback: marker_fallback || parse_fallback,
+    })
 }
 
 fn validate_resumed_translation(
@@ -1060,6 +1318,12 @@ fn validate_resumed_translation(
         .protected
         .tokens
         .iter()
+        .filter(|token| {
+            !matches!(
+                token.kind,
+                ProtectedTokenKind::StyleStart | ProtectedTokenKind::StyleEnd
+            )
+        })
         .any(|token| !translated.contains(&token.original))
     {
         return false;
@@ -1124,18 +1388,7 @@ fn protected_prefix(text: &str, protect_identifiers: bool) -> Option<(ProtectedT
         .next()
         .is_some_and(|character| character.is_ascii_digit())
     {
-        let length = text
-            .char_indices()
-            .take_while(|(_, character)| {
-                character.is_ascii_alphanumeric()
-                    || matches!(
-                        character,
-                        '.' | ',' | '%' | '°' | '/' | ':' | '-' | '+' | '×'
-                    )
-            })
-            .map(|(index, character)| index + character.len_utf8())
-            .last()
-            .unwrap_or(0);
+        let length = numeric_literal_length(text);
         if length > 0 {
             return Some((ProtectedTokenKind::NumericLiteral, length));
         }
@@ -1154,7 +1407,7 @@ fn protected_prefix(text: &str, protect_identifiers: bool) -> Option<(ProtectedT
             .map(|(index, character)| index + character.len_utf8())
             .last()
             .unwrap_or(0);
-        let candidate = &text[..length];
+        let candidate = text[..length].trim_end_matches(['.', ',', ';', ':']);
         if candidate.len() >= 2
             && (candidate.contains('_')
                 || candidate
@@ -1163,10 +1416,98 @@ fn protected_prefix(text: &str, protect_identifiers: bool) -> Option<(ProtectedT
                     .count()
                     >= 2)
         {
-            return Some((ProtectedTokenKind::Identifier, length));
+            return Some((
+                ProtectedTokenKind::Identifier,
+                identifier_prefix_length(candidate),
+            ));
         }
     }
     None
+}
+
+fn numeric_literal_length(text: &str) -> usize {
+    let mut length = 0usize;
+    let mut digit_count = 0usize;
+    let mut only_digits = true;
+    for (index, character) in text.char_indices() {
+        if character.is_ascii_digit() {
+            length = index + character.len_utf8();
+            digit_count += 1;
+            continue;
+        }
+        if matches!(
+            character,
+            '.' | ',' | '%' | '°' | '/' | ':' | '-' | '+' | '×'
+        ) {
+            let next = text[index + character.len_utf8()..].chars().next();
+            if matches!(character, '-' | '+') && next.is_some_and(|next| next.is_ascii_alphabetic())
+            {
+                break;
+            }
+            length = index + character.len_utf8();
+            only_digits = false;
+            continue;
+        }
+        break;
+    }
+
+    let suffix = &text[length..];
+    let suffix_length = suffix
+        .char_indices()
+        .take_while(|(_, character)| character.is_ascii_alphabetic())
+        .map(|(index, character)| index + character.len_utf8())
+        .last()
+        .unwrap_or(0);
+    if only_digits
+        && digit_count >= 2
+        && suffix_length > 0
+        && suffix
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_lowercase())
+    {
+        length += suffix_length;
+    }
+    while length > 0
+        && text[..length]
+            .chars()
+            .last()
+            .is_some_and(|character| matches!(character, '.' | ',' | ';' | ':'))
+    {
+        length -= text[..length]
+            .chars()
+            .last()
+            .map(char::len_utf8)
+            .unwrap_or_default();
+    }
+    length
+}
+
+fn identifier_prefix_length(candidate: &str) -> usize {
+    let mut prefix_end = 0usize;
+    let mut uppercase = 0usize;
+    for (index, character) in candidate.char_indices() {
+        if character.is_ascii_uppercase()
+            || character.is_ascii_digit()
+            || matches!(character, '_' | '-')
+        {
+            prefix_end = index + character.len_utf8();
+            uppercase += usize::from(character.is_ascii_uppercase());
+        } else {
+            break;
+        }
+    }
+    let suffix = &candidate[prefix_end..];
+    if uppercase >= 2
+        && suffix.len() >= 4
+        && suffix
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+    {
+        prefix_end
+    } else {
+        candidate.len()
+    }
 }
 
 fn delimited_length(text: &str, start: &str, end: &str) -> Option<usize> {
@@ -1191,6 +1532,8 @@ fn placeholder(kind: ProtectedTokenKind, index: usize, original: &str) -> String
         ProtectedTokenKind::Url => "URL",
         ProtectedTokenKind::NumericLiteral => "NUMBER",
         ProtectedTokenKind::Identifier => "IDENTIFIER",
+        ProtectedTokenKind::StyleStart => "STYLE_START",
+        ProtectedTokenKind::StyleEnd => "STYLE_END",
     };
     format!(
         "[[GLYPHST_{kind}_{index:04}_{:08X}]]",
@@ -1223,6 +1566,116 @@ fn append_continuation_text(target: &mut String, continuation: &str) {
         target.push(' ');
     }
     target.push_str(continuation);
+}
+
+fn normalize_pdf_hard_wraps(text: &str, role: BlockRole) -> String {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if preserves_semantic_line_breaks(role, &text) {
+        return text
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+    }
+
+    let mut paragraphs = Vec::new();
+    let mut lines = Vec::new();
+    let flush = |paragraphs: &mut Vec<String>, lines: &mut Vec<&str>| {
+        if lines.is_empty() {
+            return;
+        }
+        paragraphs.push(join_visual_lines(lines));
+        lines.clear();
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            flush(&mut paragraphs, &mut lines);
+        } else {
+            lines.push(line);
+        }
+    }
+    flush(&mut paragraphs, &mut lines);
+    paragraphs
+        .into_iter()
+        .filter(|paragraph| !paragraph.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .trim()
+        .to_string()
+}
+
+fn join_visual_lines(lines: &[&str]) -> String {
+    let mut joined = String::new();
+    for line in lines {
+        if joined.is_empty() {
+            joined.push_str(line);
+            continue;
+        }
+        let dehyphenate = joined.ends_with('-')
+            && line
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_lowercase());
+        if dehyphenate {
+            joined.pop();
+        } else if !joined.ends_with(char::is_whitespace) {
+            joined.push(' ');
+        }
+        joined.push_str(line);
+    }
+    joined
+}
+
+fn normalize_translated_whitespace(translated: &str, source: &str, role: BlockRole) -> String {
+    let translated = translated.replace("\r\n", "\n").replace('\r', "\n");
+    if preserves_semantic_line_breaks(role, source) {
+        return translated
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+    }
+    let source_paragraphs = source
+        .split("\n\n")
+        .filter(|paragraph| !paragraph.trim().is_empty())
+        .count()
+        .max(1);
+    let translated_paragraphs = translated
+        .split("\n\n")
+        .map(|paragraph| paragraph.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|paragraph| !paragraph.is_empty())
+        .collect::<Vec<_>>();
+    if source_paragraphs == 1 || translated_paragraphs.len() > source_paragraphs + 1 {
+        translated_paragraphs.join(" ")
+    } else {
+        translated_paragraphs.join("\n\n")
+    }
+}
+
+fn preserves_semantic_line_breaks(role: BlockRole, text: &str) -> bool {
+    matches!(role, BlockRole::TableOfContents | BlockRole::Code) || looks_like_dialogue(text)
+}
+
+fn looks_like_dialogue(text: &str) -> bool {
+    let lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    lines.len() >= 2
+        && lines
+            .iter()
+            .filter(|line| {
+                line.split_once([':', '：']).is_some_and(|(speaker, _)| {
+                    !speaker.trim().is_empty() && speaker.chars().count() <= 24
+                })
+            })
+            .count()
+            >= 2
 }
 
 fn context_excerpt(text: &str) -> String {
@@ -1330,34 +1783,83 @@ mod tests {
     }
 
     #[test]
-    fn semantic_units_forward_exact_protected_token_metadata() {
+    fn translation_units_keep_exact_protected_token_metadata() {
         let unit = build_translation_units(&test_document(
             "Use AI for 25 cases; see [12], $x < y$, and https://example.test/?a=1&b=2.",
         ))
         .remove(0);
 
-        let semantic = semantic_unit(&unit);
-
-        assert_eq!(semantic.text, unit.protected.text);
-        assert_eq!(semantic.protected_tokens.len(), unit.protected.tokens.len());
         assert_eq!(
-            semantic
-                .protected_tokens
+            unit.protected
+                .tokens
                 .iter()
                 .map(|token| token.kind)
                 .collect::<Vec<_>>(),
             [
-                SemanticProtectedTokenKind::Identifier,
-                SemanticProtectedTokenKind::NumericLiteral,
-                SemanticProtectedTokenKind::Citation,
-                SemanticProtectedTokenKind::Formula,
-                SemanticProtectedTokenKind::Url,
+                ProtectedTokenKind::Identifier,
+                ProtectedTokenKind::NumericLiteral,
+                ProtectedTokenKind::Citation,
+                ProtectedTokenKind::Formula,
+                ProtectedTokenKind::Url,
             ]
         );
-        for (semantic, protected) in semantic.protected_tokens.iter().zip(&unit.protected.tokens) {
-            assert_eq!(semantic.placeholder, protected.placeholder);
-            assert_eq!(semantic.original, protected.original);
+        for token in &unit.protected.tokens {
+            assert!(unit.protected.text.contains(&token.placeholder));
+            assert!(!token.original.is_empty());
         }
+    }
+
+    #[test]
+    fn all_caps_identifier_suffixes_remain_translatable() {
+        let protected = protect_text("WORDTOURaligns with people while 20news remains a dataset.");
+        let originals = protected
+            .tokens
+            .iter()
+            .map(|token| token.original.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(originals.contains(&"WORDTOUR"));
+        assert!(originals.contains(&"20news"));
+        assert!(!originals.contains(&"WORDTOURaligns"));
+        assert!(protected.text.contains("aligns"));
+
+        let sentence = protect_text("Use WORDTOUR. Then compare WMD, BoW; and AI:");
+        assert!(sentence.tokens.iter().all(|token| {
+            token
+                .original
+                .chars()
+                .last()
+                .is_none_or(|character| !matches!(character, '.' | ',' | ';' | ':'))
+        }));
+    }
+
+    #[test]
+    fn numeric_tokens_distinguish_identifiers_from_joined_prose() {
+        let protected =
+            protect_text("20news, 300-dimensional, Figure2shows, and 3This are distinct cases.");
+        let originals = protected
+            .tokens
+            .iter()
+            .filter(|token| token.kind == ProtectedTokenKind::NumericLiteral)
+            .map(|token| token.original.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(originals.contains(&"20news"));
+        assert!(originals.contains(&"300"));
+        assert!(originals.contains(&"2"));
+        assert!(originals.contains(&"3"));
+        assert!(!originals.contains(&"300-dimensional"));
+        assert!(!originals.contains(&"2shows"));
+        assert!(!originals.contains(&"3This"));
+
+        let punctuation = protect_text("See Table 2. Compare 3.14, then Section 4.3.");
+        let numeric = punctuation
+            .tokens
+            .iter()
+            .filter(|token| token.kind == ProtectedTokenKind::NumericLiteral)
+            .map(|token| token.original.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(numeric, ["2", "3.14", "4.3"]);
     }
 
     #[test]
@@ -1376,6 +1878,83 @@ mod tests {
             body.tokens
                 .iter()
                 .any(|token| token.kind == ProtectedTokenKind::Identifier)
+        );
+    }
+
+    #[test]
+    fn pdf_visual_wraps_are_removed_before_translation() {
+        let document = test_document(
+            "Generative agents wake up, cook breakfast,\nand then plan their day. They inter-\nact with neighbors.",
+        );
+
+        let units = build_translation_units(&document);
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(
+            units[0].source_text,
+            "Generative agents wake up, cook breakfast, and then plan their day. They interact with neighbors."
+        );
+        assert!(!units[0].protected.text.contains('\n'));
+    }
+
+    #[test]
+    fn invented_ai_paragraph_breaks_are_flattened_for_single_paragraph_sources() {
+        let normalized = normalize_translated_whitespace(
+            "生成式智能体醒来。\n\n它们做早餐。\n\n然后规划一天。",
+            "Generative agents wake up. They cook breakfast. Then they plan their day.",
+            BlockRole::Body,
+        );
+
+        assert_eq!(normalized, "生成式智能体醒来。 它们做早餐。 然后规划一天。");
+    }
+
+    #[test]
+    fn styled_translation_markers_restore_inline_typography() {
+        let definitions = vec![StyleDefinition {
+            id: 0,
+            style: TextStyle {
+                bold: true,
+                italic: true,
+                color_argb: Some(0xff44_5566),
+                ..TextStyle::default()
+            },
+        }];
+
+        let (plain, runs, fallback) = parse_styled_translation(
+            "普通\u{e000}S0\u{e001}重点\u{e000}E0\u{e001}文本",
+            &definitions,
+        );
+
+        assert_eq!(plain, "普通重点文本");
+        assert!(!fallback);
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[1].text, "重点");
+        assert!(runs[1].style.as_ref().is_some_and(|style| {
+            style.bold && style.italic && style.color_argb == Some(0xff44_5566)
+        }));
+    }
+
+    #[test]
+    fn malformed_style_markers_fall_back_without_losing_text() {
+        let definitions = vec![StyleDefinition {
+            id: 0,
+            style: TextStyle {
+                bold: true,
+                ..TextStyle::default()
+            },
+        }];
+
+        let (plain, runs, fallback) =
+            parse_styled_translation("普通\u{e000}S0\u{e001}重点", &definitions);
+
+        assert_eq!(plain, "普通重点");
+        assert!(fallback);
+        assert_eq!(
+            runs,
+            vec![StyledRun {
+                text: plain,
+                style: None
+            }]
         );
     }
 
@@ -1809,6 +2388,8 @@ mod tests {
             role: unit.role,
             source_text: unit.source_text.clone(),
             translated_text: "Previously translated paragraph.".to_string(),
+            styled_runs: Vec::new(),
+            style_fallback: false,
             semantic_hash: semantic_unit_hash(&unit),
         };
         let last_snapshot = Arc::new(Mutex::new(None));
@@ -1830,6 +2411,42 @@ mod tests {
         let snapshot = last_snapshot.lock().unwrap().clone().unwrap();
         assert_eq!(snapshot.progress.cached, 1);
         assert_eq!(snapshot.queue.dispatched_requests, 0);
+    }
+
+    #[test]
+    fn resumed_styled_units_do_not_require_internal_style_markers() {
+        let unit = TranslationUnit {
+            id: "styled".to_string(),
+            member_block_ids: vec!["block".to_string()],
+            role: BlockRole::Body,
+            source_text: "Styled source text".to_string(),
+            protected: ProtectedText {
+                text:
+                    "[[GLYPHST_STYLE_START_0000_AAAAAAAA]]source[[GLYPHST_STYLE_END_0001_BBBBBBBB]]"
+                        .to_string(),
+                tokens: vec![
+                    ProtectedToken {
+                        placeholder: "[[GLYPHST_STYLE_START_0000_AAAAAAAA]]".to_string(),
+                        original: style_marker(0, true),
+                        kind: ProtectedTokenKind::StyleStart,
+                    },
+                    ProtectedToken {
+                        placeholder: "[[GLYPHST_STYLE_END_0001_BBBBBBBB]]".to_string(),
+                        original: style_marker(0, false),
+                        kind: ProtectedTokenKind::StyleEnd,
+                    },
+                ],
+            },
+            style_definitions: Vec::new(),
+            context_before: None,
+            context_after: None,
+        };
+
+        assert!(validate_resumed_translation(
+            &unit,
+            "已翻译的样式文本",
+            true
+        ));
     }
 
     #[test]
@@ -1943,6 +2560,8 @@ mod tests {
                                 bbox,
                                 text,
                                 segments: Vec::new(),
+                                baseline_y: None,
+                                line_height: Some(bbox.height()),
                             }],
                             segments: Vec::new(),
                             markdown: None,
@@ -1960,6 +2579,7 @@ mod tests {
                         metadata: BTreeMap::new(),
                     })
                     .collect(),
+                protected_regions: Vec::new(),
                 metadata: BTreeMap::new(),
             }],
         )

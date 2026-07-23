@@ -1,0 +1,16 @@
+[package]
+name = "glyphst-pdf-translation-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glyphst-ai = { path = "../ai" }
+glyphst-core = { path = "../core" }
+glyphst-pdf-translation = { path = "../pdf-translation" }
+glyphst-settings = { path = "../settings" }
+glyphst-translation = { path = "../translation" }
+gpui.workspace = true
+mupdf.workspace = true
+serde.workspace = true
+serde_json.workspace = true

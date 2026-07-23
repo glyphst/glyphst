@@ -54,6 +54,20 @@ impl DocumentV1 {
                     bail!("block {} has an invalid bounding box", block.id);
                 }
             }
+            for region in &page.protected_regions {
+                if region.page_index != page_index {
+                    bail!(
+                        "protected region {} is assigned to the wrong page",
+                        region.id
+                    );
+                }
+                if !region.bbox.is_valid() {
+                    bail!("protected region {} has an invalid bounding box", region.id);
+                }
+                if !region.confidence.is_finite() || !(0.0..=1.0).contains(&region.confidence) {
+                    bail!("protected region {} has invalid confidence", region.id);
+                }
+            }
         }
         Ok(())
     }
@@ -74,6 +88,8 @@ pub struct Page {
     pub page_index: usize,
     pub geometry: PageGeometry,
     pub blocks: Vec<Block>,
+    #[serde(default)]
+    pub protected_regions: Vec<ProtectedRegion>,
     #[serde(default)]
     pub metadata: BTreeMap<String, Value>,
 }
@@ -152,6 +168,31 @@ pub enum BlockRole {
     Unknown,
 }
 
+impl BlockRole {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::Heading => "heading",
+            Self::Body => "body",
+            Self::Abstract => "abstract",
+            Self::TableOfContents => "table_of_contents",
+            Self::FigureCaption => "figure_caption",
+            Self::TableCaption => "table_caption",
+            Self::Footnote => "footnote",
+            Self::Header => "header",
+            Self::Footer => "footer",
+            Self::PageNumber => "page_number",
+            Self::Metadata => "metadata",
+            Self::Reference => "reference",
+            Self::FormulaNumber => "formula_number",
+            Self::Image => "image",
+            Self::Table => "table",
+            Self::Formula => "formula",
+            Self::Code => "code",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct BlockContent {
     #[serde(default)]
@@ -172,6 +213,10 @@ pub struct Line {
     pub text: String,
     #[serde(default)]
     pub segments: Vec<Segment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_y: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -198,19 +243,55 @@ pub struct TextStyle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_class: Option<FontFamilyClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
     #[serde(default)]
     pub bold: bool,
     #[serde(default)]
     pub italic: bool,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub strikeout: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_argb: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FontFamilyClass {
+    Serif,
+    SansSerif,
+    Monospace,
+    Math,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyDecisionSource {
+    #[default]
+    Unknown,
+    NativeHeuristic,
+    OcrSemantic,
+    ProtectedRegion,
+    DeterministicRule,
+    FusionConflict,
+    AiReview,
+    OverflowFallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranslationPolicy {
     pub translate: bool,
     pub reason: String,
+    #[serde(default)]
+    pub source: PolicyDecisionSource,
+    #[serde(default = "default_policy_confidence")]
+    pub confidence: f32,
+    #[serde(default)]
+    pub locked: bool,
 }
 
 impl TranslationPolicy {
@@ -218,6 +299,9 @@ impl TranslationPolicy {
         Self {
             translate: true,
             reason: reason.into(),
+            source: PolicyDecisionSource::DeterministicRule,
+            confidence: 1.0,
+            locked: false,
         }
     }
 
@@ -225,8 +309,94 @@ impl TranslationPolicy {
         Self {
             translate: false,
             reason: reason.into(),
+            source: PolicyDecisionSource::DeterministicRule,
+            confidence: 1.0,
+            locked: false,
         }
     }
+
+    pub fn candidate(
+        translate: bool,
+        reason: impl Into<String>,
+        source: PolicyDecisionSource,
+        confidence: f32,
+    ) -> Self {
+        Self {
+            translate,
+            reason: reason.into(),
+            source,
+            confidence: confidence.clamp(0.0, 1.0),
+            locked: false,
+        }
+    }
+
+    pub fn locked_preserve(
+        reason: impl Into<String>,
+        source: PolicyDecisionSource,
+        confidence: f32,
+    ) -> Self {
+        Self {
+            translate: false,
+            reason: reason.into(),
+            source,
+            confidence: confidence.clamp(0.0, 1.0),
+            locked: true,
+        }
+    }
+
+    pub fn unresolved(reason: impl Into<String>) -> Self {
+        Self::candidate(false, reason, PolicyDecisionSource::FusionConflict, 0.0)
+    }
+}
+
+const fn default_policy_confidence() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtectedRegionKind {
+    Chart,
+    Table,
+    Image,
+    Formula,
+    Code,
+    Drawing,
+    Unknown,
+}
+
+impl ProtectedRegionKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chart => "chart",
+            Self::Table => "table",
+            Self::Image => "image",
+            Self::Formula => "formula",
+            Self::Code => "code",
+            Self::Drawing => "drawing",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub const fn block_role(self) -> BlockRole {
+        match self {
+            Self::Table => BlockRole::Table,
+            Self::Formula => BlockRole::Formula,
+            Self::Code => BlockRole::Code,
+            Self::Chart | Self::Image | Self::Drawing | Self::Unknown => BlockRole::Image,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProtectedRegion {
+    pub id: String,
+    pub page_index: usize,
+    pub kind: ProtectedRegionKind,
+    pub bbox: BoundingBox,
+    pub source: String,
+    pub confidence: f32,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -375,6 +545,7 @@ mod tests {
                     tags: Vec::new(),
                     metadata: BTreeMap::new(),
                 }],
+                protected_regions: Vec::new(),
                 metadata: BTreeMap::new(),
             }],
         );

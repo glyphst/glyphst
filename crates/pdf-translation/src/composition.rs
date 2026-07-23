@@ -37,17 +37,19 @@ pub fn sanitize_source_pdf(
             .load_pdf_page(page_layout.page_index as i32)
             .map_err(PdfCompositionError::mupdf)?;
         for block in &page_layout.items {
-            let mut annotation = page
-                .create_annotation(PdfAnnotationType::Redact)
-                .map_err(PdfCompositionError::mupdf)?;
-            annotation
-                .set_rect(Rect::new(
-                    block.bbox.x0,
-                    block.bbox.y0,
-                    block.bbox.x1,
-                    block.bbox.y1,
-                ))
-                .map_err(PdfCompositionError::mupdf)?;
+            let regions = if block.source_regions.is_empty() {
+                std::slice::from_ref(&block.source_bbox)
+            } else {
+                block.source_regions.as_slice()
+            };
+            for region in regions {
+                let mut annotation = page
+                    .create_annotation(PdfAnnotationType::Redact)
+                    .map_err(PdfCompositionError::mupdf)?;
+                annotation
+                    .set_rect(Rect::new(region.x0, region.y0, region.x1, region.y1))
+                    .map_err(PdfCompositionError::mupdf)?;
+            }
         }
         page.redact().map_err(PdfCompositionError::mupdf)?;
     }
@@ -727,6 +729,8 @@ mod tests {
                 role: block_lookup[&block.id],
                 source_text: block.content.text.clone(),
                 translated_text: "这是用于验证 PDF 合成与字体嵌入的测试译文。".to_string(),
+                styled_runs: Vec::new(),
+                style_fallback: false,
                 semantic_hash: 0,
             })
             .collect();

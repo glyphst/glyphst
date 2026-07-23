@@ -1,7 +1,7 @@
 use glyphst_actions::settings_panel::PanelClose;
 use glyphst_ai::ai_client::{AiModelInfo, list_ai_models, test_ai_connection};
 use glyphst_keymap::keybindings;
-use glyphst_pdf_translation::PdfTranslationService;
+use glyphst_pdf_translation_app::PdfTranslationService;
 use glyphst_settings::{
     AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, AppLanguage, CopyFormat,
     DEFAULT_OCR_ENDPOINT, DEFAULT_OCR_MODEL, DEFAULT_PAGE_IMAGE_LIMIT, FontSettings, KeymapPreset,

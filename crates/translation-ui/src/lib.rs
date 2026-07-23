@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use futures::{StreamExt as _, channel::mpsc};
-use glyphst_pdf_translation::{
+use glyphst_pdf_translation_app::{
     CancellationToken, PdfTranslationError, PdfTranslationProgress, PdfTranslationRequest,
     PdfTranslationResult, PdfTranslationService, PdfTranslationStage,
 };

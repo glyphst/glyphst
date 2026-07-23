@@ -25,6 +25,14 @@ pub struct SemanticTranslationOutput {
     pub text: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TextPolicyReviewDecision {
+    pub block_id: String,
+    pub translate: bool,
+    pub confidence: f32,
+    pub reason: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AiTranslationErrorCategory {
     Authentication,
@@ -117,6 +125,44 @@ pub fn translate_semantic_batch(
         .map_err(Into::into)
 }
 
+pub fn review_pdf_translation_policy(
+    settings: ResolvedAiConfig,
+    page_map: Value,
+) -> Result<Vec<TextPolicyReviewDecision>> {
+    if !settings.can_request() {
+        return Err(anyhow!(settings.missing_credentials_message()));
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("failed to create AI policy review client")?;
+    review_pdf_translation_policy_with_client(&client, settings, page_map).map_err(Into::into)
+}
+
+pub fn review_pdf_translation_policy_with_client(
+    client: &reqwest::blocking::Client,
+    settings: ResolvedAiConfig,
+    page_map: Value,
+) -> std::result::Result<Vec<TextPolicyReviewDecision>, AiTranslationError> {
+    if !settings.can_request() {
+        return Err(configuration_error(settings.missing_credentials_message()));
+    }
+    let system = "You review a structured, text-only PDF page map to decide whether ambiguous \
+text blocks should be translated. You do not receive or need an image. Bounding boxes are \
+normalized to the page. Never change a block whose locked field is true. Translate narrative \
+prose, headings, and separate figure/table captions. Preserve author and publication metadata, \
+page furniture, formulas, code and literal examples, table cells, chart labels, axis labels, \
+legends, and text associated with protected regions. Review only unlocked low-confidence blocks. \
+When uncertain, choose translate=false. Return only valid JSON in this exact shape: \
+{\"decisions\":[{\"block_id\":\"id\",\"translate\":false,\"confidence\":0.0,\"reason\":\"short \
+reason\"}]}. Omit locked and already-confident blocks.";
+    let response = match settings.provider.api_style() {
+        AiApiStyle::OpenAi => request_openai_payload(client, &settings, system, page_map),
+        AiApiStyle::Anthropic => request_anthropic_payload(client, &settings, system, page_map),
+    }?;
+    parse_policy_review_decisions(&response).map_err(invalid_response)
+}
+
 pub fn translate_semantic_batch_with_client(
     client: &reqwest::blocking::Client,
     settings: ResolvedAiConfig,
@@ -137,8 +183,14 @@ pub fn translate_semantic_batch_with_client(
 {target_language}. Use each unit's role and neighboring context to resolve terminology and \
 continuations, but translate only its text field. Preserve every token matching \
 [[GLYPHST_TYPE_INDEX_CHECKSUM]] exactly, including brackets, spelling, order, and count. Preserve \
-equations, citations, URLs, names, reference markers, identifiers, and paragraph meaning. Return \
-only valid JSON in this exact shape: \
+adjacency too: when two placeholders touch in the input, return them touching with no inserted \
+text or whitespace. Translate every natural-language word, including words immediately beside a \
+placeholder. Preserve \
+equations, citations, URLs, names, reference markers, identifiers, and paragraph meaning. PDF \
+line wrapping has already been normalized: do not introduce line breaks merely for visual \
+wrapping, do not put each sentence on a separate line or paragraph, and preserve blank-line \
+paragraph boundaries only when they exist in the input text. Return only valid JSON in this exact \
+shape: \
 {{\"translations\":[{{\"id\":\"unit-id\",\"text\":\"translated text\"}}]}}. Return every input ID \
 exactly once and do not add IDs."
     );
@@ -180,8 +232,10 @@ fn translation_system_prompt(source_language: Option<&str>, target_language: &st
     format!(
         "You are a precise document translator. Translate every input from {source} to \
 {target_language}. Preserve equations, citations, reference markers, URLs, names, and paragraph \
-meaning. Return only valid JSON in this exact shape: {{\"translations\":[\"...\"]}}. The \
-translations array must have the same length and order as the input texts."
+meaning. Do not add visual line wrapping or turn individual sentences into separate paragraphs; \
+preserve blank-line paragraph boundaries only when present in the input. Return only valid JSON \
+in this exact shape: {{\"translations\":[\"...\"]}}. The translations array must have the same \
+length and order as the input texts."
     )
 }
 
@@ -320,6 +374,38 @@ fn parse_semantic_translations(
         translations.remove(&id);
     }
     Ok(translations.into_values().collect())
+}
+
+fn parse_policy_review_decisions(content: &str) -> Result<Vec<TextPolicyReviewDecision>> {
+    let value = parse_json_object(content)?;
+    let decisions = value
+        .get("decisions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("AI policy review response is missing decisions"))?;
+    let mut by_id = std::collections::HashMap::new();
+    let mut duplicates = std::collections::HashSet::new();
+    for decision in decisions {
+        let Ok(mut decision) = serde_json::from_value::<TextPolicyReviewDecision>(decision.clone())
+        else {
+            continue;
+        };
+        decision.block_id = decision.block_id.trim().to_string();
+        decision.reason = decision.reason.trim().chars().take(240).collect();
+        if decision.block_id.is_empty()
+            || !decision.confidence.is_finite()
+            || !(0.0..=1.0).contains(&decision.confidence)
+        {
+            continue;
+        }
+        let id = decision.block_id.clone();
+        if by_id.insert(id.clone(), decision).is_some() {
+            duplicates.insert(id);
+        }
+    }
+    for id in duplicates {
+        by_id.remove(&id);
+    }
+    Ok(by_id.into_values().collect())
 }
 
 fn send_json(
@@ -611,6 +697,22 @@ mod tests {
 
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].id, "unit-2");
+    }
+
+    #[test]
+    fn policy_review_parser_is_fail_closed_for_invalid_and_duplicate_items() {
+        let parsed = parse_policy_review_decisions(
+            r#"{"decisions":[
+                {"block_id":"body","translate":true,"confidence":0.91,"reason":"narrative prose"},
+                {"block_id":"duplicate","translate":true,"confidence":0.95,"reason":"first"},
+                {"block_id":"duplicate","translate":false,"confidence":0.99,"reason":"second"},
+                {"block_id":"invalid","translate":true,"confidence":1.5,"reason":"bad confidence"}
+            ]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].block_id, "body");
     }
 
     #[test]

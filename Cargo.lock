@@ -2208,7 +2208,7 @@ dependencies = [
  "glyphst-core",
  "glyphst-keymap",
  "glyphst-library",
- "glyphst-pdf-translation",
+ "glyphst-pdf-translation-app",
  "glyphst-pdf-ui",
  "glyphst-settings",
  "glyphst-settings-ui",
@@ -2309,16 +2309,27 @@ name = "glyphst-pdf-translation"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "glyphst-core",
- "glyphst-settings",
- "glyphst-translation",
- "gpui",
  "mupdf",
  "reqwest",
  "serde",
  "serde_json",
  "tracing",
- "ztracing",
+]
+
+[[package]]
+name = "glyphst-pdf-translation-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glyphst-ai",
+ "glyphst-core",
+ "glyphst-pdf-translation",
+ "glyphst-settings",
+ "glyphst-translation",
+ "gpui",
+ "mupdf",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2335,7 +2346,7 @@ dependencies = [
  "glyphst-core",
  "glyphst-library",
  "glyphst-pdf",
- "glyphst-pdf-translation",
+ "glyphst-pdf-translation-app",
  "glyphst-settings",
  "glyphst-translation",
  "glyphst-translation-ui",
@@ -2371,7 +2382,7 @@ dependencies = [
  "glyphst-ai",
  "glyphst-core",
  "glyphst-keymap",
- "glyphst-pdf-translation",
+ "glyphst-pdf-translation-app",
  "glyphst-settings",
  "glyphst-translation-ui",
  "glyphst-ui",
@@ -2401,7 +2412,7 @@ name = "glyphst-translation-ui"
 version = "0.1.0"
 dependencies = [
  "futures",
- "glyphst-pdf-translation",
+ "glyphst-pdf-translation-app",
  "glyphst-settings",
  "glyphst-translation",
  "glyphst-ui",

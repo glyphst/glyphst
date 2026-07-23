@@ -2,12 +2,45 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Block, BlockRole, BoundingBox, PageGeometry, TranslatedDocument};
+use crate::{
+    Block, BlockRole, BoundingBox, FontFamilyClass, PageGeometry, StyledRun, TextStyle,
+    TranslatedDocument,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayoutDocument {
     pub pages: Vec<LayoutPage>,
     pub warnings: Vec<LayoutWarning>,
+    #[serde(default)]
+    pub preserved_on_overflow: Vec<String>,
+    #[serde(default)]
+    pub overflow_policy: OverflowPolicy,
+}
+
+impl LayoutDocument {
+    pub fn preserve_block_on_overflow(&mut self, block_id: &str) -> bool {
+        for page in &mut self.pages {
+            let Some(index) = page.items.iter().position(|item| item.block_id == block_id) else {
+                continue;
+            };
+            let item = page.items.remove(index);
+            if !self
+                .preserved_on_overflow
+                .iter()
+                .any(|preserved| preserved == block_id)
+            {
+                self.preserved_on_overflow.push(block_id.to_string());
+            }
+            self.warnings.push(LayoutWarning {
+                unit_id: item.unit_id,
+                message: format!(
+                    "preserved_on_overflow: source block {block_id} was retained unchanged"
+                ),
+            });
+            return true;
+        }
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,17 +55,56 @@ pub struct LayoutItem {
     pub unit_id: String,
     pub block_id: String,
     pub page_index: usize,
+    pub source_bbox: BoundingBox,
+    #[serde(default)]
+    pub source_regions: Vec<BoundingBox>,
     pub bbox: BoundingBox,
     pub text: String,
     pub role: BlockRole,
+    pub source_font_size_pt: f32,
     pub font_size_pt: f32,
     pub minimum_font_size_pt: f32,
+    pub emergency_minimum_font_size_pt: f32,
     pub leading_em: f32,
     pub minimum_leading_em: f32,
     pub font_weight: FontWeight,
+    pub font_class: FontFamilyClass,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikeout: bool,
+    pub color_argb: u32,
+    #[serde(default)]
+    pub styled_runs: Vec<StyledRun>,
     pub first_line_indent_pt: f32,
     pub justify: bool,
     pub preserve_line_breaks: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverflowPolicy {
+    #[default]
+    Strict,
+    Adaptive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutOptions {
+    pub overflow_policy: OverflowPolicy,
+}
+
+impl LayoutOptions {
+    pub const fn strict() -> Self {
+        Self {
+            overflow_policy: OverflowPolicy::Strict,
+        }
+    }
+
+    pub const fn application_default() -> Self {
+        Self {
+            overflow_policy: OverflowPolicy::Adaptive,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +130,13 @@ pub struct LayoutWarning {
 }
 
 pub fn build_layout(translated: &TranslatedDocument) -> LayoutDocument {
+    build_layout_with_options(translated, LayoutOptions::strict())
+}
+
+pub fn build_layout_with_options(
+    translated: &TranslatedDocument,
+    options: LayoutOptions,
+) -> LayoutDocument {
     let blocks = translated
         .document
         .pages
@@ -114,39 +193,53 @@ pub fn build_layout(translated: &TranslatedDocument) -> LayoutDocument {
             });
             continue;
         }
+        let member_count = member_blocks.len();
         for (index, (block, text)) in member_blocks.into_iter().zip(text_parts).enumerate() {
             if text.trim().is_empty() {
                 continue;
             }
             let body_font = body_font_by_page[block.page_index];
-            let font_size = role_base_font(block.role, body_font)
-                .min((block.bbox.height() * role_height_ratio(block.role)).max(4.2));
-            let minimum_font_size = minimum_font_size(block.role, font_size);
-            let leading = role_leading(block.role);
+            let profile = source_typography(block, body_font);
+            let font_size = profile.font_size_pt;
+            let minimum_font_size = preferred_minimum_font_size(block.role, font_size);
+            let emergency_minimum_font_size = emergency_minimum_font_size(block.role, font_size);
             let item = LayoutItem {
                 unit_id: unit.id.clone(),
                 block_id: block.id.clone(),
                 page_index: block.page_index,
+                source_bbox: block.bbox,
+                source_regions: source_text_regions(block),
                 bbox: block.bbox,
                 text,
                 role: block.role,
+                source_font_size_pt: font_size,
                 font_size_pt: round(font_size),
                 minimum_font_size_pt: round(minimum_font_size),
-                leading_em: leading,
-                minimum_leading_em: (leading * 0.78).max(0.20),
-                font_weight: if matches!(block.role, BlockRole::Title | BlockRole::Heading) {
+                emergency_minimum_font_size_pt: round(emergency_minimum_font_size),
+                leading_em: profile.leading_em,
+                minimum_leading_em: (profile.leading_em * 0.78).max(0.20),
+                font_weight: if profile.style.bold {
                     FontWeight::Bold
                 } else {
                     FontWeight::Regular
                 },
-                first_line_indent_pt: if block.role == BlockRole::Body && index == 0 {
-                    round((font_size * 2.0).min(block.bbox.width() * 0.08))
+                font_class: profile.style.font_class.unwrap_or(FontFamilyClass::Serif),
+                italic: profile.style.italic,
+                underline: profile.style.underline,
+                strikeout: profile.style.strikeout,
+                color_argb: profile.style.color_argb.unwrap_or(0xff00_0000),
+                styled_runs: if member_count == 1 {
+                    unit.styled_runs.clone()
+                } else {
+                    Vec::new()
+                },
+                first_line_indent_pt: if index == 0 {
+                    profile.first_line_indent_pt
                 } else {
                     0.0
                 },
-                justify: block.role == BlockRole::Body
-                    && !contains_long_unbreakable(&unit.translated_text),
-                preserve_line_breaks: matches!(block.role, BlockRole::TableOfContents),
+                justify: profile.justify && !contains_long_unbreakable(&unit.translated_text),
+                preserve_line_breaks: profile.preserve_line_breaks,
             };
             if let Some(page) = pages.get_mut(block.page_index) {
                 page.items.push(item);
@@ -160,9 +253,48 @@ pub fn build_layout(translated: &TranslatedDocument) -> LayoutDocument {
                 .total_cmp(&right.bbox.y0)
                 .then(left.bbox.x0.total_cmp(&right.bbox.x0))
         });
+    }
+    expand_into_safe_vertical_space(&mut pages, &translated.document);
+    for page in &pages {
         detect_collisions(page, &mut warnings);
     }
-    LayoutDocument { pages, warnings }
+    LayoutDocument {
+        pages,
+        warnings,
+        preserved_on_overflow: Vec::new(),
+        overflow_policy: options.overflow_policy,
+    }
+}
+
+fn source_text_regions(block: &Block) -> Vec<BoundingBox> {
+    let mut regions = block
+        .content
+        .lines
+        .iter()
+        .filter_map(|line| {
+            line.segments
+                .iter()
+                .filter(|segment| !segment.text.trim().is_empty())
+                .map(|segment| segment.bbox)
+                .reduce(BoundingBox::union)
+                .or_else(|| (line.bbox.area() > 0.0).then_some(line.bbox))
+        })
+        .map(|bbox| {
+            let vertical_padding = (bbox.height() * 0.08).clamp(0.25, 0.8);
+            BoundingBox::new(
+                bbox.x0 - 0.35,
+                bbox.y0 - vertical_padding,
+                bbox.x1 + 0.35,
+                bbox.y1 + vertical_padding,
+            )
+            .clamp_to(block.bbox)
+        })
+        .filter(|bbox| bbox.area() > 0.0)
+        .collect::<Vec<_>>();
+    if regions.is_empty() {
+        regions.push(block.bbox);
+    }
+    regions
 }
 
 pub fn split_text_for_layout_boxes(text: &str, capacities: &[usize]) -> Vec<String> {
@@ -212,7 +344,16 @@ pub fn split_text_for_layout_boxes(text: &str, capacities: &[usize]) -> Vec<Stri
 fn estimate_body_font_size(blocks: &[Block]) -> f32 {
     let mut values = blocks
         .iter()
-        .filter(|block| block.role == BlockRole::Body)
+        .filter(|block| {
+            matches!(
+                block.role,
+                BlockRole::Abstract
+                    | BlockRole::Body
+                    | BlockRole::FigureCaption
+                    | BlockRole::TableCaption
+                    | BlockRole::Footnote
+            )
+        })
         .filter_map(|block| {
             block
                 .metadata
@@ -220,13 +361,37 @@ fn estimate_body_font_size(blocks: &[Block]) -> f32 {
                 .and_then(|value| value.as_f64())
                 .map(|value| value as f32)
                 .filter(|value| value.is_finite() && *value >= 5.0 && *value <= 36.0)
+                .map(|value| {
+                    (
+                        value,
+                        block
+                            .content
+                            .text
+                            .chars()
+                            .filter(|character| !character.is_whitespace())
+                            .count()
+                            .max(1),
+                    )
+                })
         })
         .collect::<Vec<_>>();
     if values.is_empty() {
         return 10.0;
     }
-    values.sort_by(f32::total_cmp);
-    values[values.len() / 2].clamp(8.0, 13.0)
+    values.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let midpoint = values
+        .iter()
+        .map(|(_, weight)| *weight)
+        .sum::<usize>()
+        .div_ceil(2);
+    let mut cumulative = 0usize;
+    for (value, weight) in values {
+        cumulative += weight;
+        if cumulative >= midpoint {
+            return value.clamp(5.0, 13.0);
+        }
+    }
+    10.0
 }
 
 fn role_base_font(role: BlockRole, body_font: f32) -> f32 {
@@ -241,22 +406,26 @@ fn role_base_font(role: BlockRole, body_font: f32) -> f32 {
     }
 }
 
-fn minimum_font_size(role: BlockRole, font_size: f32) -> f32 {
-    let ratio = match role {
-        BlockRole::Title => 0.58,
-        BlockRole::Heading => 0.62,
-        BlockRole::FigureCaption | BlockRole::TableCaption | BlockRole::Footnote => 0.55,
-        _ => 0.65,
+fn preferred_minimum_font_size(role: BlockRole, font_size: f32) -> f32 {
+    let absolute_floor = match role {
+        BlockRole::Title => 10.0,
+        BlockRole::Heading => 7.0,
+        BlockRole::Footnote => 5.0,
+        BlockRole::FigureCaption | BlockRole::TableCaption => 5.5,
+        _ => 6.5,
     };
-    (font_size * ratio).max(4.2).min(font_size)
+    font_size.min((font_size * 0.88).max(absolute_floor))
 }
 
-fn role_height_ratio(role: BlockRole) -> f32 {
-    match role {
-        BlockRole::Title | BlockRole::Heading => 0.82,
-        BlockRole::FigureCaption | BlockRole::TableCaption | BlockRole::Footnote => 0.68,
-        _ => 0.72,
-    }
+fn emergency_minimum_font_size(role: BlockRole, font_size: f32) -> f32 {
+    let absolute_floor = match role {
+        BlockRole::Title => 8.0,
+        BlockRole::Heading => 6.0,
+        BlockRole::Footnote => 4.8,
+        BlockRole::FigureCaption | BlockRole::TableCaption => 5.0,
+        _ => 5.5,
+    };
+    font_size.min((font_size * 0.70).max(absolute_floor))
 }
 
 fn role_leading(role: BlockRole) -> f32 {
@@ -265,6 +434,163 @@ fn role_leading(role: BlockRole) -> f32 {
         BlockRole::FigureCaption | BlockRole::TableCaption | BlockRole::Footnote => 0.48,
         _ => 0.58,
     }
+}
+
+struct SourceTypography {
+    style: TextStyle,
+    font_size_pt: f32,
+    leading_em: f32,
+    first_line_indent_pt: f32,
+    justify: bool,
+    preserve_line_breaks: bool,
+}
+
+fn source_typography(block: &Block, body_font: f32) -> SourceTypography {
+    let mut styles = Vec::<(TextStyle, usize)>::new();
+    for segment in block
+        .content
+        .lines
+        .iter()
+        .flat_map(|line| line.segments.iter())
+    {
+        let weight = segment
+            .text
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .count();
+        if weight == 0 {
+            continue;
+        }
+        if let Some((_, total)) = styles
+            .iter_mut()
+            .find(|(style, _)| typography_styles_match(style, &segment.style))
+        {
+            *total += weight;
+        } else {
+            styles.push((segment.style.clone(), weight));
+        }
+    }
+    let mut style = styles
+        .into_iter()
+        .max_by_key(|(_, weight)| *weight)
+        .map(|(style, _)| style)
+        .unwrap_or_default();
+    let font_size = style
+        .font_size
+        .or_else(|| {
+            block
+                .metadata
+                .get("average_font_size")
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32)
+        })
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or_else(|| role_base_font(block.role, body_font))
+        .clamp(4.5, 48.0);
+    style.font_size = Some(font_size);
+    if style.font_class.is_none() {
+        style.font_class = Some(FontFamilyClass::Serif);
+    }
+    if matches!(block.role, BlockRole::Title | BlockRole::Heading)
+        && block
+            .metadata
+            .get("bold_ratio")
+            .and_then(|value| value.as_f64())
+            .is_some_and(|ratio| ratio >= 0.55)
+    {
+        style.bold = true;
+    }
+    let leading_em = block
+        .metadata
+        .get("line_pitch_pt")
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|pitch| (pitch / font_size - 0.78).clamp(0.20, 1.05))
+        .unwrap_or_else(|| role_leading(block.role));
+    let first_line_indent_pt = block
+        .metadata
+        .get("first_line_indent_pt")
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(0.0)
+        .min(block.bbox.width() * 0.20);
+    let justify = block
+        .metadata
+        .get("justify")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(block.role == BlockRole::Body);
+    SourceTypography {
+        style,
+        font_size_pt: round(font_size),
+        leading_em: round(leading_em),
+        first_line_indent_pt: round(first_line_indent_pt),
+        justify,
+        preserve_line_breaks: matches!(block.role, BlockRole::TableOfContents | BlockRole::Code)
+            || looks_like_dialogue(&block.content.text),
+    }
+}
+
+fn typography_styles_match(left: &TextStyle, right: &TextStyle) -> bool {
+    left.font_class == right.font_class
+        && left.bold == right.bold
+        && left.italic == right.italic
+        && left.underline == right.underline
+        && left.strikeout == right.strikeout
+        && left.color_argb == right.color_argb
+        && match (left.font_size, right.font_size) {
+            (Some(left), Some(right)) => (left - right).abs() <= 0.5,
+            (None, None) => true,
+            _ => false,
+        }
+}
+
+fn looks_like_dialogue(text: &str) -> bool {
+    let lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    lines.len() >= 2
+        && lines
+            .iter()
+            .filter(|line| {
+                line.split_once([':', '：']).is_some_and(|(speaker, _)| {
+                    !speaker.trim().is_empty() && speaker.chars().count() <= 24
+                })
+            })
+            .count()
+            >= 2
+}
+
+fn expand_into_safe_vertical_space(pages: &mut [LayoutPage], document: &crate::DocumentV1) {
+    for page in pages {
+        let Some(source_page) = document.pages.get(page.page_index) else {
+            continue;
+        };
+        for item in &mut page.items {
+            let nearest = source_page
+                .blocks
+                .iter()
+                .filter(|block| block.id != item.block_id && block.bbox.y0 >= item.source_bbox.y1)
+                .filter(|block| horizontal_overlap(item.source_bbox, block.bbox) >= 0.25)
+                .map(|block| block.bbox.y0)
+                .min_by(f32::total_cmp)
+                .unwrap_or(page.geometry.height - 2.0);
+            let growth_cap = (item.source_bbox.height() * 0.35).clamp(0.0, 24.0);
+            let safe_y1 = (nearest - 1.5)
+                .min(item.source_bbox.y1 + growth_cap)
+                .min(page.geometry.height - 2.0);
+            if safe_y1 > item.bbox.y1 + 1.0 {
+                item.bbox.y1 = safe_y1;
+            }
+        }
+    }
+}
+
+fn horizontal_overlap(left: BoundingBox, right: BoundingBox) -> f32 {
+    let overlap = (left.x1.min(right.x1) - left.x0.max(right.x0)).max(0.0);
+    overlap / left.width().min(right.width()).max(1.0)
 }
 
 fn text_capacity(bbox: BoundingBox, font_size: f32) -> usize {
@@ -321,5 +647,50 @@ mod tests {
         );
         assert!(!parts[0].is_empty());
         assert!(!parts[1].is_empty());
+    }
+
+    #[test]
+    fn overflowing_block_can_fall_back_to_its_preserved_source() {
+        let mut layout = LayoutDocument {
+            pages: vec![LayoutPage {
+                page_index: 0,
+                geometry: PageGeometry::new(100.0, 100.0),
+                items: vec![LayoutItem {
+                    unit_id: "unit-block".to_string(),
+                    block_id: "block".to_string(),
+                    page_index: 0,
+                    source_bbox: BoundingBox::new(10.0, 10.0, 90.0, 30.0),
+                    source_regions: Vec::new(),
+                    bbox: BoundingBox::new(10.0, 10.0, 90.0, 30.0),
+                    text: "translated text".to_string(),
+                    role: BlockRole::Body,
+                    source_font_size_pt: 10.0,
+                    font_size_pt: 10.0,
+                    minimum_font_size_pt: 7.0,
+                    emergency_minimum_font_size_pt: 5.0,
+                    leading_em: 1.2,
+                    minimum_leading_em: 0.9,
+                    font_weight: FontWeight::Regular,
+                    font_class: FontFamilyClass::Serif,
+                    italic: false,
+                    underline: false,
+                    strikeout: false,
+                    color_argb: 0xff00_0000,
+                    styled_runs: Vec::new(),
+                    first_line_indent_pt: 0.0,
+                    justify: true,
+                    preserve_line_breaks: false,
+                }],
+            }],
+            warnings: Vec::new(),
+            preserved_on_overflow: Vec::new(),
+            overflow_policy: OverflowPolicy::Adaptive,
+        };
+
+        assert!(layout.preserve_block_on_overflow("block"));
+        assert!(layout.pages[0].items.is_empty());
+        assert_eq!(layout.preserved_on_overflow, ["block"]);
+        assert!(layout.warnings[0].message.contains("preserved_on_overflow"));
+        assert!(!layout.preserve_block_on_overflow("block"));
     }
 }

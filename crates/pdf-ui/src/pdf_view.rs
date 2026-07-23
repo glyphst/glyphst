@@ -50,7 +50,7 @@ use glyphst_core::{
     EpubTheme, PageIndex, PageRegion, RegionImageReference, SemanticTextAnchor,
 };
 use glyphst_pdf::{DocumentSnapshot, ReloadCoordinator, ReloadDisposition};
-use glyphst_pdf_translation::{PdfTranslationRequest, PdfTranslationService};
+use glyphst_pdf_translation_app::{PdfTranslationRequest, PdfTranslationService};
 use glyphst_translation::{LanguageCode, TranslationRequest, TranslationService};
 use glyphst_translation_ui::{
     DocumentTranslationJobManager, DocumentTranslationOpenMode, target_language_items,

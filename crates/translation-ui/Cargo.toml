@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 futures.workspace = true
-glyphst-pdf-translation = { path = "../pdf-translation" }
+glyphst-pdf-translation-app = { path = "../pdf-translation-app" }
 glyphst-settings = { path = "../settings" }
 glyphst-translation = { path = "../translation" }
 glyphst-ui = { path = "../ui" }

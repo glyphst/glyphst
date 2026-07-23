@@ -13,21 +13,24 @@ use glyphst_translation::{LanguageCode, TranslationService};
 use mupdf::{Document, TextPageFlags};
 use serde::{Deserialize, Serialize};
 
-use crate::translate::{
+use glyphst_pdf_translation::{
+    BoundingBox, CancellationToken, DocumentV1, LayoutDocument, LayoutOptions, PaddleClient,
+    PaddleClientConfig, PdfComposer, PdfTranslationStage, ProgressTracker, TranslatedDocument,
+    TranslationProgressSink, TypstCompiler, TypstCompilerConfig, build_layout_with_options,
+    extract_native_document, fuse_native_with_ocr, inspect_pdf, normalize_paddle_payload,
+    review_translation_policies, sanitize_source_pdf,
+};
+use glyphst_pdf_translation::{
     TranslatedUnit, TranslationFailureDiagnostic, TranslationQueueStats, TranslationRunProgress,
     TranslationRunSnapshot, translate_document_resuming,
 };
-use crate::{
-    BoundingBox, CancellationToken, DocumentV1, GlyphstTranslationBackend, LayoutDocument,
-    PaddleClient, PaddleClientConfig, PdfComposer, PdfTranslationStage, ProgressTracker,
-    TranslatedDocument, TranslationProgressSink, TypstCompiler, TypstCompilerConfig, build_layout,
-    extract_native_document, inspect_pdf, normalize_paddle_payload, reconcile_ocr_geometry,
-    sanitize_source_pdf,
-};
 
-const ARTIFACT_VERSION: u32 = 1;
-const PIPELINE_VERSION: &str = "native-rust-v4";
-const CHECKPOINT_VERSION: u32 = 1;
+use crate::backend::GlyphstTranslationBackend;
+use crate::reviewer::GlyphstPolicyReviewer;
+
+const ARTIFACT_VERSION: u32 = 3;
+const PIPELINE_VERSION: &str = "native-rust-v12-protected-layout";
+const CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone)]
 pub struct PdfTranslationService {
@@ -87,12 +90,10 @@ impl PdfTranslationService {
         }
 
         let mut errors = Vec::new();
-        if clear_provider_cache {
-            if let Err(error) = self.translation.clear_cache() {
-                errors.push(format!(
-                    "could not clear cached provider responses: {error:#}"
-                ));
-            }
+        if clear_provider_cache && let Err(error) = self.translation.clear_cache() {
+            errors.push(format!(
+                "could not clear cached provider responses: {error:#}"
+            ));
         }
         for (label, path) in [
             ("PDF translation artifacts", artifact_root),
@@ -174,7 +175,7 @@ impl PdfTranslationService {
         progress.finish_stage(PdfTranslationStage::Preparing, "Source PDF inspected");
 
         let document_path = job_directory.join("document.v1.json");
-        let document = if let Some(document) =
+        let mut document = if let Some(document) =
             load_normalized_document(&document_path, &fingerprint)
         {
             progress.finish_stage(PdfTranslationStage::Ocr, "Reused extracted document");
@@ -228,9 +229,23 @@ impl PdfTranslationService {
                     document
                 }
             };
-            write_json(&document_path, &document)?;
             document
         };
+        if let Some(reviewer) = GlyphstPolicyReviewer::from_settings(&settings) {
+            let review_errors = review_translation_policies(&mut document, &reviewer);
+            if !review_errors.is_empty() {
+                document.metadata.extra.insert(
+                    "policy_review_errors".to_string(),
+                    serde_json::json!(
+                        review_errors
+                            .iter()
+                            .map(|error| error.message.as_str())
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            }
+        }
+        write_json(&document_path, &document)?;
 
         progress.report(
             PdfTranslationStage::Translating,
@@ -261,9 +276,12 @@ impl PdfTranslationService {
                 let counts = &snapshot.progress;
                 final_translation_counts = counts.clone();
                 let resolved = snapshot.resolved_units.len();
-                let should_persist = resolved == counts.total
-                    || resolved.saturating_sub(last_checkpoint_resolved) >= 8
-                    || counts.failed != last_terminal_failures;
+                let should_persist = translation_checkpoint_changed(
+                    resolved,
+                    last_checkpoint_resolved,
+                    counts.failed,
+                    last_terminal_failures,
+                );
                 if should_persist {
                     write_translation_checkpoint(&checkpoint_path, &checkpoint_identity, snapshot)
                         .map_err(|error| error.message)?;
@@ -315,7 +333,8 @@ impl PdfTranslationService {
             Some(0),
             Some(1),
         );
-        let layout = build_layout(&translated);
+        let mut layout =
+            build_layout_with_options(&translated, LayoutOptions::application_default());
         write_json(job_directory.join("layout.json"), &layout)?;
         progress.finish_stage(PdfTranslationStage::Layout, "Translated layout prepared");
 
@@ -325,31 +344,55 @@ impl PdfTranslationService {
             None,
             None,
         );
-        let sanitized_source_path = job_directory.join("source-sanitized.pdf");
-        sanitize_source_pdf(
-            &pipeline_request.source_path,
-            &sanitized_source_path,
-            &layout,
-            &cancellation,
-        )
-        .map_err(|error| PdfTranslationError {
-            stage: PdfTranslationStage::Compiling,
-            message: format!("Could not remove source text from translated regions: {error}"),
-            retryable: false,
-        })?;
-        let typst_output = self
-            .typst
-            .compile_translated_pdf(
+        let initial_layout_items = layout
+            .pages
+            .iter()
+            .map(|page| page.items.len())
+            .sum::<usize>();
+        let mut overflow_attempt = 0usize;
+        let typst_output = loop {
+            let sanitized_source_path = job_directory.join(if overflow_attempt == 0 {
+                "source-sanitized.pdf".to_string()
+            } else {
+                format!("source-sanitized-fallback-{overflow_attempt}.pdf")
+            });
+            sanitize_source_pdf(
+                &pipeline_request.source_path,
                 &sanitized_source_path,
                 &layout,
-                &job_directory,
                 &cancellation,
             )
             .map_err(|error| PdfTranslationError {
                 stage: PdfTranslationStage::Compiling,
-                message: error.message,
+                message: format!("Could not remove source text from translated regions: {error}"),
                 retryable: false,
             })?;
+            match self.typst.compile_translated_pdf(
+                &sanitized_source_path,
+                &layout,
+                &job_directory,
+                &cancellation,
+            ) {
+                Ok(output) => break output,
+                Err(error)
+                    if overflow_attempt < initial_layout_items
+                        && typst_overflow_block_id(&error.message).is_some_and(|block_id| {
+                            layout.preserve_block_on_overflow(&block_id)
+                        }) =>
+                {
+                    overflow_attempt += 1;
+                    write_json(job_directory.join("layout.json"), &layout)?;
+                }
+                Err(error) => {
+                    return Err(PdfTranslationError {
+                        stage: PdfTranslationStage::Compiling,
+                        message: error.message,
+                        retryable: false,
+                    });
+                }
+            }
+        };
+        write_json(job_directory.join("layout.json"), &layout)?;
         progress.finish_stage(PdfTranslationStage::Compiling, "Typst PDF compiled");
 
         progress.report(
@@ -519,7 +562,7 @@ impl PdfTranslationService {
             Some(0),
             Some(1),
         );
-        let mut document = normalize_paddle_payload(
+        let document = normalize_paddle_payload(
             &result.payload,
             request.source_path.clone(),
             request_fingerprint(settings, request).unwrap_or_else(|_| "document".to_string()),
@@ -533,11 +576,13 @@ impl PdfTranslationService {
                 error,
             )
         })?;
-        if let Ok(native_document) =
+        let document = if let Ok(native_document) =
             extract_native_document(&request.source_path, "native-geometry", cancellation)
         {
-            reconcile_ocr_geometry(&mut document, &native_document);
-        }
+            fuse_native_with_ocr(native_document, &document)
+        } else {
+            document
+        };
         progress.finish_stage(PdfTranslationStage::Normalizing, "OCR document normalized");
         Ok(document)
     }
@@ -662,6 +707,8 @@ pub struct PdfTranslationArtifactManifest {
     pub ocr_provider: String,
     pub translation_provider: String,
     pub translated_unit_count: usize,
+    #[serde(default)]
+    pub preserved_on_overflow: Vec<String>,
     pub job_directory: String,
     pub geometry: Vec<ArtifactGeometry>,
 }
@@ -690,13 +737,14 @@ fn build_manifest(
         output_path: request.output_path.to_string_lossy().to_string(),
         target_language: request.target_language.as_str().to_string(),
         ocr_mode: settings.ocr.mode.as_str().to_string(),
-        ocr_provider: if translated.document.metadata.provider == "paddle" {
+        ocr_provider: if translated.document.metadata.provider.contains("paddle") {
             "paddle".to_string()
         } else {
             "mupdf".to_string()
         },
         translation_provider: settings.translation.active_provider.as_str().to_string(),
         translated_unit_count: translated.units.len(),
+        preserved_on_overflow: layout.preserved_on_overflow.clone(),
         job_directory: job_directory.to_string_lossy().to_string(),
         geometry: layout
             .pages
@@ -705,7 +753,7 @@ fn build_manifest(
                 page.items.iter().map(|item| ArtifactGeometry {
                     block_id: item.block_id.clone(),
                     page_index: item.page_index,
-                    source_bbox: item.bbox,
+                    source_bbox: item.source_bbox,
                     target_bbox: item.bbox,
                 })
             })
@@ -774,9 +822,20 @@ fn validate_output(
             })?;
         extracted_text.push_str(&text);
     }
+    let rendered_blocks = layout
+        .pages
+        .iter()
+        .flat_map(|page| page.items.iter())
+        .map(|item| item.block_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
     let expected = translated
         .units
         .iter()
+        .filter(|unit| {
+            unit.member_block_ids
+                .iter()
+                .any(|block_id| rendered_blocks.contains(block_id.as_str()))
+        })
         .filter(|unit| unit.translated_text.chars().count() >= 4)
         .take(8)
         .collect::<Vec<_>>();
@@ -799,6 +858,16 @@ fn validate_output(
         ));
     }
     Ok(())
+}
+
+fn typst_overflow_block_id(message: &str) -> Option<String> {
+    let marker = "GLYPHST_OVERFLOW:";
+    let start = message.find(marker)? + marker.len();
+    let id = message[start..]
+        .chars()
+        .take_while(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        .collect::<String>();
+    (!id.is_empty()).then_some(id)
 }
 
 fn request_fingerprint(
@@ -921,6 +990,15 @@ fn write_translation_diagnostics(
         },
         PdfTranslationStage::Translating,
     )
+}
+
+fn translation_checkpoint_changed(
+    resolved: usize,
+    last_resolved: usize,
+    failed: usize,
+    last_failed: usize,
+) -> bool {
+    resolved != last_resolved || failed != last_failed
 }
 
 fn create_job_directory(fingerprint: &str) -> Result<PathBuf, PdfTranslationError> {
@@ -1070,6 +1148,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extracts_only_the_overflowing_block_id_from_typst_diagnostics() {
+        assert_eq!(
+            typst_overflow_block_id(
+                "error: panicked with: GLYPHST_OVERFLOW:p001-b0029-s01\n  ┌─ file.typ"
+            ),
+            Some("p001-b0029-s01".to_string())
+        );
+        assert_eq!(typst_overflow_block_id("ordinary Typst error"), None);
+    }
+
+    #[test]
     fn fingerprint_does_not_include_ocr_or_translation_secrets() {
         let mut settings = Settings::default();
         settings.ocr.token = "paddle-secret".to_string();
@@ -1142,6 +1231,8 @@ mod tests {
             role: crate::BlockRole::Body,
             source_text: "source".to_string(),
             translated_text: "target".to_string(),
+            styled_runs: Vec::new(),
+            style_fallback: false,
             semantic_hash: 1,
         };
         let snapshot = TranslationRunSnapshot {
@@ -1178,6 +1269,14 @@ mod tests {
             "atomic checkpoint write left a staging file behind"
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn every_newly_resolved_unit_advances_the_checkpoint() {
+        assert!(translation_checkpoint_changed(1, 0, 0, 0));
+        assert!(translation_checkpoint_changed(8, 7, 1, 1));
+        assert!(translation_checkpoint_changed(7, 7, 1, 0));
+        assert!(!translation_checkpoint_changed(7, 7, 1, 1));
     }
 
     #[test]

@@ -11,10 +11,11 @@ use reqwest::header::AUTHORIZATION;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+use crate::policy::{derive_protected_regions_from_blocks, enforce_page_protected_regions};
 use crate::{
     Block, BlockContent, BlockKind, BlockRole, BoundingBox, CancellationToken, ContinuationHint,
-    ContinuationScope, DocumentMetadata, DocumentV1, Line, Page, PageGeometry, Segment,
-    SegmentKind, SourceProvenance, TextStyle, TranslationPolicy,
+    ContinuationScope, DocumentMetadata, DocumentV1, Line, Page, PageGeometry,
+    PolicyDecisionSource, Segment, SegmentKind, SourceProvenance, TextStyle, TranslationPolicy,
 };
 
 static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -615,6 +616,13 @@ pub fn normalize_paddle_payload(
             let text = string(raw_block.get("block_content")).trim().to_string();
             let (kind, role, mut policy, tags) =
                 classify_paddle_block(&raw_label, &text, order, body_flow_start, previous_anchor);
+            policy.source = PolicyDecisionSource::OcrSemantic;
+            policy.confidence = if role == BlockRole::Unknown {
+                0.0
+            } else {
+                0.96
+            };
+            policy.locked = !policy.translate && role != BlockRole::Unknown;
             if matches!(
                 kind,
                 BlockKind::Text | BlockKind::Image | BlockKind::Table | BlockKind::Formula
@@ -674,12 +682,16 @@ pub fn normalize_paddle_payload(
         {
             metadata.insert("provider_markdown".to_string(), json!(markdown));
         }
-        pages.push(Page {
+        let mut page = Page {
             page_index,
             geometry,
             blocks,
+            protected_regions: Vec::new(),
             metadata,
-        });
+        };
+        derive_protected_regions_from_blocks(&mut page);
+        enforce_page_protected_regions(&mut page);
+        pages.push(page);
     }
     assign_provider_continuations(&mut pages);
 
@@ -949,6 +961,8 @@ fn build_lines(
                 bbox: line_bbox,
                 segments: split_inline_segments(&text, raw_label, line_bbox),
                 text,
+                baseline_y: None,
+                line_height: Some(line_bbox.height()),
             }
         })
         .collect()
@@ -1425,5 +1439,32 @@ mod tests {
                 .any(|block| block.policy.translate)
         );
         document.validate().unwrap();
+
+        let Some(source_path) =
+            std::env::var_os("GLYPHST_PADDLE_FIXTURE_SOURCE").map(PathBuf::from)
+        else {
+            return;
+        };
+        let cancellation = CancellationToken::new();
+        let native =
+            crate::extract_native_document(&source_path, "fixture-native", &cancellation).unwrap();
+        let fused = crate::fuse_native_with_ocr(native, &document);
+        for page in &fused.pages {
+            for block in page.blocks.iter().filter(|block| block.policy.translate) {
+                assert!(
+                    !page.protected_regions.iter().any(|region| {
+                        let x = (block.bbox.x0 + block.bbox.x1) * 0.5;
+                        let y = (block.bbox.y0 + block.bbox.y1) * 0.5;
+                        x >= region.bbox.x0
+                            && x <= region.bbox.x1
+                            && y >= region.bbox.y0
+                            && y <= region.bbox.y1
+                    }),
+                    "translated block {} remained inside a protected region",
+                    block.id
+                );
+            }
+        }
+        fused.validate().unwrap();
     }
 }

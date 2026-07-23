@@ -5,13 +5,8 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-glyphst-core = { path = "../core" }
-glyphst-settings = { path = "../settings" }
-glyphst-translation = { path = "../translation" }
-gpui.workspace = true
 mupdf.workspace = true
 reqwest = { workspace = true, features = ["multipart"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-ztracing.workspace = true

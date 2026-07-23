@@ -17,7 +17,7 @@ mod instance;
 
 use glyphst_keymap::keybindings;
 use glyphst_library::{DocumentPosition, LibraryStore};
-use glyphst_pdf_translation::PdfTranslationService;
+use glyphst_pdf_translation_app::PdfTranslationService;
 use glyphst_pdf_ui::pdf_view::RenderCache;
 use glyphst_settings::{SettingsStore, localize};
 use glyphst_translation::TranslationService;

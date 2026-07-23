@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use mupdf::{Colorspace, Document, Matrix};
 
-use crate::{BoundingBox, CancellationToken, LayoutDocument, LayoutItem};
+use crate::{
+    BoundingBox, CancellationToken, FontFamilyClass, LayoutDocument, LayoutItem, OverflowPolicy,
+    StyledRun, TextStyle,
+};
 
 #[derive(Debug, Clone)]
 pub struct TypstCompilerConfig {
@@ -283,24 +286,29 @@ pub fn generate_typst_source(layout: &LayoutDocument) -> String {
     }
   }
 }
-#let glyphst_fit(markdown, max-size: 10pt, min-size: 6pt, max-leading: 0.58em, min-leading: 0.40em, fit-height: none, weight: "regular", first-line-indent: 0pt, justify: false) = {
+#let glyphst_fit(body, max-size: 10pt, min-size: 6pt, emergency-min-size: 5pt, max-leading: 0.58em, min-leading: 0.40em, fit-height: none, first-line-indent: 0pt, justify: false, strict: true, diagnostic: "unknown") = {
   layout(size => {
     let allowed-height = if fit-height == none { size.height } else { calc.min(size.height, fit-height) }
     let render(text-size, leading) = block(width: size.width)[#{
-      set text(size: text-size, weight: weight)
+      set text(size: text-size)
       set par(leading: leading, justify: justify)
       if first-line-indent > 0pt { h(first-line-indent) }
-      cmarker.render(markdown, math: mitex)
+      body(text-size)
     }]
     let fits(text-size, leading) = measure(width: size.width, render(text-size, leading)).height <= allowed-height
-    let emergency-size = calc.max(4.2pt, min-size * 0.70)
     let emergency-leading = calc.max(0.20em, min-leading * 0.75)
+    if not fits(emergency-min-size, emergency-leading) {
+      panic("GLYPHST_OVERFLOW:" + diagnostic)
+    }
+    if strict and not fits(min-size, min-leading) {
+      panic("GLYPHST_OVERFLOW:" + diagnostic)
+    }
     let chosen-size = if fits(max-size, max-leading) {
       max-size
     } else if fits(min-size, min-leading) {
       glyphst_fit_size(min-size, max-size, 0.08pt, size => fits(size, min-leading))
     } else {
-      glyphst_fit_size(emergency-size, min-size, 0.08pt, size => fits(size, emergency-leading))
+      glyphst_fit_size(emergency-min-size, min-size, 0.08pt, size => fits(size, emergency-leading))
     }
     let leading-floor = if fits(chosen-size, min-leading) { min-leading } else { emergency-leading }
     let leading-cap = if fits(chosen-size, max-leading) { max-leading } else { min-leading }
@@ -323,34 +331,13 @@ pub fn generate_typst_source(layout: &LayoutDocument) -> String {
             page.geometry.width, page.geometry.height
         ));
         for (item_index, item) in page.items.iter().enumerate() {
-            let name = format!("glyphst_p{}_i{}", page.page_index + 1, item_index);
-            let markdown = if item.preserve_line_breaks {
-                item.text.replace('\n', "  \n")
-            } else {
-                item.text.clone()
-            };
-            let markdown = normalize_markdown_math(&markdown);
-            source.push_str(&format!(
-                "#let {name}_text = \"{}\"\n",
-                escape_typst_string(&markdown)
-            ));
-            source.push_str(&format!(
-                "#let {name}_body = block(width: {:.3}pt, height: {:.3}pt, inset: 0pt, clip: false)[#{{ glyphst_fit({name}_text, max-size: {:.3}pt, min-size: {:.3}pt, max-leading: {:.3}em, min-leading: {:.3}em, fit-height: {:.3}pt, weight: \"{}\", first-line-indent: {:.3}pt, justify: {}) }}]\n",
-                item.bbox.width().max(1.0),
-                item.bbox.height().max(1.0),
-                item.font_size_pt,
-                item.minimum_font_size_pt,
-                item.leading_em,
-                item.minimum_leading_em,
-                item.bbox.height().max(1.0),
-                item.font_weight.typst_name(),
-                item.first_line_indent_pt,
-                item.justify
-            ));
-            source.push_str(&format!(
-                "#context {{ place(top + left, dx: {:.3}pt, dy: {:.3}pt, {name}_body) }}\n",
-                item.bbox.x0, item.bbox.y0
-            ));
+            append_typst_layout_item(
+                &mut source,
+                page.page_index,
+                item_index,
+                item,
+                layout.overflow_policy,
+            );
         }
     }
     source
@@ -385,17 +372,31 @@ pub fn generate_translated_pdf_source(
                 .and_then(|colors| colors.get(item_index))
                 .copied()
                 .unwrap_or([255, 255, 255]);
-            source.push_str(&format!(
-                "#place(top + left, dx: {:.3}pt, dy: {:.3}pt, rect(width: {:.3}pt, height: {:.3}pt, fill: rgb({}, {}, {}), stroke: none))\n",
-                item.bbox.x0 - 0.8,
-                item.bbox.y0 - 0.5,
-                item.bbox.width() + 1.6,
-                item.bbox.height() + 1.0,
-                color[0],
-                color[1],
-                color[2]
-            ));
-            append_typst_layout_item(&mut source, page.page_index, item_index, item);
+            let fallback_regions = [item.source_bbox];
+            let regions = if item.source_regions.is_empty() {
+                fallback_regions.as_slice()
+            } else {
+                item.source_regions.as_slice()
+            };
+            for region in regions {
+                source.push_str(&format!(
+                    "#place(top + left, dx: {:.3}pt, dy: {:.3}pt, rect(width: {:.3}pt, height: {:.3}pt, fill: rgb({}, {}, {}), stroke: none))\n",
+                    region.x0,
+                    region.y0,
+                    region.width(),
+                    region.height(),
+                    color[0],
+                    color[1],
+                    color[2]
+                ));
+            }
+            append_typst_layout_item(
+                &mut source,
+                page.page_index,
+                item_index,
+                item,
+                layout.overflow_policy,
+            );
         }
     }
     source
@@ -406,35 +407,157 @@ fn append_typst_layout_item(
     page_index: usize,
     item_index: usize,
     item: &LayoutItem,
+    overflow_policy: OverflowPolicy,
 ) {
     let name = format!("glyphst_p{}_i{}", page_index + 1, item_index);
-    let markdown = if item.preserve_line_breaks {
-        item.text.replace('\n', "  \n")
-    } else {
-        item.text.clone()
+    let base_style = TextStyle {
+        font_family: None,
+        font_class: Some(item.font_class),
+        font_size: Some(item.source_font_size_pt),
+        bold: item.font_weight == crate::FontWeight::Bold,
+        italic: item.italic,
+        underline: item.underline,
+        strikeout: item.strikeout,
+        color_argb: Some(item.color_argb),
     };
-    let markdown = normalize_markdown_math(&markdown);
+    let fallback_runs = [StyledRun {
+        text: item.text.clone(),
+        style: None,
+    }];
+    let runs = if item.styled_runs.is_empty() {
+        fallback_runs.as_slice()
+    } else {
+        item.styled_runs.as_slice()
+    };
+    source.push_str(&format!("#let {name}_content(text-size) = [\n"));
+    let mut index = 0usize;
+    while index < runs.len() {
+        let run = &runs[index];
+        let style = merged_text_style(&base_style, run.style.as_ref());
+        if style.font_class == Some(FontFamilyClass::Math) {
+            source.push_str("#box[");
+            while index < runs.len() {
+                let run = &runs[index];
+                let style = merged_text_style(&base_style, run.style.as_ref());
+                if style.font_class != Some(FontFamilyClass::Math) {
+                    break;
+                }
+                append_typst_styled_run(source, run, &style, item);
+                if source.ends_with('\n') {
+                    source.pop();
+                }
+                index += 1;
+            }
+            source.push_str("]\n");
+        } else {
+            append_typst_styled_run(source, run, &style, item);
+            index += 1;
+        }
+    }
+    source.push_str("]\n");
     source.push_str(&format!(
-        "#let {name}_text = \"{}\"\n",
-        escape_typst_string(&markdown)
-    ));
-    source.push_str(&format!(
-        "#let {name}_body = block(width: {:.3}pt, height: {:.3}pt, inset: 0pt, clip: false)[#{{ glyphst_fit({name}_text, max-size: {:.3}pt, min-size: {:.3}pt, max-leading: {:.3}em, min-leading: {:.3}em, fit-height: {:.3}pt, weight: \"{}\", first-line-indent: {:.3}pt, justify: {}) }}]\n",
+        "#let {name}_body = block(width: {:.3}pt, height: {:.3}pt, inset: 0pt, clip: false)[#{{ glyphst_fit({name}_content, max-size: {:.3}pt, min-size: {:.3}pt, emergency-min-size: {:.3}pt, max-leading: {:.3}em, min-leading: {:.3}em, fit-height: {:.3}pt, first-line-indent: {:.3}pt, justify: {}, strict: {}, diagnostic: \"{}\") }}]\n",
         item.bbox.width().max(1.0),
         item.bbox.height().max(1.0),
         item.font_size_pt,
         item.minimum_font_size_pt,
+        item.emergency_minimum_font_size_pt,
         item.leading_em,
         item.minimum_leading_em,
         item.bbox.height().max(1.0),
-        item.font_weight.typst_name(),
         item.first_line_indent_pt,
-        item.justify
+        item.justify,
+        overflow_policy == OverflowPolicy::Strict,
+        escape_typst_string(&item.block_id)
     ));
     source.push_str(&format!(
         "#context {{ place(top + left, dx: {:.3}pt, dy: {:.3}pt, {name}_body) }}\n",
         item.bbox.x0, item.bbox.y0
     ));
+}
+
+fn merged_text_style(base: &TextStyle, override_style: Option<&TextStyle>) -> TextStyle {
+    let Some(override_style) = override_style else {
+        return base.clone();
+    };
+    TextStyle {
+        font_family: override_style
+            .font_family
+            .clone()
+            .or_else(|| base.font_family.clone()),
+        font_class: override_style.font_class.or(base.font_class),
+        font_size: override_style.font_size.or(base.font_size),
+        bold: override_style.bold,
+        italic: override_style.italic,
+        underline: override_style.underline,
+        strikeout: override_style.strikeout,
+        color_argb: override_style.color_argb.or(base.color_argb),
+    }
+}
+
+fn append_typst_styled_run(
+    source: &mut String,
+    run: &StyledRun,
+    style: &TextStyle,
+    item: &LayoutItem,
+) {
+    if run.text.is_empty() {
+        return;
+    }
+    let markdown = if item.preserve_line_breaks {
+        run.text.replace('\n', "  \n")
+    } else {
+        run.text.clone()
+    };
+    let markdown = normalize_markdown_math(&markdown);
+    let font = typst_font_name(style.font_class.unwrap_or(FontFamilyClass::Serif));
+    let source_size = style
+        .font_size
+        .filter(|size| size.is_finite() && *size > 0.0)
+        .unwrap_or(item.source_font_size_pt);
+    let size_ratio = (source_size / item.source_font_size_pt.max(0.1)).clamp(0.55, 2.4);
+    let [red, green, blue] = argb_to_rgb(style.color_argb.unwrap_or(0xff00_0000));
+    let escaped = escape_typst_string(&markdown);
+    let mut content = if style.font_class == Some(FontFamilyClass::Math) {
+        format!("#text(\"{escaped}\")")
+    } else {
+        format!("#cmarker.render(\"{escaped}\", math: mitex)")
+    };
+    if style.strikeout {
+        content = format!("#strike[{content}]");
+    }
+    if style.underline {
+        content = format!("#underline[{content}]");
+    }
+    source.push_str(&format!(
+        "#text(font: \"{}\", size: text-size * {:.4}, weight: \"{}\", style: \"{}\", fill: rgb({}, {}, {}))[{}]\n",
+        font,
+        size_ratio,
+        if style.bold { "bold" } else { "regular" },
+        if style.italic { "italic" } else { "normal" },
+        red,
+        green,
+        blue,
+        content
+    ));
+}
+
+fn typst_font_name(font_class: FontFamilyClass) -> &'static str {
+    match font_class {
+        FontFamilyClass::SansSerif => "Noto Sans CJK SC",
+        FontFamilyClass::Monospace => "Lilex",
+        FontFamilyClass::Serif | FontFamilyClass::Math | FontFamilyClass::Unknown => {
+            "Source Han Serif SC"
+        }
+    }
+}
+
+fn argb_to_rgb(argb: u32) -> [u8; 3] {
+    [
+        ((argb >> 16) & 0xff) as u8,
+        ((argb >> 8) & 0xff) as u8,
+        (argb & 0xff) as u8,
+    ]
 }
 
 fn sample_layout_background_colors(
@@ -466,7 +589,7 @@ fn sample_layout_background_colors(
         pages.push(
             page.items
                 .iter()
-                .map(|item| sample_background_color(&pixmap, item.bbox))
+                .map(|item| sample_background_color(&pixmap, item.source_bbox))
                 .collect(),
         );
     }
@@ -617,6 +740,11 @@ mod tests {
 
     #[test]
     fn generated_source_uses_offline_packages_and_fit_helpers() {
+        let math_style = TextStyle {
+            font_class: Some(FontFamilyClass::Math),
+            font_size: Some(10.0),
+            ..TextStyle::default()
+        };
         let layout = LayoutDocument {
             pages: vec![LayoutPage {
                 page_index: 0,
@@ -625,20 +753,59 @@ mod tests {
                     unit_id: "unit".to_string(),
                     block_id: "block".to_string(),
                     page_index: 0,
+                    source_bbox: BoundingBox::new(10.0, 20.0, 90.0, 60.0),
+                    source_regions: vec![BoundingBox::new(10.0, 20.0, 90.0, 60.0)],
                     bbox: BoundingBox::new(10.0, 20.0, 90.0, 60.0),
                     text: "你好 $E = mc^2$".to_string(),
                     role: crate::BlockRole::Body,
+                    source_font_size_pt: 10.0,
                     font_size_pt: 10.0,
                     minimum_font_size_pt: 6.0,
+                    emergency_minimum_font_size_pt: 5.5,
                     leading_em: 0.58,
                     minimum_leading_em: 0.4,
                     font_weight: FontWeight::Regular,
+                    font_class: FontFamilyClass::Serif,
+                    italic: false,
+                    underline: false,
+                    strikeout: false,
+                    color_argb: 0xff00_0000,
+                    styled_runs: vec![
+                        StyledRun {
+                            text: "你好 ".to_string(),
+                            style: Some(TextStyle {
+                                font_class: Some(FontFamilyClass::SansSerif),
+                                font_size: Some(10.0),
+                                bold: true,
+                                italic: true,
+                                color_argb: Some(0xff44_5566),
+                                ..TextStyle::default()
+                            }),
+                        },
+                        StyledRun {
+                            text: "O(n".to_string(),
+                            style: Some(math_style.clone()),
+                        },
+                        StyledRun {
+                            text: "3".to_string(),
+                            style: Some(TextStyle {
+                                font_size: Some(8.0),
+                                ..math_style.clone()
+                            }),
+                        },
+                        StyledRun {
+                            text: "+n2d)".to_string(),
+                            style: Some(math_style),
+                        },
+                    ],
                     first_line_indent_pt: 0.0,
                     justify: true,
                     preserve_line_breaks: false,
                 }],
             }],
             warnings: Vec::new(),
+            preserved_on_overflow: Vec::new(),
+            overflow_policy: OverflowPolicy::Strict,
         };
 
         let source = generate_typst_source(&layout);
@@ -648,6 +815,14 @@ mod tests {
         assert!(source.contains("glyphst_fit"));
         assert!(source.contains("fill: none"));
         assert!(source.contains("clip: false"));
+        assert!(source.contains("font: \"Noto Sans CJK SC\""));
+        assert!(source.contains("weight: \"bold\""));
+        assert!(source.contains("style: \"italic\""));
+        assert!(source.contains("fill: rgb(68, 85, 102)"));
+        assert!(source.contains("#box["));
+        assert!(source.contains("#text(\"+n2d)\")"));
+        assert!(!source.contains("cmarker.render(\"+n2d)\""));
+        assert!(!source.contains("#text(\"O(n\")\n#text(\"3\")"));
         assert!(!source.contains("clip: true"));
     }
 
@@ -676,20 +851,32 @@ mod tests {
                     unit_id: "unit".to_string(),
                     block_id: "block".to_string(),
                     page_index: 0,
+                    source_bbox: BoundingBox::new(10.0, 10.0, 190.0, 100.0),
+                    source_regions: vec![BoundingBox::new(10.0, 10.0, 190.0, 100.0)],
                     bbox: BoundingBox::new(10.0, 10.0, 190.0, 100.0),
                     text: "简体中文第一行不应裁切。\nDansk: Ålborg, dejlig og lang.\nDeutsch: Ältere Übung, deutlich und lang. $E = mc^2$.".to_string(),
                     role: crate::BlockRole::Body,
+                    source_font_size_pt: 10.0,
                     font_size_pt: 10.0,
                     minimum_font_size_pt: 6.0,
+                    emergency_minimum_font_size_pt: 5.5,
                     leading_em: 0.58,
                     minimum_leading_em: 0.4,
                     font_weight: FontWeight::Regular,
+                    font_class: FontFamilyClass::Serif,
+                    italic: false,
+                    underline: false,
+                    strikeout: false,
+                    color_argb: 0xff00_0000,
+                    styled_runs: Vec::new(),
                     first_line_indent_pt: 0.0,
                     justify: true,
                     preserve_line_breaks: true,
                 }],
             }],
             warnings: Vec::new(),
+            preserved_on_overflow: Vec::new(),
+            overflow_policy: OverflowPolicy::Strict,
         };
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

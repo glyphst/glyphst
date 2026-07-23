@@ -20,7 +20,7 @@ const MAX_CACHE_ENTRIES: usize = 10_000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_BATCH_TEXTS: usize = 64;
 const MAX_BATCH_CHARS: usize = 24_000;
-const SEMANTIC_PROTOCOL_VERSION: &str = "semantic-v2-json-items-prompt-v2";
+const SEMANTIC_PROTOCOL_VERSION: &str = "semantic-v4-json-items-adjacency-prompt-v4";
 const GOOGLE_SEMANTIC_PROTOCOL_VERSION: &str = "google-semantic-v3-html-spans-segmented-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,6 +243,7 @@ pub enum SemanticProtectedTokenKind {
     Url,
     NumericLiteral,
     Identifier,
+    StyleBoundary,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1463,6 +1464,7 @@ fn prepare_google_semantic_unit(
             SemanticProtectedTokenKind::Formula
                 | SemanticProtectedTokenKind::Citation
                 | SemanticProtectedTokenKind::Url
+                | SemanticProtectedTokenKind::StyleBoundary
         );
         if no_translate {
             html.push_str("<span translate=\"no\" class=\"notranslate\">");
@@ -1733,7 +1735,7 @@ fn semantic_cache_key(
     let prefix = if provider == TranslationProvider::Google {
         "google-semantic-v3"
     } else {
-        "semantic-v2"
+        "semantic-v4"
     };
     format!("{prefix}-{:016x}", hasher.finish())
 }
@@ -2426,7 +2428,7 @@ mod tests {
                 &changed_token
             )
         );
-        assert!(!key.starts_with("semantic-v2-"));
+        assert!(!key.starts_with("semantic-v3-"));
     }
 
     #[test]
@@ -2641,7 +2643,7 @@ mod tests {
             base_key,
             semantic_cache_key(&changed_endpoint, provider, None, &target, &unit)
         );
-        assert!(base_key.starts_with("semantic-v2-"));
+        assert!(base_key.starts_with("semantic-v4-"));
     }
 
     #[test]
