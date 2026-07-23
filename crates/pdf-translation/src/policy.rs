@@ -406,10 +406,7 @@ fn set_block_lines(block: &mut Block, lines: &[Line]) {
     };
 }
 
-fn region_for_bbox<'a>(
-    bbox: BoundingBox,
-    regions: &'a [ProtectedRegion],
-) -> Option<&'a ProtectedRegion> {
+fn region_for_bbox(bbox: BoundingBox, regions: &[ProtectedRegion]) -> Option<&ProtectedRegion> {
     regions
         .iter()
         .filter_map(|region| {
@@ -533,6 +530,7 @@ mod tests {
                 0.90,
             ),
             continuation: None,
+            structure: None,
             source: SourceProvenance {
                 provider: "fixture".to_string(),
                 raw_label: "text".to_string(),

@@ -14,18 +14,19 @@ pub use composition::{
     PdfComposer, PdfCompositionError, PdfCompositionReport, sanitize_source_pdf,
 };
 pub use document::{
-    BaselinePosition, Block, BlockContent, BlockKind, BlockRole, BoundingBox, ContinuationHint,
-    ContinuationScope, DocumentMetadata, DocumentV1, FontFamilyClass, Line, Page, PageGeometry,
-    PolicyDecisionSource, ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind,
-    SourceProvenance, TextStyle, TranslationPolicy,
+    BaselinePosition, Block, BlockContent, BlockKind, BlockRole, BlockStructure, BoundingBox,
+    ContinuationHint, ContinuationScope, DocumentMetadata, DocumentV1, FontFamilyClass, Line, Page,
+    PageGeometry, PolicyDecisionSource, ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind,
+    SourceProvenance, StructureKind, TextFlow, TextStyle, TranslationPolicy,
 };
 pub use layout::{
     FontWeight, LayoutDocument, LayoutItem, LayoutOptions, LayoutPage, LayoutWarning,
     OverflowPolicy, build_layout, build_layout_with_options, split_text_for_layout_boxes,
 };
 pub use native::{
-    PdfInspection, PdfPageProfile, extract_native_document, fuse_native_with_ocr, inspect_pdf,
-    reconcile_ocr_geometry,
+    OcrFusionDecision, OcrFusionPageReport, OcrFusionRelation, OcrFusionReport, OcrFusionResult,
+    PdfInspection, PdfPageProfile, extract_native_document, fuse_native_with_ocr,
+    fuse_native_with_ocr_report, inspect_pdf, reconcile_ocr_geometry,
 };
 pub use paddle::{
     PaddleClient, PaddleClientConfig, PaddleError, PaddleErrorCategory, PaddleJobProgress,

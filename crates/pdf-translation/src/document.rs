@@ -53,6 +53,19 @@ impl DocumentV1 {
                 if !block.bbox.is_valid() {
                     bail!("block {} has an invalid bounding box", block.id);
                 }
+                if let Some(structure) = &block.structure {
+                    if !structure.confidence.is_finite()
+                        || !(0.0..=1.0).contains(&structure.confidence)
+                    {
+                        bail!("block {} has invalid structure confidence", block.id);
+                    }
+                    if structure
+                        .group_bbox
+                        .is_some_and(|group_bbox| !group_bbox.is_valid())
+                    {
+                        bail!("block {} has an invalid structure group box", block.id);
+                    }
+                }
             }
             for region in &page.protected_regions {
                 if region.page_index != page_index {
@@ -126,11 +139,48 @@ pub struct Block {
     pub policy: TranslationPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ContinuationHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structure: Option<BlockStructure>,
     pub source: SourceProvenance,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
     pub metadata: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlockStructure {
+    pub kind: StructureKind,
+    pub flow: TextFlow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_bbox: Option<BoundingBox>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    pub provider: String,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextFlow {
+    #[default]
+    Reflow,
+    PreserveLines,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructureKind {
+    #[default]
+    Region,
+    Caption,
+    PromptHeading,
+    PromptQuestion,
+    OrderedListItem,
+    BulletListItem,
+    DialogueTurn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -557,6 +607,7 @@ mod tests {
                     content: BlockContent::default(),
                     policy: TranslationPolicy::translate("test"),
                     continuation: None,
+                    structure: None,
                     source: SourceProvenance {
                         provider: "test".to_string(),
                         raw_label: "text".to_string(),

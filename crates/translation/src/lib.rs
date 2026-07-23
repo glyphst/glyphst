@@ -243,6 +243,7 @@ pub enum SemanticProtectedTokenKind {
     Url,
     NumericLiteral,
     Identifier,
+    StructuralMarker,
     LineBreak,
     StyleBoundary,
 }
@@ -1465,6 +1466,7 @@ fn prepare_google_semantic_unit(
             SemanticProtectedTokenKind::Formula
                 | SemanticProtectedTokenKind::Citation
                 | SemanticProtectedTokenKind::Url
+                | SemanticProtectedTokenKind::StructuralMarker
                 | SemanticProtectedTokenKind::LineBreak
                 | SemanticProtectedTokenKind::StyleBoundary
         );
@@ -1884,15 +1886,15 @@ impl TranslationCache {
             create_private_cache_directory(parent)?;
         }
         if !path.exists() {
-            create_private_cache_file(&path)?;
+            create_private_cache_file(path)?;
         }
-        let database = Database::create(&path)
-            .with_context(|| format!("failed to open {}", path.display()))?;
+        let database =
+            Database::create(path).with_context(|| format!("failed to open {}", path.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
 
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
                 .with_context(|| format!("failed to restrict {}", path.display()))?;
         }
         let write_txn = database.begin_write()?;

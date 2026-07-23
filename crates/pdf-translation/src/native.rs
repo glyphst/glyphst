@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -9,10 +9,10 @@ use serde_json::json;
 
 use crate::policy::enforce_page_protected_regions;
 use crate::{
-    BaselinePosition, Block, BlockContent, BlockKind, BlockRole, BoundingBox, CancellationToken,
-    DocumentMetadata, DocumentV1, FontFamilyClass, Line, Page, PageGeometry, PolicyDecisionSource,
-    ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind, SourceProvenance, TextStyle,
-    TranslationPolicy,
+    BaselinePosition, Block, BlockContent, BlockKind, BlockRole, BlockStructure, BoundingBox,
+    CancellationToken, DocumentMetadata, DocumentV1, FontFamilyClass, Line, Page, PageGeometry,
+    PolicyDecisionSource, ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind,
+    SourceProvenance, StructureKind, TextFlow, TextStyle, TranslationPolicy,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,6 +31,50 @@ pub struct PdfPageProfile {
     pub text_area_ratio: f32,
     pub image_area_ratio: f32,
     pub needs_ocr: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OcrFusionResult {
+    pub document: DocumentV1,
+    pub report: OcrFusionReport,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OcrFusionReport {
+    pub pages: Vec<OcrFusionPageReport>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OcrFusionPageReport {
+    pub page_index: usize,
+    pub one_to_one_matches: usize,
+    pub accepted_merges: usize,
+    pub accepted_splits: usize,
+    pub accepted_many_to_many: usize,
+    pub ocr_only_blocks: usize,
+    pub native_fallbacks: usize,
+    pub decisions: Vec<OcrFusionDecision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OcrFusionDecision {
+    pub relation: OcrFusionRelation,
+    pub native_block_ids: Vec<String>,
+    pub ocr_block_ids: Vec<String>,
+    pub score: f32,
+    pub native_coverage: f32,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrFusionRelation {
+    OneToOne,
+    Merge,
+    Split,
+    ManyToMany,
+    OcrOnly,
+    NativeFallback,
 }
 
 pub fn inspect_pdf(path: &Path, cancellation: &CancellationToken) -> Result<PdfInspection> {
@@ -395,6 +439,7 @@ pub fn extract_native_document(
                 },
                 policy,
                 continuation: None,
+                structure: None,
                 source: SourceProvenance {
                     provider: "mupdf".to_string(),
                     raw_label: "text".to_string(),
@@ -780,7 +825,12 @@ pub fn reconcile_ocr_geometry(document: &mut DocumentV1, native: &DocumentV1) {
     }
 }
 
-pub fn fuse_native_with_ocr(mut native: DocumentV1, ocr: &DocumentV1) -> DocumentV1 {
+pub fn fuse_native_with_ocr(native: DocumentV1, ocr: &DocumentV1) -> DocumentV1 {
+    fuse_native_with_ocr_report(native, ocr).document
+}
+
+pub fn fuse_native_with_ocr_report(mut native: DocumentV1, ocr: &DocumentV1) -> OcrFusionResult {
+    let mut report = OcrFusionReport::default();
     for page in &mut native.pages {
         let Some(ocr_page) = ocr
             .pages
@@ -789,70 +839,203 @@ pub fn fuse_native_with_ocr(mut native: DocumentV1, ocr: &DocumentV1) -> Documen
         else {
             continue;
         };
+        let mut page_report = OcrFusionPageReport {
+            page_index: page.page_index,
+            ..OcrFusionPageReport::default()
+        };
         page.protected_regions
             .extend(ocr_page.protected_regions.iter().cloned());
         reclassify_prompt_code_regions(page);
         enforce_page_protected_regions(page);
-        let original_native_count = page.blocks.len();
-        let mut matched_ocr = vec![false; ocr_page.blocks.len()];
 
-        for native_block in &mut page.blocks {
-            if native_block.policy.locked
-                || !matches!(native_block.kind, BlockKind::Text | BlockKind::Code)
-            {
-                continue;
-            }
-            let best = ocr_page
-                .blocks
-                .iter()
-                .enumerate()
-                .filter(|(_, ocr_block)| {
-                    matches!(ocr_block.kind, BlockKind::Text | BlockKind::Code)
-                        && !ocr_block.policy.locked
-                })
-                .filter_map(|(index, ocr_block)| {
-                    let containment = intersection_ratio(native_block.bbox, ocr_block.bbox);
-                    let similarity = normalized_text_similarity(
-                        &native_block.content.text,
-                        &ocr_block.content.text,
-                    );
-                    (containment >= 0.20 || similarity >= 0.82)
-                        .then_some((index, containment * 0.75 + similarity * 0.25))
-                })
-                .max_by(|left, right| left.1.total_cmp(&right.1));
-            let Some((ocr_index, score)) = best else {
-                continue;
-            };
-            let ocr_block = &ocr_page.blocks[ocr_index];
-            matched_ocr[ocr_index] = true;
-            if ocr_role_is_textual(ocr_block.role) && ocr_block.role != BlockRole::Unknown {
-                native_block.role = ocr_block.role;
-                native_block.policy = policy_for_role(ocr_block.role);
-                native_block.policy.source = PolicyDecisionSource::OcrSemantic;
-                native_block.policy.confidence = 0.96;
-            }
-            if native_block.continuation.is_none() {
-                native_block
-                    .continuation
-                    .clone_from(&ocr_block.continuation);
-            }
-            native_block
-                .tags
-                .push(format!("ocr_role:{}", ocr_block.role.as_str()));
-            native_block
-                .metadata
-                .insert("ocr_match_score".to_string(), json!(score));
-            native_block.metadata.insert(
-                "ocr_text_was_empty".to_string(),
-                json!(ocr_block.content.text.trim().is_empty()),
+        let original_blocks = page.blocks.clone();
+        let atoms = native_line_atoms(&original_blocks);
+        let eligible_ocr = ocr_page
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| {
+                !block.policy.locked
+                    && matches!(block.kind, BlockKind::Text | BlockKind::Code)
+                    && (!block.content.text.trim().is_empty() || block.role != BlockRole::Unknown)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let mut assignments = assign_native_lines_to_ocr(
+            &atoms,
+            &original_blocks,
+            ocr_page,
+            &eligible_ocr,
+            page.geometry.width,
+        );
+        let (native_to_ocr, ocr_to_atoms, ocr_to_native) =
+            index_fusion_relations(&atoms, &assignments);
+        let components = topology_components(&native_to_ocr, &ocr_to_native, &ocr_to_atoms);
+        let mut consumed_native = HashSet::<usize>::new();
+        let mut matched_ocr = HashSet::<usize>::new();
+        let mut fused_blocks = Vec::<Block>::new();
+
+        for (component_index, (native_indices, ocr_indices)) in components.into_iter().enumerate() {
+            attach_component_native_lines(
+                &native_indices,
+                &ocr_indices,
+                &atoms,
+                &original_blocks,
+                ocr_page,
+                page.geometry.width,
+                &mut assignments,
             );
+            let coverages = native_indices
+                .iter()
+                .map(|native_index| {
+                    native_assignment_coverage(*native_index, &ocr_indices, &atoms, &assignments)
+                })
+                .collect::<Vec<_>>();
+            let coverage = if coverages.is_empty() {
+                0.0
+            } else {
+                coverages.iter().sum::<f32>() / coverages.len() as f32
+            };
+            let high_confidence_structure = ocr_indices.iter().all(|ocr_index| {
+                ocr_page.blocks[*ocr_index]
+                    .structure
+                    .as_ref()
+                    .is_some_and(|structure| structure.confidence >= 0.95)
+            });
+            let score =
+                component_assignment_score(&native_indices, &ocr_indices, &atoms, &assignments);
+            let relation = fusion_relation(native_indices.len(), ocr_indices.len());
+            let native_ids = sorted_native_ids(&native_indices, &original_blocks);
+            let ocr_ids = sorted_ocr_ids(&ocr_indices, ocr_page);
+            if coverage < 0.999 || !high_confidence_structure {
+                page_report.native_fallbacks += native_indices.len();
+                page_report.decisions.push(OcrFusionDecision {
+                    relation: OcrFusionRelation::NativeFallback,
+                    native_block_ids: native_ids,
+                    ocr_block_ids: ocr_ids,
+                    score,
+                    native_coverage: coverage,
+                    reason: if high_confidence_structure {
+                        "native_line_coverage_below_threshold".to_string()
+                    } else {
+                        "ocr_structure_confidence_below_threshold".to_string()
+                    },
+                });
+                continue;
+            }
+
+            let component_id = format!(
+                "p{:03}-ocr-structure-{component_index:04}",
+                page.page_index + 1
+            );
+            let group_bbox = ocr_indices
+                .iter()
+                .map(|index| ocr_structure_bbox(&ocr_page.blocks[*index]))
+                .reduce(BoundingBox::union);
+            let mut ordered_ocr = ocr_indices.iter().copied().collect::<Vec<_>>();
+            ordered_ocr.sort_by_key(|index| {
+                ocr_page.blocks[*index]
+                    .metadata
+                    .get("raw_block_order")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(ocr_page.blocks[*index].reading_order as u64)
+            });
+            for ocr_index in ordered_ocr {
+                let assigned_atoms = assignments
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(atom_index, assignment)| {
+                        assignment
+                            .is_some_and(|assignment| assignment.ocr_index == ocr_index)
+                            .then_some(atom_index)
+                    })
+                    .filter(|atom_index| native_indices.contains(&atoms[*atom_index].block_index))
+                    .collect::<Vec<_>>();
+                if assigned_atoms.is_empty() {
+                    continue;
+                }
+                fused_blocks.push(build_topology_fused_block(
+                    page.page_index,
+                    ocr_index,
+                    &component_id,
+                    group_bbox,
+                    &assigned_atoms,
+                    &atoms,
+                    &original_blocks,
+                    &ocr_page.blocks[ocr_index],
+                    score,
+                ));
+                matched_ocr.insert(ocr_index);
+            }
+            consumed_native.extend(native_indices.iter().copied());
+            match relation {
+                OcrFusionRelation::Merge => page_report.accepted_merges += 1,
+                OcrFusionRelation::Split => page_report.accepted_splits += 1,
+                OcrFusionRelation::ManyToMany => page_report.accepted_many_to_many += 1,
+                _ => {}
+            }
+            page_report.decisions.push(OcrFusionDecision {
+                relation,
+                native_block_ids: native_ids,
+                ocr_block_ids: ocr_ids,
+                score,
+                native_coverage: coverage,
+                reason: "validated_paddle_structure".to_string(),
+            });
         }
 
+        let mut output_blocks = original_blocks;
+        for (native_index, ocr_indices) in &native_to_ocr {
+            if consumed_native.contains(native_index) || ocr_indices.len() != 1 {
+                continue;
+            }
+            let ocr_index = *ocr_indices.iter().next().expect("one OCR relation exists");
+            if ocr_to_native.get(&ocr_index).map_or(0, HashSet::len) != 1 {
+                continue;
+            }
+            let scores = ocr_to_atoms
+                .get(&ocr_index)
+                .into_iter()
+                .flatten()
+                .filter_map(|atom_index| assignments[*atom_index].map(|value| value.score))
+                .collect::<Vec<_>>();
+            let score = if scores.is_empty() {
+                0.0
+            } else {
+                scores.iter().sum::<f32>() / scores.len() as f32
+            };
+            apply_ocr_semantics(
+                &mut output_blocks[*native_index],
+                &ocr_page.blocks[ocr_index],
+                score,
+            );
+            matched_ocr.insert(ocr_index);
+            page_report.one_to_one_matches += 1;
+            page_report.decisions.push(OcrFusionDecision {
+                relation: OcrFusionRelation::OneToOne,
+                native_block_ids: vec![output_blocks[*native_index].id.clone()],
+                ocr_block_ids: vec![ocr_page.blocks[ocr_index].id.clone()],
+                score,
+                native_coverage: native_assignment_coverage(
+                    *native_index,
+                    &HashSet::from([ocr_index]),
+                    &atoms,
+                    &assignments,
+                ),
+                reason: "validated_one_to_one_match".to_string(),
+            });
+        }
+
+        output_blocks = output_blocks
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, block)| (!consumed_native.contains(&index)).then_some(block))
+            .collect();
+        output_blocks.extend(fused_blocks);
+
         for (ocr_index, ocr_block) in ocr_page.blocks.iter().enumerate() {
-            let native_coverage = page
-                .blocks
+            let native_coverage = output_blocks
                 .iter()
-                .take(original_native_count)
                 .filter(|native_block| {
                     matches!(native_block.kind, BlockKind::Text | BlockKind::Code)
                 })
@@ -869,7 +1052,7 @@ pub fn fuse_native_with_ocr(mut native: DocumentV1, ocr: &DocumentV1) -> Documen
             let should_add = match ocr_block.kind {
                 BlockKind::Text | BlockKind::Code => {
                     !ocr_block.policy.locked
-                        && !matched_ocr[ocr_index]
+                        && !matched_ocr.contains(&ocr_index)
                         && native_coverage < 0.20
                         && !ocr_block.content.text.trim().is_empty()
                 }
@@ -881,15 +1064,24 @@ pub fn fuse_native_with_ocr(mut native: DocumentV1, ocr: &DocumentV1) -> Documen
             }
             let mut inserted = ocr_block.clone();
             inserted.id = format!("ocr-{}", inserted.id);
-            inserted.order = page.blocks.len();
-            inserted.reading_order = inserted.order;
             inserted.source.provider = format!("{}+native-fusion", inserted.source.provider);
             inserted.tags.push("ocr_only".to_string());
-            page.blocks.push(inserted);
+            page_report.ocr_only_blocks += 1;
+            page_report.decisions.push(OcrFusionDecision {
+                relation: OcrFusionRelation::OcrOnly,
+                native_block_ids: Vec::new(),
+                ocr_block_ids: vec![ocr_block.id.clone()],
+                score: 1.0,
+                native_coverage,
+                reason: "ocr_text_missing_from_native_extraction".to_string(),
+            });
+            output_blocks.push(inserted);
         }
+        page.blocks = output_blocks;
         enforce_page_protected_regions(page);
         reclassify_standalone_prompt_blocks(page);
         reclassify_dialogue_blocks(page);
+        classify_ocr_structure_groups(page);
         page.blocks.sort_by(|left, right| {
             left.bbox
                 .y0
@@ -898,17 +1090,709 @@ pub fn fuse_native_with_ocr(mut native: DocumentV1, ocr: &DocumentV1) -> Documen
         });
         for (order, block) in page.blocks.iter_mut().enumerate() {
             block.order = order;
-            block.reading_order = order;
         }
         page.metadata
             .insert("ocr_fused".to_string(), serde_json::Value::Bool(true));
+        page.metadata.insert(
+            "ocr_structure_merge_count".to_string(),
+            json!(page_report.accepted_merges),
+        );
+        page.metadata.insert(
+            "ocr_structure_split_count".to_string(),
+            json!(page_report.accepted_splits),
+        );
+        page.metadata.insert(
+            "ocr_structure_fallback_count".to_string(),
+            json!(page_report.native_fallbacks),
+        );
+        report.pages.push(page_report);
     }
     native.metadata.provider = format!("{}+{}", native.metadata.provider, ocr.metadata.provider);
     native.metadata.provider_version = format!(
         "{}+{}",
         native.metadata.provider_version, ocr.metadata.provider_version
     );
-    native
+    OcrFusionResult {
+        document: native,
+        report,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NativeLineAtom {
+    block_index: usize,
+    line: Line,
+    weight: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LineOcrAssignment {
+    ocr_index: usize,
+    score: f32,
+}
+
+type FusionRelationIndex = (
+    HashMap<usize, HashSet<usize>>,
+    HashMap<usize, Vec<usize>>,
+    HashMap<usize, HashSet<usize>>,
+);
+
+fn native_line_atoms(blocks: &[Block]) -> Vec<NativeLineAtom> {
+    let mut atoms = Vec::new();
+    for (block_index, block) in blocks.iter().enumerate() {
+        if block.policy.locked
+            || !matches!(block.kind, BlockKind::Text | BlockKind::Code)
+            || block.content.text.trim().is_empty()
+        {
+            continue;
+        }
+        if block.content.lines.is_empty() {
+            atoms.push(NativeLineAtom {
+                block_index,
+                line: Line {
+                    bbox: block.bbox,
+                    text: block.content.text.clone(),
+                    segments: block.content.segments.clone(),
+                    baseline_y: None,
+                    line_height: Some(block.bbox.height()),
+                },
+                weight: significant_text_length(&block.content.text),
+            });
+            continue;
+        }
+        atoms.extend(
+            block
+                .content
+                .lines
+                .iter()
+                .cloned()
+                .map(|line| NativeLineAtom {
+                    block_index,
+                    weight: significant_text_length(&line.text),
+                    line,
+                }),
+        );
+    }
+    atoms
+}
+
+fn assign_native_lines_to_ocr(
+    atoms: &[NativeLineAtom],
+    native_blocks: &[Block],
+    ocr_page: &Page,
+    eligible_ocr: &[usize],
+    page_width: f32,
+) -> Vec<Option<LineOcrAssignment>> {
+    atoms
+        .iter()
+        .map(|atom| {
+            let native_block = &native_blocks[atom.block_index];
+            let mut candidates = eligible_ocr
+                .iter()
+                .filter_map(|ocr_index| {
+                    let ocr_block = &ocr_page.blocks[*ocr_index];
+                    line_ocr_match_score(atom, native_block, ocr_block, page_width)
+                        .map(|(score, geometry)| (*ocr_index, score, geometry))
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| right.1.total_cmp(&left.1));
+            let (ocr_index, score, geometry) = *candidates.first()?;
+            let margin = candidates
+                .get(1)
+                .map_or(f32::INFINITY, |candidate| score - candidate.1);
+            (score >= 0.70 && (margin >= 0.08 || geometry >= 0.92))
+                .then_some(LineOcrAssignment { ocr_index, score })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attach_component_native_lines(
+    native_indices: &HashSet<usize>,
+    ocr_indices: &HashSet<usize>,
+    atoms: &[NativeLineAtom],
+    native_blocks: &[Block],
+    ocr_page: &Page,
+    page_width: f32,
+    assignments: &mut [Option<LineOcrAssignment>],
+) {
+    for (atom_index, atom) in atoms.iter().enumerate() {
+        if !native_indices.contains(&atom.block_index) || assignments[atom_index].is_some() {
+            continue;
+        }
+        let native_block = &native_blocks[atom.block_index];
+        let best = ocr_indices
+            .iter()
+            .filter_map(|ocr_index| {
+                let ocr_block = &ocr_page.blocks[*ocr_index];
+                let (score, geometry) =
+                    line_ocr_match_score(atom, native_block, ocr_block, page_width)?;
+                (geometry >= 0.82).then_some((*ocr_index, score, geometry))
+            })
+            .max_by(|left, right| left.2.total_cmp(&right.2).then(left.1.total_cmp(&right.1)));
+        if let Some((ocr_index, score, _)) = best {
+            assignments[atom_index] = Some(LineOcrAssignment { ocr_index, score });
+        }
+    }
+}
+
+fn line_ocr_match_score(
+    atom: &NativeLineAtom,
+    native_block: &Block,
+    ocr_block: &Block,
+    page_width: f32,
+) -> Option<(f32, f32)> {
+    let ocr_bbox = ocr_structure_bbox(ocr_block);
+    let vertical_overlap = axis_overlap(
+        atom.line.bbox.y0,
+        atom.line.bbox.y1,
+        ocr_bbox.y0,
+        ocr_bbox.y1,
+    ) / atom.line.bbox.height().max(1.0);
+    let horizontal_overlap = axis_overlap(
+        atom.line.bbox.x0,
+        atom.line.bbox.x1,
+        ocr_bbox.x0,
+        ocr_bbox.x1,
+    ) / atom.line.bbox.width().max(1.0);
+    let center_inside = bbox_contains_with_padding(ocr_bbox, atom.line.bbox, 2.5);
+    let text_similarity = partial_text_similarity(&atom.line.text, &ocr_block.content.text);
+    if (vertical_overlap < 0.20 || horizontal_overlap < 0.05)
+        && !(text_similarity >= 0.90 && native_block.bbox.intersection(ocr_bbox).is_some())
+    {
+        return None;
+    }
+    if !column_compatible(native_block.bbox, ocr_bbox, page_width, ocr_block.role) {
+        return None;
+    }
+    let geometry = (vertical_overlap.clamp(0.0, 1.0) * 0.65
+        + horizontal_overlap.clamp(0.0, 1.0) * 0.25
+        + if center_inside { 0.10 } else { 0.0 })
+    .clamp(0.0, 1.0);
+    let score = geometry * 0.60 + text_similarity * 0.30 + 0.10;
+    Some((score, geometry))
+}
+
+fn ocr_structure_bbox(block: &Block) -> BoundingBox {
+    let raw_bbox = block.source.raw_bbox;
+    if block
+        .structure
+        .as_ref()
+        .is_some_and(|structure| structure.confidence >= 0.95)
+        && raw_bbox.is_valid()
+        && raw_bbox.area() >= 1.0
+    {
+        raw_bbox
+    } else {
+        block.bbox
+    }
+}
+
+fn axis_overlap(left_start: f32, left_end: f32, right_start: f32, right_end: f32) -> f32 {
+    (left_end.min(right_end) - left_start.max(right_start)).max(0.0)
+}
+
+fn bbox_contains_with_padding(container: BoundingBox, line: BoundingBox, padding: f32) -> bool {
+    let x = (line.x0 + line.x1) * 0.5;
+    let y = (line.y0 + line.y1) * 0.5;
+    x >= container.x0 - padding
+        && x <= container.x1 + padding
+        && y >= container.y0 - padding
+        && y <= container.y1 + padding
+}
+
+fn column_compatible(
+    native: BoundingBox,
+    ocr: BoundingBox,
+    page_width: f32,
+    ocr_role: BlockRole,
+) -> bool {
+    if page_width <= 0.0 {
+        return true;
+    }
+    let native_full = native.width() >= page_width * 0.62;
+    let ocr_full = ocr.width() >= page_width * 0.62;
+    if native_full == ocr_full {
+        return true;
+    }
+    if ocr_full
+        && matches!(
+            ocr_role,
+            BlockRole::Title | BlockRole::FigureCaption | BlockRole::TableCaption
+        )
+    {
+        return true;
+    }
+    let native_side = ((native.x0 + native.x1) * 0.5) <= page_width * 0.5;
+    let ocr_side = ((ocr.x0 + ocr.x1) * 0.5) <= page_width * 0.5;
+    native_side == ocr_side
+}
+
+fn partial_text_similarity(left: &str, right: &str) -> f32 {
+    let left_normalized = normalize_match_text(left);
+    let right_normalized = normalize_match_text(right);
+    if left_normalized.is_empty() || right_normalized.is_empty() {
+        let left_marker = structural_marker(left);
+        let right_marker = structural_marker(right);
+        return if left_marker.is_some() && left_marker == right_marker {
+            1.0
+        } else {
+            0.0
+        };
+    }
+    if left_normalized.contains(&right_normalized) || right_normalized.contains(&left_normalized) {
+        return 1.0;
+    }
+    normalized_text_similarity(&left_normalized, &right_normalized)
+}
+
+fn significant_text_length(text: &str) -> usize {
+    text.chars()
+        .filter(|character| !character.is_whitespace())
+        .count()
+        .max(1)
+}
+
+fn index_fusion_relations(
+    atoms: &[NativeLineAtom],
+    assignments: &[Option<LineOcrAssignment>],
+) -> FusionRelationIndex {
+    let mut native_to_ocr = HashMap::<usize, HashSet<usize>>::new();
+    let mut ocr_to_atoms = HashMap::<usize, Vec<usize>>::new();
+    let mut ocr_to_native = HashMap::<usize, HashSet<usize>>::new();
+    for (atom_index, assignment) in assignments.iter().enumerate() {
+        let Some(assignment) = assignment else {
+            continue;
+        };
+        let native_index = atoms[atom_index].block_index;
+        native_to_ocr
+            .entry(native_index)
+            .or_default()
+            .insert(assignment.ocr_index);
+        ocr_to_atoms
+            .entry(assignment.ocr_index)
+            .or_default()
+            .push(atom_index);
+        ocr_to_native
+            .entry(assignment.ocr_index)
+            .or_default()
+            .insert(native_index);
+    }
+    (native_to_ocr, ocr_to_atoms, ocr_to_native)
+}
+
+fn topology_components(
+    native_to_ocr: &HashMap<usize, HashSet<usize>>,
+    ocr_to_native: &HashMap<usize, HashSet<usize>>,
+    ocr_to_atoms: &HashMap<usize, Vec<usize>>,
+) -> Vec<(HashSet<usize>, HashSet<usize>)> {
+    let mut seeds = Vec::<(bool, usize)>::new();
+    seeds.extend(
+        native_to_ocr
+            .iter()
+            .filter(|(_, ocr)| ocr.len() > 1)
+            .map(|(native, _)| (true, *native)),
+    );
+    seeds.extend(
+        ocr_to_native
+            .iter()
+            .filter(|(_, native)| native.len() > 1)
+            .map(|(ocr, _)| (false, *ocr)),
+    );
+    let mut visited_native = HashSet::new();
+    let mut visited_ocr = HashSet::new();
+    let mut components = Vec::new();
+    for seed in seeds {
+        if (seed.0 && visited_native.contains(&seed.1))
+            || (!seed.0 && visited_ocr.contains(&seed.1))
+        {
+            continue;
+        }
+        let mut native_component = HashSet::new();
+        let mut ocr_component = HashSet::new();
+        let mut queue = VecDeque::from([seed]);
+        while let Some((is_native, index)) = queue.pop_front() {
+            if is_native {
+                if !visited_native.insert(index) {
+                    continue;
+                }
+                native_component.insert(index);
+                for ocr_index in native_to_ocr.get(&index).into_iter().flatten() {
+                    queue.push_back((false, *ocr_index));
+                }
+            } else {
+                if !visited_ocr.insert(index) {
+                    continue;
+                }
+                ocr_component.insert(index);
+                for native_index in ocr_to_native.get(&index).into_iter().flatten() {
+                    queue.push_back((true, *native_index));
+                }
+            }
+        }
+        if !native_component.is_empty()
+            && !ocr_component.is_empty()
+            && ocr_component
+                .iter()
+                .any(|index| ocr_to_atoms.contains_key(index))
+        {
+            components.push((native_component, ocr_component));
+        }
+    }
+    components
+}
+
+fn native_assignment_coverage(
+    native_index: usize,
+    ocr_indices: &HashSet<usize>,
+    atoms: &[NativeLineAtom],
+    assignments: &[Option<LineOcrAssignment>],
+) -> f32 {
+    let mut total = 0usize;
+    let mut assigned = 0usize;
+    for (atom_index, atom) in atoms.iter().enumerate() {
+        if atom.block_index != native_index {
+            continue;
+        }
+        total += atom.weight;
+        if assignments[atom_index]
+            .is_some_and(|assignment| ocr_indices.contains(&assignment.ocr_index))
+        {
+            assigned += atom.weight;
+        }
+    }
+    assigned as f32 / total.max(1) as f32
+}
+
+fn component_assignment_score(
+    native_indices: &HashSet<usize>,
+    ocr_indices: &HashSet<usize>,
+    atoms: &[NativeLineAtom],
+    assignments: &[Option<LineOcrAssignment>],
+) -> f32 {
+    let scores = atoms
+        .iter()
+        .enumerate()
+        .filter(|(_, atom)| native_indices.contains(&atom.block_index))
+        .filter_map(|(index, _)| assignments[index])
+        .filter(|assignment| ocr_indices.contains(&assignment.ocr_index))
+        .map(|assignment| assignment.score)
+        .collect::<Vec<_>>();
+    if scores.is_empty() {
+        0.0
+    } else {
+        scores.iter().sum::<f32>() / scores.len() as f32
+    }
+}
+
+fn fusion_relation(native_count: usize, ocr_count: usize) -> OcrFusionRelation {
+    match (native_count, ocr_count) {
+        (1, count) if count > 1 => OcrFusionRelation::Split,
+        (count, 1) if count > 1 => OcrFusionRelation::Merge,
+        _ => OcrFusionRelation::ManyToMany,
+    }
+}
+
+fn sorted_native_ids(indices: &HashSet<usize>, blocks: &[Block]) -> Vec<String> {
+    let mut indices = indices.iter().copied().collect::<Vec<_>>();
+    indices.sort_unstable();
+    indices
+        .into_iter()
+        .map(|index| blocks[index].id.clone())
+        .collect()
+}
+
+fn sorted_ocr_ids(indices: &HashSet<usize>, page: &Page) -> Vec<String> {
+    let mut indices = indices.iter().copied().collect::<Vec<_>>();
+    indices.sort_unstable();
+    indices
+        .into_iter()
+        .map(|index| page.blocks[index].id.clone())
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_topology_fused_block(
+    page_index: usize,
+    ocr_index: usize,
+    component_id: &str,
+    group_bbox: Option<BoundingBox>,
+    atom_indices: &[usize],
+    atoms: &[NativeLineAtom],
+    native_blocks: &[Block],
+    ocr_block: &Block,
+    score: f32,
+) -> Block {
+    let mut lines = atom_indices
+        .iter()
+        .map(|index| atoms[*index].line.clone())
+        .collect::<Vec<_>>();
+    lines.sort_by(|left, right| {
+        left.bbox
+            .y0
+            .total_cmp(&right.bbox.y0)
+            .then(left.bbox.x0.total_cmp(&right.bbox.x0))
+    });
+    let mut lines = merge_inline_native_lines(lines);
+    promote_detached_structural_marker(&mut lines, &ocr_block.content.text);
+    let first_native_index = atom_indices
+        .iter()
+        .map(|index| atoms[*index].block_index)
+        .min()
+        .expect("topology fusion has native atoms");
+    let first_native = &native_blocks[first_native_index];
+    let fallback_ratio = |name: &str| {
+        first_native
+            .metadata
+            .get(name)
+            .and_then(|value| value.as_f64())
+            .unwrap_or_default() as f32
+    };
+    let rebuilt = native_block_from_lines(
+        lines,
+        fallback_ratio("bold_ratio"),
+        fallback_ratio("italic_ratio"),
+        fallback_ratio("monospaced_ratio"),
+    )
+    .expect("topology fusion lines contain text");
+    let mut metadata = first_native.metadata.clone();
+    metadata.insert(
+        "average_font_size".to_string(),
+        json!(rebuilt.average_font_size),
+    );
+    metadata.insert("bold_ratio".to_string(), json!(rebuilt.bold_ratio));
+    metadata.insert("italic_ratio".to_string(), json!(rebuilt.italic_ratio));
+    metadata.insert(
+        "monospaced_ratio".to_string(),
+        json!(rebuilt.monospaced_ratio),
+    );
+    metadata.insert("ocr_match_score".to_string(), json!(score));
+    metadata.insert("ocr_topology_component".to_string(), json!(component_id));
+    let mut native_ids = atom_indices
+        .iter()
+        .map(|index| native_blocks[atoms[*index].block_index].id.clone())
+        .collect::<Vec<_>>();
+    native_ids.sort();
+    native_ids.dedup();
+    metadata.insert("native_source_block_ids".to_string(), json!(native_ids));
+
+    let mut structure = ocr_block.structure.clone().unwrap_or(BlockStructure {
+        kind: StructureKind::Region,
+        flow: TextFlow::Reflow,
+        group_id: None,
+        group_bbox: None,
+        marker: None,
+        provider: "paddle".to_string(),
+        confidence: 0.98,
+    });
+    structure.group_id = Some(component_id.to_string());
+    structure.group_bbox = group_bbox;
+    let role = if ocr_block.role == BlockRole::Unknown {
+        first_native.role
+    } else {
+        ocr_block.role
+    };
+    let mut policy = policy_for_role(role);
+    policy.source = PolicyDecisionSource::OcrSemantic;
+    policy.confidence = structure.confidence;
+    let segments = rebuilt
+        .lines
+        .iter()
+        .flat_map(|line| line.segments.iter().cloned())
+        .collect();
+    let mut tags = first_native.tags.clone();
+    tags.push("ocr_topology_fused".to_string());
+    tags.push(format!("ocr_role:{}", role.as_str()));
+    Block {
+        id: format!("p{:03}-f{ocr_index:04}", page_index + 1),
+        page_index,
+        order: ocr_block.order,
+        reading_order: ocr_block.reading_order,
+        kind: BlockKind::Text,
+        role,
+        bbox: rebuilt.bbox,
+        content: BlockContent {
+            text: rebuilt.text,
+            lines: rebuilt.lines,
+            segments,
+            markdown: None,
+            html: None,
+        },
+        policy,
+        continuation: ocr_block.continuation.clone(),
+        structure: Some(structure),
+        source: SourceProvenance {
+            provider: "mupdf+paddle-structure".to_string(),
+            raw_label: ocr_block.source.raw_label.clone(),
+            raw_bbox: ocr_block.bbox,
+            raw_path: ocr_block.source.raw_path.clone(),
+        },
+        tags,
+        metadata,
+    }
+}
+
+fn promote_detached_structural_marker(lines: &mut Vec<Line>, ocr_text: &str) {
+    if structural_marker(ocr_text).is_none() {
+        return;
+    }
+    let Some(marker_index) = lines.iter().position(|line| {
+        structural_marker(&line.text).is_some_and(|marker| line.text.trim() == marker)
+    }) else {
+        return;
+    };
+    if marker_index > 0 {
+        let marker = lines.remove(marker_index);
+        lines.insert(0, marker);
+    }
+}
+
+fn apply_ocr_semantics(native_block: &mut Block, ocr_block: &Block, score: f32) {
+    if ocr_role_is_textual(ocr_block.role) && ocr_block.role != BlockRole::Unknown {
+        native_block.role = ocr_block.role;
+        native_block.policy = policy_for_role(ocr_block.role);
+        native_block.policy.source = PolicyDecisionSource::OcrSemantic;
+        native_block.policy.confidence = ocr_block
+            .structure
+            .as_ref()
+            .map_or(0.96, |structure| structure.confidence);
+    }
+    if native_block.continuation.is_none() {
+        native_block
+            .continuation
+            .clone_from(&ocr_block.continuation);
+    }
+    native_block.structure.clone_from(&ocr_block.structure);
+    native_block.reading_order = ocr_block.reading_order;
+    native_block
+        .tags
+        .push(format!("ocr_role:{}", ocr_block.role.as_str()));
+    native_block
+        .metadata
+        .insert("ocr_match_score".to_string(), json!(score));
+    native_block.metadata.insert(
+        "ocr_text_was_empty".to_string(),
+        json!(ocr_block.content.text.trim().is_empty()),
+    );
+}
+
+fn classify_ocr_structure_groups(page: &mut Page) {
+    let mut groups = HashMap::<String, Vec<usize>>::new();
+    for (index, block) in page.blocks.iter().enumerate() {
+        let Some(group_id) = block
+            .structure
+            .as_ref()
+            .and_then(|structure| structure.group_id.clone())
+        else {
+            continue;
+        };
+        groups.entry(group_id).or_default().push(index);
+    }
+    for (group_id, mut members) in groups {
+        members.sort_by(|left, right| {
+            page.blocks[*left]
+                .bbox
+                .y0
+                .total_cmp(&page.blocks[*right].bbox.y0)
+                .then(
+                    page.blocks[*left]
+                        .bbox
+                        .x0
+                        .total_cmp(&page.blocks[*right].bbox.x0),
+                )
+        });
+        let group_bbox = members
+            .iter()
+            .map(|index| {
+                page.blocks[*index]
+                    .structure
+                    .as_ref()
+                    .and_then(|structure| structure.group_bbox)
+                    .unwrap_or(page.blocks[*index].bbox)
+            })
+            .reduce(BoundingBox::union);
+        let ordered_count = members
+            .iter()
+            .filter(|index| ordered_list_marker(&page.blocks[**index].content.text).is_some())
+            .count();
+        let bullet_count = members
+            .iter()
+            .filter(|index| bullet_list_marker(&page.blocks[**index].content.text).is_some())
+            .count();
+        let prompt_group = ordered_count >= 2;
+        let bullet_group = bullet_count >= 2;
+        for (position, index) in members.iter().enumerate() {
+            let block = &mut page.blocks[*index];
+            let ordered_marker = ordered_list_marker(&block.content.text);
+            let bullet_marker = bullet_list_marker(&block.content.text);
+            let structure = block.structure.get_or_insert_with(|| BlockStructure {
+                kind: StructureKind::Region,
+                flow: TextFlow::Reflow,
+                group_id: Some(group_id.clone()),
+                group_bbox,
+                marker: None,
+                provider: "paddle".to_string(),
+                confidence: 0.98,
+            });
+            structure.group_id = Some(group_id.clone());
+            structure.group_bbox = group_bbox;
+            structure.flow = TextFlow::Reflow;
+            if prompt_group {
+                block.role = BlockRole::Prompt;
+                block.policy = policy_for_role(BlockRole::Prompt);
+                structure.kind = if ordered_marker.is_some() {
+                    StructureKind::OrderedListItem
+                } else if position == 0 {
+                    StructureKind::PromptHeading
+                } else if block.content.text.contains(['?', '？']) {
+                    StructureKind::PromptQuestion
+                } else {
+                    StructureKind::Region
+                };
+                structure.marker = ordered_marker;
+            } else if bullet_group {
+                block.role = BlockRole::Body;
+                block.policy = policy_for_role(BlockRole::Body);
+                structure.kind = StructureKind::BulletListItem;
+                structure.marker = bullet_marker;
+            } else if matches!(
+                block.role,
+                BlockRole::FigureCaption | BlockRole::TableCaption
+            ) {
+                structure.kind = StructureKind::Caption;
+                structure.flow = TextFlow::Reflow;
+            }
+        }
+    }
+}
+
+fn structural_marker(text: &str) -> Option<String> {
+    ordered_list_marker(text).or_else(|| bullet_list_marker(text))
+}
+
+fn ordered_list_marker(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    let mut digits = String::new();
+    let mut chars = trimmed.chars();
+    for character in chars.by_ref() {
+        if character.is_ascii_digit() && digits.len() < 4 {
+            digits.push(character);
+            continue;
+        }
+        if digits.is_empty() || !matches!(character, '.' | ')' | '）' | '．' | '、') {
+            return None;
+        }
+        return Some(format!("{digits}{character}"));
+    }
+    None
+}
+
+fn bullet_list_marker(text: &str) -> Option<String> {
+    text.trim_start()
+        .chars()
+        .next()
+        .filter(|character| matches!(character, '•' | '‣' | '◦' | '*' | '-' | '–'))
+        .map(|character| character.to_string())
 }
 
 fn reclassify_prompt_code_regions(page: &mut Page) {
@@ -1175,12 +2059,6 @@ fn ocr_role_is_textual(role: BlockRole) -> bool {
             | BlockRole::Reference
             | BlockRole::Code
     )
-}
-
-fn intersection_ratio(left: BoundingBox, right: BoundingBox) -> f32 {
-    left.intersection(right).map_or(0.0, |intersection| {
-        intersection.area() / left.area().max(1.0)
-    })
 }
 
 fn normalized_text_similarity(left: &str, right: &str) -> f32 {
@@ -1923,6 +2801,342 @@ mod tests {
     }
 
     #[test]
+    fn ocr_topology_splits_a_native_prompt_into_ordered_members() {
+        let style = TextStyle {
+            font_size: Some(10.0),
+            ..TextStyle::default()
+        };
+        let native = fusion_document(
+            "native",
+            vec![fusion_multiline_block(
+                "native-prompt",
+                BlockRole::Body,
+                vec![
+                    (
+                        BoundingBox::new(10.0, 10.0, 55.0, 18.0),
+                        "Statements about Klaus",
+                        style.clone(),
+                    ),
+                    (
+                        BoundingBox::new(10.0, 20.0, 55.0, 28.0),
+                        "1. Klaus writes a paper",
+                        style.clone(),
+                    ),
+                    (
+                        BoundingBox::new(10.0, 30.0, 55.0, 38.0),
+                        "2. Klaus reads a book",
+                        style.clone(),
+                    ),
+                    (
+                        BoundingBox::new(10.0, 40.0, 55.0, 48.0),
+                        "What can you infer?",
+                        style,
+                    ),
+                ],
+            )],
+        );
+        let texts = [
+            "Statements about Klaus",
+            "1. Klaus writes a paper",
+            "2. Klaus reads a book",
+            "What can you infer?",
+        ];
+        let mut ocr_blocks = texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let mut block = fusion_block(
+                    &format!("ocr-{index}"),
+                    BoundingBox::new(
+                        10.0,
+                        10.0 + index as f32 * 10.0,
+                        55.0,
+                        18.0 + index as f32 * 10.0,
+                    ),
+                    BlockRole::Body,
+                    text,
+                    TextStyle::default(),
+                );
+                block.order = index;
+                block.reading_order = index;
+                block.structure = Some(test_structure(0.98));
+                block
+            })
+            .collect::<Vec<_>>();
+        let ocr = fusion_document("paddle", std::mem::take(&mut ocr_blocks));
+
+        let fused = fuse_native_with_ocr_report(native, &ocr);
+        let page = &fused.document.pages[0];
+
+        assert_eq!(fused.report.pages[0].accepted_splits, 1);
+        assert_eq!(page.blocks.len(), 4);
+        assert_eq!(
+            page.blocks
+                .iter()
+                .map(|block| block.content.text.as_str())
+                .collect::<Vec<_>>(),
+            texts
+        );
+        assert!(
+            page.blocks
+                .iter()
+                .all(|block| block.role == BlockRole::Prompt)
+        );
+        assert_eq!(
+            page.blocks[1].structure.as_ref().unwrap().kind,
+            StructureKind::OrderedListItem
+        );
+        assert_eq!(
+            page.blocks[1].structure.as_ref().unwrap().marker.as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            page.blocks[3].structure.as_ref().unwrap().kind,
+            StructureKind::PromptQuestion
+        );
+    }
+
+    #[test]
+    fn ocr_topology_merges_caption_fragments_without_losing_native_styles() {
+        let red = TextStyle {
+            font_size: Some(9.0),
+            color_argb: Some(0xffaa_0000),
+            ..TextStyle::default()
+        };
+        let blue = TextStyle {
+            font_size: Some(9.0),
+            color_argb: Some(0xff00_00aa),
+            italic: true,
+            ..TextStyle::default()
+        };
+        let native = fusion_document(
+            "native",
+            vec![
+                fusion_block(
+                    "caption-a",
+                    BoundingBox::new(10.0, 10.0, 45.0, 18.0),
+                    BlockRole::Body,
+                    "Figure 2: A useful",
+                    red.clone(),
+                ),
+                fusion_block(
+                    "caption-b",
+                    BoundingBox::new(10.0, 20.0, 55.0, 28.0),
+                    BlockRole::Body,
+                    "caption continues.",
+                    blue.clone(),
+                ),
+            ],
+        );
+        let mut ocr_caption = fusion_block(
+            "ocr-caption",
+            BoundingBox::new(10.0, 10.0, 55.0, 28.0),
+            BlockRole::FigureCaption,
+            "Figure 2: A useful caption continues.",
+            TextStyle::default(),
+        );
+        ocr_caption.structure = Some(BlockStructure {
+            kind: StructureKind::Caption,
+            ..test_structure(0.98)
+        });
+        let ocr = fusion_document("paddle", vec![ocr_caption]);
+
+        let fused = fuse_native_with_ocr_report(native, &ocr);
+        let caption = &fused.document.pages[0].blocks[0];
+
+        assert_eq!(fused.report.pages[0].accepted_merges, 1);
+        assert_eq!(fused.document.pages[0].blocks.len(), 1);
+        assert_eq!(caption.role, BlockRole::FigureCaption);
+        assert!(caption.content.text.contains("Figure 2: A useful"));
+        assert!(caption.content.text.contains("caption continues."));
+        assert!(
+            caption
+                .content
+                .segments
+                .iter()
+                .any(|segment| segment.style == red)
+        );
+        assert!(
+            caption
+                .content
+                .segments
+                .iter()
+                .any(|segment| segment.style == blue)
+        );
+    }
+
+    #[test]
+    fn ocr_topology_preserves_bullet_markers_as_structure() {
+        let native = fusion_document(
+            "native",
+            vec![fusion_multiline_block(
+                "native-list",
+                BlockRole::Body,
+                vec![
+                    (
+                        BoundingBox::new(10.0, 10.0, 55.0, 18.0),
+                        "• First item",
+                        TextStyle::default(),
+                    ),
+                    (
+                        BoundingBox::new(10.0, 20.0, 55.0, 28.0),
+                        "• Second item",
+                        TextStyle::default(),
+                    ),
+                ],
+            )],
+        );
+        let mut first = fusion_block(
+            "ocr-first",
+            BoundingBox::new(10.0, 10.0, 55.0, 18.0),
+            BlockRole::Body,
+            "• First item",
+            TextStyle::default(),
+        );
+        first.structure = Some(test_structure(0.98));
+        let mut second = fusion_block(
+            "ocr-second",
+            BoundingBox::new(10.0, 20.0, 55.0, 28.0),
+            BlockRole::Body,
+            "• Second item",
+            TextStyle::default(),
+        );
+        second.order = 1;
+        second.reading_order = 1;
+        second.structure = Some(test_structure(0.98));
+        let ocr = fusion_document("paddle", vec![first, second]);
+
+        let fused = fuse_native_with_ocr_report(native, &ocr);
+
+        assert_eq!(fused.report.pages[0].accepted_splits, 1);
+        assert!(fused.document.pages[0].blocks.iter().all(|block| {
+            let structure = block.structure.as_ref().unwrap();
+            structure.kind == StructureKind::BulletListItem
+                && structure.marker.as_deref() == Some("•")
+        }));
+    }
+
+    #[test]
+    fn ocr_topology_promotes_detached_markers_and_keeps_truncated_tail_lines() {
+        let native = fusion_document(
+            "native",
+            vec![fusion_multiline_block(
+                "native-list",
+                BlockRole::Body,
+                vec![
+                    (
+                        BoundingBox::new(12.0, 10.0, 55.0, 18.0),
+                        "Memory: Who is running for",
+                        TextStyle::default(),
+                    ),
+                    (
+                        BoundingBox::new(9.0, 12.0, 10.0, 15.0),
+                        "•",
+                        TextStyle::default(),
+                    ),
+                    (
+                        BoundingBox::new(12.0, 20.0, 25.0, 28.0),
+                        "mayor?",
+                        TextStyle::default(),
+                    ),
+                    (
+                        BoundingBox::new(12.0, 32.0, 55.0, 40.0),
+                        "Reflections: why?",
+                        TextStyle::default(),
+                    ),
+                    (
+                        BoundingBox::new(9.0, 34.0, 10.0, 37.0),
+                        "•",
+                        TextStyle::default(),
+                    ),
+                ],
+            )],
+        );
+        let mut memory = fusion_block(
+            "ocr-memory",
+            BoundingBox::new(9.0, 9.0, 58.0, 29.0),
+            BlockRole::Body,
+            "- Memory: Who is running for",
+            TextStyle::default(),
+        );
+        memory.structure = Some(test_structure(0.98));
+        let mut reflections = fusion_block(
+            "ocr-reflections",
+            BoundingBox::new(9.0, 31.0, 58.0, 41.0),
+            BlockRole::Body,
+            "- Reflections: why?",
+            TextStyle::default(),
+        );
+        reflections.order = 1;
+        reflections.reading_order = 1;
+        reflections.structure = Some(test_structure(0.98));
+        let ocr = fusion_document("paddle", vec![memory, reflections]);
+
+        let fused = fuse_native_with_ocr_report(native, &ocr);
+        let blocks = &fused.document.pages[0].blocks;
+
+        assert_eq!(fused.report.pages[0].accepted_splits, 1);
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].content.text.starts_with("•\nMemory:"));
+        assert!(blocks[0].content.text.ends_with("mayor?"));
+        assert!(blocks[1].content.text.starts_with("•\nReflections:"));
+        assert!(
+            blocks.iter().all(|block| {
+                block.structure.as_ref().unwrap().marker.as_deref() == Some("•")
+            })
+        );
+        assert_eq!(fused.report.pages[0].decisions[0].native_coverage, 1.0);
+    }
+
+    #[test]
+    fn low_confidence_ocr_topology_fails_closed_to_native_block() {
+        let native = fusion_document(
+            "native",
+            vec![fusion_multiline_block(
+                "native-list",
+                BlockRole::Body,
+                vec![
+                    (
+                        BoundingBox::new(10.0, 10.0, 55.0, 18.0),
+                        "1. First item",
+                        TextStyle::default(),
+                    ),
+                    (
+                        BoundingBox::new(10.0, 20.0, 55.0, 28.0),
+                        "2. Second item",
+                        TextStyle::default(),
+                    ),
+                ],
+            )],
+        );
+        let mut first = fusion_block(
+            "ocr-first",
+            BoundingBox::new(10.0, 10.0, 55.0, 18.0),
+            BlockRole::Body,
+            "1. First item",
+            TextStyle::default(),
+        );
+        first.structure = Some(test_structure(0.94));
+        let mut second = fusion_block(
+            "ocr-second",
+            BoundingBox::new(10.0, 20.0, 55.0, 28.0),
+            BlockRole::Body,
+            "2. Second item",
+            TextStyle::default(),
+        );
+        second.structure = Some(test_structure(0.94));
+        let ocr = fusion_document("paddle", vec![first, second]);
+
+        let fused = fuse_native_with_ocr_report(native, &ocr);
+
+        assert_eq!(fused.report.pages[0].accepted_splits, 0);
+        assert_eq!(fused.report.pages[0].native_fallbacks, 1);
+        assert_eq!(fused.document.pages[0].blocks.len(), 1);
+        assert_eq!(fused.document.pages[0].blocks[0].id, "native-list");
+        assert!(fused.document.pages[0].blocks[0].structure.is_none());
+    }
+
+    #[test]
     fn ocr_code_region_is_demoted_for_non_monospace_prompt_prose() {
         let bbox = BoundingBox::new(10.0, 20.0, 90.0, 80.0);
         let mut native_block = fusion_block(
@@ -2075,6 +3289,7 @@ mod tests {
             },
             policy: policy_for_role(role),
             continuation: None,
+            structure: None,
             source: SourceProvenance {
                 provider: "fixture".to_string(),
                 raw_label: "text".to_string(),
@@ -2083,6 +3298,66 @@ mod tests {
             },
             tags: Vec::new(),
             metadata: BTreeMap::new(),
+        }
+    }
+
+    fn fusion_multiline_block(
+        id: &str,
+        role: BlockRole,
+        lines: Vec<(BoundingBox, &str, TextStyle)>,
+    ) -> Block {
+        let bbox = lines
+            .iter()
+            .map(|(bbox, _, _)| *bbox)
+            .reduce(BoundingBox::union)
+            .unwrap();
+        let content_lines = lines
+            .into_iter()
+            .map(|(bbox, text, style)| {
+                let segment = Segment {
+                    kind: SegmentKind::Text,
+                    text: text.to_string(),
+                    bbox,
+                    style,
+                };
+                Line {
+                    bbox,
+                    text: text.to_string(),
+                    segments: vec![segment],
+                    baseline_y: Some(bbox.y1 - 2.0),
+                    line_height: Some(bbox.height()),
+                }
+            })
+            .collect::<Vec<_>>();
+        let text = content_lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let segments = content_lines
+            .iter()
+            .flat_map(|line| line.segments.iter().cloned())
+            .collect();
+        let mut block = fusion_block(id, bbox, role, &text, TextStyle::default());
+        block.content = BlockContent {
+            text,
+            lines: content_lines,
+            segments,
+            markdown: None,
+            html: None,
+        };
+        block
+    }
+
+    fn test_structure(confidence: f32) -> BlockStructure {
+        BlockStructure {
+            kind: StructureKind::Region,
+            flow: TextFlow::Reflow,
+            group_id: None,
+            group_bbox: None,
+            marker: None,
+            provider: "paddle".to_string(),
+            confidence,
         }
     }
 }

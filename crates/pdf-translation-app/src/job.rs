@@ -17,7 +17,7 @@ use glyphst_pdf_translation::{
     BoundingBox, CancellationToken, DocumentV1, LayoutDocument, LayoutOptions, PaddleClient,
     PaddleClientConfig, PdfComposer, PdfTranslationStage, ProgressTracker, TranslatedDocument,
     TranslationProgressSink, TypstCompiler, TypstCompilerConfig, build_layout_with_options,
-    extract_native_document, fuse_native_with_ocr, inspect_pdf, normalize_paddle_payload,
+    extract_native_document, fuse_native_with_ocr_report, inspect_pdf, normalize_paddle_payload,
     review_translation_policies, sanitize_source_pdf,
 };
 use glyphst_pdf_translation::{
@@ -29,7 +29,7 @@ use crate::backend::GlyphstTranslationBackend;
 use crate::reviewer::GlyphstPolicyReviewer;
 
 const ARTIFACT_VERSION: u32 = 3;
-const PIPELINE_VERSION: &str = "native-rust-v14-exact-fit";
+const PIPELINE_VERSION: &str = "native-rust-v15-ocr-structure-lossless";
 const CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone)]
@@ -185,7 +185,7 @@ impl PdfTranslationService {
             );
             document
         } else {
-            let document = match settings.ocr.mode {
+            match settings.ocr.mode {
                 OcrMode::Always => self.run_paddle_ocr(
                     &settings,
                     &pipeline_request,
@@ -228,8 +228,7 @@ impl PdfTranslationService {
                     );
                     document
                 }
-            };
-            document
+            }
         };
         if let Some(reviewer) = GlyphstPolicyReviewer::from_settings(&settings) {
             let review_errors = review_translation_policies(&mut document, &reviewer);
@@ -556,7 +555,12 @@ impl PdfTranslationService {
         let document = if let Ok(native_document) =
             extract_native_document(&request.source_path, "native-geometry", cancellation)
         {
-            fuse_native_with_ocr(native_document, &document)
+            let fusion = fuse_native_with_ocr_report(native_document, &document);
+            write_json(
+                job_directory.join("fusion-diagnostics.json"),
+                &fusion.report,
+            )?;
+            fusion.document
         } else {
             document
         };

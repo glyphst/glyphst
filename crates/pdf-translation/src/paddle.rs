@@ -13,9 +13,10 @@ use serde_json::{Value, json};
 
 use crate::policy::{derive_protected_regions_from_blocks, enforce_page_protected_regions};
 use crate::{
-    Block, BlockContent, BlockKind, BlockRole, BoundingBox, CancellationToken, ContinuationHint,
-    ContinuationScope, DocumentMetadata, DocumentV1, Line, Page, PageGeometry,
-    PolicyDecisionSource, Segment, SegmentKind, SourceProvenance, TextStyle, TranslationPolicy,
+    Block, BlockContent, BlockKind, BlockRole, BlockStructure, BoundingBox, CancellationToken,
+    ContinuationHint, ContinuationScope, DocumentMetadata, DocumentV1, Line, Page, PageGeometry,
+    PolicyDecisionSource, Segment, SegmentKind, SourceProvenance, StructureKind, TextFlow,
+    TextStyle, TranslationPolicy,
 };
 
 static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -570,15 +571,9 @@ pub fn normalize_paddle_payload(
     target_pages: &[PageGeometry],
 ) -> Result<DocumentV1> {
     let source_path = source_path.into();
-    let layout_results = payload
-        .get("layoutParsingResults")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("PaddleOCR payload is missing layoutParsingResults"))?;
-    let page_metadata = payload
-        .pointer("/dataInfo/pages")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let provider_version = provider_version.into();
+    let structure_confidence = paddle_structure_confidence(&provider_version);
+    let (layout_results, page_metadata) = canonical_paddle_pages(payload)?;
     let mut pages = Vec::with_capacity(layout_results.len());
 
     for (page_index, page_payload) in layout_results.iter().enumerate() {
@@ -663,6 +658,30 @@ pub fn normalize_paddle_payload(
                 content,
                 policy,
                 continuation: None,
+                structure: matches!(kind, BlockKind::Text | BlockKind::Code).then(|| {
+                    BlockStructure {
+                        kind: match role {
+                            BlockRole::FigureCaption | BlockRole::TableCaption => {
+                                StructureKind::Caption
+                            }
+                            BlockRole::Dialogue => StructureKind::DialogueTurn,
+                            _ => StructureKind::Region,
+                        },
+                        flow: if matches!(
+                            role,
+                            BlockRole::Dialogue | BlockRole::TableOfContents | BlockRole::Code
+                        ) {
+                            TextFlow::PreserveLines
+                        } else {
+                            TextFlow::Reflow
+                        },
+                        group_id: None,
+                        group_bbox: None,
+                        marker: None,
+                        provider: "paddle".to_string(),
+                        confidence: structure_confidence,
+                    }
+                }),
                 source: SourceProvenance {
                     provider: "paddle".to_string(),
                     raw_label,
@@ -700,13 +719,103 @@ pub fn normalize_paddle_payload(
             document_id: document_id.into(),
             source_path,
             provider: "paddle".to_string(),
-            provider_version: provider_version.into(),
+            provider_version,
             extra: BTreeMap::new(),
         },
         pages,
     );
     document.validate()?;
     Ok(document)
+}
+
+fn paddle_structure_confidence(provider_version: &str) -> f32 {
+    let normalized = provider_version.trim().to_ascii_lowercase();
+    if normalized.contains("paddleocr-vl-1.6") || normalized.contains("paddle-ocr-vl-1.6") {
+        0.98
+    } else {
+        0.90
+    }
+}
+
+fn canonical_paddle_pages(payload: &Value) -> Result<(Vec<Value>, Vec<Value>)> {
+    if let Some(layout_results) = payload
+        .get("layoutParsingResults")
+        .and_then(Value::as_array)
+    {
+        let page_metadata = payload
+            .pointer("/dataInfo/pages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        return Ok((layout_results.clone(), page_metadata));
+    }
+
+    let standard_pages = payload
+        .get("pages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            anyhow!("PaddleOCR payload is missing layoutParsingResults or pages[].layouts")
+        })?;
+    let mut results = Vec::with_capacity(standard_pages.len());
+    let mut metadata = Vec::with_capacity(standard_pages.len());
+    for page in standard_pages {
+        let page_width = number(page.pointer("/meta/page_width"))
+            .or_else(|| number(page.pointer("/meta/width")))
+            .unwrap_or_default();
+        let page_height = number(page.pointer("/meta/page_height"))
+            .or_else(|| number(page.pointer("/meta/height")))
+            .unwrap_or_default();
+        let layouts = page
+            .get("layouts")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let parsing_res_list = layouts
+            .iter()
+            .enumerate()
+            .map(|(order, layout)| {
+                let position = layout
+                    .get("position")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let bbox = if position.len() == 4 {
+                    let x = position[0].as_f64().unwrap_or_default();
+                    let y = position[1].as_f64().unwrap_or_default();
+                    let width = position[2].as_f64().unwrap_or_default();
+                    let height = position[3].as_f64().unwrap_or_default();
+                    json!([x, y, x + width, y + height])
+                } else {
+                    json!([0, 0, 0, 0])
+                };
+                json!({
+                    "block_label": string(layout.get("type")),
+                    "block_content": string(layout.get("text")),
+                    "block_bbox": bbox,
+                    "block_id": layout.get("layout_id").cloned().unwrap_or(Value::Null),
+                    "layout_id": layout.get("layout_id").cloned().unwrap_or(Value::Null),
+                    "block_order": order,
+                    "sub_type": layout.get("sub_type").cloned().unwrap_or(Value::Null),
+                    "block_polygon_points": layout.get("polygon").cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect::<Vec<_>>();
+        let markdown = match page.get("markdown") {
+            Some(Value::String(text)) => json!({ "text": text }),
+            Some(Value::Object(value)) => Value::Object(value.clone()),
+            _ => json!({}),
+        };
+        results.push(json!({
+            "prunedResult": {
+                "width": page_width,
+                "height": page_height,
+                "parsing_res_list": parsing_res_list,
+            },
+            "markdown": markdown,
+        }));
+        metadata.push(json!({ "width": page_width, "height": page_height }));
+    }
+    Ok((results, metadata))
 }
 
 pub fn normalize_model_name(model: &str) -> String {
@@ -1145,6 +1254,8 @@ fn insert_raw_metadata(metadata: &mut BTreeMap<String, Value>, raw_block: &Value
         ("block_order", "raw_block_order"),
         ("group_id", "raw_group_id"),
         ("global_group_id", "raw_global_group_id"),
+        ("layout_id", "raw_layout_id"),
+        ("sub_type", "raw_sub_type"),
     ] {
         if let Some(value) = raw_block.get(source).filter(|value| !value.is_null()) {
             metadata.insert(target.to_string(), value.clone());
@@ -1393,6 +1504,53 @@ mod tests {
         );
         assert!(document.pages[0].blocks[0].policy.translate);
         assert!(!document.pages[0].blocks[1].policy.translate);
+    }
+
+    #[test]
+    fn normalizes_baidu_standard_pages_layouts_payload() {
+        let payload = json!({
+            "pages": [{
+                "meta": {"page_width": 612, "page_height": 792},
+                "markdown": "page markdown",
+                "layouts": [{
+                    "layout_id": "layout-10",
+                    "type": "text",
+                    "sub_type": "prompt",
+                    "text": "1. A structured prompt item",
+                    "position": [100, 200, 240, 40],
+                    "polygon": [[100, 200], [340, 200], [340, 240], [100, 240]]
+                }]
+            }]
+        });
+
+        let document = normalize_paddle_payload(
+            &payload,
+            "source.pdf",
+            "standard",
+            "PaddleOCR-VL-1.6",
+            &[PageGeometry::new(306.0, 396.0)],
+        )
+        .unwrap();
+        let block = &document.pages[0].blocks[0];
+
+        assert_eq!(block.bbox, BoundingBox::new(50.0, 100.0, 170.0, 120.0));
+        assert_eq!(block.content.text, "1. A structured prompt item");
+        assert_eq!(
+            block.metadata.get("raw_layout_id").and_then(Value::as_str),
+            Some("layout-10")
+        );
+        assert_eq!(
+            block.metadata.get("raw_sub_type").and_then(Value::as_str),
+            Some("prompt")
+        );
+        assert_eq!(block.structure.as_ref().unwrap().confidence, 0.98);
+        assert_eq!(
+            document.pages[0]
+                .metadata
+                .get("provider_markdown")
+                .and_then(Value::as_str),
+            Some("page markdown")
+        );
     }
 
     #[test]

@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Block, BlockRole, BoundingBox, CancellationToken, DocumentV1, Line, TextStyle};
+use crate::{
+    Block, BlockRole, BoundingBox, CancellationToken, DocumentV1, Line, TextFlow, TextStyle,
+};
 
 const MAX_BATCH_UNITS: usize = 6;
 const MAX_BATCH_CHARACTERS: usize = 6_000;
@@ -169,6 +171,7 @@ pub enum ProtectedTokenKind {
     Url,
     NumericLiteral,
     Identifier,
+    StructuralMarker,
     LineBreak,
     StyleStart,
     StyleEnd,
@@ -616,8 +619,10 @@ fn process_completed_request(
         let output = outputs.remove(&unit.id);
         let result = match output {
             Some(output) if output.validation_error.is_none() => {
+                let repaired_output =
+                    repair_duplicate_protected_placeholders(&unit.protected, &output.text);
                 let normalized_output =
-                    normalize_translated_whitespace(&output.text, &unit.source_text, unit.role);
+                    normalize_translated_whitespace(&repaired_output, &unit.source_text, unit.role);
                 validate_translation(&unit, &normalized_output, backend.reject_unchanged_output())
                     .and_then(|translated| {
                         backend
@@ -721,6 +726,27 @@ fn process_completed_request(
         }
     }
     backend.cache_validated_translations(&cache_entries);
+}
+
+fn repair_duplicate_protected_placeholders(protected: &ProtectedText, translated: &str) -> String {
+    let mut repaired = translated.to_string();
+    for token in &protected.tokens {
+        if matches!(
+            token.kind,
+            ProtectedTokenKind::StyleStart | ProtectedTokenKind::StyleEnd
+        ) || repaired.matches(&token.placeholder).count() <= 1
+        {
+            continue;
+        }
+        let first_end = repaired
+            .find(&token.placeholder)
+            .expect("duplicate placeholder has a first occurrence")
+            + token.placeholder.len();
+        let suffix = repaired[first_end..].replace(&token.placeholder, "");
+        repaired.truncate(first_end);
+        repaired.push_str(&suffix);
+    }
+    repaired
 }
 
 fn queue_snapshot(queue: &TranslationQueueStats, started_at: Instant) -> TranslationQueueStats {
@@ -836,6 +862,22 @@ fn protect_text_for_role(text: &str, role: BlockRole) -> ProtectedText {
     )
 }
 
+fn protect_text_for_block(text: &str, block: &Block, role: BlockRole) -> ProtectedText {
+    protect_text_with_style_boundaries(
+        text,
+        !matches!(
+            role,
+            BlockRole::Title | BlockRole::Heading | BlockRole::TableOfContents
+        ),
+        block_preserves_line_breaks(block, role),
+        &[],
+        block
+            .structure
+            .as_ref()
+            .and_then(|structure| structure.marker.as_deref()),
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 struct StyleBoundary {
     offset: usize,
@@ -849,10 +891,10 @@ fn protect_block_text(
 ) -> (String, ProtectedText, Vec<StyleDefinition>) {
     let source = block.content.text.trim();
     let Some(dominant) = dominant_text_style(block) else {
-        let source = normalize_pdf_hard_wraps(source, role);
+        let source = normalize_block_hard_wraps(block, role);
         return (
             source.clone(),
-            protect_text_for_role(&source, role),
+            protect_text_for_block(&source, block, role),
             Vec::new(),
         );
     };
@@ -909,9 +951,15 @@ fn protect_block_text(
             .cmp(&right.offset)
             .then(left.start.cmp(&right.start))
     });
-    let normalized = normalize_styled_source(source, &boundaries, role, &block.content.lines);
+    let normalized = normalize_styled_source(
+        source,
+        &boundaries,
+        role,
+        &block.content.lines,
+        block.structure.as_ref().map(|structure| structure.flow),
+    );
     let protected = if normalized.boundaries.is_empty() {
-        protect_text_for_role(&normalized.text, role)
+        protect_text_for_block(&normalized.text, block, role)
     } else {
         protect_text_with_style_boundaries(
             &normalized.text,
@@ -919,8 +967,12 @@ fn protect_block_text(
                 role,
                 BlockRole::Title | BlockRole::Heading | BlockRole::TableOfContents
             ),
-            preserves_role_line_breaks(role),
+            block_preserves_line_breaks(block, role),
             &normalized.boundaries,
+            block
+                .structure
+                .as_ref()
+                .and_then(|structure| structure.marker.as_deref()),
         )
     };
     (normalized.text, protected, definitions)
@@ -942,6 +994,7 @@ fn normalize_styled_source(
     boundaries: &[StyleBoundary],
     role: BlockRole,
     source_lines: &[Line],
+    text_flow: Option<TextFlow>,
 ) -> NormalizedStyledSource {
     let annotated = annotate_source_styles(source, boundaries);
     let mut lines = vec![Vec::<StyledSourceCharacter>::new()];
@@ -956,11 +1009,20 @@ fn normalize_styled_source(
         }
     }
 
-    let normalized = match role {
-        BlockRole::Dialogue => normalize_styled_dialogue_lines(lines),
-        BlockRole::Prompt => normalize_styled_prompt_lines(lines, source_lines),
-        _ if preserves_semantic_line_breaks(role, source) => normalize_styled_verbatim_lines(lines),
-        _ => normalize_styled_visual_lines(lines),
+    let normalized = match text_flow {
+        Some(TextFlow::PreserveLines) => normalize_styled_verbatim_lines(lines),
+        Some(TextFlow::Reflow) if role == BlockRole::Prompt => {
+            normalize_styled_prompt_lines(lines, source_lines)
+        }
+        Some(TextFlow::Reflow) => normalize_styled_visual_lines(lines),
+        None => match role {
+            BlockRole::Dialogue => normalize_styled_dialogue_lines(lines),
+            BlockRole::Prompt => normalize_styled_prompt_lines(lines, source_lines),
+            _ if preserves_semantic_line_breaks(role, source) => {
+                normalize_styled_verbatim_lines(lines)
+            }
+            _ => normalize_styled_visual_lines(lines),
+        },
     };
     styled_characters_to_source(normalized)
 }
@@ -1307,7 +1369,7 @@ fn protect_text_with_policies(
     protect_identifiers: bool,
     protect_line_breaks: bool,
 ) -> ProtectedText {
-    protect_text_with_style_boundaries(text, protect_identifiers, protect_line_breaks, &[])
+    protect_text_with_style_boundaries(text, protect_identifiers, protect_line_breaks, &[], None)
 }
 
 fn protect_text_with_style_boundaries(
@@ -1315,6 +1377,7 @@ fn protect_text_with_style_boundaries(
     protect_identifiers: bool,
     protect_line_breaks: bool,
     boundaries: &[StyleBoundary],
+    structural_marker: Option<&str>,
 ) -> ProtectedText {
     let mut protected = String::with_capacity(text.len());
     let mut tokens = Vec::new();
@@ -1344,6 +1407,35 @@ fn protect_text_with_style_boundaries(
             break;
         }
         let rest = &text[cursor..];
+        if cursor == 0
+            && let Some(marker) = structural_marker.filter(|marker| !marker.is_empty())
+            && rest.starts_with(marker)
+        {
+            let kind = ProtectedTokenKind::StructuralMarker;
+            let placeholder = placeholder(kind, tokens.len(), marker);
+            let end = cursor + marker.len();
+            let mut restoration = String::with_capacity(marker.len());
+            let mut restoration_cursor = cursor;
+            while let Some(boundary) = boundaries.get(boundary_index)
+                && boundary.offset < end
+            {
+                restoration.push_str(&text[restoration_cursor..boundary.offset]);
+                restoration.push_str(&style_marker(boundary.style_id, boundary.start));
+                restoration_cursor = boundary.offset;
+                boundary_index += 1;
+            }
+            restoration.push_str(&text[restoration_cursor..end]);
+            let styled_restoration = (restoration != marker).then_some(restoration);
+            protected.push_str(&placeholder);
+            tokens.push(ProtectedToken {
+                placeholder,
+                original: marker.to_string(),
+                kind,
+                styled_restoration,
+            });
+            cursor = end;
+            continue;
+        }
         if protect_line_breaks && rest.starts_with('\n') {
             let original = "\n";
             let kind = ProtectedTokenKind::LineBreak;
@@ -1655,14 +1747,24 @@ fn build_translation_units(document: &DocumentV1) -> Vec<TranslationUnit> {
     let mut units = Vec::<TranslationUnit>::new();
     let mut continuation_units = HashMap::<String, usize>::new();
     for page in &document.pages {
-        for block in &page.blocks {
+        let mut blocks = page.blocks.iter().collect::<Vec<_>>();
+        blocks.sort_by_key(|block| (block.reading_order, block.order));
+        for block in blocks {
             if !block.policy.translate || block.content.text.trim().is_empty() {
                 continue;
             }
             let continuation_id = block
-                .continuation
+                .structure
                 .as_ref()
-                .map(|continuation| continuation.group_id.clone());
+                .and_then(|structure| structure.group_id.as_ref())
+                .is_none()
+                .then(|| {
+                    block
+                        .continuation
+                        .as_ref()
+                        .map(|continuation| continuation.group_id.clone())
+                })
+                .flatten();
             if let Some(group_id) = continuation_id.as_ref()
                 && let Some(unit_index) = continuation_units.get(group_id).copied()
             {
@@ -2066,6 +2168,7 @@ fn placeholder(kind: ProtectedTokenKind, index: usize, original: &str) -> String
         ProtectedTokenKind::Url => "URL",
         ProtectedTokenKind::NumericLiteral => "NUMBER",
         ProtectedTokenKind::Identifier => "IDENTIFIER",
+        ProtectedTokenKind::StructuralMarker => "STRUCTURAL_MARKER",
         ProtectedTokenKind::LineBreak => "LINE_BREAK",
         ProtectedTokenKind::StyleStart => "STYLE_START",
         ProtectedTokenKind::StyleEnd => "STYLE_END",
@@ -2103,6 +2206,25 @@ fn append_continuation_text(target: &mut String, continuation: &str) {
     target.push_str(continuation);
 }
 
+fn block_preserves_line_breaks(block: &Block, role: BlockRole) -> bool {
+    block
+        .structure
+        .as_ref()
+        .map(|structure| structure.flow == TextFlow::PreserveLines)
+        .unwrap_or_else(|| preserves_role_line_breaks(role))
+}
+
+fn normalize_block_hard_wraps(block: &Block, role: BlockRole) -> String {
+    match block.structure.as_ref().map(|structure| structure.flow) {
+        Some(TextFlow::PreserveLines) => normalize_verbatim_lines(&block.content.text),
+        Some(TextFlow::Reflow) if role == BlockRole::Prompt => {
+            normalize_prompt_lines(&block.content.text)
+        }
+        Some(TextFlow::Reflow) => normalize_visual_hard_wraps(&block.content.text),
+        None => normalize_pdf_hard_wraps(&block.content.text, role),
+    }
+}
+
 fn normalize_pdf_hard_wraps(text: &str, role: BlockRole) -> String {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     if role == BlockRole::Dialogue {
@@ -2112,15 +2234,24 @@ fn normalize_pdf_hard_wraps(text: &str, role: BlockRole) -> String {
         return normalize_prompt_lines(&text);
     }
     if preserves_semantic_line_breaks(role, &text) {
-        return text
-            .lines()
-            .map(str::trim_end)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string();
+        return normalize_verbatim_lines(&text);
     }
+    normalize_visual_hard_wraps(&text)
+}
 
+fn normalize_verbatim_lines(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn normalize_visual_hard_wraps(text: &str) -> String {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut paragraphs = Vec::new();
     let mut lines = Vec::new();
     let flush = |paragraphs: &mut Vec<String>, lines: &mut Vec<&str>| {
@@ -2388,8 +2519,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        Block, BlockContent, BlockKind, BoundingBox, DocumentMetadata, Line, Page, PageGeometry,
-        Segment, SegmentKind, SourceProvenance, TranslationPolicy,
+        Block, BlockContent, BlockKind, BlockStructure, BoundingBox, ContinuationHint,
+        ContinuationScope, DocumentMetadata, Line, Page, PageGeometry, Segment, SegmentKind,
+        SourceProvenance, StructureKind, TranslationPolicy,
     };
 
     struct EchoBackend {
@@ -2433,6 +2565,41 @@ mod tests {
             source
         );
         assert_eq!(protected.tokens.len(), 3);
+    }
+
+    #[test]
+    fn duplicate_immutable_placeholders_are_repaired_before_validation() {
+        let protected = protect_text("Use 25 cases and cite [12].");
+        let number = protected
+            .tokens
+            .iter()
+            .find(|token| token.kind == ProtectedTokenKind::NumericLiteral)
+            .unwrap();
+        let duplicated = format!(
+            "{} and accidentally repeated {}",
+            protected.text, number.placeholder
+        );
+
+        let repaired = repair_duplicate_protected_placeholders(&protected, &duplicated);
+
+        assert_eq!(repaired.matches(&number.placeholder).count(), 1);
+        assert!(
+            protected
+                .validate_and_restore(&repaired)
+                .unwrap()
+                .starts_with("Use 25 cases and cite [12].")
+        );
+    }
+
+    #[test]
+    fn missing_immutable_placeholders_are_not_synthesized_by_repair() {
+        let protected = protect_text("Use 25 cases.");
+        let missing = protected.text.replace(&protected.tokens[0].placeholder, "");
+
+        let repaired = repair_duplicate_protected_placeholders(&protected, &missing);
+
+        assert_eq!(repaired, missing);
+        assert!(protected.validate_and_restore(&repaired).is_err());
     }
 
     #[test]
@@ -2548,6 +2715,100 @@ mod tests {
             "Generative agents wake up, cook breakfast, and then plan their day. They interact with neighbors."
         );
         assert!(!units[0].protected.text.contains('\n'));
+    }
+
+    #[test]
+    fn structured_list_members_reflow_visual_wraps_and_protect_markers() {
+        let mut document = test_document_with_blocks(vec![(
+            BlockRole::Prompt,
+            "1. Eddy is\nwalking today".into(),
+        )]);
+        document.pages[0].blocks[0].structure = Some(BlockStructure {
+            kind: StructureKind::OrderedListItem,
+            flow: TextFlow::Reflow,
+            group_id: Some("prompt-group".to_string()),
+            group_bbox: Some(BoundingBox::new(10.0, 10.0, 90.0, 80.0)),
+            marker: Some("1.".to_string()),
+            provider: "paddle".to_string(),
+            confidence: 0.98,
+        });
+
+        let unit = build_translation_units(&document).remove(0);
+
+        assert_eq!(unit.source_text, "1. Eddy is walking today");
+        assert!(!unit.protected.text.contains('\n'));
+        let marker = unit
+            .protected
+            .tokens
+            .iter()
+            .find(|token| token.kind == ProtectedTokenKind::StructuralMarker)
+            .unwrap();
+        assert_eq!(marker.original, "1.");
+        assert_eq!(
+            unit.protected
+                .validate_and_restore(&unit.protected.text)
+                .unwrap(),
+            unit.source_text
+        );
+    }
+
+    #[test]
+    fn structured_members_ignore_native_continuations_and_follow_reading_order() {
+        let mut document = test_document_with_blocks(vec![
+            (BlockRole::Prompt, "1. First item".into()),
+            (BlockRole::Prompt, "2. Second item".into()),
+        ]);
+        for (index, block) in document.pages[0].blocks.iter_mut().enumerate() {
+            block.reading_order = 1 - index;
+            block.continuation = Some(ContinuationHint {
+                group_id: "native-continuation".to_string(),
+                scope: ContinuationScope::IntraPage,
+                reading_order: Some(index),
+                confidence: 0.98,
+            });
+            block.structure = Some(BlockStructure {
+                kind: StructureKind::OrderedListItem,
+                flow: TextFlow::Reflow,
+                group_id: Some("ocr-list".to_string()),
+                group_bbox: Some(BoundingBox::new(10.0, 10.0, 90.0, 80.0)),
+                marker: Some(format!("{}.", index + 1)),
+                provider: "paddle".to_string(),
+                confidence: 0.98,
+            });
+        }
+
+        let units = build_translation_units(&document);
+
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].member_block_ids, ["p001-b0001"]);
+        assert_eq!(units[1].member_block_ids, ["p001-b0000"]);
+    }
+
+    #[test]
+    fn explicit_preserve_lines_flow_overrides_a_body_role() {
+        let mut document =
+            test_document_with_blocks(vec![(BlockRole::Body, "Speaker A\nSpeaker B".into())]);
+        document.pages[0].blocks[0].structure = Some(BlockStructure {
+            kind: StructureKind::DialogueTurn,
+            flow: TextFlow::PreserveLines,
+            group_id: Some("dialogue".to_string()),
+            group_bbox: None,
+            marker: None,
+            provider: "paddle".to_string(),
+            confidence: 0.98,
+        });
+
+        let unit = build_translation_units(&document).remove(0);
+
+        assert_eq!(unit.source_text, "Speaker A\nSpeaker B");
+        assert_eq!(
+            unit.protected
+                .tokens
+                .iter()
+                .filter(|token| token.kind == ProtectedTokenKind::LineBreak)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -3429,6 +3690,7 @@ mod tests {
                         },
                         policy: TranslationPolicy::translate("test"),
                         continuation: None,
+                        structure: None,
                         source: SourceProvenance {
                             provider: "test".to_string(),
                             raw_label: "text".to_string(),

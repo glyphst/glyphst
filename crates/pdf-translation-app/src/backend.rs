@@ -148,6 +148,9 @@ fn semantic_unit(unit: &TranslationUnit) -> SemanticTranslationUnit {
                         SemanticProtectedTokenKind::NumericLiteral
                     }
                     ProtectedTokenKind::Identifier => SemanticProtectedTokenKind::Identifier,
+                    ProtectedTokenKind::StructuralMarker => {
+                        SemanticProtectedTokenKind::StructuralMarker
+                    }
                     ProtectedTokenKind::LineBreak => SemanticProtectedTokenKind::LineBreak,
                     ProtectedTokenKind::StyleStart | ProtectedTokenKind::StyleEnd => {
                         SemanticProtectedTokenKind::StyleBoundary

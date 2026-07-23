@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Block, BlockRole, BoundingBox, FontFamilyClass, PageGeometry, StyledRun, TextStyle,
+    Block, BlockRole, BoundingBox, FontFamilyClass, PageGeometry, StyledRun, TextFlow, TextStyle,
     TranslatedDocument,
 };
 
@@ -32,6 +32,8 @@ pub struct LayoutItem {
     pub source_bbox: BoundingBox,
     #[serde(default)]
     pub source_regions: Vec<BoundingBox>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structure_group_id: Option<String>,
     pub bbox: BoundingBox,
     pub text: String,
     pub role: BlockRole,
@@ -177,13 +179,18 @@ pub fn build_layout_with_options(
             let font_size = profile.font_size_pt;
             let minimum_font_size = preferred_minimum_font_size(block.role, font_size);
             let emergency_minimum_font_size = emergency_minimum_font_size(block.role, font_size);
+            let layout_bbox = structural_layout_bbox(block);
             let item = LayoutItem {
                 unit_id: unit.id.clone(),
                 block_id: block.id.clone(),
                 page_index: block.page_index,
                 source_bbox: block.bbox,
                 source_regions: source_text_regions(block),
-                bbox: block.bbox,
+                structure_group_id: block
+                    .structure
+                    .as_ref()
+                    .and_then(|structure| structure.group_id.clone()),
+                bbox: layout_bbox,
                 text,
                 role: block.role,
                 source_font_size_pt: font_size,
@@ -269,6 +276,27 @@ fn source_text_regions(block: &Block) -> Vec<BoundingBox> {
         regions.push(block.bbox);
     }
     regions
+}
+
+fn structural_layout_bbox(block: &Block) -> BoundingBox {
+    let Some(structure) = block
+        .structure
+        .as_ref()
+        .filter(|structure| structure.confidence >= 0.95)
+    else {
+        return block.bbox;
+    };
+    let Some(group_bbox) = structure.group_bbox else {
+        return block.bbox;
+    };
+    let block_center_x = (block.bbox.x0 + block.bbox.x1) * 0.5;
+    if group_bbox.width() < block.bbox.width() * 0.65
+        || block_center_x < group_bbox.x0
+        || block_center_x > group_bbox.x1
+    {
+        return block.bbox;
+    }
+    BoundingBox::new(group_bbox.x0, block.bbox.y0, group_bbox.x1, block.bbox.y1)
 }
 
 pub fn split_text_for_layout_boxes(text: &str, capacities: &[usize]) -> Vec<String> {
@@ -503,10 +531,19 @@ fn source_typography(block: &Block, body_font: f32) -> SourceTypography {
         leading_em: round(leading_em),
         first_line_indent_pt: round(first_line_indent_pt),
         justify,
-        preserve_line_breaks: matches!(
-            block.role,
-            BlockRole::Prompt | BlockRole::Dialogue | BlockRole::TableOfContents | BlockRole::Code
-        ) || looks_like_dialogue(&block.content.text),
+        preserve_line_breaks: block
+            .structure
+            .as_ref()
+            .map(|structure| structure.flow == TextFlow::PreserveLines)
+            .unwrap_or_else(|| {
+                matches!(
+                    block.role,
+                    BlockRole::Prompt
+                        | BlockRole::Dialogue
+                        | BlockRole::TableOfContents
+                        | BlockRole::Code
+                ) || looks_like_dialogue(&block.content.text)
+            }),
     }
 }
 
@@ -619,7 +656,12 @@ fn round(value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::{
+        BlockContent, BlockKind, BlockStructure, SourceProvenance, StructureKind, TranslationPolicy,
+    };
 
     #[test]
     fn continuation_text_is_distributed_across_boxes() {
@@ -635,5 +677,77 @@ mod tests {
         );
         assert!(!parts[0].is_empty());
         assert!(!parts[1].is_empty());
+    }
+
+    #[test]
+    fn high_confidence_structure_members_share_horizontal_layout_bounds() {
+        let source_bbox = BoundingBox::new(40.0, 20.0, 90.0, 32.0);
+        let mut block = layout_test_block(source_bbox);
+        block.structure = Some(BlockStructure {
+            kind: StructureKind::OrderedListItem,
+            flow: TextFlow::Reflow,
+            group_id: Some("prompt".to_string()),
+            group_bbox: Some(BoundingBox::new(30.0, 10.0, 120.0, 80.0)),
+            marker: Some("1.".to_string()),
+            provider: "paddle".to_string(),
+            confidence: 0.98,
+        });
+
+        assert_eq!(
+            structural_layout_bbox(&block),
+            BoundingBox::new(30.0, 20.0, 120.0, 32.0)
+        );
+
+        block.structure.as_mut().unwrap().confidence = 0.94;
+        assert_eq!(structural_layout_bbox(&block), source_bbox);
+    }
+
+    #[test]
+    fn ocr_flow_controls_layout_line_preservation() {
+        let mut block = layout_test_block(BoundingBox::new(10.0, 10.0, 90.0, 40.0));
+        block.role = BlockRole::Prompt;
+        block.structure = Some(BlockStructure {
+            kind: StructureKind::OrderedListItem,
+            flow: TextFlow::Reflow,
+            group_id: Some("prompt".to_string()),
+            group_bbox: None,
+            marker: Some("1.".to_string()),
+            provider: "paddle".to_string(),
+            confidence: 0.98,
+        });
+        assert!(!source_typography(&block, 10.0).preserve_line_breaks);
+
+        block.structure.as_mut().unwrap().flow = TextFlow::PreserveLines;
+        assert!(source_typography(&block, 10.0).preserve_line_breaks);
+    }
+
+    fn layout_test_block(bbox: BoundingBox) -> Block {
+        Block {
+            id: "block".to_string(),
+            page_index: 0,
+            order: 0,
+            reading_order: 0,
+            kind: BlockKind::Text,
+            role: BlockRole::Body,
+            bbox,
+            content: BlockContent {
+                text: "1. Source text".to_string(),
+                lines: Vec::new(),
+                segments: Vec::new(),
+                markdown: None,
+                html: None,
+            },
+            policy: TranslationPolicy::translate("test"),
+            continuation: None,
+            structure: None,
+            source: SourceProvenance {
+                provider: "test".to_string(),
+                raw_label: "text".to_string(),
+                raw_bbox: bbox,
+                raw_path: None,
+            },
+            tags: Vec::new(),
+            metadata: BTreeMap::new(),
+        }
     }
 }
