@@ -239,9 +239,29 @@ settings-page-image-limit-hint = Maximum number of page images that can be attac
 settings-quick-ai-chat = Quick AI chat
 settings-no-enabled-provider-models = No enabled provider models
 settings-no-models-added = No models added yet.
-settings-choose-models-to-add = Choose models to add
 settings-no-models-returned = No models returned.
 settings-no-matching-models-period = No matching models.
+settings-add-models = Add Models…
+settings-add-model-id = Add ID
+settings-add-provider-models = Add { $provider } Models
+settings-model-catalog-hint = Select one or more models. Provider catalogs are cached while this settings window remains open.
+settings-refresh-models = Refresh Models
+settings-add-selected-models = Add Selected ({ $count })
+settings-select-all = Select All
+settings-clear-selection = Clear
+settings-model-already-added = Added
+settings-no-cached-models = No catalog cached
+settings-model-catalog-empty = The model catalog has not been loaded yet. Refresh to fetch it from the provider.
+settings-models-cached =
+    { $count ->
+        [one] { $count } model cached
+       *[other] { $count } models cached
+    }
+settings-added-models =
+    { $count ->
+        [one] Added { $count } model.
+       *[other] Added { $count } models.
+    }
 settings-model-list = Model List
 settings-theme-mode = Theme Mode
 settings-mode = Mode

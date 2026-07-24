@@ -15,3 +15,6 @@ glyphst-translation-ui = { path = "../translation-ui" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
 gpui_component.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
