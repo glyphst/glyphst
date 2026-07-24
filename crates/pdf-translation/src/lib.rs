@@ -8,6 +8,7 @@ mod policy;
 mod progress;
 mod translate;
 mod typst;
+mod unlimited;
 
 pub use cancellation::{CancellationToken, TranslationCancelled};
 pub use composition::{
@@ -50,4 +51,8 @@ pub use translate::{
 pub use typst::{
     TypstCompiler, TypstCompilerConfig, TypstError, TypstOutput, generate_translated_pdf_source,
     generate_typst_source, resolve_translation_assets_dir,
+};
+pub use unlimited::{
+    UnlimitedClient, UnlimitedClientConfig, UnlimitedError, UnlimitedErrorCategory,
+    UnlimitedJobProgress, UnlimitedOcrResult, UnlimitedProbeResult, normalize_unlimited_payload,
 };

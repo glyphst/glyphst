@@ -832,13 +832,15 @@ pub fn fuse_native_with_ocr(native: DocumentV1, ocr: &DocumentV1) -> DocumentV1 
 pub fn fuse_native_with_ocr_report(mut native: DocumentV1, ocr: &DocumentV1) -> OcrFusionResult {
     let mut report = OcrFusionReport::default();
     for page in &mut native.pages {
-        let Some(ocr_page) = ocr
+        let Some(source_ocr_page) = ocr
             .pages
             .iter()
             .find(|candidate| candidate.page_index == page.page_index)
         else {
             continue;
         };
+        let expanded_ocr_page = expand_ocr_semantic_regions(source_ocr_page);
+        let ocr_page = &expanded_ocr_page;
         let mut page_report = OcrFusionPageReport {
             page_index: page.page_index,
             ..OcrFusionPageReport::default()
@@ -980,7 +982,10 @@ pub fn fuse_native_with_ocr_report(mut native: DocumentV1, ocr: &DocumentV1) -> 
                 ocr_block_ids: ocr_ids,
                 score,
                 native_coverage: coverage,
-                reason: "validated_paddle_structure".to_string(),
+                reason: format!(
+                    "validated_ocr_structure:{}",
+                    ocr_provider_name(&ocr_page.blocks, &ocr_indices)
+                ),
             });
         }
 
@@ -1116,6 +1121,188 @@ pub fn fuse_native_with_ocr_report(mut native: DocumentV1, ocr: &DocumentV1) -> 
         document: native,
         report,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OcrLineTopology {
+    Prompt,
+    Dialogue,
+    OrderedList,
+    BulletList,
+}
+
+fn expand_ocr_semantic_regions(page: &Page) -> Page {
+    let mut expanded = page.clone();
+    let mut blocks = Vec::new();
+    for block in &page.blocks {
+        let Some((topology, members)) = ocr_semantic_line_members(block) else {
+            blocks.push(block.clone());
+            continue;
+        };
+        let group_id = format!("{}-semantic-lines", block.id);
+        let group_bbox = ocr_structure_bbox(block);
+        let confidence = block
+            .structure
+            .as_ref()
+            .map_or(block.policy.confidence, |structure| structure.confidence);
+        for (member_index, member) in members.into_iter().enumerate() {
+            let mut expanded_block = block.clone();
+            expanded_block.id = format!("{}-s{member_index:02}", block.id);
+            expanded_block.continuation = None;
+            expanded_block.role = match topology {
+                OcrLineTopology::Prompt => BlockRole::Prompt,
+                OcrLineTopology::Dialogue => BlockRole::Dialogue,
+                OcrLineTopology::OrderedList | OcrLineTopology::BulletList => BlockRole::Body,
+            };
+            expanded_block.policy = policy_for_role(expanded_block.role);
+            expanded_block.policy.source = PolicyDecisionSource::OcrSemantic;
+            expanded_block.policy.confidence = confidence;
+            let marker = structural_marker(&member);
+            let kind = match topology {
+                OcrLineTopology::Prompt
+                    if member_index == 0 && native_bracketed_prompt_heading(&member) =>
+                {
+                    StructureKind::PromptHeading
+                }
+                OcrLineTopology::Prompt if member.contains(['?', '？']) => {
+                    StructureKind::PromptQuestion
+                }
+                OcrLineTopology::Dialogue => StructureKind::DialogueTurn,
+                OcrLineTopology::OrderedList if marker.is_some() => StructureKind::OrderedListItem,
+                OcrLineTopology::BulletList if marker.is_some() => StructureKind::BulletListItem,
+                _ => StructureKind::Region,
+            };
+            let provider = expanded_block
+                .structure
+                .as_ref()
+                .map(|structure| structure.provider.clone())
+                .unwrap_or_else(|| expanded_block.source.provider.clone());
+            expanded_block.structure = Some(BlockStructure {
+                kind,
+                flow: TextFlow::Reflow,
+                group_id: Some(group_id.clone()),
+                group_bbox: Some(group_bbox),
+                marker,
+                provider,
+                confidence,
+            });
+            let style = block
+                .content
+                .segments
+                .first()
+                .map(|segment| segment.style.clone())
+                .unwrap_or_default();
+            let segment = Segment {
+                kind: SegmentKind::Text,
+                text: member.clone(),
+                bbox: group_bbox,
+                style,
+            };
+            expanded_block.content = BlockContent {
+                text: member.clone(),
+                lines: vec![Line {
+                    bbox: group_bbox,
+                    text: member,
+                    segments: vec![segment.clone()],
+                    baseline_y: None,
+                    line_height: None,
+                }],
+                segments: vec![segment],
+                markdown: None,
+                html: None,
+            };
+            expanded_block.tags.push("ocr_semantic_lines".to_string());
+            expanded_block.metadata.insert(
+                "ocr_semantic_parent_id".to_string(),
+                json!(block.id.clone()),
+            );
+            expanded_block
+                .metadata
+                .insert("ocr_semantic_member_index".to_string(), json!(member_index));
+            blocks.push(expanded_block);
+        }
+    }
+    for (order, block) in blocks.iter_mut().enumerate() {
+        block.order = order;
+        block.reading_order = order;
+    }
+    expanded.blocks = blocks;
+    expanded
+}
+
+fn ocr_semantic_line_members(block: &Block) -> Option<(OcrLineTopology, Vec<String>)> {
+    if block.kind != BlockKind::Text
+        || block.policy.locked
+        || block
+            .structure
+            .as_ref()
+            .is_none_or(|structure| structure.confidence < 0.95)
+    {
+        return None;
+    }
+    let raw_lines = block
+        .content
+        .text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if raw_lines.len() < 2 {
+        return None;
+    }
+    let ordered_count = raw_lines
+        .iter()
+        .filter(|line| ordered_list_marker(line).is_some())
+        .count();
+    let bullet_count = raw_lines
+        .iter()
+        .filter(|line| bullet_list_marker(line).is_some())
+        .count();
+    let topology = if native_text_looks_like_prompt(&block.content.text) {
+        OcrLineTopology::Prompt
+    } else if native_text_looks_like_dialogue(&block.content.text) {
+        OcrLineTopology::Dialogue
+    } else if ordered_count >= 2 {
+        OcrLineTopology::OrderedList
+    } else if bullet_count >= 2 {
+        OcrLineTopology::BulletList
+    } else {
+        return None;
+    };
+    let mut members = Vec::<String>::new();
+    for line in raw_lines {
+        let starts_member = members
+            .last()
+            .is_none_or(|previous| semantic_ocr_line_boundary(previous, line, topology));
+        if starts_member {
+            members.push(line.to_string());
+        } else if let Some(previous) = members.last_mut() {
+            previous.push(' ');
+            previous.push_str(line);
+        }
+    }
+    (members.len() >= 2).then_some((topology, members))
+}
+
+fn semantic_ocr_line_boundary(previous: &str, current: &str, topology: OcrLineTopology) -> bool {
+    if matches!(topology, OcrLineTopology::OrderedList) {
+        return ordered_list_marker(current).is_some();
+    }
+    if matches!(topology, OcrLineTopology::BulletList) {
+        return bullet_list_marker(current).is_some();
+    }
+    if matches!(topology, OcrLineTopology::Dialogue) && native_speaker_label(current).is_some() {
+        return true;
+    }
+    if native_bracketed_prompt_heading(current)
+        || native_prompt_field_label(current)
+        || structural_marker(current).is_some()
+    {
+        return true;
+    }
+    previous
+        .trim_end()
+        .ends_with(['.', '!', '?', '。', '！', '？', ']', '］', ')', '）'])
 }
 
 #[derive(Debug, Clone)]
@@ -1262,7 +1449,14 @@ fn line_ocr_match_score(
     {
         return None;
     }
-    if !column_compatible(native_block.bbox, ocr_bbox, page_width, ocr_block.role) {
+    // A native text block can span the page even when OCR correctly divides it
+    // into narrower semantic regions, while the last visual line of one region
+    // can itself be much shorter than the region. Accept either the physical
+    // line or its enclosing native block as column-compatible. A genuinely
+    // cross-column OCR region remains incompatible with both.
+    if !column_compatible(atom.line.bbox, ocr_bbox, page_width, ocr_block.role)
+        && !column_compatible(native_block.bbox, ocr_bbox, page_width, ocr_block.role)
+    {
         return None;
     }
     let geometry = (vertical_overlap.clamp(0.0, 1.0) * 0.65
@@ -1582,16 +1776,17 @@ fn build_topology_fused_block(
         group_id: None,
         group_bbox: None,
         marker: None,
-        provider: "paddle".to_string(),
-        confidence: 0.98,
+        provider: ocr_block.source.provider.clone(),
+        confidence: ocr_block.policy.confidence.max(0.95),
     });
     structure.group_id = Some(component_id.to_string());
     structure.group_bbox = group_bbox;
-    let role = if ocr_block.role == BlockRole::Unknown {
-        first_native.role
-    } else {
-        ocr_block.role
-    };
+    let role = resolved_ocr_role(
+        ocr_block.role,
+        atom_indices
+            .iter()
+            .map(|index| native_blocks[atoms[*index].block_index].role),
+    );
     let mut policy = policy_for_role(role);
     policy.source = PolicyDecisionSource::OcrSemantic;
     policy.confidence = structure.confidence;
@@ -1622,7 +1817,7 @@ fn build_topology_fused_block(
         continuation: ocr_block.continuation.clone(),
         structure: Some(structure),
         source: SourceProvenance {
-            provider: "mupdf+paddle-structure".to_string(),
+            provider: format!("mupdf+{}-structure", ocr_block.source.provider),
             raw_label: ocr_block.source.raw_label.clone(),
             raw_bbox: ocr_block.bbox,
             raw_path: ocr_block.source.raw_path.clone(),
@@ -1647,10 +1842,67 @@ fn promote_detached_structural_marker(lines: &mut Vec<Line>, ocr_text: &str) {
     }
 }
 
+fn ocr_provider_name(blocks: &[Block], indices: &HashSet<usize>) -> String {
+    let mut providers = indices
+        .iter()
+        .filter_map(|index| blocks.get(*index))
+        .map(|block| block.source.provider.trim())
+        .filter(|provider| !provider.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    providers.sort();
+    providers.dedup();
+    if providers.is_empty() {
+        "unknown".to_string()
+    } else {
+        providers.join("+")
+    }
+}
+
+fn resolved_ocr_role(
+    ocr_role: BlockRole,
+    native_roles: impl IntoIterator<Item = BlockRole>,
+) -> BlockRole {
+    if !matches!(ocr_role, BlockRole::Unknown | BlockRole::Body) {
+        return ocr_role;
+    }
+    native_roles
+        .into_iter()
+        .filter(|role| !matches!(role, BlockRole::Unknown | BlockRole::Body))
+        .max_by_key(|role| native_role_specificity(*role))
+        .unwrap_or(ocr_role)
+}
+
+fn native_role_specificity(role: BlockRole) -> u8 {
+    match role {
+        BlockRole::Title => 6,
+        BlockRole::Heading => 5,
+        BlockRole::Prompt
+        | BlockRole::Dialogue
+        | BlockRole::Code
+        | BlockRole::TableOfContents
+        | BlockRole::FigureCaption
+        | BlockRole::TableCaption => 4,
+        BlockRole::Abstract | BlockRole::Footnote => 3,
+        BlockRole::Metadata
+        | BlockRole::Reference
+        | BlockRole::Header
+        | BlockRole::Footer
+        | BlockRole::PageNumber
+        | BlockRole::FormulaNumber => 2,
+        BlockRole::Body
+        | BlockRole::Image
+        | BlockRole::Table
+        | BlockRole::Formula
+        | BlockRole::Unknown => 1,
+    }
+}
+
 fn apply_ocr_semantics(native_block: &mut Block, ocr_block: &Block, score: f32) {
-    if ocr_role_is_textual(ocr_block.role) && ocr_block.role != BlockRole::Unknown {
-        native_block.role = ocr_block.role;
-        native_block.policy = policy_for_role(ocr_block.role);
+    let role = resolved_ocr_role(ocr_block.role, std::iter::once(native_block.role));
+    if ocr_role_is_textual(role) && role != BlockRole::Unknown {
+        native_block.role = role;
+        native_block.policy = policy_for_role(role);
         native_block.policy.source = PolicyDecisionSource::OcrSemantic;
         native_block.policy.confidence = ocr_block
             .structure
@@ -1719,7 +1971,22 @@ fn classify_ocr_structure_groups(page: &mut Page) {
             .iter()
             .filter(|index| bullet_list_marker(&page.blocks[**index].content.text).is_some())
             .count();
-        let prompt_group = ordered_count >= 2;
+        let semantic_prompt_count = members
+            .iter()
+            .filter(|index| page.blocks[**index].role == BlockRole::Prompt)
+            .count();
+        let bracketed_prompt_heading = members.first().is_some_and(|index| {
+            page.blocks[*index]
+                .content
+                .text
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .is_some_and(native_bracketed_prompt_heading)
+        });
+        let prompt_group = ordered_count >= 2
+            || semantic_prompt_count >= 2
+            || (members.len() >= 2 && bracketed_prompt_heading);
         let bullet_group = bullet_count >= 2;
         for (position, index) in members.iter().enumerate() {
             let block = &mut page.blocks[*index];
@@ -1731,8 +1998,8 @@ fn classify_ocr_structure_groups(page: &mut Page) {
                 group_id: Some(group_id.clone()),
                 group_bbox,
                 marker: None,
-                provider: "paddle".to_string(),
-                confidence: 0.98,
+                provider: block.source.provider.clone(),
+                confidence: block.policy.confidence.max(0.95),
             });
             structure.group_id = Some(group_id.clone());
             structure.group_bbox = group_bbox;
@@ -1800,8 +2067,7 @@ fn reclassify_prompt_code_regions(page: &mut Page) {
         .protected_regions
         .iter()
         .filter(|region| {
-            region.kind == ProtectedRegionKind::Code
-                && region.source.to_ascii_lowercase().contains("paddle")
+            region.kind == ProtectedRegionKind::Code && is_ocr_region_source(&region.source)
         })
         .filter(|region| {
             page.blocks.iter().any(|block| {
@@ -1818,7 +2084,7 @@ fn reclassify_prompt_code_regions(page: &mut Page) {
 
     page.protected_regions.retain(|region| {
         region.kind != ProtectedRegionKind::Code
-            || !region.source.to_ascii_lowercase().contains("paddle")
+            || !is_ocr_region_source(&region.source)
             || !prompt_boxes.contains(&region.bbox)
     });
     for block in &mut page.blocks {
@@ -1841,6 +2107,11 @@ fn reclassify_prompt_code_regions(page: &mut Page) {
             serde_json::Value::Bool(true),
         );
     }
+}
+
+fn is_ocr_region_source(source: &str) -> bool {
+    let source = source.to_ascii_lowercase();
+    source.contains("ocr") || source.contains("paddle") || source.contains("unlimited")
 }
 
 fn prompt_region_overlap(block: BoundingBox, region: BoundingBox) -> f32 {
@@ -2893,6 +3164,193 @@ mod tests {
         assert_eq!(
             page.blocks[3].structure.as_ref().unwrap().kind,
             StructureKind::PromptQuestion
+        );
+    }
+
+    #[test]
+    fn ocr_topology_splits_semantic_fields_without_splitting_visual_wraps() {
+        let style = TextStyle {
+            font_size: Some(8.0),
+            ..TextStyle::default()
+        };
+        let native = fusion_document(
+            "native",
+            vec![fusion_multiline_block(
+                "native-fields",
+                // A coarse native heuristic can misclassify the whole region
+                // before OCR exposes its prompt-field topology.
+                BlockRole::Dialogue,
+                vec![
+                    (
+                        BoundingBox::new(20.0, 10.0, 75.0, 18.0),
+                        "[Summary Description]",
+                        style.clone(),
+                    ),
+                    (
+                        BoundingBox::new(20.0, 20.0, 92.0, 28.0),
+                        "Status: a deliberately long value that",
+                        style.clone(),
+                    ),
+                    (
+                        BoundingBox::new(20.0, 30.0, 72.0, 38.0),
+                        "wraps onto a second visual line.",
+                        style.clone(),
+                    ),
+                    (
+                        BoundingBox::new(20.0, 40.0, 88.0, 48.0),
+                        "Observation: another semantic field.",
+                        style.clone(),
+                    ),
+                    (
+                        BoundingBox::new(20.0, 50.0, 70.0, 58.0),
+                        "What should happen next?",
+                        style,
+                    ),
+                ],
+            )],
+        );
+        let candidates = [
+            (
+                BoundingBox::new(20.0, 10.0, 75.0, 18.0),
+                "[Summary Description]",
+            ),
+            (
+                BoundingBox::new(20.0, 20.0, 92.0, 38.0),
+                "Status: a deliberately long value that wraps onto a second visual line.",
+            ),
+            (
+                BoundingBox::new(20.0, 40.0, 88.0, 48.0),
+                "Observation: another semantic field.",
+            ),
+            (
+                BoundingBox::new(20.0, 50.0, 70.0, 58.0),
+                "What should happen next?",
+            ),
+        ];
+        let ocr_blocks = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, (bbox, text))| {
+                let mut block = fusion_block(
+                    &format!("unlimited-{index}"),
+                    *bbox,
+                    BlockRole::Body,
+                    text,
+                    TextStyle::default(),
+                );
+                block.order = index;
+                block.reading_order = index;
+                block.source.provider = "unlimited".to_string();
+                block.structure = Some(BlockStructure {
+                    provider: "unlimited".to_string(),
+                    confidence: 0.99,
+                    ..test_structure(0.99)
+                });
+                block
+            })
+            .collect::<Vec<_>>();
+        let ocr = fusion_document("unlimited", ocr_blocks);
+
+        let fusion = fuse_native_with_ocr_report(native, &ocr);
+        let blocks = &fusion.document.pages[0].blocks;
+
+        assert_eq!(
+            fusion.report.pages[0].accepted_splits, 1,
+            "{:#?}",
+            fusion.report
+        );
+        assert_eq!(fusion.report.pages[0].native_fallbacks, 0);
+        assert_eq!(blocks.len(), 4);
+        assert!(blocks.iter().all(|block| block.role == BlockRole::Prompt));
+        assert_eq!(blocks[1].content.lines.len(), 2);
+        assert_eq!(
+            blocks[1].content.text,
+            "Status: a deliberately long value that\nwraps onto a second visual line."
+        );
+        assert_eq!(
+            blocks[3].structure.as_ref().unwrap().kind,
+            StructureKind::PromptQuestion
+        );
+        assert!(
+            fusion.report.pages[0]
+                .decisions
+                .iter()
+                .any(|decision| decision.reason == "validated_ocr_structure:unlimited")
+        );
+    }
+
+    #[test]
+    fn coarse_ocr_semantic_newlines_expand_without_promoting_visual_wraps() {
+        let style = TextStyle {
+            font_size: Some(8.0),
+            ..TextStyle::default()
+        };
+        let native = fusion_document(
+            "native",
+            vec![fusion_multiline_block(
+                "native-coarse-fields",
+                BlockRole::Dialogue,
+                vec![
+                    (
+                        BoundingBox::new(20.0, 10.0, 75.0, 18.0),
+                        "[Summary Description]",
+                        style.clone(),
+                    ),
+                    (
+                        BoundingBox::new(20.0, 20.0, 92.0, 28.0),
+                        "Status: a deliberately long value that",
+                        style.clone(),
+                    ),
+                    (
+                        BoundingBox::new(20.0, 30.0, 72.0, 38.0),
+                        "wraps onto a second visual line.",
+                        style.clone(),
+                    ),
+                    (
+                        BoundingBox::new(20.0, 40.0, 88.0, 48.0),
+                        "Observation: another semantic field.",
+                        style.clone(),
+                    ),
+                    (
+                        BoundingBox::new(20.0, 50.0, 70.0, 58.0),
+                        "What should happen next?",
+                        style,
+                    ),
+                ],
+            )],
+        );
+        let bbox = BoundingBox::new(20.0, 10.0, 92.0, 58.0);
+        let mut coarse_ocr = fusion_block(
+            "unlimited-coarse",
+            bbox,
+            BlockRole::Body,
+            "[Summary Description]\nStatus: a deliberately long value that\nwraps onto a second visual line.\nObservation: another semantic field.\nWhat should happen next?",
+            TextStyle::default(),
+        );
+        coarse_ocr.source.provider = "unlimited".to_string();
+        coarse_ocr.structure = Some(BlockStructure {
+            provider: "unlimited".to_string(),
+            confidence: 0.99,
+            ..test_structure(0.99)
+        });
+        let ocr = fusion_document("unlimited", vec![coarse_ocr]);
+
+        let fusion = fuse_native_with_ocr_report(native, &ocr);
+        let blocks = &fusion.document.pages[0].blocks;
+
+        assert_eq!(fusion.report.pages[0].accepted_splits, 1);
+        assert_eq!(fusion.report.pages[0].native_fallbacks, 0);
+        assert_eq!(blocks.len(), 4);
+        assert!(blocks.iter().all(|block| block.role == BlockRole::Prompt));
+        assert_eq!(blocks[1].content.lines.len(), 2);
+        assert_eq!(
+            blocks[1].content.text,
+            "Status: a deliberately long value that\nwraps onto a second visual line."
+        );
+        assert!(
+            blocks
+                .iter()
+                .all(|block| block.tags.contains(&"ocr_topology_fused".to_string()))
         );
     }
 

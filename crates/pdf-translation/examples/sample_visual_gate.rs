@@ -5,7 +5,7 @@ use glyphst_pdf_translation::{
     CancellationToken, LayoutOptions, PdfComposer, TranslationBackend, TranslationBackendError,
     TranslationUnit, TranslationUnitOutput, TypstCompiler, TypstCompilerConfig,
     build_layout_with_options, extract_native_document, fuse_native_with_ocr, inspect_pdf,
-    normalize_paddle_payload, sanitize_source_pdf, translate_document,
+    normalize_paddle_payload, normalize_unlimited_payload, sanitize_source_pdf, translate_document,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -33,6 +33,7 @@ impl TranslationBackend for DeterministicCjkBackend {
 #[derive(Debug, Serialize)]
 struct SampleReport {
     sample: String,
+    ocr_provider: Option<&'static str>,
     pages: usize,
     source_blocks: usize,
     protected_regions: usize,
@@ -55,11 +56,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| workspace.join("target/pdf-translation-visual"));
     fs::create_dir_all(&output_directory)?;
 
-    let mut samples = fs::read_dir(&sample_directory)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "pdf"))
-        .collect::<Vec<_>>();
+    let mut samples = if sample_directory.is_file() {
+        vec![sample_directory.clone()]
+    } else {
+        fs::read_dir(&sample_directory)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "pdf"))
+            .collect::<Vec<_>>()
+    };
     samples.sort();
     if samples.is_empty() {
         return Err(format!("no PDF samples found in {}", sample_directory.display()).into());
@@ -79,20 +84,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let inspection = inspect_pdf(&source_path, &cancellation)?;
         let mut document =
             extract_native_document(&source_path, format!("sample-{sample}"), &cancellation)?;
-        if let Some(fixture_path) = paddle_fixture_for(sample) {
-            let payload: Value = serde_json::from_slice(&fs::read(&fixture_path)?)?;
+        let ocr_fixture = ocr_fixture_for(sample)?;
+        if let Some(fixture) = ocr_fixture.as_ref() {
+            let fixture_path = fixture.path();
+            let payload: Value = serde_json::from_slice(&fs::read(fixture_path)?)?;
             let target_pages = inspection
                 .pages
                 .iter()
                 .map(|page| glyphst_pdf_translation::PageGeometry::new(page.width, page.height))
                 .collect::<Vec<_>>();
-            let ocr = normalize_paddle_payload(
-                &payload,
-                source_path.clone(),
-                format!("sample-{sample}-ocr"),
-                "PaddleOCR-VL-1.6",
-                &target_pages,
-            )?;
+            let ocr = match fixture {
+                OcrFixture::Unlimited(_) => normalize_unlimited_payload(
+                    &payload,
+                    source_path.clone(),
+                    format!("sample-{sample}-ocr"),
+                    &target_pages,
+                )?,
+                OcrFixture::Paddle(_) => normalize_paddle_payload(
+                    &payload,
+                    source_path.clone(),
+                    format!("sample-{sample}-ocr"),
+                    "PaddleOCR-VL-1.6",
+                    &target_pages,
+                )?,
+            };
             document = fuse_native_with_ocr(document, &ocr);
         }
         let source_blocks = document
@@ -144,6 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         reports.push(SampleReport {
             sample: sample.to_string(),
+            ocr_provider: ocr_fixture.as_ref().map(OcrFixture::provider),
             pages: layout.pages.len(),
             source_blocks,
             protected_regions,
@@ -173,14 +189,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn paddle_fixture_for(sample: &str) -> Option<PathBuf> {
-    let direct = std::env::var_os(format!(
-        "GLYPHST_PADDLE_FIXTURE_{}",
-        sample.replace('-', "_")
-    ))
-    .map(PathBuf::from);
+#[derive(Debug)]
+enum OcrFixture {
+    Unlimited(PathBuf),
+    Paddle(PathBuf),
+}
+
+impl OcrFixture {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Unlimited(path) | Self::Paddle(path) => path,
+        }
+    }
+
+    fn provider(&self) -> &'static str {
+        match self {
+            Self::Unlimited(_) => "unlimited",
+            Self::Paddle(_) => "paddle",
+        }
+    }
+}
+
+fn ocr_fixture_for(sample: &str) -> Result<Option<OcrFixture>, Box<dyn std::error::Error>> {
+    let unlimited = fixture_path_for("GLYPHST_UNLIMITED_FIXTURE", sample);
+    let paddle = fixture_path_for("GLYPHST_PADDLE_FIXTURE", sample);
+    match (unlimited, paddle) {
+        (Some(_), Some(_)) => Err(format!(
+            "sample {sample} has both Unlimited and Paddle fixtures; select exactly one provider"
+        )
+        .into()),
+        (Some(path), None) => Ok(Some(OcrFixture::Unlimited(path))),
+        (None, Some(path)) => Ok(Some(OcrFixture::Paddle(path))),
+        (None, None) => Ok(None),
+    }
+}
+
+fn fixture_path_for(prefix: &str, sample: &str) -> Option<PathBuf> {
+    let direct =
+        std::env::var_os(format!("{prefix}_{}", sample.replace('-', "_"))).map(PathBuf::from);
     direct.filter(|path| path.is_file()).or_else(|| {
-        std::env::var_os("GLYPHST_PADDLE_FIXTURE_DIR")
+        std::env::var_os(format!("{prefix}_DIR"))
             .map(PathBuf::from)
             .map(|directory| directory.join(format!("{sample}.json")))
             .filter(|path| path.is_file())

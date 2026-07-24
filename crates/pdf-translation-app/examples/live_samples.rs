@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -8,12 +9,18 @@ use glyphst_settings::{Settings, app_paths, parse_settings};
 use glyphst_translation::{LanguageCode, TranslationService};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var_os("GLYPHST_LIVE_PDF_TRANSLATION").is_none() {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dotenv = read_dotenv(workspace.join(".env"))?;
+    let env_value = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .or_else(|| dotenv.get(name).cloned())
+    };
+    if env_value("GLYPHST_LIVE_PDF_TRANSLATION").is_none() {
         return Err(
-            "set GLYPHST_LIVE_PDF_TRANSLATION=1 to permit OCR and translation API requests".into(),
+            "set GLYPHST_LIVE_PDF_TRANSLATION=1 in the environment or workspace .env to permit OCR and translation API requests".into(),
         );
     }
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sample_directory = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
@@ -24,16 +31,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| workspace.join("target/pdf-translation-live"));
     fs::create_dir_all(&output_directory)?;
 
-    let settings_path = std::env::var_os("GLYPHST_SETTINGS_PATH")
+    let settings_path = env_value("GLYPHST_SETTINGS_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|| app_paths::config_dir().join("config.kdl"));
+        .unwrap_or_else(|| {
+            let managed = app_paths::config_dir().join("config.kdl");
+            if managed.is_file() {
+                managed
+            } else {
+                app_paths::state_dir().join("config.kdl")
+            }
+        });
     let mut settings: Settings = parse_settings(&fs::read_to_string(&settings_path)?)?;
+    if let Some(api_key) = env_value("GLYPHST_BAIDU_OCR_API_KEY") {
+        settings.ocr.unlimited.api_key = api_key;
+    }
+    if let Some(secret_key) = env_value("GLYPHST_BAIDU_OCR_SECRET_KEY") {
+        settings.ocr.unlimited.secret_key = secret_key;
+    }
     settings.sanitize();
     let resolved_ai = settings.ai.resolved_translation();
     println!(
-        "OCR mode={}, OCR model={}, translation provider={}, AI model={}",
+        "OCR mode={}, OCR provider={}, translation provider={}, AI model={}",
         settings.ocr.mode.as_str(),
-        settings.ocr.model,
+        settings.ocr.provider.as_str(),
         settings.translation.active_provider.as_str(),
         resolved_ai.model
     );
@@ -96,4 +116,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Err(format!("live translation failed for: {}", failures.join(", ")).into())
     }
+}
+
+fn read_dotenv(path: PathBuf) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error>> {
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeMap::new());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut values = BTreeMap::new();
+    for (line_index, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((name, value)) = line.split_once('=') else {
+            return Err(format!(
+                "{}:{} is not a KEY=VALUE assignment",
+                path.display(),
+                line_index + 1
+            )
+            .into());
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(format!(
+                "{}:{} has an empty variable name",
+                path.display(),
+                line_index + 1
+            )
+            .into());
+        }
+        let value = value.trim();
+        let value = if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+        values.insert(name.to_string(), value.to_string());
+    }
+    Ok(values)
 }

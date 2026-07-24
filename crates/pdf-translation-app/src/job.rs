@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, anyhow};
-use glyphst_settings::{OcrMode, Settings};
+use glyphst_settings::{OcrMode, OcrProvider, Settings};
 use glyphst_translation::{LanguageCode, TranslationService};
 use mupdf::{Document, TextPageFlags};
 use serde::{Deserialize, Serialize};
@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 use glyphst_pdf_translation::{
     BoundingBox, CancellationToken, DocumentV1, LayoutDocument, LayoutOptions, PaddleClient,
     PaddleClientConfig, PdfComposer, PdfTranslationStage, ProgressTracker, TranslatedDocument,
-    TranslationProgressSink, TypstCompiler, TypstCompilerConfig, build_layout_with_options,
-    extract_native_document, fuse_native_with_ocr_report, inspect_pdf, normalize_paddle_payload,
-    review_translation_policies, sanitize_source_pdf,
+    TranslationProgressSink, TypstCompiler, TypstCompilerConfig, UnlimitedClient,
+    UnlimitedClientConfig, build_layout_with_options, extract_native_document,
+    fuse_native_with_ocr_report, inspect_pdf, normalize_paddle_payload,
+    normalize_unlimited_payload, review_translation_policies, sanitize_source_pdf,
 };
 use glyphst_pdf_translation::{
     TranslatedUnit, TranslationFailureDiagnostic, TranslationQueueStats, TranslationRunProgress,
@@ -29,7 +30,7 @@ use crate::backend::GlyphstTranslationBackend;
 use crate::reviewer::GlyphstPolicyReviewer;
 
 const ARTIFACT_VERSION: u32 = 3;
-const PIPELINE_VERSION: &str = "native-rust-v15-ocr-structure-lossless";
+const PIPELINE_VERSION: &str = "native-rust-v17-ocr-semantic-lines";
 const CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone)]
@@ -186,7 +187,7 @@ impl PdfTranslationService {
             document
         } else {
             match settings.ocr.mode {
-                OcrMode::Always => self.run_paddle_ocr(
+                OcrMode::Always => self.run_selected_ocr(
                     &settings,
                     &pipeline_request,
                     &target_pages,
@@ -194,7 +195,7 @@ impl PdfTranslationService {
                     &cancellation,
                     &mut progress,
                 )?,
-                OcrMode::Auto if inspection.recommends_ocr => self.run_paddle_ocr(
+                OcrMode::Auto if inspection.recommends_ocr => self.run_selected_ocr(
                     &settings,
                     &pipeline_request,
                     &target_pages,
@@ -487,10 +488,10 @@ impl PdfTranslationService {
         );
         let client = PaddleClient::new(
             PaddleClientConfig {
-                base_url: settings.ocr.endpoint.clone(),
+                base_url: settings.ocr.paddle.endpoint.clone(),
                 ..PaddleClientConfig::default()
             },
-            settings.ocr.token.clone(),
+            settings.ocr.paddle.token.clone(),
         )
         .map_err(|error| {
             PdfTranslationError::message(PdfTranslationStage::Ocr, error.to_string())
@@ -498,7 +499,7 @@ impl PdfTranslationService {
         let result = client
             .run_document(
                 &request.source_path,
-                &settings.ocr.model,
+                &settings.ocr.paddle.model,
                 cancellation,
                 |ocr_progress| {
                     let completed = ocr_progress
@@ -542,7 +543,7 @@ impl PdfTranslationService {
             &result.payload,
             request.source_path.clone(),
             request_fingerprint(settings, request).unwrap_or_else(|_| "document".to_string()),
-            settings.ocr.model.clone(),
+            settings.ocr.paddle.model.clone(),
             target_pages,
         )
         .map_err(|error| {
@@ -552,7 +553,124 @@ impl PdfTranslationService {
                 error,
             )
         })?;
-        let document = if let Ok(native_document) =
+        let document = self.fuse_ocr_with_native(document, request, job_directory, cancellation)?;
+        progress.finish_stage(PdfTranslationStage::Normalizing, "OCR document normalized");
+        Ok(document)
+    }
+
+    fn run_selected_ocr(
+        &self,
+        settings: &Settings,
+        request: &PdfTranslationRequest,
+        target_pages: &[crate::PageGeometry],
+        job_directory: &Path,
+        cancellation: &CancellationToken,
+        progress: &mut ProgressTracker,
+    ) -> Result<DocumentV1, PdfTranslationError> {
+        match settings.ocr.provider {
+            OcrProvider::Unlimited => self.run_unlimited_ocr(
+                settings,
+                request,
+                target_pages,
+                job_directory,
+                cancellation,
+                progress,
+            ),
+            OcrProvider::Paddle => self.run_paddle_ocr(
+                settings,
+                request,
+                target_pages,
+                job_directory,
+                cancellation,
+                progress,
+            ),
+        }
+    }
+
+    fn run_unlimited_ocr(
+        &self,
+        settings: &Settings,
+        request: &PdfTranslationRequest,
+        target_pages: &[crate::PageGeometry],
+        job_directory: &Path,
+        cancellation: &CancellationToken,
+        progress: &mut ProgressTracker,
+    ) -> Result<DocumentV1, PdfTranslationError> {
+        progress.report(
+            PdfTranslationStage::Ocr,
+            "Submitting the document to Unlimited-OCR",
+            None,
+            None,
+        );
+        let client = UnlimitedClient::new(
+            UnlimitedClientConfig {
+                base_url: settings.ocr.unlimited.endpoint.clone(),
+                ..UnlimitedClientConfig::default()
+            },
+            settings.ocr.unlimited.api_key.clone(),
+            settings.ocr.unlimited.secret_key.clone(),
+        )
+        .map_err(|error| {
+            PdfTranslationError::message(PdfTranslationStage::Ocr, error.to_string())
+        })?;
+        let result = client
+            .run_document(&request.source_path, cancellation, |ocr_progress| {
+                progress.report(
+                    PdfTranslationStage::Ocr,
+                    match ocr_progress.state.as_str() {
+                        "pending" => "Unlimited-OCR is queued".to_string(),
+                        "running" => "Unlimited-OCR is parsing the document".to_string(),
+                        _ => format!("Unlimited-OCR state: {}", ocr_progress.state),
+                    },
+                    None,
+                    None,
+                );
+            })
+            .map_err(|error| PdfTranslationError {
+                stage: PdfTranslationStage::Ocr,
+                message: error.to_string(),
+                retryable: matches!(
+                    error.category,
+                    crate::UnlimitedErrorCategory::QueueFull
+                        | crate::UnlimitedErrorCategory::ServiceUnavailable
+                        | crate::UnlimitedErrorCategory::PollTimeout
+                ),
+            })?;
+        write_json(job_directory.join("unlimited-raw.json"), &result.payload)?;
+        progress.finish_stage(PdfTranslationStage::Ocr, "Unlimited-OCR result downloaded");
+
+        progress.report(
+            PdfTranslationStage::Normalizing,
+            "Normalizing OCR geometry and semantic roles",
+            Some(0),
+            Some(1),
+        );
+        let document = normalize_unlimited_payload(
+            &result.payload,
+            request.source_path.clone(),
+            request_fingerprint(settings, request).unwrap_or_else(|_| "document".to_string()),
+            target_pages,
+        )
+        .map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Normalizing,
+                "Could not normalize the Unlimited-OCR result",
+                error,
+            )
+        })?;
+        let document = self.fuse_ocr_with_native(document, request, job_directory, cancellation)?;
+        progress.finish_stage(PdfTranslationStage::Normalizing, "OCR document normalized");
+        Ok(document)
+    }
+
+    fn fuse_ocr_with_native(
+        &self,
+        document: DocumentV1,
+        request: &PdfTranslationRequest,
+        job_directory: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<DocumentV1, PdfTranslationError> {
+        if let Ok(native_document) =
             extract_native_document(&request.source_path, "native-geometry", cancellation)
         {
             let fusion = fuse_native_with_ocr_report(native_document, &document);
@@ -560,12 +678,10 @@ impl PdfTranslationService {
                 job_directory.join("fusion-diagnostics.json"),
                 &fusion.report,
             )?;
-            fusion.document
+            Ok(fusion.document)
         } else {
-            document
-        };
-        progress.finish_stage(PdfTranslationStage::Normalizing, "OCR document normalized");
-        Ok(document)
+            Ok(document)
+        }
     }
 }
 
@@ -718,7 +834,9 @@ fn build_manifest(
         output_path: request.output_path.to_string_lossy().to_string(),
         target_language: request.target_language.as_str().to_string(),
         ocr_mode: settings.ocr.mode.as_str().to_string(),
-        ocr_provider: if translated.document.metadata.provider.contains("paddle") {
+        ocr_provider: if translated.document.metadata.provider.contains("unlimited") {
+            "unlimited".to_string()
+        } else if translated.document.metadata.provider.contains("paddle") {
             "paddle".to_string()
         } else {
             "mupdf".to_string()
@@ -903,8 +1021,16 @@ fn request_fingerprint_with_source(
     request.source_language.hash(&mut hasher);
     request.target_language.hash(&mut hasher);
     settings.ocr.mode.as_str().hash(&mut hasher);
-    settings.ocr.endpoint.hash(&mut hasher);
-    settings.ocr.model.hash(&mut hasher);
+    settings.ocr.provider.as_str().hash(&mut hasher);
+    match settings.ocr.provider {
+        OcrProvider::Unlimited => {
+            settings.ocr.unlimited.endpoint.hash(&mut hasher);
+        }
+        OcrProvider::Paddle => {
+            settings.ocr.paddle.endpoint.hash(&mut hasher);
+            settings.ocr.paddle.model.hash(&mut hasher);
+        }
+    }
     settings.translation.active_provider.hash(&mut hasher);
     translation_provider_identity(settings).hash(&mut hasher);
     Ok((format!("{:016x}", hasher.finish()), source_bytes))
@@ -1158,7 +1284,9 @@ mod tests {
     #[test]
     fn fingerprint_does_not_include_ocr_or_translation_secrets() {
         let mut settings = Settings::default();
-        settings.ocr.token = "paddle-secret".to_string();
+        settings.ocr.paddle.token = "paddle-secret".to_string();
+        settings.ocr.unlimited.api_key = "baidu-api-key-secret".to_string();
+        settings.ocr.unlimited.secret_key = "baidu-secret-key-secret".to_string();
         settings
             .translation
             .provider_config_mut(glyphst_settings::TranslationProvider::Google)
@@ -1177,6 +1305,8 @@ mod tests {
         let fingerprint = request_fingerprint(&settings, &request).unwrap();
 
         assert!(!fingerprint.contains("paddle-secret"));
+        assert!(!fingerprint.contains("baidu-api-key-secret"));
+        assert!(!fingerprint.contains("baidu-secret-key-secret"));
         assert!(!fingerprint.contains("google-secret"));
     }
 

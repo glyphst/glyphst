@@ -2309,6 +2309,7 @@ name = "glyphst-pdf-translation"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "mupdf",
  "reqwest",
  "serde",
@@ -2387,8 +2388,6 @@ dependencies = [
  "glyphst-translation-ui",
  "glyphst-ui",
  "gpui",
- "reqwest",
- "serde_json",
 ]
 
 [[package]]

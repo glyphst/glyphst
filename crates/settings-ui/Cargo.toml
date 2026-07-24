@@ -14,5 +14,3 @@ glyphst-settings = { path = "../settings" }
 glyphst-translation-ui = { path = "../translation-ui" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
-reqwest.workspace = true
-serde_json.workspace = true

@@ -47,8 +47,11 @@ const DEFAULT_TRANSLATION_TARGET_LANGUAGE: &str = "en";
 const DEFAULT_PINNED_TRANSLATION_WIDTH: f32 = 360.0;
 const MIN_PINNED_TRANSLATION_WIDTH: f32 = 240.0;
 const MAX_PINNED_TRANSLATION_WIDTH: f32 = 640.0;
-pub const DEFAULT_OCR_ENDPOINT: &str = "https://paddleocr.aistudio-app.com";
-pub const DEFAULT_OCR_MODEL: &str = "PaddleOCR-VL-1.6";
+pub const DEFAULT_PADDLE_OCR_ENDPOINT: &str = "https://paddleocr.aistudio-app.com";
+pub const DEFAULT_PADDLE_OCR_MODEL: &str = "PaddleOCR-VL-1.6";
+pub const DEFAULT_UNLIMITED_OCR_ENDPOINT: &str = "https://aip.baidubce.com";
+pub const DEFAULT_OCR_ENDPOINT: &str = DEFAULT_PADDLE_OCR_ENDPOINT;
+pub const DEFAULT_OCR_MODEL: &str = DEFAULT_PADDLE_OCR_MODEL;
 const DEFAULT_UI_FONT_FALLBACKS: &[&str] = &[
     "Noto Sans CJK SC",
     "Noto Sans SC",
@@ -1740,12 +1743,119 @@ impl OcrMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OcrProvider {
+    #[default]
+    Unlimited,
+    Paddle,
+}
+
+impl OcrProvider {
+    pub const ALL: [Self; 2] = [Self::Unlimited, Self::Paddle];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unlimited => "unlimited",
+            Self::Paddle => "paddle",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "unlimited" | "unlimited-ocr" | "baidu-unlimited" => Some(Self::Unlimited),
+            "paddle" | "paddleocr" | "paddle-ocr" => Some(Self::Paddle),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
-pub struct OcrSettings {
-    pub mode: OcrMode,
+pub struct PaddleOcrSettings {
     pub token: String,
     pub endpoint: String,
     pub model: String,
+}
+
+impl std::fmt::Debug for PaddleOcrSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PaddleOcrSettings")
+            .field("has_token", &!self.token.is_empty())
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .finish()
+    }
+}
+
+impl Default for PaddleOcrSettings {
+    fn default() -> Self {
+        Self {
+            token: String::new(),
+            endpoint: DEFAULT_PADDLE_OCR_ENDPOINT.to_string(),
+            model: DEFAULT_PADDLE_OCR_MODEL.to_string(),
+        }
+    }
+}
+
+impl PaddleOcrSettings {
+    fn sanitize(&mut self) {
+        self.token = self.token.trim().to_string();
+        self.endpoint = self.endpoint.trim().trim_end_matches('/').to_string();
+        if self.endpoint.is_empty() {
+            self.endpoint = DEFAULT_PADDLE_OCR_ENDPOINT.to_string();
+        }
+        self.model = self.model.trim().to_string();
+        if self.model.is_empty() {
+            self.model = DEFAULT_PADDLE_OCR_MODEL.to_string();
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct UnlimitedOcrSettings {
+    pub api_key: String,
+    pub secret_key: String,
+    pub endpoint: String,
+}
+
+impl std::fmt::Debug for UnlimitedOcrSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UnlimitedOcrSettings")
+            .field("has_api_key", &!self.api_key.is_empty())
+            .field("has_secret_key", &!self.secret_key.is_empty())
+            .field("endpoint", &self.endpoint)
+            .finish()
+    }
+}
+
+impl Default for UnlimitedOcrSettings {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            secret_key: String::new(),
+            endpoint: DEFAULT_UNLIMITED_OCR_ENDPOINT.to_string(),
+        }
+    }
+}
+
+impl UnlimitedOcrSettings {
+    fn sanitize(&mut self) {
+        self.api_key = self.api_key.trim().to_string();
+        self.secret_key = self.secret_key.trim().to_string();
+        self.endpoint = self.endpoint.trim().trim_end_matches('/').to_string();
+        if self.endpoint.is_empty() {
+            self.endpoint = DEFAULT_UNLIMITED_OCR_ENDPOINT.to_string();
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct OcrSettings {
+    pub mode: OcrMode,
+    pub provider: OcrProvider,
+    pub paddle: PaddleOcrSettings,
+    pub unlimited: UnlimitedOcrSettings,
 }
 
 impl std::fmt::Debug for OcrSettings {
@@ -1753,9 +1863,9 @@ impl std::fmt::Debug for OcrSettings {
         formatter
             .debug_struct("OcrSettings")
             .field("mode", &self.mode)
-            .field("has_token", &!self.token.is_empty())
-            .field("endpoint", &self.endpoint)
-            .field("model", &self.model)
+            .field("provider", &self.provider)
+            .field("paddle", &self.paddle)
+            .field("unlimited", &self.unlimited)
             .finish()
     }
 }
@@ -1764,24 +1874,17 @@ impl Default for OcrSettings {
     fn default() -> Self {
         Self {
             mode: OcrMode::Always,
-            token: String::new(),
-            endpoint: DEFAULT_OCR_ENDPOINT.to_string(),
-            model: DEFAULT_OCR_MODEL.to_string(),
+            provider: OcrProvider::Unlimited,
+            paddle: PaddleOcrSettings::default(),
+            unlimited: UnlimitedOcrSettings::default(),
         }
     }
 }
 
 impl OcrSettings {
     fn sanitize(&mut self) {
-        self.token = self.token.trim().to_string();
-        self.endpoint = self.endpoint.trim().trim_end_matches('/').to_string();
-        if self.endpoint.is_empty() {
-            self.endpoint = DEFAULT_OCR_ENDPOINT.to_string();
-        }
-        self.model = self.model.trim().to_string();
-        if self.model.is_empty() {
-            self.model = DEFAULT_OCR_MODEL.to_string();
-        }
+        self.paddle.sanitize();
+        self.unlimited.sanitize();
     }
 }
 
@@ -2151,14 +2254,52 @@ impl Settings {
             {
                 settings.ocr.mode = value;
             }
+            if let Some(value) = ocr
+                .get_arg("provider")
+                .and_then(KdlValue::as_string)
+                .and_then(OcrProvider::from_str)
+            {
+                settings.ocr.provider = value;
+            }
+            // Read the original flat Paddle configuration so existing development
+            // settings remain recoverable after the provider model becomes nested.
             if let Some(value) = ocr.get_arg("token").and_then(KdlValue::as_string) {
-                settings.ocr.token = value.to_string();
+                settings.ocr.paddle.token = value.to_string();
             }
             if let Some(value) = ocr.get_arg("endpoint").and_then(KdlValue::as_string) {
-                settings.ocr.endpoint = value.to_string();
+                settings.ocr.paddle.endpoint = value.to_string();
             }
             if let Some(value) = ocr.get_arg("model").and_then(KdlValue::as_string) {
-                settings.ocr.model = value.to_string();
+                settings.ocr.paddle.model = value.to_string();
+            }
+            if let Some(providers) = ocr.get("providers").and_then(KdlNode::children) {
+                if let Some(paddle) = providers.get("paddle").and_then(KdlNode::children) {
+                    if let Some(value) = paddle.get_arg("token").and_then(KdlValue::as_string) {
+                        settings.ocr.paddle.token = value.to_string();
+                    }
+                    if let Some(value) = paddle.get_arg("endpoint").and_then(KdlValue::as_string) {
+                        settings.ocr.paddle.endpoint = value.to_string();
+                    }
+                    if let Some(value) = paddle.get_arg("model").and_then(KdlValue::as_string) {
+                        settings.ocr.paddle.model = value.to_string();
+                    }
+                }
+                if let Some(unlimited) = providers.get("unlimited").and_then(KdlNode::children) {
+                    if let Some(value) = unlimited.get_arg("api_key").and_then(KdlValue::as_string)
+                    {
+                        settings.ocr.unlimited.api_key = value.to_string();
+                    }
+                    if let Some(value) = unlimited
+                        .get_arg("secret_key")
+                        .and_then(KdlValue::as_string)
+                    {
+                        settings.ocr.unlimited.secret_key = value.to_string();
+                    }
+                    if let Some(value) = unlimited.get_arg("endpoint").and_then(KdlValue::as_string)
+                    {
+                        settings.ocr.unlimited.endpoint = value.to_string();
+                    }
+                }
             }
         }
 
@@ -2425,11 +2566,50 @@ impl Settings {
             let mut ocr = KdlNode::new("ocr");
             let ocr_children = ocr.ensure_children();
             push_value_node(ocr_children, "mode", self.ocr.mode.as_str());
-            if !self.ocr.token.is_empty() {
-                push_value_node(ocr_children, "token", self.ocr.token.clone());
+            push_value_node(ocr_children, "provider", self.ocr.provider.as_str());
+            let mut providers = KdlNode::new("providers");
+            let provider_children = providers.ensure_children();
+            if self.ocr.paddle != PaddleOcrSettings::default() {
+                let mut paddle = KdlNode::new("paddle");
+                let paddle_children = paddle.ensure_children();
+                if !self.ocr.paddle.token.is_empty() {
+                    push_value_node(paddle_children, "token", self.ocr.paddle.token.clone());
+                }
+                push_value_node(
+                    paddle_children,
+                    "endpoint",
+                    self.ocr.paddle.endpoint.clone(),
+                );
+                push_value_node(paddle_children, "model", self.ocr.paddle.model.clone());
+                provider_children.nodes_mut().push(paddle);
             }
-            push_value_node(ocr_children, "endpoint", self.ocr.endpoint.clone());
-            push_value_node(ocr_children, "model", self.ocr.model.clone());
+            if self.ocr.unlimited != UnlimitedOcrSettings::default() {
+                let mut unlimited = KdlNode::new("unlimited");
+                let unlimited_children = unlimited.ensure_children();
+                if !self.ocr.unlimited.api_key.is_empty() {
+                    push_value_node(
+                        unlimited_children,
+                        "api_key",
+                        self.ocr.unlimited.api_key.clone(),
+                    );
+                }
+                if !self.ocr.unlimited.secret_key.is_empty() {
+                    push_value_node(
+                        unlimited_children,
+                        "secret_key",
+                        self.ocr.unlimited.secret_key.clone(),
+                    );
+                }
+                push_value_node(
+                    unlimited_children,
+                    "endpoint",
+                    self.ocr.unlimited.endpoint.clone(),
+                );
+                provider_children.nodes_mut().push(unlimited);
+            }
+            if !provider_children.nodes().is_empty() {
+                ocr_children.nodes_mut().push(providers);
+            }
             document.nodes_mut().push(ocr);
         }
 
@@ -3306,9 +3486,16 @@ translation {
 
         assert_eq!(settings.ocr, OcrSettings::default());
         assert_eq!(settings.ocr.mode, OcrMode::Always);
-        assert_eq!(settings.ocr.endpoint, DEFAULT_OCR_ENDPOINT);
-        assert_eq!(settings.ocr.model, DEFAULT_OCR_MODEL);
-        assert!(settings.ocr.token.is_empty());
+        assert_eq!(settings.ocr.provider, OcrProvider::Unlimited);
+        assert_eq!(settings.ocr.paddle.endpoint, DEFAULT_PADDLE_OCR_ENDPOINT);
+        assert_eq!(settings.ocr.paddle.model, DEFAULT_PADDLE_OCR_MODEL);
+        assert!(settings.ocr.paddle.token.is_empty());
+        assert_eq!(
+            settings.ocr.unlimited.endpoint,
+            DEFAULT_UNLIMITED_OCR_ENDPOINT
+        );
+        assert!(settings.ocr.unlimited.api_key.is_empty());
+        assert!(settings.ocr.unlimited.secret_key.is_empty());
         assert!(!settings.to_kdl_string().contains("\nocr "));
     }
 
@@ -3318,39 +3505,95 @@ translation {
             r#"
 ocr {
     mode "auto"
-    token "  paddle-token  "
-    endpoint " https://ocr.example.com/ "
-    model " custom-model "
+    provider "paddle"
+    providers {
+        paddle {
+            token "  paddle-token  "
+            endpoint " https://ocr.example.com/ "
+            model " custom-model "
+        }
+        unlimited {
+            api_key "  baidu-api-key  "
+            secret_key "  baidu-secret-key  "
+            endpoint " https://baidu-ocr.example.com/ "
+        }
+    }
 }
 "#,
         )
         .unwrap();
 
         assert_eq!(settings.ocr.mode, OcrMode::Auto);
-        assert_eq!(settings.ocr.token, "paddle-token");
-        assert_eq!(settings.ocr.endpoint, "https://ocr.example.com");
-        assert_eq!(settings.ocr.model, "custom-model");
+        assert_eq!(settings.ocr.provider, OcrProvider::Paddle);
+        assert_eq!(settings.ocr.paddle.token, "paddle-token");
+        assert_eq!(settings.ocr.paddle.endpoint, "https://ocr.example.com");
+        assert_eq!(settings.ocr.paddle.model, "custom-model");
+        assert_eq!(settings.ocr.unlimited.api_key, "baidu-api-key");
+        assert_eq!(settings.ocr.unlimited.secret_key, "baidu-secret-key");
+        assert_eq!(
+            settings.ocr.unlimited.endpoint,
+            "https://baidu-ocr.example.com"
+        );
         assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
     }
 
     #[test]
-    fn invalid_ocr_settings_fall_back_without_exposing_the_token_in_debug() {
+    fn legacy_paddle_settings_remain_readable_without_changing_the_default_provider() {
+        let settings = parse_settings(
+            r#"
+ocr {
+    token "legacy-paddle-token"
+    endpoint "https://legacy-paddle.example.com/"
+    model "legacy-model"
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(settings.ocr.provider, OcrProvider::Unlimited);
+        assert_eq!(settings.ocr.paddle.token, "legacy-paddle-token");
+        assert_eq!(
+            settings.ocr.paddle.endpoint,
+            "https://legacy-paddle.example.com"
+        );
+        assert_eq!(settings.ocr.paddle.model, "legacy-model");
+    }
+
+    #[test]
+    fn invalid_ocr_settings_fall_back_without_exposing_secrets_in_debug() {
         let settings = parse_settings(
             r#"
 ocr {
     mode "sometimes"
-    token "secret-paddle-token"
-    endpoint " / "
-    model " "
+    provider "unknown"
+    providers {
+        paddle {
+            token "secret-paddle-token"
+            endpoint " / "
+            model " "
+        }
+        unlimited {
+            api_key "secret-baidu-api-key"
+            secret_key "secret-baidu-secret-key"
+            endpoint " "
+        }
+    }
 }
 "#,
         )
         .unwrap();
 
         assert_eq!(settings.ocr.mode, OcrMode::Always);
-        assert_eq!(settings.ocr.endpoint, DEFAULT_OCR_ENDPOINT);
-        assert_eq!(settings.ocr.model, DEFAULT_OCR_MODEL);
+        assert_eq!(settings.ocr.provider, OcrProvider::Unlimited);
+        assert_eq!(settings.ocr.paddle.endpoint, DEFAULT_PADDLE_OCR_ENDPOINT);
+        assert_eq!(settings.ocr.paddle.model, DEFAULT_PADDLE_OCR_MODEL);
+        assert_eq!(
+            settings.ocr.unlimited.endpoint,
+            DEFAULT_UNLIMITED_OCR_ENDPOINT
+        );
         assert!(!format!("{:?}", settings.ocr).contains("secret-paddle-token"));
+        assert!(!format!("{:?}", settings.ocr).contains("secret-baidu-api-key"));
+        assert!(!format!("{:?}", settings.ocr).contains("secret-baidu-secret-key"));
     }
 
     #[test]

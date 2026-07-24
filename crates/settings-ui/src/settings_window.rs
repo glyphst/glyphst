@@ -1,13 +1,17 @@
 use glyphst_actions::settings_panel::PanelClose;
 use glyphst_ai::ai_client::{AiModelInfo, list_ai_models, test_ai_connection};
 use glyphst_keymap::keybindings;
-use glyphst_pdf_translation_app::PdfTranslationService;
+use glyphst_pdf_translation_app::{
+    CancellationToken, PaddleClient, PaddleClientConfig, PaddleErrorCategory,
+    PdfTranslationService, UnlimitedClient, UnlimitedClientConfig, UnlimitedErrorCategory,
+};
 use glyphst_settings::{
     AiModel, AiProvider, AiProviderConfig, AiThinkingLevel, AppLanguage, CopyFormat,
-    DEFAULT_OCR_ENDPOINT, DEFAULT_OCR_MODEL, DEFAULT_PAGE_IMAGE_LIMIT, FontSettings, KeymapPreset,
-    ModelRef, OcrMode, OcrSettings, PageImageQuality, PageTextFormat, ResolvedAiConfig, Settings,
-    SettingsStore, TabBarVisibility, TranslationBoxCorner, TranslationProvider,
-    TranslationProviderConfig, WindowBackgroundMode, localize, setup_ui_font,
+    DEFAULT_PADDLE_OCR_ENDPOINT, DEFAULT_PADDLE_OCR_MODEL, DEFAULT_PAGE_IMAGE_LIMIT,
+    DEFAULT_UNLIMITED_OCR_ENDPOINT, FontSettings, KeymapPreset, ModelRef, OcrMode, OcrProvider,
+    OcrSettings, PageImageQuality, PageTextFormat, ResolvedAiConfig, Settings, SettingsStore,
+    TabBarVisibility, TranslationBoxCorner, TranslationProvider, TranslationProviderConfig,
+    WindowBackgroundMode, localize, setup_ui_font,
     theme::{
         PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode, ThemeMetadata, ThemeSelection,
         format_rgb_hex, format_rgba_hex, parse_hex_color,
@@ -32,18 +36,14 @@ use gpui::{
     UniformListScrollHandle, Window, WindowBounds, WindowOptions, anchored, deferred, div, point,
     prelude::*, px, rgb, rgba, size, uniform_list,
 };
-use reqwest::StatusCode;
-use serde_json::Value;
 use std::{
-    collections::hash_map::RandomState,
-    hash::BuildHasher,
     ops::Range,
     path::Path,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 // ---- settings panel ----
@@ -63,109 +63,67 @@ const HIGHLIGHT_SWATCHES: [u32; 6] = [
 const ALPHA_SWATCHES: [u32; 6] = [
     0x00000033, 0x00000066, 0xffffff66, 0x61afef55, 0x3a3f4bcc, 0x45475a99,
 ];
-static OCR_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum OcrConnectionStatus {
     Testing,
     Succeeded,
     InvalidAuth,
     Retryable,
-    ProviderError(Option<i64>),
+    ProviderError(Option<String>),
 }
 
 enum OcrProbeError {
     InvalidAuth,
     Retryable,
-    Provider(Option<i64>),
-}
-
-fn random_ocr_probe_job_id() -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let sequence = OCR_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let hash = RandomState::new().hash_one((timestamp, sequence, std::process::id()));
-    format!("glyphst-connection-test-{hash:016x}")
-}
-
-fn paddle_provider_code(value: &Value) -> Option<i64> {
-    match value {
-        Value::Object(object) => {
-            for key in ["code", "errorCode", "error_code"] {
-                if let Some(value) = object.get(key) {
-                    if let Some(code) = value.as_i64() {
-                        return Some(code);
-                    }
-                    if let Some(code) = value
-                        .as_str()
-                        .and_then(|value| value.trim().parse::<i64>().ok())
-                    {
-                        return Some(code);
-                    }
-                }
-            }
-            object.values().find_map(paddle_provider_code)
-        }
-        Value::Array(values) => values.iter().find_map(paddle_provider_code),
-        _ => None,
-    }
-}
-
-fn classify_ocr_probe_response(
-    status: StatusCode,
-    provider_code: Option<i64>,
-) -> Result<(), OcrProbeError> {
-    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        return Err(OcrProbeError::InvalidAuth);
-    }
-    if status == StatusCode::NOT_FOUND || matches!(provider_code, Some(404 | 11001)) {
-        return Ok(());
-    }
-    if status == StatusCode::REQUEST_TIMEOUT
-        || status == StatusCode::TOO_MANY_REQUESTS
-        || status.is_server_error()
-    {
-        return Err(OcrProbeError::Retryable);
-    }
-    Err(OcrProbeError::Provider(provider_code))
+    Provider(Option<String>),
 }
 
 fn test_ocr_connection_request(settings: OcrSettings) -> Result<(), OcrProbeError> {
-    if settings.token.is_empty() {
-        return Err(OcrProbeError::InvalidAuth);
-    }
-
-    let url = format!(
-        "{}/api/v2/ocr/jobs/{}",
-        settings.endpoint.trim_end_matches('/'),
-        random_ocr_probe_job_id()
-    );
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|_| OcrProbeError::Provider(None))?;
-    let response = client
-        .get(url)
-        .bearer_auth(settings.token)
-        .send()
-        .map_err(|error| {
-            if error.is_timeout() || error.is_connect() {
-                OcrProbeError::Retryable
-            } else {
-                OcrProbeError::Provider(None)
+    let cancellation = CancellationToken::new();
+    match settings.provider {
+        OcrProvider::Paddle => PaddleClient::new(
+            PaddleClientConfig {
+                base_url: settings.paddle.endpoint,
+                request_timeout: Duration::from_secs(15),
+                ..PaddleClientConfig::default()
+            },
+            settings.paddle.token,
+        )
+        .map_err(|_| OcrProbeError::InvalidAuth)?
+        .probe(&cancellation)
+        .map(|_| ())
+        .map_err(|error| match error.category {
+            PaddleErrorCategory::Unauthorized | PaddleErrorCategory::PermissionDenied => {
+                OcrProbeError::InvalidAuth
             }
-        })?;
-    let status = response.status();
-    let provider_code = response
-        .text()
-        .ok()
-        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
-        .as_ref()
-        .and_then(paddle_provider_code);
-
-    classify_ocr_probe_response(status, provider_code)
+            PaddleErrorCategory::QueueFull
+            | PaddleErrorCategory::ServiceUnavailable
+            | PaddleErrorCategory::PollTimeout => OcrProbeError::Retryable,
+            _ => OcrProbeError::Provider(error.provider_code),
+        }),
+        OcrProvider::Unlimited => UnlimitedClient::new(
+            UnlimitedClientConfig {
+                base_url: settings.unlimited.endpoint,
+                request_timeout: Duration::from_secs(15),
+                download_timeout: Duration::from_secs(15),
+                ..UnlimitedClientConfig::default()
+            },
+            settings.unlimited.api_key,
+            settings.unlimited.secret_key,
+        )
+        .map_err(|_| OcrProbeError::InvalidAuth)?
+        .probe(&cancellation)
+        .map(|_| ())
+        .map_err(|error| match error.category {
+            UnlimitedErrorCategory::Unauthorized | UnlimitedErrorCategory::PermissionDenied => {
+                OcrProbeError::InvalidAuth
+            }
+            UnlimitedErrorCategory::QueueFull
+            | UnlimitedErrorCategory::ServiceUnavailable
+            | UnlimitedErrorCategory::PollTimeout => OcrProbeError::Retryable,
+            _ => OcrProbeError::Provider(error.provider_code.map(|code| code.to_string())),
+        }),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -553,9 +511,12 @@ pub struct SettingsWindow {
     translation_key_input: Entity<SettingsTextInput>,
     translation_base_url_input: Entity<SettingsTextInput>,
     translation_region_input: Entity<SettingsTextInput>,
-    ocr_token_input: Entity<SettingsTextInput>,
-    ocr_endpoint_input: Entity<SettingsTextInput>,
-    ocr_model_input: Entity<SettingsTextInput>,
+    ocr_paddle_token_input: Entity<SettingsTextInput>,
+    ocr_paddle_endpoint_input: Entity<SettingsTextInput>,
+    ocr_paddle_model_input: Entity<SettingsTextInput>,
+    ocr_unlimited_api_key_input: Entity<SettingsTextInput>,
+    ocr_unlimited_secret_key_input: Entity<SettingsTextInput>,
+    ocr_unlimited_endpoint_input: Entity<SettingsTextInput>,
     ocr_connection_status: Option<OcrConnectionStatus>,
     ocr_connection_task: Option<Task<()>>,
     translation_data_clear_pending: bool,
@@ -909,48 +870,93 @@ impl SettingsWindow {
         })
         .detach();
 
-        let ocr_token_input = cx.new(|cx| {
+        let ocr_paddle_token_input = cx.new(|cx| {
             SettingsTextInput::new(
-                ocr_settings.token.clone().into(),
-                crate::fl!("settings-ocr-token-placeholder").into(),
+                ocr_settings.paddle.token.clone().into(),
+                crate::fl!("settings-ocr-paddle-token-placeholder").into(),
                 true,
                 cx,
             )
         });
-        let ocr_endpoint_input = cx.new(|cx| {
+        let ocr_paddle_endpoint_input = cx.new(|cx| {
             SettingsTextInput::new(
-                ocr_settings.endpoint.clone().into(),
-                DEFAULT_OCR_ENDPOINT.into(),
+                ocr_settings.paddle.endpoint.clone().into(),
+                DEFAULT_PADDLE_OCR_ENDPOINT.into(),
                 false,
                 cx,
             )
         });
-        let ocr_model_input = cx.new(|cx| {
+        let ocr_paddle_model_input = cx.new(|cx| {
             SettingsTextInput::new(
-                ocr_settings.model.clone().into(),
-                DEFAULT_OCR_MODEL.into(),
+                ocr_settings.paddle.model.clone().into(),
+                DEFAULT_PADDLE_OCR_MODEL.into(),
                 false,
                 cx,
             )
         });
-        cx.subscribe(&ocr_token_input, |this, _, event, cx| {
+        let ocr_unlimited_api_key_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                ocr_settings.unlimited.api_key.clone().into(),
+                crate::fl!("settings-ocr-unlimited-api-key-placeholder").into(),
+                true,
+                cx,
+            )
+        });
+        let ocr_unlimited_secret_key_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                ocr_settings.unlimited.secret_key.clone().into(),
+                crate::fl!("settings-ocr-unlimited-secret-key-placeholder").into(),
+                true,
+                cx,
+            )
+        });
+        let ocr_unlimited_endpoint_input = cx.new(|cx| {
+            SettingsTextInput::new(
+                ocr_settings.unlimited.endpoint.clone().into(),
+                DEFAULT_UNLIMITED_OCR_ENDPOINT.into(),
+                false,
+                cx,
+            )
+        });
+        cx.subscribe(&ocr_paddle_token_input, |this, _, event, cx| {
             let SettingsInputEvent::Changed(value) = event;
             let mut settings = cx.global::<SettingsStore>().settings.clone();
-            settings.ocr.token = value.to_string();
+            settings.ocr.paddle.token = value.to_string();
             this.persist_ocr_settings(settings, cx);
         })
         .detach();
-        cx.subscribe(&ocr_endpoint_input, |this, _, event, cx| {
+        cx.subscribe(&ocr_paddle_endpoint_input, |this, _, event, cx| {
             let SettingsInputEvent::Changed(value) = event;
             let mut settings = cx.global::<SettingsStore>().settings.clone();
-            settings.ocr.endpoint = value.to_string();
+            settings.ocr.paddle.endpoint = value.to_string();
             this.persist_ocr_settings(settings, cx);
         })
         .detach();
-        cx.subscribe(&ocr_model_input, |this, _, event, cx| {
+        cx.subscribe(&ocr_paddle_model_input, |this, _, event, cx| {
             let SettingsInputEvent::Changed(value) = event;
             let mut settings = cx.global::<SettingsStore>().settings.clone();
-            settings.ocr.model = value.to_string();
+            settings.ocr.paddle.model = value.to_string();
+            this.persist_ocr_settings(settings, cx);
+        })
+        .detach();
+        cx.subscribe(&ocr_unlimited_api_key_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            settings.ocr.unlimited.api_key = value.to_string();
+            this.persist_ocr_settings(settings, cx);
+        })
+        .detach();
+        cx.subscribe(&ocr_unlimited_secret_key_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            settings.ocr.unlimited.secret_key = value.to_string();
+            this.persist_ocr_settings(settings, cx);
+        })
+        .detach();
+        cx.subscribe(&ocr_unlimited_endpoint_input, |this, _, event, cx| {
+            let SettingsInputEvent::Changed(value) = event;
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            settings.ocr.unlimited.endpoint = value.to_string();
             this.persist_ocr_settings(settings, cx);
         })
         .detach();
@@ -1136,9 +1142,12 @@ impl SettingsWindow {
             translation_key_input,
             translation_base_url_input,
             translation_region_input,
-            ocr_token_input,
-            ocr_endpoint_input,
-            ocr_model_input,
+            ocr_paddle_token_input,
+            ocr_paddle_endpoint_input,
+            ocr_paddle_model_input,
+            ocr_unlimited_api_key_input,
+            ocr_unlimited_secret_key_input,
+            ocr_unlimited_endpoint_input,
             ocr_connection_status: None,
             ocr_connection_task: None,
             translation_data_clear_pending: false,
@@ -4333,11 +4342,46 @@ impl SettingsWindow {
                     .child(label)
             })
             .collect::<Vec<_>>();
+        let provider_options = OcrProvider::ALL
+            .into_iter()
+            .map(|provider| {
+                let selected = settings.ocr.provider == provider;
+                let label = match provider {
+                    OcrProvider::Unlimited => crate::fl!("settings-ocr-unlimited"),
+                    OcrProvider::Paddle => crate::fl!("settings-ocr-paddle"),
+                };
+                div()
+                    .id(format!("settings-ocr-provider-{}", provider.as_str()))
+                    .px_3()
+                    .py_1()
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(rgb(if selected { theme.accent } else { theme.border }))
+                    .bg(rgb(if selected {
+                        theme.element_selected
+                    } else {
+                        theme.surface_background
+                    }))
+                    .text_color(rgb(theme.text))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.element_hover)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            let mut settings = cx.global::<SettingsStore>().settings.clone();
+                            settings.ocr.provider = provider;
+                            this.persist_ocr_settings(settings, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(label)
+            })
+            .collect::<Vec<_>>();
         let testing = matches!(
-            self.ocr_connection_status,
+            &self.ocr_connection_status,
             Some(OcrConnectionStatus::Testing)
         );
-        let status = self.ocr_connection_status.map(|status| {
+        let status = self.ocr_connection_status.clone().map(|status| {
             let (message, color) = match status {
                 OcrConnectionStatus::Testing => (
                     crate::fl!("settings-ocr-connection-testing"),
@@ -4368,6 +4412,98 @@ impl SettingsWindow {
                 .text_color(rgb(color))
                 .child(message)
         });
+        let provider_config = match settings.ocr.provider {
+            OcrProvider::Unlimited => div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Self::section_title(
+                    crate::fl!("settings-ocr-unlimited"),
+                    theme,
+                ))
+                .child(input_row(
+                    crate::fl!("settings-ocr-unlimited-api-key"),
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(self.ocr_unlimited_api_key_input.clone())
+                        .child(self.ai_action_button(
+                            "settings-test-ocr-connection",
+                            if testing {
+                                crate::fl!("settings-ocr-testing")
+                            } else {
+                                crate::fl!("settings-test-connection")
+                            },
+                            theme,
+                            |this, cx| this.test_ocr_connection(cx),
+                            cx,
+                        ))
+                        .into_any_element(),
+                ))
+                .child(input_row(
+                    crate::fl!("settings-ocr-unlimited-secret-key"),
+                    self.ocr_unlimited_secret_key_input
+                        .clone()
+                        .into_any_element(),
+                ))
+                .child(input_row(
+                    crate::fl!("settings-ocr-endpoint"),
+                    self.ocr_unlimited_endpoint_input.clone().into_any_element(),
+                ))
+                .when_some(status, |this, status| this.child(status))
+                .child(
+                    div()
+                        .text_size(ui_rems(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(crate::fl!("settings-ocr-unlimited-connection-hint")),
+                )
+                .into_any_element(),
+            OcrProvider::Paddle => div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Self::section_title(
+                    crate::fl!("settings-ocr-paddle"),
+                    theme,
+                ))
+                .child(input_row(
+                    crate::fl!("settings-ocr-paddle-token"),
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(self.ocr_paddle_token_input.clone())
+                        .child(self.ai_action_button(
+                            "settings-test-ocr-connection",
+                            if testing {
+                                crate::fl!("settings-ocr-testing")
+                            } else {
+                                crate::fl!("settings-test-connection")
+                            },
+                            theme,
+                            |this, cx| this.test_ocr_connection(cx),
+                            cx,
+                        ))
+                        .into_any_element(),
+                ))
+                .child(input_row(
+                    crate::fl!("settings-ocr-endpoint"),
+                    self.ocr_paddle_endpoint_input.clone().into_any_element(),
+                ))
+                .child(input_row(
+                    crate::fl!("settings-ocr-model"),
+                    self.ocr_paddle_model_input.clone().into_any_element(),
+                ))
+                .when_some(status, |this, status| this.child(status))
+                .child(
+                    div()
+                        .text_size(ui_rems(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(crate::fl!("settings-ocr-paddle-connection-hint")),
+                )
+                .into_any_element(),
+        };
 
         vec![
             div()
@@ -4407,45 +4543,12 @@ impl SettingsWindow {
                 .flex_col()
                 .gap_2()
                 .child(Self::section_title(
-                    crate::fl!("settings-ocr-paddle"),
+                    crate::fl!("settings-ocr-provider"),
                     theme,
                 ))
-                .child(input_row(
-                    crate::fl!("settings-ocr-token"),
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap_2()
-                        .child(self.ocr_token_input.clone())
-                        .child(self.ai_action_button(
-                            "settings-test-ocr-connection",
-                            if testing {
-                                crate::fl!("settings-ocr-testing")
-                            } else {
-                                crate::fl!("settings-test-connection")
-                            },
-                            theme,
-                            |this, cx| this.test_ocr_connection(cx),
-                            cx,
-                        ))
-                        .into_any_element(),
-                ))
-                .child(input_row(
-                    crate::fl!("settings-ocr-endpoint"),
-                    self.ocr_endpoint_input.clone().into_any_element(),
-                ))
-                .child(input_row(
-                    crate::fl!("settings-ocr-model"),
-                    self.ocr_model_input.clone().into_any_element(),
-                ))
-                .when_some(status, |this, status| this.child(status))
-                .child(
-                    div()
-                        .text_size(ui_rems(12.0))
-                        .text_color(rgb(theme.text_muted))
-                        .child(crate::fl!("settings-ocr-connection-hint")),
-                )
+                .child(div().flex().flex_wrap().gap_2().children(provider_options))
                 .into_any_element(),
+            provider_config,
         ]
     }
 
@@ -6093,45 +6196,17 @@ impl Render for SettingsWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        OCR_PROBE_SEQUENCE, OcrProbeError, SETTINGS_NAV_ENTRIES, SettingsNavEntry, SettingsSection,
-        SettingsTab, classify_ocr_probe_response, paddle_provider_code, random_ocr_probe_job_id,
-        visible_settings_nav_entries,
+        OcrProbeError, SETTINGS_NAV_ENTRIES, SettingsNavEntry, SettingsSection, SettingsTab,
+        test_ocr_connection_request, visible_settings_nav_entries,
     };
-    use reqwest::StatusCode;
-    use serde_json::json;
-    use std::sync::atomic::Ordering;
+    use glyphst_settings::OcrSettings;
 
     #[test]
-    fn ocr_probe_accepts_expected_missing_job_responses() {
-        assert!(classify_ocr_probe_response(StatusCode::NOT_FOUND, None).is_ok());
-        assert!(classify_ocr_probe_response(StatusCode::BAD_REQUEST, Some(404)).is_ok());
-        assert!(classify_ocr_probe_response(StatusCode::BAD_REQUEST, Some(11001)).is_ok());
+    fn ocr_probe_rejects_missing_default_provider_credentials() {
         assert!(matches!(
-            classify_ocr_probe_response(StatusCode::UNAUTHORIZED, Some(11001)),
+            test_ocr_connection_request(OcrSettings::default()),
             Err(OcrProbeError::InvalidAuth)
         ));
-    }
-
-    #[test]
-    fn ocr_probe_distinguishes_retryable_and_provider_errors() {
-        assert!(matches!(
-            classify_ocr_probe_response(StatusCode::TOO_MANY_REQUESTS, None),
-            Err(OcrProbeError::Retryable)
-        ));
-        assert!(matches!(
-            classify_ocr_probe_response(StatusCode::BAD_REQUEST, Some(12000)),
-            Err(OcrProbeError::Provider(Some(12000)))
-        ));
-        assert_eq!(
-            paddle_provider_code(&json!({"error": {"error_code": "11001"}})),
-            Some(11001)
-        );
-    }
-
-    #[test]
-    fn ocr_probe_job_ids_change_between_requests() {
-        OCR_PROBE_SEQUENCE.store(0, Ordering::Relaxed);
-        assert_ne!(random_ocr_probe_job_id(), random_ocr_probe_job_id());
     }
 
     #[test]
