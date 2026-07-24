@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{
-    App, AppContext, Bounds, Pixels, TitlebarOptions, WindowBounds, WindowHandle, WindowOptions,
-    point, px, size,
+    App, AppContext, Bounds, Pixels, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
 };
+use gpui_component::Root;
 use gpui_platform::application;
 use tikv_jemalloc_sys as _;
 use tikv_jemallocator::Jemalloc;
@@ -19,10 +19,12 @@ use glyphst_keymap::keybindings;
 use glyphst_library::{DocumentPosition, LibraryStore};
 use glyphst_pdf_translation_app::PdfTranslationService;
 use glyphst_pdf_ui::pdf_view::RenderCache;
-use glyphst_settings::{SettingsStore, localize};
+use glyphst_settings::{SettingsStore, localize, sync_component_theme};
 use glyphst_translation::TranslationService;
 use glyphst_ui::{assets, fonts, notification_center, prompt};
-use glyphst_workspace::{NewTab, Workspace, WorkspaceCallbacks, WorkspaceWindowRequest};
+use glyphst_workspace::{
+    NewTab, Workspace, WorkspaceCallbacks, WorkspaceWindowHandle, WorkspaceWindowRequest,
+};
 
 fn main() {
     let request = instance::parse_args();
@@ -41,14 +43,21 @@ fn main() {
     ztracing::init();
 
     application()
-        .with_assets(assets::Assets)
+        .with_assets(assets::Assets::default())
         .run(move |cx: &mut App| {
+            gpui_component::init(cx);
+            keybindings::capture_framework_bindings(cx);
+
             if let Err(error) = fonts::load_embedded_fonts(cx) {
                 eprintln!("failed to load embedded fonts: {error:#}");
             }
             let settings_store = SettingsStore::load();
+            if let Err(error) = settings_store.install_theme_catalog(cx) {
+                eprintln!("failed to install theme catalog: {error:#}");
+            }
             localize::select_language(settings_store.settings.language);
             cx.set_global(settings_store);
+            sync_component_theme(cx);
             prompt::init(cx);
             notification_center::init(cx);
             cx.set_global(LibraryStore::load());
@@ -148,20 +157,20 @@ fn handle_open_request(request: instance::OpenRequest, cx: &mut App) {
     }
 }
 
-fn active_workspace_window(cx: &App) -> Option<WindowHandle<Workspace>> {
+fn active_workspace_window(cx: &App) -> Option<WorkspaceWindowHandle> {
     cx.active_window()
-        .and_then(|window| window.downcast::<Workspace>())
+        .and_then(|window| WorkspaceWindowHandle::from_any(window, cx))
         .or_else(|| {
             cx.window_stack().and_then(|windows| {
                 windows
                     .into_iter()
-                    .find_map(|window| window.downcast::<Workspace>())
+                    .find_map(|window| WorkspaceWindowHandle::from_any(window, cx))
             })
         })
         .or_else(|| {
             cx.windows()
                 .into_iter()
-                .find_map(|window| window.downcast::<Workspace>())
+                .find_map(|window| WorkspaceWindowHandle::from_any(window, cx))
         })
 }
 
@@ -204,7 +213,7 @@ fn open_workspace_window_at(
 fn open_detached_workspace_window(
     request: WorkspaceWindowRequest,
     cx: &mut App,
-) -> Result<WindowHandle<Workspace>> {
+) -> Result<WorkspaceWindowHandle> {
     open_workspace_window_inner(None, None, Some(request.bounds), true, cx)
 }
 
@@ -213,7 +222,7 @@ fn open_workspace_window_at_position(
     initial_position: Option<DocumentPosition>,
     bounds: Option<Bounds<Pixels>>,
     cx: &mut App,
-) -> Result<WindowHandle<Workspace>> {
+) -> Result<WorkspaceWindowHandle> {
     open_workspace_window_inner(path, initial_position, bounds, false, cx)
 }
 
@@ -223,7 +232,7 @@ fn open_workspace_window_inner(
     bounds: Option<Bounds<Pixels>>,
     empty: bool,
     cx: &mut App,
-) -> Result<WindowHandle<Workspace>> {
+) -> Result<WorkspaceWindowHandle> {
     let window_size = if path.is_some() {
         size(px(800.0), px(1000.0))
     } else {
@@ -233,7 +242,7 @@ fn open_workspace_window_inner(
     let window_settings = cx.global::<SettingsStore>().settings.window;
     let transparency_enabled = window_settings.transparency_enabled_by_default();
 
-    cx.open_window(
+    let root = cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: None,
@@ -247,7 +256,7 @@ fn open_workspace_window_inner(
         },
         move |window, cx| {
             window.set_app_id("glyphst");
-            cx.new(|cx| {
+            let workspace = cx.new(|cx| {
                 if empty {
                     Workspace::new_empty(workspace_callbacks(), window, cx)
                 } else {
@@ -259,7 +268,11 @@ fn open_workspace_window_inner(
                         cx,
                     )
                 }
-            })
+            });
+            cx.new(|cx| Root::new(workspace, window, cx))
         },
-    )
+    )?;
+
+    WorkspaceWindowHandle::from_root(root, cx)
+        .ok_or_else(|| anyhow!("new Root window does not host a Workspace"))
 }

@@ -197,6 +197,17 @@ impl NotificationCenter {
         cx.notify();
     }
 
+    fn activate_notification_action(
+        &mut self,
+        id: NotificationId,
+        callback: UiCallback,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss_notification(id, cx);
+        window.defer(cx, move |window, cx| callback(window, cx));
+    }
+
     pub fn render_activity(&mut self, theme: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (_, primary) = self.tasks.last()?.clone();
         let additional = self.tasks.len().saturating_sub(1);
@@ -461,8 +472,7 @@ impl NotificationCenter {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
-                            this.dismiss_notification(id, cx);
-                            callback(window, cx);
+                            this.activate_notification_action(id, callback.clone(), window, cx);
                             cx.stop_propagation();
                         }),
                     )
@@ -536,7 +546,15 @@ impl NotificationCenter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
+    use gpui::{Render, TestAppContext};
+
+    struct TestWindow;
+
+    impl Render for TestWindow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
 
     #[gpui::test]
     fn tasks_and_notifications_are_removed_independently(cx: &mut TestAppContext) {
@@ -576,5 +594,44 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(cx.read(|cx| center.read(cx).notification_count()), 0);
+    }
+
+    #[gpui::test]
+    fn notification_actions_can_update_the_center(cx: &mut TestAppContext) {
+        cx.update(init);
+        let center = cx.update(|cx| NotificationCenter::global(cx));
+        let (test_window, cx) = cx.add_window_view(|_, _| TestWindow);
+        let callback_center = center.clone();
+        let action_center = center.clone();
+
+        test_window.update_in(cx, move |_, window, cx| {
+            action_center.update(cx, |center, cx| {
+                let id = center.show_notification(
+                    NotificationEntry::new(NotificationLevel::Success, "Translation complete"),
+                    None,
+                    cx,
+                );
+                center.activate_notification_action(
+                    id,
+                    Arc::new(move |_, cx| {
+                        callback_center.update(cx, |center, cx| {
+                            center.show_notification(
+                                NotificationEntry::new(NotificationLevel::Info, "Output opened"),
+                                None,
+                                cx,
+                            );
+                        });
+                    }),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            center.read_with(cx, |center, _| center.notification_count()),
+            1
+        );
     }
 }

@@ -11,14 +11,15 @@ use glyphst_settings::{
     DEFAULT_UNLIMITED_OCR_ENDPOINT, FontSettings, KeymapPreset, ModelRef, OcrMode, OcrProvider,
     OcrSettings, PageImageQuality, PageTextFormat, ResolvedAiConfig, Settings, SettingsStore,
     TabBarVisibility, TranslationBoxCorner, TranslationProvider, TranslationProviderConfig,
-    WindowBackgroundMode, localize, setup_ui_font,
+    WindowBackgroundMode, localize, setup_ui_font, sync_component_theme,
     theme::{
-        PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode, ThemeMetadata, ThemeSelection,
-        format_rgb_hex, format_rgba_hex, parse_hex_color,
+        PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode, ThemeMetadata, format_rgb_hex,
+        format_rgba_hex, parse_hex_color,
     },
     ui_rems,
 };
 use glyphst_translation_ui::target_language_items;
+use glyphst_ui::root::{RootWindowHandle, render_overlays};
 use glyphst_ui::{
     notification_center::{
         BackgroundTaskEntry, NotificationCenter, NotificationEntry, NotificationLevel,
@@ -36,6 +37,7 @@ use gpui::{
     UniformListScrollHandle, Window, WindowBounds, WindowOptions, anchored, deferred, div, point,
     prelude::*, px, rgb, rgba, size, uniform_list,
 };
+use gpui_component::Root;
 use std::{
     ops::Range,
     path::Path,
@@ -175,7 +177,7 @@ fn open_settings_window_with_section(
     if let Some(existing_window) = cx
         .windows()
         .into_iter()
-        .find_map(|window| window.downcast::<SettingsWindow>())
+        .find_map(|window| RootWindowHandle::<SettingsWindow>::from_any(window, cx))
     {
         if let Err(error) = existing_window.update(cx, move |settings, window, cx| {
             if let Some(section) = section {
@@ -207,13 +209,14 @@ fn open_settings_window_with_section(
         },
         move |window, cx| {
             window.set_app_id("glyphst");
-            cx.new(|cx| {
+            let settings = cx.new(|cx| {
                 let mut settings = SettingsWindow::new(open_keymap, cx);
                 if let Some(section) = section {
                     settings.select_section(section);
                 }
                 settings
-            })
+            });
+            cx.new(|cx| Root::new(settings, window, cx))
         },
     ) {
         eprintln!("failed to open settings window: {error:#}");
@@ -529,7 +532,6 @@ pub struct SettingsWindow {
     translation_model_search: Entity<SettingsTextInput>,
     fetch_model_search: Entity<SettingsTextInput>,
     translation_language_dropdown: Entity<SearchableDropdown>,
-    static_theme_dropdown: Entity<SearchableDropdown>,
     light_theme_dropdown: Entity<SearchableDropdown>,
     dark_theme_dropdown: Entity<SearchableDropdown>,
 }
@@ -962,35 +964,12 @@ impl SettingsWindow {
         .detach();
 
         // Theme dropdowns for the appearance tab
-        let (
-            static_selected,
-            light_selected,
-            dark_selected,
-            all_theme_items,
-            light_theme_items,
-            dark_theme_items,
-        ) = {
+        let (light_selected, dark_selected, light_theme_items, dark_theme_items) = {
             let store = cx.global::<SettingsStore>();
-            let system_appearance = store.system_appearance;
-            let (static_sel, light_sel, dark_sel) = match &store.settings.theme {
-                ThemeSelection::Static(name) => (name.clone(), name.clone(), name.clone()),
-                ThemeSelection::Dynamic { light, dark, .. } => (
-                    store.settings.theme.name(system_appearance).to_string(),
-                    light.clone(),
-                    dark.clone(),
-                ),
-            };
-            let all_items: Vec<SearchableItem> = store
-                .registry
-                .metadata()
-                .into_iter()
-                .map(|m| SearchableItem {
-                    value: m.id,
-                    label: m.name,
-                })
-                .collect();
+            let light_selected = store.settings.theme.light.clone();
+            let dark_selected = store.settings.theme.dark.clone();
             let light_items: Vec<SearchableItem> = store
-                .registry
+                .theme_catalog
                 .metadata()
                 .into_iter()
                 .filter(|m| m.appearance == ThemeAppearance::Light)
@@ -1000,7 +979,7 @@ impl SettingsWindow {
                 })
                 .collect();
             let dark_items: Vec<SearchableItem> = store
-                .registry
+                .theme_catalog
                 .metadata()
                 .into_iter()
                 .filter(|m| m.appearance == ThemeAppearance::Dark)
@@ -1009,23 +988,8 @@ impl SettingsWindow {
                     label: m.name,
                 })
                 .collect();
-            (
-                static_sel,
-                light_sel,
-                dark_sel,
-                all_items,
-                light_items,
-                dark_items,
-            )
+            (light_selected, dark_selected, light_items, dark_items)
         };
-        let static_theme_dropdown = cx.new(|cx| {
-            SearchableDropdown::new(
-                all_theme_items,
-                static_selected,
-                &crate::fl!("settings-search-themes-placeholder"),
-                cx,
-            )
-        });
         let light_theme_dropdown = cx.new(|cx| {
             SearchableDropdown::new(
                 light_theme_items,
@@ -1042,63 +1006,37 @@ impl SettingsWindow {
                 cx,
             )
         });
-        cx.subscribe(&static_theme_dropdown, |this, _, event, cx| {
-            let SearchableDropdownEvent::Selected(value) = event;
-            let mut settings = cx.global::<SettingsStore>().settings.clone();
-            settings.theme = ThemeSelection::Static(value.clone());
-            this.persist_settings(settings, cx);
-        })
-        .detach();
         cx.subscribe(&light_theme_dropdown, |this, _, event, cx| {
             let SearchableDropdownEvent::Selected(value) = event;
             let mut settings = cx.global::<SettingsStore>().settings.clone();
-            if let ThemeSelection::Dynamic { light, .. } = &mut settings.theme {
-                *light = value.clone();
-                this.persist_settings(settings, cx);
-            }
+            settings.theme.light = value.clone();
+            this.persist_settings(settings, cx);
         })
         .detach();
         cx.subscribe(&dark_theme_dropdown, |this, _, event, cx| {
             let SearchableDropdownEvent::Selected(value) = event;
             let mut settings = cx.global::<SettingsStore>().settings.clone();
-            if let ThemeSelection::Dynamic { dark, .. } = &mut settings.theme {
-                *dark = value.clone();
-                this.persist_settings(settings, cx);
-            }
+            settings.theme.dark = value.clone();
+            this.persist_settings(settings, cx);
         })
         .detach();
 
         cx.observe_global::<SettingsStore>(|this, cx| {
-            let (theme, system_appearance, page_image_limit) = {
+            let (theme, page_image_limit) = {
                 let store = cx.global::<SettingsStore>();
                 (
                     store.settings.theme.clone(),
-                    store.system_appearance,
                     store.settings.ai.page_image_limit,
                 )
             };
-            match &theme {
-                ThemeSelection::Static(name) => {
-                    this.static_theme_dropdown.update(cx, |d, cx| {
-                        d.set_selected_value(name.clone());
-                        cx.notify();
-                    });
-                }
-                ThemeSelection::Dynamic { light, dark, .. } => {
-                    this.light_theme_dropdown.update(cx, |d, cx| {
-                        d.set_selected_value(light.clone());
-                        cx.notify();
-                    });
-                    this.dark_theme_dropdown.update(cx, |d, cx| {
-                        d.set_selected_value(dark.clone());
-                        cx.notify();
-                    });
-                    this.static_theme_dropdown.update(cx, |d, cx| {
-                        d.set_selected_value(theme.name(system_appearance).to_string());
-                        cx.notify();
-                    });
-                }
-            }
+            this.light_theme_dropdown.update(cx, |d, cx| {
+                d.set_selected_value(theme.light.clone());
+                cx.notify();
+            });
+            this.dark_theme_dropdown.update(cx, |d, cx| {
+                d.set_selected_value(theme.dark.clone());
+                cx.notify();
+            });
             this.page_image_limit_input.update(cx, |input, cx| {
                 let value = page_image_limit.to_string();
                 if input.content.as_ref() != value {
@@ -1160,7 +1098,6 @@ impl SettingsWindow {
             translation_model_search,
             fetch_model_search,
             translation_language_dropdown,
-            static_theme_dropdown,
             light_theme_dropdown,
             dark_theme_dropdown,
         }
@@ -1168,6 +1105,7 @@ impl SettingsWindow {
 
     fn persist_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
         let result = cx.global_mut::<SettingsStore>().set_settings(settings);
+        sync_component_theme(cx);
         let (keymap_preset, keybinding_overrides) = {
             let store = cx.global::<SettingsStore>();
             (
@@ -2373,92 +2311,6 @@ impl SettingsWindow {
         )
     }
 
-    fn theme_mode_option(
-        &self,
-        label: &'static str,
-        is_dynamic: bool,
-        current_is_dynamic: bool,
-        system_appearance: ThemeAppearance,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let selected = is_dynamic == current_is_dynamic;
-
-        div()
-            .id(format!("theme-mode-{label}"))
-            .h(px(30.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .border_1()
-            .border_color(if selected {
-                rgb(theme.accent)
-            } else {
-                rgb(theme.border_variant)
-            })
-            .bg(if selected {
-                rgb(theme.element_selected)
-            } else {
-                rgba(0x00000000)
-            })
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    let (new_theme, save_dynamic) = {
-                        let store = cx.global::<SettingsStore>();
-                        match &store.settings.theme {
-                            ThemeSelection::Static(name) if is_dynamic => {
-                                let (light, dark) =
-                                    match (&store.last_dynamic_light, &store.last_dynamic_dark) {
-                                        (Some(l), Some(d)) => (l.clone(), d.clone()),
-                                        _ => (name.clone(), name.clone()),
-                                    };
-                                (
-                                    Some(ThemeSelection::Dynamic {
-                                        mode: ThemeAppearanceMode::System,
-                                        light,
-                                        dark,
-                                    }),
-                                    None,
-                                )
-                            }
-                            ThemeSelection::Dynamic { mode, light, dark } if !is_dynamic => {
-                                let active = match mode {
-                                    ThemeAppearanceMode::Light => light.clone(),
-                                    ThemeAppearanceMode::Dark => dark.clone(),
-                                    ThemeAppearanceMode::System => match system_appearance {
-                                        ThemeAppearance::Light => light.clone(),
-                                        ThemeAppearance::Dark => dark.clone(),
-                                    },
-                                };
-                                (
-                                    Some(ThemeSelection::Static(active)),
-                                    Some((light.clone(), dark.clone())),
-                                )
-                            }
-                            _ => (None, None),
-                        }
-                    };
-                    if let Some((light, dark)) = save_dynamic {
-                        let store = cx.global_mut::<SettingsStore>();
-                        store.last_dynamic_light = Some(light);
-                        store.last_dynamic_dark = Some(dark);
-                    }
-                    if let Some(new_theme) = new_theme {
-                        this.change_settings(
-                            move |settings| settings.theme = new_theme,
-                            window,
-                            cx,
-                        );
-                    }
-                    cx.stop_propagation();
-                }),
-            )
-            .child(label)
-    }
-
     fn appearance_mode_option(
         &self,
         label: &'static str,
@@ -2491,18 +2343,7 @@ impl SettingsWindow {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
-                    this.change_settings(
-                        move |settings| {
-                            if let ThemeSelection::Dynamic {
-                                mode: mode_field, ..
-                            } = &mut settings.theme
-                            {
-                                *mode_field = mode;
-                            }
-                        },
-                        window,
-                        cx,
-                    );
+                    this.change_settings(move |settings| settings.theme.mode = mode, window, cx);
                     cx.stop_propagation();
                 }),
             )
@@ -5280,159 +5121,67 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let page_gap = resolved.page_gap;
-        let system_appearance = cx.global::<SettingsStore>().system_appearance;
-        let current_is_dynamic = matches!(settings.theme, ThemeSelection::Dynamic { .. });
-
-        let theme_section = if current_is_dynamic {
-            let current_mode = match &settings.theme {
-                ThemeSelection::Dynamic { mode, .. } => *mode,
-                _ => unreachable!(),
-            };
-
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(Self::section_title(
-                    crate::fl!("settings-section-theme"),
-                    resolved,
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .h(px(44.0))
-                        .child(
-                            div()
-                                .text_color(rgb(resolved.text))
-                                .child(crate::fl!("settings-theme-mode")),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(self.theme_mode_option(
-                                    "Single Theme",
-                                    false,
-                                    current_is_dynamic,
-                                    system_appearance,
-                                    resolved,
-                                    cx,
-                                ))
-                                .child(self.theme_mode_option(
-                                    "Light/Dark",
-                                    true,
-                                    current_is_dynamic,
-                                    system_appearance,
-                                    resolved,
-                                    cx,
-                                )),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .h(px(44.0))
-                        .child(
-                            div()
-                                .text_color(rgb(resolved.text))
-                                .child(crate::fl!("settings-mode")),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(self.appearance_mode_option(
-                                    "Light",
-                                    ThemeAppearanceMode::Light,
-                                    current_mode,
-                                    resolved,
-                                    cx,
-                                ))
-                                .child(self.appearance_mode_option(
-                                    "Dark",
-                                    ThemeAppearanceMode::Dark,
-                                    current_mode,
-                                    resolved,
-                                    cx,
-                                ))
-                                .child(self.appearance_mode_option(
-                                    "System",
-                                    ThemeAppearanceMode::System,
-                                    current_mode,
-                                    resolved,
-                                    cx,
-                                )),
-                        ),
-                )
-                .child(Self::section_title(
-                    crate::fl!("settings-light-theme"),
-                    resolved,
-                ))
-                .child(Self::section_title(
-                    crate::fl!("settings-dark-theme"),
-                    resolved,
-                ))
-                .child(Self::section_title("Dark Theme", resolved))
-                .child(self.dark_theme_dropdown.clone())
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(Self::section_title(
-                    crate::fl!("settings-section-theme"),
-                    resolved,
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .h(px(44.0))
-                        .child(
-                            div()
-                                .text_color(rgb(resolved.text))
-                                .child(crate::fl!("settings-theme-mode")),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(self.theme_mode_option(
-                                    "Single Theme",
-                                    false,
-                                    current_is_dynamic,
-                                    system_appearance,
-                                    resolved,
-                                    cx,
-                                ))
-                                .child(self.theme_mode_option(
-                                    "Light/Dark",
-                                    true,
-                                    current_is_dynamic,
-                                    system_appearance,
-                                    resolved,
-                                    cx,
-                                )),
-                        ),
-                )
-                .child(self.static_theme_dropdown.clone())
-                .into_any_element()
-        };
+        let current_mode = settings.theme.mode;
+        let theme_section = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(Self::section_title(
+                crate::fl!("settings-section-theme"),
+                resolved,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(44.0))
+                    .child(
+                        div()
+                            .text_color(rgb(resolved.text))
+                            .child(crate::fl!("settings-mode")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(self.appearance_mode_option(
+                                "Light",
+                                ThemeAppearanceMode::Light,
+                                current_mode,
+                                resolved,
+                                cx,
+                            ))
+                            .child(self.appearance_mode_option(
+                                "Dark",
+                                ThemeAppearanceMode::Dark,
+                                current_mode,
+                                resolved,
+                                cx,
+                            ))
+                            .child(self.appearance_mode_option(
+                                "System",
+                                ThemeAppearanceMode::System,
+                                current_mode,
+                                resolved,
+                                cx,
+                            )),
+                    ),
+            )
+            .child(Self::section_title(
+                crate::fl!("settings-light-theme"),
+                resolved,
+            ))
+            .child(self.light_theme_dropdown.clone())
+            .child(Self::section_title(
+                crate::fl!("settings-dark-theme"),
+                resolved,
+            ))
+            .child(self.dark_theme_dropdown.clone())
+            .into_any_element();
 
         vec![
             theme_section,
@@ -5983,13 +5732,14 @@ impl Focusable for SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let root_overlays = render_overlays(window, cx);
         let ui_font = setup_ui_font(window, cx);
         let (settings, resolved, themes) = {
             let store = cx.global::<SettingsStore>();
             (
                 store.settings.clone(),
                 store.resolved_theme,
-                store.registry.metadata(),
+                store.theme_catalog.metadata(),
             )
         };
         let ai_providers_view = if self.active_tab == SettingsTab::AiProviders {
@@ -6190,6 +5940,7 @@ impl Render for SettingsWindow {
                         .child(notifications),
                 )
             })
+            .children(root_overlays)
     }
 }
 

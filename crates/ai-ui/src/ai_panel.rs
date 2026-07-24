@@ -8247,19 +8247,18 @@ mod tests {
     fn install_test_settings(cx: &mut App) {
         let settings = glyphst_settings::Settings::default();
         let appearance = glyphst_settings::theme::ThemeAppearance::Light;
-        let registry =
-            glyphst_settings::theme::ThemeRegistry::load(std::path::Path::new("/nonexistent"));
-        let resolved_theme = registry.resolve(settings.theme.name(appearance), settings.overrides);
+        let theme_catalog =
+            glyphst_settings::theme::ThemeCatalog::load(std::path::Path::new("/nonexistent"));
+        let resolved_theme =
+            theme_catalog.resolve(settings.theme.name(appearance), settings.overrides);
         cx.set_global(SettingsStore {
             settings,
-            registry,
+            theme_catalog,
             resolved_theme,
             system_appearance: appearance,
             user_managed: false,
             config_path: PathBuf::new(),
             state_path: PathBuf::new(),
-            last_dynamic_light: None,
-            last_dynamic_dark: None,
         });
     }
 

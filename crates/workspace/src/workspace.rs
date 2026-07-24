@@ -5,11 +5,11 @@ use glyphst_translation_ui::{
     DocumentTranslationJobEvent, DocumentTranslationJobId, DocumentTranslationJobManager,
 };
 use glyphst_ui::notification_center::NotificationCenter;
+use glyphst_ui::root::render_overlays;
 use gpui::{
     AnyElement, App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString,
-    Window, WindowAppearance, WindowControlArea, WindowHandle, div, point, prelude::*, px, rgb,
-    rgba,
+    Window, WindowAppearance, WindowControlArea, div, point, prelude::*, px, rgb, rgba,
 };
 
 pub use glyphst_actions::workspace::{
@@ -32,7 +32,7 @@ use crate::{
         ToggleCommandPalette,
     },
     picker::{Picker, PickerEvent},
-    settings::{SettingsStore, setup_ui_font, ui_rems},
+    settings::{SettingsStore, setup_ui_font, sync_component_theme, ui_rems},
     style::RADIUS_SM,
     theme::{Theme, ThemeAppearance, ThemeAppearanceMode},
     theme_selector::{ThemeSelector, ThemeSelectorDelegate},
@@ -74,6 +74,8 @@ pub struct Workspace {
     should_move_window: bool,
 }
 
+pub type WorkspaceWindowHandle = glyphst_ui::root::RootWindowHandle<Workspace>;
+
 struct PendingTranslationSplit {
     job_id: DocumentTranslationJobId,
     stage: PendingTranslationSplitStage,
@@ -99,7 +101,7 @@ pub struct WorkspaceWindowRequest {
 #[derive(Clone, Copy)]
 pub struct WorkspaceCallbacks {
     pub open_workspace_window:
-        fn(WorkspaceWindowRequest, &mut App) -> Result<WindowHandle<Workspace>>,
+        fn(WorkspaceWindowRequest, &mut App) -> Result<WorkspaceWindowHandle>,
     pub open_settings_window: fn(&mut App),
 }
 
@@ -234,6 +236,7 @@ impl Workspace {
         };
         cx.global_mut::<SettingsStore>()
             .set_system_appearance(system_appearance);
+        sync_component_theme(cx);
         cx.observe_window_appearance(window, |_, window, cx| {
             let appearance = match window.appearance() {
                 WindowAppearance::Light | WindowAppearance::VibrantLight => ThemeAppearance::Light,
@@ -241,7 +244,7 @@ impl Workspace {
             };
             cx.global_mut::<SettingsStore>()
                 .set_system_appearance(appearance);
-            cx.refresh_windows();
+            sync_component_theme(cx);
         })
         .detach();
         cx.on_release(|this, cx| {
@@ -947,11 +950,11 @@ impl Workspace {
         let store = cx.global::<SettingsStore>();
         let current_mode = store.settings.theme.mode();
         let next_mode = match current_mode {
-            Some(ThemeAppearanceMode::Light) => ThemeAppearanceMode::Dark,
-            Some(ThemeAppearanceMode::Dark) => ThemeAppearanceMode::Light,
-            Some(ThemeAppearanceMode::System) | None => {
+            ThemeAppearanceMode::Light => ThemeAppearanceMode::Dark,
+            ThemeAppearanceMode::Dark => ThemeAppearanceMode::Light,
+            ThemeAppearanceMode::System => {
                 let active_name = store.settings.theme.name(store.system_appearance);
-                match store.registry.appearance(active_name) {
+                match store.theme_catalog.appearance(active_name) {
                     ThemeAppearance::Light => ThemeAppearanceMode::Dark,
                     ThemeAppearance::Dark => ThemeAppearanceMode::Light,
                 }
@@ -961,7 +964,7 @@ impl Workspace {
         let mut settings = store.settings.clone();
         settings.theme.set_mode(next_mode);
         let _ = cx.global_mut::<SettingsStore>().set_settings(settings);
-        cx.refresh_windows();
+        sync_component_theme(cx);
     }
 
     fn render_body(
@@ -1053,17 +1056,13 @@ impl Workspace {
             return;
         }
 
-        let Some(destination_window) = window.window_handle().downcast::<Workspace>() else {
-            eprintln!("failed to move tab: workspace root view is unavailable");
-            return;
-        };
         let destination = TabDestination {
             pane: target_pane.clone(),
             target: target.clone(),
             index: self.drop_index(target_pane, &target, cx),
         };
 
-        if dragged_tab.source_window.window_id() == destination_window.window_id() {
+        if dragged_tab.source_window.window_id() == window.window_handle().window_id() {
             if self.move_tab_to_destination(
                 &dragged_tab.source_pane,
                 dragged_tab.tab_id,
@@ -1074,26 +1073,41 @@ impl Workspace {
                 self.complete_transferred_tab_removal(&dragged_tab.source_pane, window, cx);
             }
         } else {
-            let result = dragged_tab
-                .source_window
-                .update(cx, |source, source_window, cx| {
-                    source.move_tab_to_workspace(
+            let Some(source_window) =
+                WorkspaceWindowHandle::from_root(dragged_tab.source_window, cx)
+            else {
+                eprintln!("failed to move tab: source workspace is unavailable");
+                return;
+            };
+            let result = source_window.update(cx, |source, source_window, cx| {
+                let transfer = dragged_tab.source_pane.update(cx, |pane, cx| {
+                    pane.take_tab_for_transfer(dragged_tab.tab_id, cx)
+                });
+                if transfer.is_some() {
+                    source.complete_transferred_tab_removal(
                         &dragged_tab.source_pane,
-                        dragged_tab.tab_id,
-                        destination_window,
-                        destination,
                         source_window,
                         cx,
-                    )
-                });
-            match result {
-                Ok(true) => {}
-                Ok(false) => return,
+                    );
+                }
+                transfer
+            });
+            let transfer = match result {
+                Ok(Some(transfer)) => transfer,
+                Ok(None) => return,
                 Err(error) => {
                     eprintln!("failed to move tab from source window: {error:#}");
                     return;
                 }
-            }
+            };
+            self.insert_transferred_tab(
+                &destination.pane,
+                destination.target,
+                destination.index,
+                transfer,
+                window,
+                cx,
+            );
         }
 
         cx.notify();
@@ -1134,49 +1148,6 @@ impl Workspace {
             window,
             cx,
         );
-        true
-    }
-
-    fn move_tab_to_workspace(
-        &mut self,
-        source_pane: &Entity<Pane>,
-        tab_id: gpui::EntityId,
-        destination_window: WindowHandle<Workspace>,
-        destination: TabDestination,
-        source_window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let transfer = source_pane.update(cx, |pane, cx| pane.take_tab_for_transfer(tab_id, cx));
-        let Some(transfer) = transfer else {
-            return false;
-        };
-        let mut transfer = Some(transfer);
-        let inserted = destination_window.update(cx, |destination_workspace, window, cx| {
-            let Some(transfer) = transfer.take() else {
-                return false;
-            };
-            destination_workspace.insert_transferred_tab(
-                &destination.pane,
-                destination.target.clone(),
-                destination.index,
-                transfer,
-                window,
-                cx,
-            );
-            true
-        });
-
-        if !matches!(inserted, Ok(true)) {
-            if let Some(transfer) = transfer {
-                source_pane.update(cx, |pane, cx| pane.restore_transferred_tab(transfer, cx));
-            }
-            if let Err(error) = inserted {
-                eprintln!("failed to insert moved tab in destination window: {error:#}");
-            }
-            return false;
-        }
-
-        self.complete_transferred_tab_removal(source_pane, source_window, cx);
         true
     }
 
@@ -1393,7 +1364,7 @@ impl Workspace {
 
         let (themes, selection, system_appearance, selected_ix) = {
             let store = cx.global::<SettingsStore>();
-            let themes = store.registry.metadata();
+            let themes = store.theme_catalog.metadata();
             let selection = store.settings.theme.clone();
             let system_appearance = store.system_appearance;
             let active_name = selection.name(system_appearance);
@@ -1869,6 +1840,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let root_overlays = render_overlays(window, cx);
         let ui_font = setup_ui_font(window, cx);
         let (theme, dim_inactive_panes) = {
             let store = cx.global::<SettingsStore>();
@@ -2080,20 +2052,22 @@ impl Render for Workspace {
                         .child(notifications),
                 )
             })
+            .children(root_overlays)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use gpui::TestAppContext;
+    use gpui::{AppContext as _, TestAppContext};
+    use gpui_component::Root;
 
-    use super::{Workspace, WorkspaceCallbacks, WorkspaceWindowRequest};
+    use super::{Workspace, WorkspaceCallbacks, WorkspaceWindowHandle, WorkspaceWindowRequest};
     use crate::{library::LibraryStore, pdf_view::RenderCache, settings::SettingsStore};
 
     fn unavailable_workspace_window(
         _: WorkspaceWindowRequest,
         _: &mut gpui::App,
-    ) -> anyhow::Result<gpui::WindowHandle<Workspace>> {
+    ) -> anyhow::Result<WorkspaceWindowHandle> {
         anyhow::bail!("not available in tests")
     }
 
@@ -2102,6 +2076,7 @@ mod tests {
     #[gpui::test]
     fn documentless_workspace_starts_on_a_new_tab(cx: &mut TestAppContext) {
         cx.update(|cx| {
+            gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
             cx.set_global(LibraryStore::memory());
             cx.set_global(RenderCache::new());
@@ -2111,11 +2086,47 @@ mod tests {
             open_settings_window: ignore_settings_window,
         };
 
-        let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::new(None, None, callbacks, window, cx));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
 
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.active_pane.read(cx).active_tab_is_new_tab());
         });
+    }
+
+    #[gpui::test]
+    fn root_hosted_workspace_renders_each_open_tab(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_new_tab(window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("pane-tab-0").is_some());
+        assert!(cx.debug_bounds("pane-tab-1").is_some());
     }
 }

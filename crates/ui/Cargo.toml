@@ -9,7 +9,12 @@ glyphst-actions = { path = "../actions" }
 glyphst-core = { path = "../core" }
 glyphst-settings = { path = "../settings" }
 gpui.workspace = true
+gpui_component.workspace = true
+gpui_component_assets.workspace = true
 pulldown-cmark.workspace = true
 rust-embed.workspace = true
 smallvec.workspace = true
 unicode-segmentation.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

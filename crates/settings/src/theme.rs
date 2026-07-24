@@ -1,45 +1,51 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use anyhow::{Context as _, Result};
+use gpui::{App, Hsla, rgb, rgba};
+use gpui_component::{
+    Theme as ComponentTheme, ThemeConfig as ComponentThemeConfig, ThemeMode as ComponentThemeMode,
+    ThemeRegistry as ComponentThemeRegistry, ThemeSet as ComponentThemeSet,
+};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 
 use glyphst_library::HighlightColor;
 
-pub const DEFAULT_THEME_ID: &str = "one-light";
-pub const DEFAULT_LIGHT_THEME_ID: &str = "one-light";
-pub const DEFAULT_DARK_THEME_ID: &str = "one-dark";
+pub const DEFAULT_LIGHT_THEME_ID: &str = "Default Light";
+pub const DEFAULT_DARK_THEME_ID: &str = "Default Dark";
 pub const DEFAULT_PAGE_GAP: f32 = 4.0;
 
 const MIN_PAGE_GAP: f32 = 0.0;
 const MAX_PAGE_GAP: f32 = 240.0;
 
-const BUILTIN_THEMES: [(&str, &str); 8] = [
-    ("one-light", include_str!("../themes/one-light.kdl")),
-    ("one-dark", include_str!("../themes/one-dark.kdl")),
-    (
-        "modus-operandi",
-        include_str!("../themes/modus-operandi.kdl"),
-    ),
-    ("modus-vivendi", include_str!("../themes/modus-vivendi.kdl")),
-    (
-        "modus-operandi-tinted",
-        include_str!("../themes/modus-operandi-tinted.kdl"),
-    ),
-    (
-        "modus-operandi-deuteranopia",
-        include_str!("../themes/modus-operandi-deuteranopia.kdl"),
-    ),
-    (
-        "modus-vivendi-tinted",
-        include_str!("../themes/modus-vivendi-tinted.kdl"),
-    ),
-    (
-        "modus-vivendi-deuteranopia",
-        include_str!("../themes/modus-vivendi-deuteranopia.kdl"),
-    ),
+const BUNDLED_THEME_SOURCES: [&str; 23] = [
+    include_str!("../themes/gpui-component/default-theme.json"),
+    include_str!("../themes/gpui-component/adventure.json"),
+    include_str!("../themes/gpui-component/alduin.json"),
+    include_str!("../themes/gpui-component/asciinema.json"),
+    include_str!("../themes/gpui-component/aurora.json"),
+    include_str!("../themes/gpui-component/ayu.json"),
+    include_str!("../themes/gpui-component/catppuccin.json"),
+    include_str!("../themes/gpui-component/everforest.json"),
+    include_str!("../themes/gpui-component/fahrenheit.json"),
+    include_str!("../themes/gpui-component/flexoki.json"),
+    include_str!("../themes/gpui-component/gruvbox.json"),
+    include_str!("../themes/gpui-component/harper.json"),
+    include_str!("../themes/gpui-component/hybrid.json"),
+    include_str!("../themes/gpui-component/jellybeans.json"),
+    include_str!("../themes/gpui-component/kibble.json"),
+    include_str!("../themes/gpui-component/macos-classic.json"),
+    include_str!("../themes/gpui-component/matrix.json"),
+    include_str!("../themes/gpui-component/mellifluous.json"),
+    include_str!("../themes/gpui-component/molokai.json"),
+    include_str!("../themes/gpui-component/solarized.json"),
+    include_str!("../themes/gpui-component/spaceduck.json"),
+    include_str!("../themes/gpui-component/tokyonight.json"),
+    include_str!("../themes/gpui-component/twilight.json"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,11 +62,11 @@ impl ThemeAppearance {
         }
     }
 
-    fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "dark" => Some(Self::Dark),
-            "light" => Some(Self::Light),
-            _ => None,
+    fn from_component(mode: ComponentThemeMode) -> Self {
+        if mode.is_dark() {
+            Self::Dark
+        } else {
+            Self::Light
         }
     }
 }
@@ -104,68 +110,56 @@ pub fn appearance_to_mode(appearance: ThemeAppearance) -> ThemeAppearanceMode {
     }
 }
 
-/// Represents the selection of a theme, which can be either static or dynamic.
+/// A light/dark theme pair and the rule used to choose between them.
+///
+/// Glyphst intentionally has no single-theme compatibility mode. Keeping both
+/// choices explicit makes system appearance changes deterministic.
 #[derive(Clone, Debug, PartialEq)]
-pub enum ThemeSelection {
-    /// A static theme selection, represented by a single theme name.
-    Static(String),
-    /// A dynamic theme selection, which can change based on the mode.
-    Dynamic {
-        mode: ThemeAppearanceMode,
-        light: String,
-        dark: String,
-    },
+pub struct ThemeSelection {
+    pub mode: ThemeAppearanceMode,
+    pub light: String,
+    pub dark: String,
 }
 
 impl Default for ThemeSelection {
     fn default() -> Self {
-        Self::Static(DEFAULT_THEME_ID.to_string())
+        Self {
+            mode: ThemeAppearanceMode::System,
+            light: DEFAULT_LIGHT_THEME_ID.to_string(),
+            dark: DEFAULT_DARK_THEME_ID.to_string(),
+        }
     }
 }
 
 impl ThemeSelection {
     /// Returns the theme name for the selected mode.
     pub fn name(&self, system_appearance: ThemeAppearance) -> &str {
-        match self {
-            Self::Static(theme) => theme,
-            Self::Dynamic { mode, light, dark } => match mode {
-                ThemeAppearanceMode::Light => light,
-                ThemeAppearanceMode::Dark => dark,
-                ThemeAppearanceMode::System => match system_appearance {
-                    ThemeAppearance::Light => light,
-                    ThemeAppearance::Dark => dark,
-                },
+        match self.mode {
+            ThemeAppearanceMode::Light => &self.light,
+            ThemeAppearanceMode::Dark => &self.dark,
+            ThemeAppearanceMode::System => match system_appearance {
+                ThemeAppearance::Light => &self.light,
+                ThemeAppearance::Dark => &self.dark,
             },
         }
     }
 
     /// Returns the mode for the theme selection.
-    pub fn mode(&self) -> Option<ThemeAppearanceMode> {
-        match self {
-            Self::Static(_) => None,
-            Self::Dynamic { mode, .. } => Some(*mode),
+    pub fn mode(&self) -> ThemeAppearanceMode {
+        self.mode
+    }
+
+    pub fn effective_appearance(&self, system_appearance: ThemeAppearance) -> ThemeAppearance {
+        match self.mode {
+            ThemeAppearanceMode::Light => ThemeAppearance::Light,
+            ThemeAppearanceMode::Dark => ThemeAppearance::Dark,
+            ThemeAppearanceMode::System => system_appearance,
         }
     }
 
     /// Sets the mode for the theme.
-    ///
-    /// If the current selection is `Static`, this migrates it to `Dynamic`
-    /// with `mode: System` and the default light/dark themes.
-    /// If the current selection is `Dynamic`, this updates the mode field.
     pub fn set_mode(&mut self, mode: ThemeAppearanceMode) {
-        match self {
-            Self::Static(_) => {
-                *self = Self::Dynamic {
-                    mode: ThemeAppearanceMode::System,
-                    light: DEFAULT_LIGHT_THEME_ID.to_string(),
-                    dark: DEFAULT_DARK_THEME_ID.to_string(),
-                };
-            }
-            Self::Dynamic {
-                mode: mode_to_update,
-                ..
-            } => *mode_to_update = mode,
-        }
+        self.mode = mode;
     }
 
     /// Sets the theme for the given appearance to the theme with the specified name.
@@ -175,84 +169,59 @@ impl ThemeSelection {
         appearance: ThemeAppearance,
         system_appearance: ThemeAppearance,
     ) {
-        match self {
-            Self::Static(current) => *current = name,
-            Self::Dynamic { mode, light, dark } => {
-                match appearance {
-                    ThemeAppearance::Light => *light = name,
-                    ThemeAppearance::Dark => *dark = name,
-                }
+        match appearance {
+            ThemeAppearance::Light => self.light = name,
+            ThemeAppearance::Dark => self.dark = name,
+        }
 
-                let should_update_mode =
-                    !(*mode == ThemeAppearanceMode::System && appearance == system_appearance);
+        let should_update_mode =
+            !(self.mode == ThemeAppearanceMode::System && appearance == system_appearance);
 
-                if should_update_mode {
-                    *mode = appearance_to_mode(appearance);
-                }
-            }
+        if should_update_mode {
+            self.mode = appearance_to_mode(appearance);
         }
     }
 
     pub fn sanitize(&mut self) {
-        match self {
-            Self::Static(name) => {
-                if name.trim().is_empty() {
-                    *name = DEFAULT_THEME_ID.to_string();
-                }
-            }
-            Self::Dynamic { light, dark, .. } => {
-                if light.trim().is_empty() {
-                    *light = DEFAULT_LIGHT_THEME_ID.to_string();
-                }
-                if dark.trim().is_empty() {
-                    *dark = DEFAULT_DARK_THEME_ID.to_string();
-                }
-            }
+        if self.light.trim().is_empty() {
+            self.light = DEFAULT_LIGHT_THEME_ID.to_string();
+        }
+        if self.dark.trim().is_empty() {
+            self.dark = DEFAULT_DARK_THEME_ID.to_string();
         }
     }
 
     pub fn from_kdl_node(node: &KdlNode) -> Self {
-        if let Some(children) = node.children() {
-            let mode = children
+        let Some(children) = node.children() else {
+            return Self::default();
+        };
+
+        Self {
+            mode: children
                 .get_arg("mode")
                 .and_then(KdlValue::as_string)
                 .and_then(ThemeAppearanceMode::from_str)
-                .unwrap_or_default();
-            let light = children
+                .unwrap_or_default(),
+            light: children
                 .get_arg("light")
                 .and_then(KdlValue::as_string)
                 .unwrap_or(DEFAULT_LIGHT_THEME_ID)
-                .to_string();
-            let dark = children
+                .to_string(),
+            dark: children
                 .get_arg("dark")
                 .and_then(KdlValue::as_string)
                 .unwrap_or(DEFAULT_DARK_THEME_ID)
-                .to_string();
-            Self::Dynamic { mode, light, dark }
-        } else {
-            let name = node
-                .get(0)
-                .and_then(KdlValue::as_string)
-                .unwrap_or(DEFAULT_THEME_ID)
-                .to_string();
-            Self::Static(name)
+                .to_string(),
         }
     }
 
     pub fn write_to_document(self, document: &mut KdlDocument) {
-        match self {
-            Self::Static(name) => {
-                push_value_node(document, "theme", name);
-            }
-            Self::Dynamic { mode, light, dark } => {
-                let mut theme_node = KdlNode::new("theme");
-                let children = theme_node.ensure_children();
-                push_value_node(children, "mode", mode.as_str());
-                push_value_node(children, "light", light);
-                push_value_node(children, "dark", dark);
-                document.nodes_mut().push(theme_node);
-            }
-        }
+        let mut theme_node = KdlNode::new("theme");
+        let children = theme_node.ensure_children();
+        push_value_node(children, "mode", self.mode.as_str());
+        push_value_node(children, "light", self.light);
+        push_value_node(children, "dark", self.dark);
+        document.nodes_mut().push(theme_node);
     }
 }
 
@@ -296,6 +265,48 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Resolve Glyphst's document/workspace semantics from the component
+    /// theme. This is the only color translation layer retained by Glyphst.
+    pub fn from_component(theme: &ComponentTheme) -> Self {
+        Self {
+            background: hsla_to_rgb(theme.background),
+            page: hsla_to_rgb(theme.popover),
+            selection_highlight: hsla_to_rgba(theme.selection),
+            highlight_yellow: hsla_to_rgba_with_alpha(theme.yellow, 0x66),
+            highlight_green: hsla_to_rgba_with_alpha(theme.green, 0x66),
+            highlight_blue: hsla_to_rgba_with_alpha(theme.blue, 0x66),
+            highlight_pink: hsla_to_rgba_with_alpha(theme.magenta, 0x66),
+            highlight_orange: hsla_to_rgba_with_alpha(theme.warning, 0x66),
+            overlay: hsla_to_rgba(theme.overlay),
+            footer_background: hsla_to_rgb(theme.status_bar),
+            footer_border: hsla_to_rgb(theme.status_bar_border),
+            footer_text: hsla_to_rgb(theme.muted_foreground),
+            panel_background: hsla_to_rgb(theme.sidebar),
+            panel_border: hsla_to_rgb(theme.sidebar_border),
+            surface_background: hsla_to_rgb(theme.popover),
+            border: hsla_to_rgb(theme.border),
+            border_variant: hsla_to_rgb(theme.input),
+            border_focused: hsla_to_rgb(theme.ring),
+            tab_bar_background: hsla_to_rgb(theme.tab_bar),
+            tab_active_background: hsla_to_rgb(theme.tab_active),
+            tab_inactive_background: hsla_to_rgb(theme.tab),
+            element_hover: hsla_to_rgb(theme.list_hover),
+            element_selected: hsla_to_rgb(theme.list_active),
+            text: hsla_to_rgb(theme.foreground),
+            text_muted: hsla_to_rgb(theme.muted_foreground),
+            placeholder_text: hsla_to_rgba(theme.muted_foreground),
+            accent: hsla_to_rgb(theme.primary),
+            match_highlight: hsla_to_rgb(theme.warning),
+            selected_row: hsla_to_rgba(theme.list_active),
+            control_background: hsla_to_rgb(theme.button),
+            control_border: hsla_to_rgb(theme.input),
+            control_hover: hsla_to_rgb(theme.button_hover),
+            success: hsla_to_rgb(theme.success),
+            error: hsla_to_rgb(theme.danger),
+            page_gap: DEFAULT_PAGE_GAP,
+        }
+    }
+
     pub fn apply(mut self, partial: PartialTheme) -> Self {
         macro_rules! apply {
             ($field:ident) => {
@@ -339,8 +350,6 @@ impl Theme {
         apply!(control_hover);
         apply!(success);
         apply!(error);
-
-        self.apply_legacy_token_fallbacks(partial);
 
         if let Some(page_gap) = partial.page_gap {
             self.page_gap = page_gap;
@@ -403,99 +412,22 @@ impl Theme {
         let scale = |shift: u32| (((base >> shift) & 0xffu32) as f32 * 0.65) as u32;
         (scale(24) << 24) | (scale(16) << 16) | (scale(8) << 8) | 0xff
     }
-
-    fn apply_legacy_token_fallbacks(&mut self, partial: PartialTheme) {
-        if partial.surface_background.is_none()
-            && let Some(value) = partial.panel_background
-        {
-            self.surface_background = value;
-        }
-        if partial.border.is_none()
-            && let Some(value) = partial.panel_border
-        {
-            self.border = value;
-        }
-        if partial.border_variant.is_none()
-            && let Some(value) = partial.control_border.or(partial.panel_border)
-        {
-            self.border_variant = value;
-        }
-        if partial.border_focused.is_none()
-            && let Some(value) = partial.accent
-        {
-            self.border_focused = value;
-        }
-        if partial.tab_bar_background.is_none()
-            && let Some(value) = partial.panel_background
-        {
-            self.tab_bar_background = value;
-        }
-        if partial.tab_active_background.is_none()
-            && let Some(value) = partial.background
-        {
-            self.tab_active_background = value;
-        }
-        if partial.tab_inactive_background.is_none()
-            && let Some(value) = partial.panel_background
-        {
-            self.tab_inactive_background = value;
-        }
-        if partial.element_hover.is_none()
-            && let Some(value) = partial.control_hover
-        {
-            self.element_hover = value;
-        }
-        if partial.element_selected.is_none()
-            && let Some(value) = partial.selected_row
-        {
-            self.element_selected = rgba_to_rgb(value);
-        }
-    }
 }
 
 impl Default for Theme {
     fn default() -> Self {
-        DEFAULT_THEME
+        let set = serde_json::from_str::<ComponentThemeSet>(BUNDLED_THEME_SOURCES[0])
+            .expect("bundled gpui-component default theme is invalid");
+        let config = set
+            .themes
+            .into_iter()
+            .find(|config| config.name == DEFAULT_LIGHT_THEME_ID)
+            .expect("bundled gpui-component default light theme is missing");
+        let mut theme = ComponentTheme::default();
+        theme.apply_config(&Rc::new(config));
+        Self::from_component(&theme)
     }
 }
-
-pub const DEFAULT_THEME: Theme = Theme {
-    background: 0xdcdcdd,
-    page: 0xffffff,
-    selection_highlight: 0x5c78e23d,
-    highlight_yellow: 0xdec18466,
-    highlight_green: 0x669f5966,
-    highlight_blue: 0x5c78e266,
-    highlight_pink: 0xa349ab66,
-    highlight_orange: 0xad6e2666,
-    overlay: 0x00000033,
-    footer_background: 0xebebec,
-    footer_border: 0xc9c9ca,
-    footer_text: 0x58585a,
-    panel_background: 0xebebec,
-    panel_border: 0xc9c9ca,
-    surface_background: 0xebebec,
-    border: 0xc9c9ca,
-    border_variant: 0xdfdfe0,
-    border_focused: 0x7d82e8,
-    tab_bar_background: 0xebebec,
-    tab_active_background: 0xfafafa,
-    tab_inactive_background: 0xebebec,
-    element_hover: 0xdfdfe0,
-    element_selected: 0xcacaca,
-    text: 0x242529,
-    text_muted: 0x58585a,
-    placeholder_text: 0x7e8086ff,
-    accent: 0x5c78e2,
-    match_highlight: 0xd0a923,
-    selected_row: 0xcacacaff,
-    control_background: 0xebebec,
-    control_border: 0xdfdfe0,
-    control_hover: 0xdfdfe0,
-    success: 0x669f59,
-    error: 0xd36151,
-    page_gap: DEFAULT_PAGE_GAP,
-};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PartialTheme {
@@ -711,83 +643,121 @@ impl PartialTheme {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ThemeOrigin {
+    Bundled,
+    User(PathBuf),
+}
+
 #[derive(Clone, Debug)]
 pub struct ThemeMetadata {
     pub id: String,
     pub name: String,
     pub appearance: ThemeAppearance,
+    pub origin: ThemeOrigin,
 }
 
 #[derive(Clone, Debug)]
-pub struct ThemeRegistry {
+pub struct ThemeCatalog {
     themes: Vec<ThemeEntry>,
 }
 
 #[derive(Clone, Debug)]
 struct ThemeEntry {
     id: String,
-    name: String,
-    appearance: ThemeAppearance,
-    theme: Theme,
+    config: Rc<ComponentThemeConfig>,
+    origin: ThemeOrigin,
 }
 
-impl ThemeRegistry {
+impl ThemeCatalog {
     pub fn load(user_themes_dir: &Path) -> Self {
-        let mut registry = Self::builtins();
-        registry.load_user_themes(user_themes_dir);
-        registry
+        let mut catalog = Self::bundled();
+        catalog.load_user_themes(user_themes_dir);
+        catalog
     }
 
     pub fn resolve(&self, theme_id: &str, overrides: PartialTheme) -> Theme {
-        self.theme(theme_id)
-            .or_else(|| self.theme(DEFAULT_THEME_ID))
-            .unwrap_or(DEFAULT_THEME)
-            .apply(overrides)
+        let Some(mut theme) = self.component_theme(theme_id) else {
+            return Theme::default().apply(overrides);
+        };
+        apply_component_overrides(&mut theme, overrides);
+        Theme::from_component(&theme).apply(overrides)
     }
 
     pub fn contains(&self, theme_id: &str) -> bool {
-        self.theme(theme_id).is_some()
+        self.config(theme_id).is_some()
+    }
+
+    pub fn contains_for_appearance(&self, theme_id: &str, appearance: ThemeAppearance) -> bool {
+        self.config(theme_id)
+            .is_some_and(|config| ThemeAppearance::from_component(config.mode) == appearance)
     }
 
     pub fn appearance(&self, theme_id: &str) -> ThemeAppearance {
-        self.themes
-            .iter()
-            .find(|entry| entry.id == theme_id)
-            .map(|entry| entry.appearance)
-            .unwrap_or(ThemeAppearance::Dark)
+        self.config(theme_id)
+            .map(|config| ThemeAppearance::from_component(config.mode))
+            .unwrap_or(ThemeAppearance::Light)
     }
 
     pub fn metadata(&self) -> Vec<ThemeMetadata> {
-        self.themes
+        let mut themes = self
+            .themes
             .iter()
             .map(|theme| ThemeMetadata {
                 id: theme.id.clone(),
-                name: theme.name.clone(),
-                appearance: theme.appearance,
+                name: theme.config.name.to_string(),
+                appearance: ThemeAppearance::from_component(theme.config.mode),
+                origin: theme.origin.clone(),
             })
-            .collect()
+            .collect::<Vec<_>>();
+        themes.sort_by(|a, b| {
+            let a_default = a.id == DEFAULT_LIGHT_THEME_ID || a.id == DEFAULT_DARK_THEME_ID;
+            let b_default = b.id == DEFAULT_LIGHT_THEME_ID || b.id == DEFAULT_DARK_THEME_ID;
+            b_default
+                .cmp(&a_default)
+                .then_with(|| {
+                    appearance_sort_key(a.appearance).cmp(&appearance_sort_key(b.appearance))
+                })
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        themes
     }
 
-    pub(crate) fn builtins() -> Self {
-        let mut registry = Self { themes: Vec::new() };
+    pub fn config(&self, theme_id: &str) -> Option<Rc<ComponentThemeConfig>> {
+        self.themes
+            .iter()
+            .find(|entry| entry.id == theme_id)
+            .map(|entry| Rc::clone(&entry.config))
+    }
 
-        for (id, source) in BUILTIN_THEMES {
-            match parse_theme_source(id, source) {
-                Ok(theme) => registry.insert_theme(theme),
-                Err(error) => eprintln!("failed to parse built-in theme {id}: {error:#}"),
+    pub fn install_into_component_registry(&self, cx: &mut App) -> Result<()> {
+        let set = ComponentThemeSet {
+            name: "Glyphst theme catalog".into(),
+            themes: self
+                .themes
+                .iter()
+                .map(|entry| (*entry.config).clone())
+                .collect(),
+            ..ComponentThemeSet::default()
+        };
+        let source = serde_json::to_string(&set)?;
+        ComponentThemeRegistry::global_mut(cx).load_themes_from_str(&source)
+    }
+
+    pub(crate) fn bundled() -> Self {
+        let mut catalog = Self { themes: Vec::new() };
+
+        for source in BUNDLED_THEME_SOURCES {
+            if let Err(error) = catalog.load_source(source, ThemeOrigin::Bundled) {
+                eprintln!("failed to parse bundled gpui-component theme: {error:#}");
             }
         }
 
-        if registry.theme(DEFAULT_THEME_ID).is_none() {
-            registry.insert_theme(ThemeEntry {
-                id: DEFAULT_THEME_ID.to_string(),
-                name: "One Light".to_string(),
-                appearance: ThemeAppearance::Light,
-                theme: DEFAULT_THEME,
-            });
+        if !catalog.contains(DEFAULT_LIGHT_THEME_ID) || !catalog.contains(DEFAULT_DARK_THEME_ID) {
+            panic!("bundled gpui-component default themes are missing");
         }
 
-        registry
+        catalog
     }
 
     fn load_user_themes(&mut self, directory: &Path) {
@@ -798,57 +768,117 @@ impl ThemeRegistry {
         let mut paths = entries
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "kdl"))
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
             .collect::<Vec<PathBuf>>();
         paths.sort();
 
         for path in paths {
-            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-
             match fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))
-                .and_then(|source| parse_theme_source(id, &source))
+                .and_then(|source| self.load_source(&source, ThemeOrigin::User(path.clone())))
             {
-                Ok(theme) => self.insert_theme(theme),
+                Ok(()) => {}
                 Err(error) => eprintln!("failed to load theme {}: {error:#}", path.display()),
             }
         }
     }
 
-    fn insert_theme(&mut self, theme: ThemeEntry) {
-        self.themes.retain(|existing| existing.id != theme.id);
-        self.themes.push(theme);
+    fn load_source(&mut self, source: &str, origin: ThemeOrigin) -> Result<()> {
+        let set = serde_json::from_str::<ComponentThemeSet>(source)?;
+        let mut known = self
+            .themes
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<HashSet<_>>();
+
+        for config in set.themes {
+            let id = config.name.trim().to_string();
+            if id.is_empty() || !known.insert(id.clone()) {
+                continue;
+            }
+            self.themes.push(ThemeEntry {
+                id,
+                config: Rc::new(config),
+                origin: origin.clone(),
+            });
+        }
+
+        Ok(())
     }
 
-    fn theme(&self, id: &str) -> Option<Theme> {
-        self.themes
-            .iter()
-            .find_map(|entry| (entry.id == id).then_some(entry.theme))
+    fn component_theme(&self, id: &str) -> Option<ComponentTheme> {
+        let config = self
+            .config(id)
+            .or_else(|| self.config(DEFAULT_LIGHT_THEME_ID))?;
+        let mut theme = ComponentTheme::default();
+        theme.apply_config(&config);
+        Some(theme)
     }
 }
 
-fn parse_theme_source(id: &str, source: &str) -> Result<ThemeEntry> {
-    let document = source.parse::<KdlDocument>()?;
-    let partial = PartialTheme::from_document(&document);
-    let name = document
-        .get_arg("name")
-        .and_then(KdlValue::as_string)
-        .unwrap_or(id)
-        .to_string();
-    let appearance = document
-        .get_arg("appearance")
-        .and_then(KdlValue::as_string)
-        .and_then(ThemeAppearance::from_str)
-        .unwrap_or(ThemeAppearance::Dark);
+fn appearance_sort_key(appearance: ThemeAppearance) -> u8 {
+    match appearance {
+        ThemeAppearance::Light => 0,
+        ThemeAppearance::Dark => 1,
+    }
+}
 
-    Ok(ThemeEntry {
-        id: id.to_string(),
-        name,
-        appearance,
-        theme: DEFAULT_THEME.apply(partial),
-    })
+/// Apply the subset of Glyphst's domain overrides that has a component-theme
+/// equivalent. Document-only colors are applied later by [`Theme::apply`].
+pub fn apply_component_overrides(theme: &mut ComponentTheme, overrides: PartialTheme) {
+    macro_rules! apply_rgb {
+        ($source:ident => $($target:ident),+ $(,)?) => {
+            if let Some(value) = overrides.$source {
+                let color: Hsla = rgb(value).into();
+                $(
+                    theme.colors.$target = color;
+                    theme.tokens.$target = color.into();
+                )+
+            }
+        };
+    }
+
+    macro_rules! apply_rgba {
+        ($source:ident => $($target:ident),+ $(,)?) => {
+            if let Some(value) = overrides.$source {
+                let color: Hsla = rgba(value).into();
+                $(
+                    theme.colors.$target = color;
+                    theme.tokens.$target = color.into();
+                )+
+            }
+        };
+    }
+
+    apply_rgb!(background => background);
+    apply_rgba!(overlay => overlay);
+    apply_rgb!(footer_background => status_bar);
+    apply_rgb!(footer_border => status_bar_border);
+    apply_rgb!(panel_background => sidebar);
+    apply_rgb!(panel_border => sidebar_border);
+    apply_rgb!(surface_background => popover);
+    apply_rgb!(border => border);
+    apply_rgb!(border_variant => input);
+    apply_rgb!(border_focused => ring);
+    apply_rgb!(tab_bar_background => tab_bar);
+    apply_rgb!(tab_active_background => tab_active);
+    apply_rgb!(tab_inactive_background => tab);
+    apply_rgb!(element_hover => list_hover);
+    apply_rgb!(element_selected => list_active);
+    apply_rgb!(text => foreground, popover_foreground, sidebar_foreground);
+    apply_rgb!(text_muted => muted_foreground);
+    apply_rgba!(placeholder_text => muted_foreground);
+    apply_rgb!(accent => primary, ring, link, caret, sidebar_primary);
+    apply_rgb!(match_highlight => warning, yellow);
+    apply_rgba!(selected_row => list_active, table_active);
+    apply_rgb!(control_background => button);
+    apply_rgb!(control_border => input);
+    apply_rgb!(control_hover => button_hover);
+    apply_rgb!(success => success);
+    apply_rgb!(error => danger);
 }
 
 pub fn parse_hex_color(value: &str, allow_alpha: bool) -> Option<u32> {
@@ -883,8 +913,24 @@ pub fn push_value_node(document: &mut KdlDocument, name: &str, value: impl Into<
     document.nodes_mut().push(node);
 }
 
-fn rgba_to_rgb(value: u32) -> u32 {
-    (value >> 8) & 0x00ff_ffff
+fn hsla_to_rgb(color: Hsla) -> u32 {
+    hsla_to_rgba(color) >> 8
+}
+
+fn hsla_to_rgba(color: Hsla) -> u32 {
+    let rgb = color.to_rgb();
+    (channel_to_u8(rgb.r) << 24)
+        | (channel_to_u8(rgb.g) << 16)
+        | (channel_to_u8(rgb.b) << 8)
+        | channel_to_u8(color.a)
+}
+
+fn hsla_to_rgba_with_alpha(color: Hsla, alpha: u32) -> u32 {
+    (hsla_to_rgb(color) << 8) | (alpha & 0xff)
+}
+
+fn channel_to_u8(channel: f32) -> u32 {
+    (channel.clamp(0.0, 1.0) * 255.0).round() as u32
 }
 
 fn mask_rgb(value: &mut u32) {

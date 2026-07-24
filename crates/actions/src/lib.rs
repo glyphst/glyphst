@@ -4,7 +4,7 @@ pub mod ai_panel {
 
 pub mod input {
     gpui::actions!(
-        input,
+        glyphst_input,
         [
             Backspace,
             Delete,

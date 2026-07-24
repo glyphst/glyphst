@@ -8,7 +8,12 @@ anyhow.workspace = true
 glyphst-core = { path = "../core" }
 glyphst-library = { path = "../library" }
 gpui.workspace = true
+gpui_component.workspace = true
 i18n-embed.workspace = true
 i18n-embed-fl.workspace = true
 kdl.workspace = true
 rust-embed.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

@@ -1,7 +1,7 @@
 use crate::{
     icons::{Icon, IconName},
     picker::{Picker, PickerDelegate, fuzzy_match},
-    settings::{SettingsStore, ui_rems},
+    settings::{SettingsStore, sync_component_theme, ui_rems},
     style::TextSize,
     theme::{Theme, ThemeAppearance, ThemeMetadata, ThemeSelection},
 };
@@ -95,6 +95,7 @@ impl ThemeSelectorDelegate {
             self.original_system_appearance,
         );
         cx.global_mut::<SettingsStore>().override_settings(settings);
+        sync_component_theme(cx);
     }
 
     fn revert(&mut self, cx: &mut Context<Picker<Self>>) {
@@ -102,6 +103,7 @@ impl ThemeSelectorDelegate {
             let mut settings = cx.global::<SettingsStore>().settings.clone();
             settings.theme = self.original_selection.clone();
             cx.global_mut::<SettingsStore>().override_settings(settings);
+            sync_component_theme(cx);
             self.selection_completed = true;
         }
     }

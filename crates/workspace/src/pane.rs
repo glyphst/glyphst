@@ -17,6 +17,7 @@ use gpui::{
     Styled, Task, Window, WindowHandle, div, fill, point, prelude::*, px, quad, relative, rgb,
     rgba, size, transparent_black,
 };
+use gpui_component::Root;
 use smallvec::SmallVec;
 
 pub use glyphst_actions::pane::{
@@ -31,7 +32,6 @@ use crate::{
     pdf_view::{PdfAnnotations, PdfOpenOptions, PdfView, PdfViewEvent, PreparedPdfOpen},
     settings::{SettingsStore, TabBarVisibility, ui_rems},
     theme::Theme,
-    workspace::Workspace,
 };
 
 pub(crate) const PANE_TAB_BAR_HEIGHT: f32 = 32.0;
@@ -107,7 +107,7 @@ impl Render for LoadingDocumentView {
 
 #[derive(Clone)]
 pub(crate) struct DraggedTab {
-    pub(crate) source_window: WindowHandle<Workspace>,
+    pub(crate) source_window: WindowHandle<Root>,
     pub(crate) source_pane: Entity<Pane>,
     pub(crate) ix: usize,
     pub(crate) tab_id: EntityId,
@@ -958,7 +958,7 @@ impl Pane {
     fn render_tab(
         &self,
         tab_ix: usize,
-        source_window: WindowHandle<Workspace>,
+        source_window: Option<WindowHandle<Root>>,
         source_pane: Entity<Pane>,
         theme: Theme,
         cx: &mut Context<Self>,
@@ -997,36 +997,42 @@ impl Pane {
             }))
             .hover(move |style| style.bg(rgb(theme.element_hover)))
             .cursor_pointer()
-            .when(draggable, |this| {
-                let drag_source_pane = source_pane.clone();
-                this.on_drag(
-                    DraggedTab {
-                        source_window,
-                        source_pane: source_pane.clone(),
-                        ix: tab_ix,
-                        tab_id,
-                        label: label.clone(),
-                        theme,
-                    },
-                    |tab, _, _, cx| cx.new(|_| tab.clone()),
-                )
-                .drag_over::<DraggedTab>(move |style, dragged_tab, _, _| {
-                    let style = style.bg(rgb(theme.element_hover));
-                    if dragged_tab.source_pane != drag_source_pane || tab_ix < dragged_tab.ix {
-                        style.border_l(px(2.0)).border_color(rgb(theme.accent))
-                    } else if tab_ix > dragged_tab.ix {
-                        style.border_r(px(2.0)).border_color(rgb(theme.accent))
-                    } else {
-                        style
-                    }
-                })
-                .on_drop(cx.listener(move |_, dragged_tab: &DraggedTab, _, cx| {
-                    cx.emit(PaneEvent::TabDrop {
-                        dragged_tab: Box::new(dragged_tab.clone()),
-                        target: PaneDropTarget::Tab(tab_ix),
-                    });
-                }))
-            })
+            .debug_selector(move || format!("pane-tab-{tab_ix}"))
+            .when_some(
+                source_window.filter(|_| draggable),
+                |this, source_window| {
+                    let drag_source_pane = source_pane.clone();
+                    this.on_drag(
+                        DraggedTab {
+                            source_window,
+                            source_pane: source_pane.clone(),
+                            ix: tab_ix,
+                            tab_id,
+                            label: label.clone(),
+                            theme,
+                        },
+                        |tab, _, _, cx| cx.new(|_| tab.clone()),
+                    )
+                    .drag_over::<DraggedTab>(move |style, dragged_tab, _, _| {
+                        let style = style.bg(rgb(theme.element_hover));
+                        if dragged_tab.source_pane != drag_source_pane || tab_ix < dragged_tab.ix {
+                            style.border_l(px(2.0)).border_color(rgb(theme.accent))
+                        } else if tab_ix > dragged_tab.ix {
+                            style.border_r(px(2.0)).border_color(rgb(theme.accent))
+                        } else {
+                            style
+                        }
+                    })
+                    .on_drop(cx.listener(
+                        move |_, dragged_tab: &DraggedTab, _, cx| {
+                            cx.emit(PaneEvent::TabDrop {
+                                dragged_tab: Box::new(dragged_tab.clone()),
+                                target: PaneDropTarget::Tab(tab_ix),
+                            });
+                        },
+                    ))
+                },
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -1068,17 +1074,11 @@ impl Pane {
     }
 
     fn render_tab_bar(&self, theme: Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let source_window = window.window_handle().downcast::<Workspace>();
+        let source_window = window.window_handle().downcast::<Root>();
         let source_pane = cx.entity();
-        let tabs = source_window
-            .map(|source_window| {
-                (0..self.tabs.len())
-                    .map(|tab_ix| {
-                        self.render_tab(tab_ix, source_window, source_pane.clone(), theme, cx)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let tabs = (0..self.tabs.len())
+            .map(|tab_ix| self.render_tab(tab_ix, source_window, source_pane.clone(), theme, cx))
+            .collect::<Vec<_>>();
 
         div()
             .flex_none()
@@ -2262,6 +2262,7 @@ mod tests {
     use std::fs;
 
     use gpui::{AppContext as _, TestAppContext};
+    use gpui_component::Root;
 
     use super::{Pane, Tab, resize_axis_sizes};
     use crate::{library::LibraryStore, pdf_view::RenderCache, settings::SettingsStore};
@@ -2334,6 +2335,7 @@ mod tests {
     #[gpui::test]
     fn document_open_stages_a_loading_tab_without_blocking_tab_switches(cx: &mut TestAppContext) {
         cx.update(|cx| {
+            gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
             cx.set_global(LibraryStore::memory());
             cx.set_global(RenderCache::new());
@@ -2342,8 +2344,13 @@ mod tests {
         let path = temporary_pdf_path("loading-tab");
         fs::create_dir(&path).unwrap();
 
-        let (pane, cx) =
-            cx.add_window_view(|_window, cx| Pane::empty(cx.focus_handle(), jobs.clone()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs.clone()));
+            Root::new(pane, window, cx)
+        });
+        let pane = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Pane>().unwrap()
+        });
         pane.update_in(cx, |pane, window, cx| {
             pane.focus_or_open_document(path.clone(), None, true, window, cx)
                 .unwrap();
@@ -2384,6 +2391,7 @@ mod tests {
     #[gpui::test]
     fn successful_document_preparation_replaces_the_loading_tab(cx: &mut TestAppContext) {
         cx.update(|cx| {
+            gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
             cx.set_global(LibraryStore::memory());
             cx.set_global(RenderCache::new());
@@ -2392,8 +2400,13 @@ mod tests {
         let path = temporary_pdf_path("loading-success");
         write_minimal_pdf(&path);
 
-        let (pane, cx) =
-            cx.add_window_view(|_window, cx| Pane::empty(cx.focus_handle(), jobs.clone()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs.clone()));
+            Root::new(pane, window, cx)
+        });
+        let pane = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Pane>().unwrap()
+        });
         pane.update_in(cx, |pane, window, cx| {
             pane.focus_or_open_document(path.clone(), None, true, window, cx)
                 .unwrap();

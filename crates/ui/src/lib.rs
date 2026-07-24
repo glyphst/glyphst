@@ -5,6 +5,7 @@ pub mod markdown;
 pub mod notification_center;
 pub mod picker;
 pub mod prompt;
+pub mod root;
 pub mod scrollbar;
 pub mod searchable_dropdown;
 pub mod settings_input;

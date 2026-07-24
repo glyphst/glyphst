@@ -1,22 +1,97 @@
-use anyhow::Context as _;
 use gpui::{AssetSource, Result, SharedString};
+use gpui_component_assets::Assets as ComponentAssets;
 use rust_embed::RustEmbed;
+use std::{borrow::Cow, collections::BTreeSet};
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
 #[include = "icons/**/*"]
-pub struct Assets;
+struct GlyphstAssets;
+
+/// The application asset source.
+///
+/// Glyphst-specific assets take precedence, while the curated
+/// `gpui-component-assets` bundle supplies the component icon set.
+pub struct Assets {
+    component: ComponentAssets,
+}
+
+impl Default for Assets {
+    fn default() -> Self {
+        Self {
+            component: ComponentAssets::new(""),
+        }
+    }
+}
 
 impl AssetSource for Assets {
-    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        Self::get(path)
-            .map(|file| Some(file.data))
-            .with_context(|| format!("loading asset at path {path:?}"))
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some(file) = GlyphstAssets::get(path) {
+            return Ok(Some(file.data));
+        }
+
+        self.component.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        Ok(Self::iter()
-            .filter_map(|asset| asset.starts_with(path).then_some(asset.into()))
-            .collect())
+        let mut assets = BTreeSet::new();
+        assets.extend(
+            GlyphstAssets::iter()
+                .filter(|asset| asset.starts_with(path))
+                .map(|asset| asset.to_string()),
+        );
+        assets.extend(
+            self.component
+                .list(path)?
+                .into_iter()
+                .map(|asset| asset.to_string()),
+        );
+
+        Ok(assets.into_iter().map(Into::into).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn glyphst_and_component_asset_sets_are_disjoint() {
+        let component = ComponentAssets::new("");
+        let component_assets = component
+            .list("icons/")
+            .expect("component icon inventory")
+            .into_iter()
+            .map(|path| path.to_string())
+            .collect::<BTreeSet<_>>();
+
+        let duplicates = GlyphstAssets::iter()
+            .map(|path| path.to_string())
+            .filter(|path| component_assets.contains(path))
+            .collect::<Vec<_>>();
+
+        assert!(
+            duplicates.is_empty(),
+            "Glyphst must not embed icons already supplied by gpui-component-assets: {duplicates:?}"
+        );
+    }
+
+    #[test]
+    fn composite_assets_load_both_sources() {
+        let assets = Assets::default();
+
+        assert!(
+            assets
+                .load("icons/app-window.svg")
+                .expect("Glyphst icon lookup")
+                .is_some()
+        );
+        assert!(
+            assets
+                .load("icons/search.svg")
+                .expect("component icon lookup")
+                .is_some()
+        );
     }
 }

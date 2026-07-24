@@ -29,7 +29,22 @@ use glyphst_actions::{
     },
 };
 use glyphst_settings::{KeyBindingOverride, KeymapPreset, Settings};
-use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate};
+use gpui::{Action, App, Global, KeyBinding, KeyBindingContextPredicate};
+
+struct FrameworkKeyBindings(Vec<KeyBinding>);
+
+impl Global for FrameworkKeyBindings {}
+
+/// Capture bindings registered by the UI framework before Glyphst applies its
+/// configurable keymap.
+///
+/// Glyphst rebuilds its bindings when the preset or overrides change. Keeping
+/// this baseline prevents that rebuild from erasing gpui-component's internal
+/// input, focus, menu, and dialog bindings.
+pub fn capture_framework_bindings(cx: &mut App) {
+    let bindings = cx.key_bindings().borrow().bindings().cloned().collect();
+    cx.set_global(FrameworkKeyBindings(bindings));
+}
 
 const OVERLAY_CONTEXTS: &[&str] = &[
     "GridOverview",
@@ -355,7 +370,10 @@ const PLATFORM_TEXT_EDIT_BINDINGS: &[InternalBindingSpec] = &[
 ];
 
 pub fn apply(cx: &mut App, preset: KeymapPreset, overrides: &[KeyBindingOverride]) {
-    let mut bindings = Vec::new();
+    let mut bindings = cx
+        .try_global::<FrameworkKeyBindings>()
+        .map(|bindings| bindings.0.clone())
+        .unwrap_or_default();
 
     for spec in command_specs() {
         let context = spec.category.predicate();

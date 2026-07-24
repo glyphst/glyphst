@@ -16,6 +16,7 @@ glyphst-settings-ui = { path = "../settings-ui" }
 glyphst-translation-ui = { path = "../translation-ui" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
+gpui_component.workspace = true
 image.workspace = true
 mupdf.workspace = true
 smallvec.workspace = true

@@ -30,4 +30,4 @@ pub use glyphst_pdf_ui::pdf_view;
 pub use glyphst_settings::{self as settings, localize, theme};
 pub use glyphst_ui::{icons, picker, scrollbar, style};
 pub use new_tab::NewTab;
-pub use workspace::{Workspace, WorkspaceCallbacks, WorkspaceWindowRequest};
+pub use workspace::{Workspace, WorkspaceCallbacks, WorkspaceWindowHandle, WorkspaceWindowRequest};

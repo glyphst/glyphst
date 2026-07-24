@@ -12,8 +12,8 @@ use gpui::{App, Font, FontFallbacks, FontWeight, Global, Window, WindowBackgroun
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use crate::theme::{
-    DEFAULT_DARK_THEME_ID, DEFAULT_LIGHT_THEME_ID, DEFAULT_THEME_ID, PartialTheme, Theme,
-    ThemeAppearance, ThemeRegistry, ThemeSelection, push_value_node, value_to_f32,
+    DEFAULT_DARK_THEME_ID, DEFAULT_LIGHT_THEME_ID, PartialTheme, Theme, ThemeAppearance,
+    ThemeCatalog, ThemeSelection, apply_component_overrides, push_value_node, value_to_f32,
 };
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -2641,14 +2641,12 @@ impl Settings {
 
 pub struct SettingsStore {
     pub settings: Settings,
-    pub registry: ThemeRegistry,
+    pub theme_catalog: ThemeCatalog,
     pub resolved_theme: Theme,
     pub system_appearance: ThemeAppearance,
     pub user_managed: bool,
     pub config_path: PathBuf,
     pub state_path: PathBuf,
-    pub last_dynamic_light: Option<String>,
-    pub last_dynamic_dark: Option<String>,
 }
 
 impl Global for SettingsStore {}
@@ -2656,28 +2654,32 @@ impl Global for SettingsStore {}
 impl SettingsStore {
     pub fn memory() -> Self {
         let settings = Settings::default();
-        let registry = ThemeRegistry::builtins();
+        let theme_catalog = ThemeCatalog::bundled();
         let system_appearance = ThemeAppearance::Light;
         let resolved_theme =
-            registry.resolve(settings.theme.name(system_appearance), settings.overrides);
+            theme_catalog.resolve(settings.theme.name(system_appearance), settings.overrides);
         Self {
             settings,
-            registry,
+            theme_catalog,
             resolved_theme,
             system_appearance,
             user_managed: false,
             config_path: PathBuf::new(),
             state_path: PathBuf::new(),
-            last_dynamic_light: None,
-            last_dynamic_dark: None,
         }
     }
 
     pub fn load() -> Self {
         let config_path = config_path();
         let state_path = state_path();
-        let themes_path = themes_path();
-        let registry = ThemeRegistry::load(&themes_path);
+        let themes_path = user_themes_dir();
+        if let Err(error) = fs::create_dir_all(&themes_path) {
+            eprintln!(
+                "failed to create user theme directory {}: {error}",
+                themes_path.display()
+            );
+        }
+        let theme_catalog = ThemeCatalog::load(&themes_path);
         let user_managed = config_path.exists();
         let load_path = if user_managed {
             Some(&config_path)
@@ -2696,28 +2698,30 @@ impl SettingsStore {
             })
             .unwrap_or_default();
         let system_appearance = ThemeAppearance::Light;
-        validate_theme_selection(&mut settings, &registry, system_appearance);
+        validate_theme_selection(&mut settings, &theme_catalog);
         let resolved_theme =
-            registry.resolve(settings.theme.name(system_appearance), settings.overrides);
+            theme_catalog.resolve(settings.theme.name(system_appearance), settings.overrides);
 
         Self {
             settings,
-            registry,
+            theme_catalog,
             resolved_theme,
             system_appearance,
             user_managed,
             config_path,
             state_path,
-            last_dynamic_light: None,
-            last_dynamic_dark: None,
         }
+    }
+
+    pub fn install_theme_catalog(&self, cx: &mut App) -> Result<()> {
+        self.theme_catalog.install_into_component_registry(cx)
     }
 
     pub fn set_settings(&mut self, settings: Settings) -> Result<()> {
         let mut settings = settings;
         settings.sanitize();
-        validate_theme_selection(&mut settings, &self.registry, self.system_appearance);
-        let resolved_theme = self.registry.resolve(
+        validate_theme_selection(&mut settings, &self.theme_catalog);
+        let resolved_theme = self.theme_catalog.resolve(
             settings.theme.name(self.system_appearance),
             settings.overrides,
         );
@@ -2736,8 +2740,8 @@ impl SettingsStore {
     pub fn set_settings_in_memory(&mut self, settings: Settings) {
         let mut settings = settings;
         settings.sanitize();
-        validate_theme_selection(&mut settings, &self.registry, self.system_appearance);
-        let resolved_theme = self.registry.resolve(
+        validate_theme_selection(&mut settings, &self.theme_catalog);
+        let resolved_theme = self.theme_catalog.resolve(
             settings.theme.name(self.system_appearance),
             settings.overrides,
         );
@@ -2750,7 +2754,7 @@ impl SettingsStore {
             return;
         }
         self.system_appearance = appearance;
-        self.resolved_theme = self.registry.resolve(
+        self.resolved_theme = self.theme_catalog.resolve(
             self.settings.theme.name(appearance),
             self.settings.overrides,
         );
@@ -2777,8 +2781,8 @@ impl SettingsStore {
     pub fn override_settings(&mut self, settings: Settings) {
         self.settings = settings;
         self.settings.sanitize();
-        validate_theme_selection(&mut self.settings, &self.registry, self.system_appearance);
-        self.resolved_theme = self.registry.resolve(
+        validate_theme_selection(&mut self.settings, &self.theme_catalog);
+        self.resolved_theme = self.theme_catalog.resolve(
             self.settings.theme.name(self.system_appearance),
             self.settings.overrides,
         );
@@ -2793,27 +2797,56 @@ impl SettingsStore {
     }
 }
 
-fn validate_theme_selection(
-    settings: &mut Settings,
-    registry: &ThemeRegistry,
-    system_appearance: ThemeAppearance,
-) {
-    match &mut settings.theme {
-        ThemeSelection::Static(name) => {
-            if !registry.contains(name) {
-                *name = DEFAULT_THEME_ID.to_string();
-            }
-        }
-        ThemeSelection::Dynamic { light, dark, .. } => {
-            if !registry.contains(light) {
-                *light = DEFAULT_LIGHT_THEME_ID.to_string();
-            }
-            if !registry.contains(dark) {
-                *dark = DEFAULT_DARK_THEME_ID.to_string();
-            }
-        }
+/// Keep gpui-components and Glyphst's document/workspace adapter on the same
+/// selected theme. Call this after a theme, appearance, override, or UI-font
+/// setting changes.
+pub fn sync_component_theme(cx: &mut App) {
+    let (light, dark, active, overrides, font) = {
+        let store = cx.global::<SettingsStore>();
+        let light = store
+            .theme_catalog
+            .config(&store.settings.theme.light)
+            .or_else(|| store.theme_catalog.config(DEFAULT_LIGHT_THEME_ID))
+            .expect("bundled default light theme is missing");
+        let dark = store
+            .theme_catalog
+            .config(&store.settings.theme.dark)
+            .or_else(|| store.theme_catalog.config(DEFAULT_DARK_THEME_ID))
+            .expect("bundled default dark theme is missing");
+        let active = match store
+            .settings
+            .theme
+            .effective_appearance(store.system_appearance)
+        {
+            ThemeAppearance::Light => light.clone(),
+            ThemeAppearance::Dark => dark.clone(),
+        };
+        (
+            light,
+            dark,
+            active,
+            store.settings.overrides,
+            store.settings.font.clone(),
+        )
+    };
+
+    let theme = gpui_component::Theme::global_mut(cx);
+    theme.light_theme = light;
+    theme.dark_theme = dark;
+    theme.apply_config(&active);
+    apply_component_overrides(theme, overrides);
+    theme.font_family = font.ui_font_family.into();
+    theme.font_size = gpui::px(font.ui_font_size);
+    cx.refresh_windows();
+}
+
+fn validate_theme_selection(settings: &mut Settings, catalog: &ThemeCatalog) {
+    if !catalog.contains_for_appearance(&settings.theme.light, ThemeAppearance::Light) {
+        settings.theme.light = DEFAULT_LIGHT_THEME_ID.to_string();
     }
-    let _ = system_appearance;
+    if !catalog.contains_for_appearance(&settings.theme.dark, ThemeAppearance::Dark) {
+        settings.theme.dark = DEFAULT_DARK_THEME_ID.to_string();
+    }
 }
 
 pub fn parse_settings(text: &str) -> Result<Settings> {
@@ -2827,7 +2860,7 @@ fn config_path() -> PathBuf {
     crate::app_paths::config_dir().join("config.kdl")
 }
 
-fn themes_path() -> PathBuf {
+pub fn user_themes_dir() -> PathBuf {
     crate::app_paths::config_dir().join("themes")
 }
 
@@ -2931,14 +2964,19 @@ fn atomic_write_private(path: &Path, contents: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::ThemeAppearanceMode;
+    use crate::theme::{ThemeAppearanceMode, ThemeOrigin};
+    use gpui::TestAppContext;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_partial_settings_with_defaults() {
         let settings = parse_settings(
             r##"
-theme "one-dark"
+theme {
+    mode "dark"
+    light "Default Light"
+    dark "Default Dark"
+}
 zoom {
     default 1.5
 }
@@ -2966,7 +3004,11 @@ theme-overrides {
         );
         assert_eq!(
             settings.theme,
-            ThemeSelection::Static("one-dark".to_string())
+            ThemeSelection {
+                mode: ThemeAppearanceMode::Dark,
+                light: DEFAULT_LIGHT_THEME_ID.to_string(),
+                dark: DEFAULT_DARK_THEME_ID.to_string(),
+            }
         );
         assert_eq!(settings.overrides.background, Some(0x101010));
         assert_eq!(settings.overrides.selection_highlight, None);
@@ -3027,7 +3069,10 @@ window {
                 copy_format: CopyFormat::Markdown,
                 semantic_copy: false,
             },
-            theme: ThemeSelection::Static("one-dark".to_string()),
+            theme: ThemeSelection {
+                mode: ThemeAppearanceMode::Dark,
+                ..ThemeSelection::default()
+            },
             overrides: PartialTheme {
                 background: Some(0x181818),
                 selection_highlight: Some(0x61afef66),
@@ -3746,9 +3791,12 @@ ai {
 
     #[test]
     fn theme_resolution_layers_selected_theme_and_overrides() {
-        let registry = ThemeRegistry::load(Path::new("/path/that/does/not/exist"));
+        let catalog = ThemeCatalog::load(Path::new("/path/that/does/not/exist"));
         let settings = Settings {
-            theme: ThemeSelection::Static("one-dark".to_string()),
+            theme: ThemeSelection {
+                mode: ThemeAppearanceMode::Dark,
+                ..ThemeSelection::default()
+            },
             overrides: PartialTheme {
                 background: Some(0x101010),
                 page_gap: Some(48.0),
@@ -3757,22 +3805,65 @@ ai {
             ..Settings::default()
         };
 
-        let theme = registry.resolve(
+        let base = catalog.resolve(DEFAULT_DARK_THEME_ID, PartialTheme::default());
+        let theme = catalog.resolve(
             settings.theme.name(ThemeAppearance::Light),
             settings.overrides,
         );
 
-        assert_eq!(theme.accent, 0x74ade8);
+        assert_eq!(theme.accent, base.accent);
         assert_eq!(theme.background, 0x101010);
         assert_eq!(theme.page_gap, 48.0);
     }
 
     #[test]
     fn unknown_theme_falls_back_to_default() {
-        let registry = ThemeRegistry::load(Path::new("/path/that/does/not/exist"));
-        let theme = registry.resolve("missing", PartialTheme::default());
+        let catalog = ThemeCatalog::load(Path::new("/path/that/does/not/exist"));
+        let theme = catalog.resolve("missing", PartialTheme::default());
 
-        assert_eq!(theme, Theme::default());
+        assert_eq!(
+            theme,
+            catalog.resolve(DEFAULT_LIGHT_THEME_ID, PartialTheme::default())
+        );
+    }
+
+    #[test]
+    fn bundles_the_full_gpui_component_catalog() {
+        let catalog = ThemeCatalog::load(Path::new("/path/that/does/not/exist"));
+        let metadata = catalog.metadata();
+
+        assert_eq!(metadata.len(), 39);
+        assert!(metadata.iter().any(|theme| theme.id == "Catppuccin Latte"));
+        assert!(metadata.iter().any(|theme| theme.id == "Catppuccin Mocha"));
+        assert!(
+            metadata
+                .iter()
+                .all(|theme| theme.origin == ThemeOrigin::Bundled)
+        );
+    }
+
+    #[gpui::test]
+    fn installs_and_activates_the_catalog_in_gpui_components(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let mut store = SettingsStore::memory();
+            store.settings.theme.mode = ThemeAppearanceMode::Dark;
+            store.settings.theme.dark = "Catppuccin Mocha".to_string();
+            store.resolved_theme = store
+                .theme_catalog
+                .resolve("Catppuccin Mocha", store.settings.overrides);
+            store.install_theme_catalog(cx).unwrap();
+            cx.set_global(store);
+
+            sync_component_theme(cx);
+
+            assert_eq!(gpui_component::ThemeRegistry::global(cx).themes().len(), 39);
+            assert_eq!(
+                gpui_component::Theme::global(cx).theme_name().as_ref(),
+                "Catppuccin Mocha"
+            );
+            assert!(gpui_component::Theme::global(cx).is_dark());
+        });
     }
 
     #[test]
@@ -3780,32 +3871,38 @@ ai {
         let root = unique_test_dir();
         fs::create_dir_all(&root).unwrap();
         fs::write(
-            root.join("solar.kdl"),
+            root.join("solar.json"),
             r##"
-name "Solar"
-appearance "light"
-colors {
-    background "#123456"
-    accent "#abcdef"
+{
+  "name": "Solar test",
+  "themes": [
+    {
+      "name": "Solar",
+      "mode": "light",
+      "colors": {
+        "background": "#123456",
+        "primary.background": "#abcdef"
+      }
+    }
+  ]
 }
-page-gap 36
 "##,
         )
         .unwrap();
 
-        let registry = ThemeRegistry::load(&root);
-        let theme = registry.resolve("solar", PartialTheme::default());
-        let metadata = registry
+        let catalog = ThemeCatalog::load(&root);
+        let theme = catalog.resolve("Solar", PartialTheme::default());
+        let metadata = catalog
             .metadata()
             .into_iter()
-            .find(|metadata| metadata.id == "solar")
+            .find(|metadata| metadata.id == "Solar")
             .unwrap();
 
         assert_eq!(theme.background, 0x123456);
         assert_eq!(theme.accent, 0xabcdef);
-        assert_eq!(theme.page_gap, 36.0);
         assert_eq!(metadata.name, "Solar");
         assert_eq!(metadata.appearance.as_str(), "light");
+        assert_eq!(metadata.origin, ThemeOrigin::User(root.join("solar.json")));
 
         fs::remove_dir_all(root).ok();
     }
@@ -3942,7 +4039,7 @@ page-gap 36
                 copy_format: CopyFormat::PlainText,
                 semantic_copy: false,
             },
-            theme: ThemeSelection::Static(DEFAULT_THEME_ID.to_string()),
+            theme: ThemeSelection::default(),
             overrides: PartialTheme {
                 background: Some(0x181818),
                 selection_highlight: Some(0x61afef66),
@@ -3968,13 +4065,13 @@ page-gap 36
     }
 
     #[test]
-    fn parses_dynamic_theme_selection() {
+    fn parses_theme_selection() {
         let settings = parse_settings(
             r##"
 theme {
     mode "system"
-    light "one-light"
-    dark "one-dark"
+    light "Ayu Light"
+    dark "Ayu Dark"
 }
 "##,
         )
@@ -3982,21 +4079,21 @@ theme {
 
         assert_eq!(
             settings.theme,
-            ThemeSelection::Dynamic {
+            ThemeSelection {
                 mode: ThemeAppearanceMode::System,
-                light: "one-light".to_string(),
-                dark: "one-dark".to_string(),
+                light: "Ayu Light".to_string(),
+                dark: "Ayu Dark".to_string(),
             }
         );
     }
 
     #[test]
-    fn dynamic_theme_selection_round_trips() {
+    fn theme_selection_round_trips() {
         let settings = Settings {
-            theme: ThemeSelection::Dynamic {
+            theme: ThemeSelection {
                 mode: ThemeAppearanceMode::Dark,
-                light: "one-light".to_string(),
-                dark: "one-dark".to_string(),
+                light: "Ayu Light".to_string(),
+                dark: "Ayu Dark".to_string(),
             },
             ..Settings::default()
         };
@@ -4006,56 +4103,64 @@ theme {
     }
 
     #[test]
-    fn set_mode_migrates_static_to_dynamic() {
-        let mut selection = ThemeSelection::Static("one-light".to_string());
+    fn set_mode_updates_mode_without_changing_pair() {
+        let mut selection = ThemeSelection {
+            mode: ThemeAppearanceMode::System,
+            light: "Ayu Light".to_string(),
+            dark: "Ayu Dark".to_string(),
+        };
         selection.set_mode(ThemeAppearanceMode::Dark);
 
         assert_eq!(
             selection,
-            ThemeSelection::Dynamic {
-                mode: ThemeAppearanceMode::System,
-                light: "one-light".to_string(),
-                dark: "one-dark".to_string(),
+            ThemeSelection {
+                mode: ThemeAppearanceMode::Dark,
+                light: "Ayu Light".to_string(),
+                dark: "Ayu Dark".to_string(),
             }
         );
     }
 
     #[test]
-    fn set_mode_updates_dynamic_mode() {
-        let mut selection = ThemeSelection::Dynamic {
+    fn set_theme_updates_the_selected_appearance() {
+        let mut selection = ThemeSelection {
             mode: ThemeAppearanceMode::System,
-            light: "one-light".to_string(),
-            dark: "one-dark".to_string(),
+            light: "Ayu Light".to_string(),
+            dark: "Ayu Dark".to_string(),
         };
-        selection.set_mode(ThemeAppearanceMode::Light);
+        selection.set_theme(
+            "Catppuccin Mocha".to_string(),
+            ThemeAppearance::Dark,
+            ThemeAppearance::Light,
+        );
 
         assert_eq!(
             selection,
-            ThemeSelection::Dynamic {
-                mode: ThemeAppearanceMode::Light,
-                light: "one-light".to_string(),
-                dark: "one-dark".to_string(),
+            ThemeSelection {
+                mode: ThemeAppearanceMode::Dark,
+                light: "Ayu Light".to_string(),
+                dark: "Catppuccin Mocha".to_string(),
             }
         );
     }
 
     #[test]
     fn theme_selection_name_returns_correct_theme() {
-        let dynamic = ThemeSelection::Dynamic {
+        let dynamic = ThemeSelection {
             mode: ThemeAppearanceMode::System,
-            light: "one-light".to_string(),
-            dark: "one-dark".to_string(),
+            light: "Ayu Light".to_string(),
+            dark: "Ayu Dark".to_string(),
         };
 
-        assert_eq!(dynamic.name(ThemeAppearance::Light), "one-light");
-        assert_eq!(dynamic.name(ThemeAppearance::Dark), "one-dark");
+        assert_eq!(dynamic.name(ThemeAppearance::Light), "Ayu Light");
+        assert_eq!(dynamic.name(ThemeAppearance::Dark), "Ayu Dark");
 
-        let light_mode = ThemeSelection::Dynamic {
+        let light_mode = ThemeSelection {
             mode: ThemeAppearanceMode::Light,
-            light: "one-light".to_string(),
-            dark: "one-dark".to_string(),
+            light: "Ayu Light".to_string(),
+            dark: "Ayu Dark".to_string(),
         };
-        assert_eq!(light_mode.name(ThemeAppearance::Dark), "one-light");
+        assert_eq!(light_mode.name(ThemeAppearance::Dark), "Ayu Light");
     }
 
     fn test_store(
@@ -4064,20 +4169,18 @@ theme {
         config_path: PathBuf,
         state_path: PathBuf,
     ) -> SettingsStore {
-        let registry = ThemeRegistry::load(Path::new("/path/that/does/not/exist"));
+        let theme_catalog = ThemeCatalog::load(Path::new("/path/that/does/not/exist"));
         let system_appearance = ThemeAppearance::Light;
         let resolved_theme =
-            registry.resolve(settings.theme.name(system_appearance), settings.overrides);
+            theme_catalog.resolve(settings.theme.name(system_appearance), settings.overrides);
         SettingsStore {
             settings,
-            registry,
+            theme_catalog,
             resolved_theme,
             system_appearance,
             user_managed,
             config_path,
             state_path,
-            last_dynamic_light: None,
-            last_dynamic_dark: None,
         }
     }
 
