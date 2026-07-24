@@ -2399,7 +2399,6 @@ dependencies = [
  "glyphst-settings",
  "glyphst-ui",
  "gpui",
- "gpui-component",
  "image",
 ]
 

@@ -78,6 +78,19 @@ mod tests {
     }
 
     #[test]
+    fn component_icon_bundle_stays_curated() {
+        let component_icons = ComponentAssets::new("")
+            .list("icons/")
+            .expect("component icon inventory");
+
+        assert!(
+            component_icons.len() <= 128,
+            "gpui-component-assets grew to {} icons; review the binary-size impact before updating",
+            component_icons.len()
+        );
+    }
+
+    #[test]
     fn composite_assets_load_both_sources() {
         let assets = Assets::default();
 
