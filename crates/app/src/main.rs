@@ -2,10 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use futures::{StreamExt, channel::mpsc};
-use gpui::{
-    App, AppContext, Bounds, Pixels, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
-};
-use gpui_component::Root;
+use gpui::{App, AppContext, Bounds, Pixels, WindowBounds, WindowOptions, px, size};
+use gpui_component::{Root, TitleBar};
 use gpui_platform::application;
 use tikv_jemalloc_sys as _;
 use tikv_jemallocator::Jemalloc;
@@ -244,12 +242,7 @@ fn open_workspace_window_inner(
 
     let root = cx.open_window(
         WindowOptions {
-            titlebar: Some(TitlebarOptions {
-                title: None,
-                appears_transparent: cfg!(target_os = "macos"),
-                traffic_light_position: cfg!(target_os = "macos")
-                    .then_some(point(px(9.0), px(9.0))),
-            }),
+            titlebar: Some(TitleBar::title_bar_options()),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_background: window_settings.background_appearance(transparency_enabled),
             ..Default::default()

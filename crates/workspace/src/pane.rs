@@ -12,12 +12,16 @@ use glyphst_translation_ui::{DocumentTranslationJobId, DocumentTranslationJobMan
 use gpui::{
     Along, AnyElement, App, AppContext, Axis, BorderStyle, Bounds, Context, CursorStyle,
     DispatchPhase, DragMoveEvent, Element, ElementId, Entity, EntityId, EventEmitter, FocusHandle,
-    GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, SharedString, Style,
-    Styled, Task, Window, WindowHandle, div, fill, point, prelude::*, px, quad, relative, rgb,
-    rgba, size, transparent_black,
+    GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, SharedString, Style, Styled, Task, Window,
+    WindowHandle, div, fill, point, prelude::*, px, quad, relative, rgb, rgba, size,
+    transparent_black,
 };
-use gpui_component::Root;
+use gpui_component::{
+    Root, Selectable as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    tab::{Tab as ComponentTab, TabBar as ComponentTabBar},
+};
 use smallvec::SmallVec;
 
 pub use glyphst_actions::pane::{
@@ -37,8 +41,6 @@ use crate::{
 pub(crate) const PANE_TAB_BAR_HEIGHT: f32 = 32.0;
 const PANE_TAB_MAX_WIDTH: f32 = 220.0;
 const PANE_TAB_MIN_WIDTH: f32 = 120.0;
-const PANE_TAB_CLOSE_SIZE: f32 = 22.0;
-const PANE_TAB_ICON_SIZE: f32 = 14.0;
 const HANDLE_HITBOX_SIZE: f32 = 4.0;
 const DIVIDER_SIZE: f32 = 1.0;
 const HORIZONTAL_MIN_SIZE: f32 = 120.0;
@@ -112,7 +114,6 @@ pub(crate) struct DraggedTab {
     pub(crate) ix: usize,
     pub(crate) tab_id: EntityId,
     pub(crate) label: SharedString,
-    pub(crate) theme: Theme,
 }
 
 pub(crate) struct TabTransfer {
@@ -124,25 +125,11 @@ pub(crate) struct TabTransfer {
 
 impl Render for DraggedTab {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .h(ui_rems(PANE_TAB_BAR_HEIGHT))
+        ComponentTab::new()
+            .label(self.label.clone())
+            .selected(true)
             .max_w(ui_rems(PANE_TAB_MAX_WIDTH))
             .min_w(ui_rems(PANE_TAB_MIN_WIDTH))
-            .px_2()
-            .flex()
-            .items_center()
-            .border_1()
-            .border_color(rgb(self.theme.border))
-            .bg(rgb(self.theme.tab_active_background))
-            .text_size(ui_rems(12.0))
-            .text_color(rgb(self.theme.text))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(self.label.clone()),
-            )
     }
 }
 
@@ -234,17 +221,19 @@ impl Pane {
         self.tabs.len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn active_tab_ix(&self) -> usize {
+        self.active_tab
+    }
+
     pub(crate) fn active_tab_is_new_tab(&self) -> bool {
         matches!(self.tabs.get(self.active_tab), Some(Tab::NewTab(_)))
     }
 
-    pub(crate) fn active_document_label(&self, cx: &App) -> Option<SharedString> {
-        match self.tabs.get(self.active_tab) {
-            Some(Tab::Document(pdf_view)) => Some(pdf_view.read(cx).file_name()),
-            Some(Tab::NewTab(_)) | Some(Tab::LoadingDocument(_)) | Some(Tab::Keymap(_)) | None => {
-                None
-            }
-        }
+    pub(crate) fn active_tab_label(&self, cx: &App) -> Option<SharedString> {
+        self.tabs
+            .get(self.active_tab)
+            .map(|_| self.tab_label(self.active_tab, cx))
     }
 
     pub(crate) fn active_document_state(&self, cx: &App) -> Option<(PathBuf, DocumentPosition)> {
@@ -962,8 +951,7 @@ impl Pane {
         source_pane: Entity<Pane>,
         theme: Theme,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let selected = tab_ix == self.active_tab;
+    ) -> ComponentTab {
         let label = self.tab_label(tab_ix, cx);
         let draggable = self.tab_is_draggable(tab_ix, cx);
         let tab_id = self
@@ -971,32 +959,26 @@ impl Pane {
             .get(tab_ix)
             .map(Self::tab_entity_id)
             .unwrap_or_else(|| cx.entity_id());
+        let close_pane = source_pane.clone();
+        let close_button = Button::new(("pane-tab-close", tab_id))
+            .small()
+            .compact()
+            .ghost()
+            .icon(IconName::X)
+            .tooltip(crate::fl!("toolbar-close-tab"))
+            .debug_selector(move || format!("pane-tab-close-{tab_ix}"))
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                close_pane.update(cx, |_, cx| {
+                    cx.emit(PaneEvent::CloseTab(tab_ix));
+                });
+            });
 
-        div()
-            .id(("tab", tab_id))
-            .h(ui_rems(PANE_TAB_BAR_HEIGHT))
+        ComponentTab::new()
+            .label(label.clone())
+            .suffix(close_button)
             .max_w(ui_rems(PANE_TAB_MAX_WIDTH))
             .min_w(ui_rems(PANE_TAB_MIN_WIDTH))
-            .px_2()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .border_r(px(1.0))
-            .border_color(rgb(theme.border))
-            .when(!selected, |this| this.border_b(px(1.0)))
-            .bg(rgb(if selected {
-                theme.tab_active_background
-            } else {
-                theme.tab_inactive_background
-            }))
-            .text_color(rgb(if selected {
-                theme.text
-            } else {
-                theme.text_muted
-            }))
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .cursor_pointer()
             .debug_selector(move || format!("pane-tab-{tab_ix}"))
             .when_some(
                 source_window.filter(|_| draggable),
@@ -1009,7 +991,6 @@ impl Pane {
                             ix: tab_ix,
                             tab_id,
                             label: label.clone(),
-                            theme,
                         },
                         |tab, _, _, cx| cx.new(|_| tab.clone()),
                     )
@@ -1033,110 +1014,66 @@ impl Pane {
                     ))
                 },
             )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.activate_tab(tab_ix, window, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(div().flex_1().min_w_0().truncate().child(label))
-            .child(
-                div()
-                    .id(("tab-close", tab_id))
-                    .flex_none()
-                    .w(ui_rems(PANE_TAB_CLOSE_SIZE))
-                    .h(ui_rems(PANE_TAB_CLOSE_SIZE))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .text_color(rgb(theme.text_muted))
-                    .hover(move |style| {
-                        style
-                            .bg(rgb(theme.element_hover))
-                            .text_color(rgb(theme.text))
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |_, _, _, cx| {
-                            cx.emit(PaneEvent::CloseTab(tab_ix));
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(Icon::new(
-                        IconName::X,
-                        ui_rems(PANE_TAB_ICON_SIZE),
-                        rgb(theme.text_muted),
-                    )),
-            )
-            .into_any_element()
     }
 
     fn render_tab_bar(&self, theme: Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let source_window = window.window_handle().downcast::<Root>();
         let source_pane = cx.entity();
+        let pane_id = cx.entity_id();
         let tabs = (0..self.tabs.len())
             .map(|tab_ix| self.render_tab(tab_ix, source_window, source_pane.clone(), theme, cx))
             .collect::<Vec<_>>();
 
-        div()
+        let activate_pane = source_pane.clone();
+        let new_tab_pane = source_pane.clone();
+        let new_tab_button = Button::new(("pane-new-tab", pane_id))
+            .small()
+            .compact()
+            .ghost()
+            .icon(IconName::Plus)
+            .tooltip(crate::fl!("toolbar-new-tab"))
+            .w(ui_rems(32.0))
+            .h_full()
+            .debug_selector(|| "pane-new-tab".to_string())
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                new_tab_pane.update(cx, |pane, cx| {
+                    pane.open_new_tab(window, cx);
+                });
+            });
+
+        let append_target = div()
+            .id(("pane-tab-append", pane_id))
+            .flex_1()
+            .min_w(ui_rems(24.0))
+            .h_full()
+            .drag_over::<DraggedTab>(move |style, _, _, _| {
+                style
+                    .bg(rgb(theme.element_hover))
+                    .border_l(px(2.0))
+                    .border_color(rgb(theme.accent))
+            })
+            .on_drop(cx.listener(move |_, dragged_tab: &DraggedTab, _, cx| {
+                cx.emit(PaneEvent::TabDrop {
+                    dragged_tab: Box::new(dragged_tab.clone()),
+                    target: PaneDropTarget::Append,
+                });
+            }));
+
+        ComponentTabBar::new(("pane-tab-bar", pane_id))
             .flex_none()
+            .w_full()
             .h(ui_rems(PANE_TAB_BAR_HEIGHT))
-            .flex()
-            .items_stretch()
-            .bg(rgb(theme.tab_bar_background))
+            .selected_index(self.active_tab)
+            .menu(true)
             .children(tabs)
-            .child(
-                div()
-                    .id("pane-new-tab")
-                    .w(ui_rems(32.0))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .border_r(px(1.0))
-                    .border_b(px(1.0))
-                    .border_color(rgb(theme.border))
-                    .text_color(rgb(theme.text_muted))
-                    .hover(move |style| {
-                        style
-                            .bg(rgb(theme.element_hover))
-                            .text_color(rgb(theme.text))
-                    })
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.open_new_tab(window, cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(Icon::new(
-                        IconName::Plus,
-                        ui_rems(16.0),
-                        rgb(theme.text_muted),
-                    )),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .border_b(px(1.0))
-                    .border_color(rgb(theme.border))
-                    .drag_over::<DraggedTab>(move |style, _, _, _| {
-                        style
-                            .bg(rgb(theme.element_hover))
-                            .border_l(px(2.0))
-                            .border_color(rgb(theme.accent))
-                    })
-                    .on_drop(cx.listener(move |_, dragged_tab: &DraggedTab, _, cx| {
-                        cx.emit(PaneEvent::TabDrop {
-                            dragged_tab: Box::new(dragged_tab.clone()),
-                            target: PaneDropTarget::Append,
-                        });
-                    })),
-            )
+            .last_empty_space(append_target)
+            .suffix(new_tab_button)
+            .on_click(move |tab_ix, window, cx| {
+                activate_pane.update(cx, |pane, cx| {
+                    pane.activate_tab(*tab_ix, window, cx);
+                });
+            })
             .into_any_element()
     }
 

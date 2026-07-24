@@ -320,9 +320,8 @@ untitled-note = Untitled note
 
 toolbar-menu-glyphst = Glyphst
 toolbar-menu-file = File
-toolbar-menu-tab = Tab
-toolbar-about-glyphst = About Glyphst
-toolbar-check-updates = Check for Updates
+toolbar-menu-tab = Tabs
+toolbar-show-menus = Show application menus
 toolbar-open-settings = Open Settings
 toolbar-quit-glyphst = Quit Glyphst
 toolbar-open-file = Open File

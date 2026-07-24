@@ -21,11 +21,11 @@ use glyphst_ui::{
 };
 use gpui::{
     App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement, PromptButton,
-    PromptLevel, Render, SharedString, Task, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    div, prelude::*, px, size,
+    PromptLevel, Render, SharedString, Task, Window, WindowBounds, WindowOptions, div, prelude::*,
+    px, size,
 };
 use gpui_component::{
-    ActiveTheme as _, Root, Sizable as _, Size,
+    ActiveTheme as _, Root, Sizable as _, Size, TitleBar,
     button::Button,
     group_box::GroupBoxVariant,
     setting::{SelectIndex, Settings as ComponentSettings},
@@ -60,10 +60,7 @@ pub fn open_settings_window(open_keymap: fn(&mut App), cx: &mut App) {
 
     if let Err(error) = cx.open_window(
         WindowOptions {
-            titlebar: Some(TitlebarOptions {
-                title: Some(crate::fl!("settings-window-title").into()),
-                ..Default::default()
-            }),
+            titlebar: Some(TitleBar::title_bar_options()),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_background: window_settings.background_appearance(transparency_enabled),
             app_id: Some("glyphst".to_string()),
@@ -871,26 +868,28 @@ impl Render for SettingsWindow {
             .text_size(ui_rems(13.0))
             .on_action(cx.listener(Self::close))
             .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .flex_none()
-                    .h(px(50.0))
-                    .px_4()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .text_size(ui_rems(16.0))
-                            .child(crate::fl!("settings-title")),
-                    )
-                    .child(
-                        div()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::fl!("escape-key")),
-                    ),
+                TitleBar::new().child(
+                    div()
+                        .h_full()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .pr_2()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .child(crate::fl!("settings-window-title")),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(crate::fl!("escape-key")),
+                        ),
+                ),
             )
             .child(div().flex_1().min_h_0().child(settings))
             .child(

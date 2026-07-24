@@ -88,6 +88,12 @@ impl IconName {
     }
 }
 
+impl gpui_component::IconNamed for IconName {
+    fn path(self) -> SharedString {
+        IconName::path(self)
+    }
+}
+
 #[derive(IntoElement)]
 pub struct Icon {
     name: IconName,

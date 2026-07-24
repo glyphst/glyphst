@@ -7,10 +7,13 @@ use glyphst_translation_ui::{
 use glyphst_ui::notification_center::NotificationCenter;
 use glyphst_ui::root::render_overlays;
 use gpui::{
-    AnyElement, App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement,
-    MouseButton, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString,
-    Window, WindowAppearance, WindowControlArea, div, point, prelude::*, px, rgb, rgba,
+    AnyElement, App, Context, DismissEvent, DragMoveEvent, Entity, FocusHandle, Focusable,
+    IntoElement, MouseButton, MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString,
+    Window, WindowAppearance, div, point, prelude::*, px, rgba,
 };
+use gpui_component::{menu::PopupMenu, status_bar::StatusBar};
+
+mod chrome;
 
 pub use glyphst_actions::workspace::{
     ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight, ActivatePaneUp,
@@ -21,7 +24,6 @@ pub use glyphst_actions::workspace::{
 
 use crate::{
     command_palette::{CommandPalette, CommandPaletteDelegate},
-    icons::{Icon, IconName},
     library::{DocumentPosition, normalize_path},
     pane::{
         DraggedTab, Pane, PaneDropTarget, PaneEvent, PaneGroup, SplitDirection, SplitDown,
@@ -32,30 +34,12 @@ use crate::{
         ToggleCommandPalette,
     },
     picker::{Picker, PickerEvent},
-    settings::{SettingsStore, setup_ui_font, sync_component_theme, ui_rems},
-    style::RADIUS_SM,
+    settings::{SettingsStore, setup_ui_font, sync_component_theme},
     theme::{Theme, ThemeAppearance, ThemeAppearanceMode},
     theme_selector::{ThemeSelector, ThemeSelectorDelegate},
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ToolbarMenu {
-    Glyphst,
-    File,
-    Tab,
-}
-
-const TRAFFIC_LIGHT_PADDING: f32 = 71.0;
-const TOOLBAR_MENU_TEXT_SIZE: f32 = 12.0;
-const TOOLBAR_DROPDOWN_TEXT_SIZE: f32 = 13.0;
-const TOOLBAR_DROPDOWN_WIDTH: f32 = 210.0;
-const TOOLBAR_ICON_SIZE: f32 = 16.0;
-const TOOLBAR_BUTTON_HEIGHT: f32 = 22.0;
-const TOOLBAR_PADDING_X: f32 = 4.0;
-const TOOLBAR_GAP: f32 = 4.0;
-const TOOLBAR_GLYPHST_WIDTH: f32 = 84.0;
-const TOOLBAR_FILE_WIDTH: f32 = 56.0;
-const TOOLBAR_TAB_WIDTH: f32 = 52.0;
+use chrome::{WorkspaceMenu, WorkspaceTitleBar, build_popup_menu};
 
 pub struct Workspace {
     pane_group: PaneGroup,
@@ -68,10 +52,10 @@ pub struct Workspace {
     command_palette_previous_focus_handle: Option<FocusHandle>,
     theme_selector: Option<Entity<ThemeSelector>>,
     theme_selector_previous_focus_handle: Option<FocusHandle>,
-    toolbar_menu_open: bool,
-    toolbar_open_menu: Option<ToolbarMenu>,
+    title_bar_menu_expanded: bool,
+    title_bar_open_menu: Option<WorkspaceMenu>,
+    title_bar_popup_menu: Option<Entity<PopupMenu>>,
     dragged_tab_outside_window: Option<DraggedTab>,
-    should_move_window: bool,
 }
 
 pub type WorkspaceWindowHandle = glyphst_ui::root::RootWindowHandle<Workspace>;
@@ -174,10 +158,10 @@ impl Workspace {
             command_palette_previous_focus_handle: None,
             theme_selector: None,
             theme_selector_previous_focus_handle: None,
-            toolbar_menu_open: false,
-            toolbar_open_menu: None,
+            title_bar_menu_expanded: false,
+            title_bar_open_menu: None,
+            title_bar_popup_menu: None,
             dragged_tab_outside_window: None,
-            should_move_window: false,
         };
 
         workspace.subscribe_to_pane(&pane, window, cx);
@@ -268,6 +252,7 @@ impl Workspace {
     }
 
     fn open_settings_window(&mut self, cx: &mut Context<Self>) {
+        self.set_title_bar_menu_expanded(false, cx);
         (self.callbacks.open_settings_window)(cx);
     }
 
@@ -369,6 +354,7 @@ impl Workspace {
     }
 
     fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_title_bar_menu_expanded(false, cx);
         let active_pane = self.active_pane.clone();
         active_pane.update(cx, |pane, cx| pane.open_new_tab(window, cx));
     }
@@ -379,6 +365,7 @@ impl Workspace {
     }
 
     fn open_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.set_title_bar_menu_expanded(false, cx);
         let replace_active_new_tab = self.active_pane.read(cx).active_tab_is_new_tab();
         let dialog = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -486,6 +473,7 @@ impl Workspace {
     }
 
     fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_title_bar_menu_expanded(false, cx);
         let active_pane = self.active_pane.clone();
         self.close_tab_in_pane(&active_pane, None, window, cx);
     }
@@ -589,6 +577,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.set_title_bar_menu_expanded(false, cx);
         let active_pane = self.active_pane.clone();
         let (initial_path, initial_position) = active_pane
             .read(cx)
@@ -1002,22 +991,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .child(div().flex_1().min_h_0().overflow_hidden().child(center))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .w_full()
-                        .flex_none()
-                        .h(ui_rems(26.0))
-                        .px_3()
-                        .border_t(px(1.0))
-                        .border_color(rgb(theme.border))
-                        .bg(rgb(theme.tab_bar_background))
-                        .text_size(ui_rems(12.0))
-                        .text_color(rgb(theme.footer_text))
-                        .child(activity),
-                )
+                .child(StatusBar::new().right(activity))
                 .into_any_element()
         } else {
             center
@@ -1406,409 +1380,81 @@ impl Workspace {
         }
     }
 
-    fn close_toolbar_menu(&mut self, cx: &mut Context<Self>) {
-        if self.toolbar_menu_open || self.toolbar_open_menu.is_some() {
-            self.toolbar_menu_open = false;
-            self.toolbar_open_menu = None;
-            cx.notify();
-        }
-    }
-
     fn active_tab_is_new_tab(&self, cx: &Context<Self>) -> bool {
         self.active_pane.read(cx).active_tab_is_new_tab()
     }
 
-    fn active_document_label(&self, cx: &Context<Self>) -> Option<SharedString> {
-        self.active_pane.read(cx).active_document_label(cx)
-    }
-
-    fn toolbar_icon_button(
-        id: &'static str,
-        icon: IconName,
-        active: bool,
-        theme: Theme,
-        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .id(id)
-            .flex_none()
-            .w(ui_rems(28.0))
-            .h(ui_rems(TOOLBAR_BUTTON_HEIGHT))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(RADIUS_SM))
-            .text_color(rgb(if active { theme.text } else { theme.text_muted }))
-            .when(active, |this| this.bg(rgb(theme.element_hover)))
-            .hover(move |style| {
-                style
-                    .bg(rgb(theme.element_hover))
-                    .text_color(rgb(theme.text))
-            })
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    on_click(this, window, cx);
-                    cx.notify();
-                    cx.stop_propagation();
-                }),
-            )
-            .child(Icon::new(
-                icon,
-                ui_rems(TOOLBAR_ICON_SIZE),
-                rgb(if active { theme.text } else { theme.text_muted }),
-            ))
-            .into_any_element()
-    }
-
-    fn toolbar_height(window: &Window) -> Pixels {
-        #[cfg(target_os = "windows")]
-        {
-            px(32.0)
+    fn set_title_bar_menu_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        let changed = self.title_bar_menu_expanded != expanded
+            || (!expanded
+                && (self.title_bar_open_menu.is_some() || self.title_bar_popup_menu.is_some()));
+        self.title_bar_menu_expanded = expanded;
+        if !expanded {
+            self.title_bar_open_menu = None;
+            self.title_bar_popup_menu = None;
         }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            (1.75 * window.rem_size()).max(px(34.0))
+        if changed {
+            cx.notify();
         }
     }
 
-    fn toolbar_menu_id(menu: ToolbarMenu) -> &'static str {
-        match menu {
-            ToolbarMenu::Glyphst => "toolbar-menu-glyphst",
-            ToolbarMenu::File => "toolbar-menu-file",
-            ToolbarMenu::Tab => "toolbar-menu-tab",
-        }
-    }
-
-    fn render_toolbar_menu_button(
-        &self,
-        label: String,
-        icon: IconName,
-        menu: ToolbarMenu,
-        width: f32,
-        theme: Theme,
+    fn open_title_bar_menu(
+        &mut self,
+        menu: WorkspaceMenu,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let active = self.toolbar_open_menu == Some(menu);
-
-        div()
-            .id(Self::toolbar_menu_id(menu))
-            .occlude()
-            .w(ui_rems(width))
-            .h(ui_rems(TOOLBAR_BUTTON_HEIGHT))
-            .px_2()
-            .flex()
-            .gap_1()
-            .items_center()
-            .justify_center()
-            .rounded(px(RADIUS_SM))
-            .text_size(ui_rems(TOOLBAR_MENU_TEXT_SIZE))
-            .text_color(rgb(if active { theme.text } else { theme.text_muted }))
-            .when(active, |this| this.bg(rgb(theme.element_hover)))
-            .hover(move |style| {
-                style
-                    .bg(rgb(theme.element_hover))
-                    .text_color(rgb(theme.text))
-            })
-            .on_hover(cx.listener(move |this, hover_enter, _, cx| {
-                if *hover_enter && this.toolbar_menu_open && this.toolbar_open_menu != Some(menu) {
-                    this.toolbar_open_menu = Some(menu);
+    ) {
+        let popup_menu = build_popup_menu(menu, self.focus_handle.clone(), window, cx);
+        cx.subscribe_in(
+            &popup_menu,
+            window,
+            move |this, popup, _: &DismissEvent, _, cx| {
+                if this.title_bar_popup_menu.as_ref() == Some(popup) {
+                    this.title_bar_menu_expanded = false;
+                    this.title_bar_open_menu = None;
+                    this.title_bar_popup_menu = None;
                     cx.notify();
                 }
-            }))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.toolbar_menu_open = true;
-                    this.toolbar_open_menu = if this.toolbar_open_menu == Some(menu) {
-                        None
-                    } else {
-                        Some(menu)
-                    };
-                    cx.notify();
-                    cx.stop_propagation();
-                }),
-            )
-            .child(Icon::new(
-                icon,
-                ui_rems(TOOLBAR_ICON_SIZE),
-                rgb(if active { theme.text } else { theme.text_muted }),
-            ))
-            .child(label)
-            .into_any_element()
+            },
+        )
+        .detach();
+
+        self.title_bar_menu_expanded = true;
+        self.title_bar_open_menu = Some(menu);
+        self.title_bar_popup_menu = Some(popup_menu.clone());
+        popup_menu.focus_handle(cx).focus(window, cx);
+        cx.notify();
     }
 
-    fn render_toolbar(
-        &self,
-        theme: Theme,
-        is_fullscreen: bool,
-        window: &Window,
+    fn toggle_title_bar_menu(
+        &mut self,
+        menu: WorkspaceMenu,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let expanded = self.toolbar_menu_open || self.active_tab_is_new_tab(cx);
-        let toolbar_height = Self::toolbar_height(window);
-        let mut toolbar = div()
-            .flex_none()
-            .h(toolbar_height)
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_1()
-            .when(cfg!(target_os = "macos") && !is_fullscreen, |this| {
-                this.pl(px(TRAFFIC_LIGHT_PADDING))
-            })
-            .bg(rgb(theme.tab_bar_background))
-            .text_size(ui_rems(TOOLBAR_MENU_TEXT_SIZE))
-            .text_color(rgb(theme.text))
-            .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.should_move_window = true;
-                    this.close_toolbar_menu(cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| {
-                    this.should_move_window = false;
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, window, _| {
-                if this.should_move_window {
-                    this.should_move_window = false;
-                    window.start_window_move();
-                }
-            }))
-            .id("toolbar")
-            .on_click(|event, window, _| {
-                if event.click_count() == 2 {
-                    #[cfg(target_os = "macos")]
-                    window.titlebar_double_click();
-                    #[cfg(not(target_os = "macos"))]
-                    window.zoom_window();
-                }
-            });
-
-        if expanded {
-            toolbar = toolbar
-                .child(self.render_toolbar_menu_button(
-                    crate::fl!("toolbar-menu-glyphst"),
-                    IconName::AppWindow,
-                    ToolbarMenu::Glyphst,
-                    TOOLBAR_GLYPHST_WIDTH,
-                    theme,
-                    cx,
-                ))
-                .child(self.render_toolbar_menu_button(
-                    crate::fl!("toolbar-menu-file"),
-                    IconName::File,
-                    ToolbarMenu::File,
-                    TOOLBAR_FILE_WIDTH,
-                    theme,
-                    cx,
-                ))
-                .child(self.render_toolbar_menu_button(
-                    crate::fl!("toolbar-menu-tab"),
-                    IconName::Plus,
-                    ToolbarMenu::Tab,
-                    TOOLBAR_TAB_WIDTH,
-                    theme,
-                    cx,
-                ));
+    ) {
+        if self.title_bar_open_menu == Some(menu) {
+            self.title_bar_open_menu = None;
+            self.title_bar_popup_menu = None;
+            self.focus_handle.focus(window, cx);
+            cx.notify();
         } else {
-            toolbar = toolbar.child(Self::toolbar_icon_button(
-                "toolbar-collapsed-menu",
-                IconName::Menu,
-                false,
-                theme,
-                |this, _, cx| {
-                    this.toolbar_menu_open = true;
-                    this.toolbar_open_menu = Some(ToolbarMenu::Glyphst);
-                    cx.notify();
-                },
-                cx,
-            ));
-            if let Some(label) = self.active_document_label(cx) {
-                toolbar = toolbar.child(
-                    div()
-                        .min_w_0()
-                        .max_w(px(360.0))
-                        .truncate()
-                        .px_1()
-                        .text_color(rgb(theme.text_muted))
-                        .child(label),
-                );
-            }
+            self.open_title_bar_menu(menu, window, cx);
         }
-
-        toolbar.child(div().flex_1()).into_any_element()
     }
 
-    fn render_toolbar_menu_item(
-        id: &'static str,
-        label: String,
-        theme: Theme,
-        handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    fn hover_title_bar_menu(
+        &mut self,
+        menu: WorkspaceMenu,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .h(ui_rems(30.0))
-            .px_3()
-            .text_size(ui_rems(TOOLBAR_DROPDOWN_TEXT_SIZE))
-            .text_color(rgb(theme.text))
-            .cursor_pointer()
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    handler(this, window, cx);
-                    this.close_toolbar_menu(cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(label)
-            .into_any_element()
-    }
-
-    fn toolbar_menu_left(menu: ToolbarMenu) -> gpui::Rems {
-        let base = TOOLBAR_PADDING_X;
-        #[cfg(target_os = "macos")]
-        let base = base + TRAFFIC_LIGHT_PADDING;
-        match menu {
-            ToolbarMenu::Glyphst => ui_rems(base),
-            ToolbarMenu::File => ui_rems(base + TOOLBAR_GLYPHST_WIDTH + TOOLBAR_GAP),
-            ToolbarMenu::Tab => ui_rems(
-                base + TOOLBAR_GLYPHST_WIDTH + TOOLBAR_GAP + TOOLBAR_FILE_WIDTH + TOOLBAR_GAP,
-            ),
+    ) {
+        if self.title_bar_open_menu.is_some() && self.title_bar_open_menu != Some(menu) {
+            self.open_title_bar_menu(menu, window, cx);
         }
     }
 
-    fn render_toolbar_dropdown(
-        &self,
-        menu: ToolbarMenu,
-        theme: Theme,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let toolbar_height = Self::toolbar_height(window);
-        let mut dropdown = div()
-            .occlude()
-            .absolute()
-            .top_0()
-            .left(Self::toolbar_menu_left(menu))
-            .w(ui_rems(TOOLBAR_DROPDOWN_WIDTH))
-            .py_1()
-            .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
-            .text_size(ui_rems(TOOLBAR_DROPDOWN_TEXT_SIZE))
-            .text_color(rgb(theme.text))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, _, cx| {
-                    cx.stop_propagation();
-                }),
-            );
-
-        match menu {
-            ToolbarMenu::Glyphst => {
-                dropdown = dropdown
-                    .child(Self::render_toolbar_menu_item(
-                        "toolbar-menu-glyphst-about",
-                        crate::fl!("toolbar-about-glyphst"),
-                        theme,
-                        |_, _, _| {},
-                        cx,
-                    ))
-                    .child(Self::render_toolbar_menu_item(
-                        "toolbar-menu-glyphst-check-updates",
-                        crate::fl!("toolbar-check-updates"),
-                        theme,
-                        |_, _, _| {},
-                        cx,
-                    ))
-                    .child(Self::render_toolbar_menu_item(
-                        "toolbar-menu-glyphst-settings",
-                        crate::fl!("toolbar-open-settings"),
-                        theme,
-                        |this, _, cx| this.open_settings_window(cx),
-                        cx,
-                    ))
-                    .child(Self::render_toolbar_menu_item(
-                        "toolbar-menu-glyphst-quit",
-                        crate::fl!("toolbar-quit-glyphst"),
-                        theme,
-                        |_, _, cx| cx.quit(),
-                        cx,
-                    ));
-            }
-            ToolbarMenu::File => {
-                dropdown = dropdown.child(Self::render_toolbar_menu_item(
-                    "toolbar-menu-file-open",
-                    crate::fl!("toolbar-open-file"),
-                    theme,
-                    |this, window, cx| this.open_file(window, cx),
-                    cx,
-                ));
-            }
-            ToolbarMenu::Tab => {
-                dropdown = dropdown
-                    .child(Self::render_toolbar_menu_item(
-                        "toolbar-menu-tab-new",
-                        crate::fl!("toolbar-new-tab"),
-                        theme,
-                        |this, window, cx| this.open_new_tab(window, cx),
-                        cx,
-                    ))
-                    .child(Self::render_toolbar_menu_item(
-                        "toolbar-menu-tab-close",
-                        crate::fl!("toolbar-close-tab"),
-                        theme,
-                        |this, window, cx| this.close_active_tab(window, cx),
-                        cx,
-                    ))
-                    .child(Self::render_toolbar_menu_item(
-                        "toolbar-menu-tab-split-right",
-                        crate::fl!("toolbar-split-right"),
-                        theme,
-                        |this, window, cx| {
-                            this.split_active_pane(SplitDirection::Right, window, cx)
-                        },
-                        cx,
-                    ))
-                    .child(Self::render_toolbar_menu_item(
-                        "toolbar-menu-tab-split-down",
-                        crate::fl!("toolbar-split-down"),
-                        theme,
-                        |this, window, cx| this.split_active_pane(SplitDirection::Down, window, cx),
-                        cx,
-                    ));
-            }
-        }
-
-        div()
-            .absolute()
-            .top(toolbar_height)
-            .left_0()
-            .size_full()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.close_toolbar_menu(cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(dropdown)
-            .into_any_element()
+    fn active_tab_label(&self, cx: &Context<Self>) -> Option<SharedString> {
+        self.active_pane.read(cx).active_tab_label(cx)
     }
 
     fn render_top_aligned_overlay(
@@ -1854,7 +1500,15 @@ impl Render for Workspace {
             .read(cx)
             .active_pdf_view()
             .is_some_and(|pdf_view| pdf_view.read(cx).is_presentation_mode());
-        let is_fullscreen = window.is_fullscreen();
+        let title_bar = (!active_pdf_is_presentation).then(|| {
+            WorkspaceTitleBar::new(
+                cx.entity(),
+                self.title_bar_menu_expanded || self.active_tab_is_new_tab(cx),
+                self.title_bar_open_menu,
+                self.title_bar_popup_menu.clone(),
+                self.active_tab_label(cx),
+            )
+        });
         let document_translation_notification = (!active_pdf_is_presentation)
             .then(|| {
                 self.document_translation_jobs
@@ -2010,9 +1664,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenKeybindings, window, cx| {
                 this.open_keymap_tab(window, cx);
             }))
-            .when(!active_pdf_is_presentation, |this| {
-                this.child(self.render_toolbar(theme, is_fullscreen, window, cx))
-            })
+            .when_some(title_bar, |this, title_bar| this.child(title_bar))
             .child(
                 div()
                     .flex_1()
@@ -2022,11 +1674,6 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(self.render_body(theme, dim_inactive_panes, window, cx)),
             )
-            .when(!active_pdf_is_presentation, |this| {
-                this.when_some(self.toolbar_open_menu, |this, menu| {
-                    this.child(self.render_toolbar_dropdown(menu, theme, window, cx))
-                })
-            })
             .when_some(self.command_palette.clone(), |this, palette| {
                 this.child(Self::render_top_aligned_overlay(
                     palette,
@@ -2058,10 +1705,12 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::{AppContext as _, Modifiers, TestAppContext};
     use gpui_component::Root;
 
-    use super::{Workspace, WorkspaceCallbacks, WorkspaceWindowHandle, WorkspaceWindowRequest};
+    use super::{
+        Workspace, WorkspaceCallbacks, WorkspaceMenu, WorkspaceWindowHandle, WorkspaceWindowRequest,
+    };
     use crate::{library::LibraryStore, pdf_view::RenderCache, settings::SettingsStore};
 
     fn unavailable_workspace_window(
@@ -2100,7 +1749,77 @@ mod tests {
     }
 
     #[gpui::test]
-    fn root_hosted_workspace_renders_each_open_tab(cx: &mut TestAppContext) {
+    fn hamburger_expands_the_inline_application_menu(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new_empty(callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("workspace-menu-toggle").is_some());
+        assert!(cx.debug_bounds("workspace-menu-glyphst").is_none());
+
+        let toggle = cx.debug_bounds("workspace-menu-toggle").unwrap().center();
+        cx.simulate_click(toggle, Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("workspace-menu-toggle").is_none());
+        assert!(cx.debug_bounds("workspace-menu-glyphst").is_some());
+        assert!(cx.debug_bounds("workspace-menu-file").is_some());
+        assert!(cx.debug_bounds("workspace-menu-tab").is_some());
+        let glyphst_popup = workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.title_bar_menu_expanded);
+            assert_eq!(workspace.title_bar_open_menu, Some(WorkspaceMenu::Glyphst));
+            workspace.title_bar_popup_menu.as_ref().unwrap().entity_id()
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.hover_title_bar_menu(WorkspaceMenu::File, window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.title_bar_open_menu, Some(WorkspaceMenu::File));
+            assert_ne!(
+                workspace.title_bar_popup_menu.as_ref().unwrap().entity_id(),
+                glyphst_popup
+            );
+        });
+
+        let drag_region = cx
+            .debug_bounds("workspace-title-bar-drag-region")
+            .unwrap()
+            .center();
+        cx.simulate_click(drag_region, Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("workspace-menu-toggle").is_some());
+        assert!(cx.debug_bounds("workspace-menu-glyphst").is_none());
+    }
+
+    #[gpui::test]
+    fn root_hosted_workspace_tabs_render_and_interact(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
@@ -2128,5 +1847,28 @@ mod tests {
 
         assert!(cx.debug_bounds("pane-tab-0").is_some());
         assert!(cx.debug_bounds("pane-tab-1").is_some());
+
+        let first_tab = cx.debug_bounds("pane-tab-0").unwrap().center();
+        cx.simulate_click(first_tab, Modifiers::default());
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.active_pane.read(cx).active_tab_ix(), 0);
+        });
+
+        let new_tab = cx.debug_bounds("pane-new-tab").unwrap().center();
+        cx.simulate_click(new_tab, Modifiers::default());
+        workspace.read_with(cx, |workspace, cx| {
+            let pane = workspace.active_pane.read(cx);
+            assert_eq!(pane.len(), 3);
+            assert_eq!(pane.active_tab_ix(), 2);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let close_tab = cx.debug_bounds("pane-tab-close-2").unwrap().center();
+        cx.simulate_click(close_tab, Modifiers::default());
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.active_pane.read(cx).len(), 2);
+        });
     }
 }
