@@ -17,9 +17,10 @@ use crate::{
     settings::{Settings, SettingsStore, ui_rems},
     theme::Theme,
 };
-use glyphst_ui::{
-    settings_input::{SettingsInputEvent, SettingsTextInput},
-    tooltip::text_tooltip,
+use glyphst_ui::tooltip::text_tooltip;
+use gpui_component::{
+    Sizable as _,
+    input::{Input, InputEvent, InputState},
 };
 
 const ROW_HEIGHT: f32 = 36.0;
@@ -67,7 +68,7 @@ struct ContextMenu {
 
 pub struct KeymapEditor {
     focus_handle: FocusHandle,
-    filter_input: Entity<SettingsTextInput>,
+    filter_input: Entity<InputState>,
     query: SharedString,
     scroll: UniformListScrollHandle,
     sort_column: SortColumn,
@@ -79,18 +80,15 @@ pub struct KeymapEditor {
 }
 
 impl KeymapEditor {
-    pub fn new(focus_handle: FocusHandle, cx: &mut Context<Self>) -> Self {
+    pub fn new(focus_handle: FocusHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let filter_input = cx.new(|cx| {
-            SettingsTextInput::new(
-                "".into(),
-                crate::fl!("keymap-search-placeholder").into(),
-                false,
-                cx,
-            )
+            InputState::new(window, cx).placeholder(crate::fl!("keymap-search-placeholder"))
         });
-        cx.subscribe(&filter_input, |this, _, event, cx| {
-            let SettingsInputEvent::Changed(value) = event;
-            this.query = value.clone();
+        cx.subscribe(&filter_input, |this, input, event, cx| {
+            if !matches!(event, InputEvent::Change) {
+                return;
+            }
+            this.query = input.read(cx).value();
             this.selected_index = None;
             cx.notify();
         })
@@ -113,7 +111,7 @@ impl KeymapEditor {
     }
 
     pub fn focus_filter(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let handle = self.filter_input.read(cx).focus_handle.clone();
+        let handle = self.filter_input.read(cx).focus_handle(cx);
         window.defer(cx, move |window, cx| {
             handle.focus(window, cx);
         });
@@ -199,11 +197,12 @@ impl KeymapEditor {
         cx.write_to_clipboard(ClipboardItem::new_string(value));
     }
 
-    fn view_matching(&mut self, keystroke: String, cx: &mut Context<Self>) {
+    fn view_matching(&mut self, keystroke: String, window: &mut Window, cx: &mut Context<Self>) {
         self.query = keystroke.clone().into();
         self.selected_index = None;
-        self.filter_input
-            .update(cx, |input, cx| input.set_content(keystroke.into(), cx));
+        self.filter_input.update(cx, |input, cx| {
+            input.set_value(keystroke, window, cx);
+        });
         self.editing = None;
         cx.notify();
     }
@@ -509,15 +508,15 @@ impl KeymapEditor {
                         this.opacity(0.0)
                             .group_hover("keymap-row", |style| style.opacity(1.0))
                     })
-                    .child(Icon::new(
-                        if is_overridden {
+                    .child(
+                        Icon::new(if is_overridden {
                             IconName::Info
                         } else {
                             IconName::Pencil
-                        },
-                        ui_rems(14.0),
-                        rgb(theme.text_muted),
-                    )),
+                        })
+                        .size(ui_rems(14.0))
+                        .text_color(rgb(theme.text_muted)),
+                    ),
             )
             .child(
                 div()
@@ -649,7 +648,11 @@ impl KeymapEditor {
                     cx.stop_propagation();
                 }),
             )
-            .child(Icon::new(icon, ui_rems(14.0), rgb(theme.text_muted)))
+            .child(
+                Icon::new(icon)
+                    .size(ui_rems(14.0))
+                    .text_color(rgb(theme.text_muted)),
+            )
             .child(label)
             .into_any_element()
     }
@@ -877,17 +880,21 @@ impl KeymapEditor {
                                         .cursor_pointer()
                                         .on_mouse_down(
                                             MouseButton::Left,
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.view_matching(view_keystroke.clone(), cx);
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.view_matching(
+                                                    view_keystroke.clone(),
+                                                    window,
+                                                    cx,
+                                                );
                                                 cx.stop_propagation();
                                             }),
                                         )
                                         .child(crate::fl!("view"))
-                                        .child(Icon::new(
-                                            IconName::ArrowUpRight,
-                                            ui_rems(11.0),
-                                            rgb(theme.text_muted),
-                                        )),
+                                        .child(
+                                            Icon::new(IconName::ArrowUpRight)
+                                                .size(ui_rems(11.0))
+                                                .text_color(rgb(theme.text_muted)),
+                                        ),
                                 ),
                         )
                     })
@@ -925,11 +932,11 @@ impl KeymapEditor {
                                 .bg(bg_color)
                                 .text_color(text_color)
                                 .text_size(ui_rems(12.0))
-                                .child(Icon::new(
-                                    IconName::TriangleAlert,
-                                    ui_rems(14.0),
-                                    text_color,
-                                ))
+                                .child(
+                                    Icon::new(IconName::TriangleAlert)
+                                        .size(ui_rems(14.0))
+                                        .text_color(text_color),
+                                )
                                 .child(error.message),
                         )
                     })
@@ -1017,7 +1024,11 @@ impl Render for KeymapEditor {
                             .text_size(ui_rems(18.0))
                             .child(crate::fl!("keymap-title")),
                     )
-                    .child(div().w(px(300.0)).child(self.filter_input.clone())),
+                    .child(
+                        div()
+                            .w(px(300.0))
+                            .child(Input::new(&self.filter_input).small().w_full()),
+                    ),
             )
             .child(
                 div()

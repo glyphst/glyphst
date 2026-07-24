@@ -9,3 +9,4 @@ glyphst-core = { path = "../core" }
 glyphst-settings = { path = "../settings" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
+gpui_component.workspace = true

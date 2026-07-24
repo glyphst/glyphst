@@ -2399,6 +2399,7 @@ dependencies = [
  "glyphst-settings",
  "glyphst-ui",
  "gpui",
+ "gpui-component",
  "image",
 ]
 
@@ -2419,6 +2420,7 @@ dependencies = [
  "glyphst-settings",
  "glyphst-ui",
  "gpui",
+ "gpui-component",
 ]
 
 [[package]]
@@ -2493,6 +2495,7 @@ dependencies = [
  "glyphst-translation-ui",
  "glyphst-ui",
  "gpui",
+ "gpui-component",
  "image",
  "mupdf",
  "smallvec",
@@ -2559,6 +2562,7 @@ dependencies = [
  "glyphst-translation",
  "glyphst-ui",
  "gpui",
+ "gpui-component",
 ]
 
 [[package]]

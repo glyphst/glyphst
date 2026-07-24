@@ -26,8 +26,8 @@ pub const MASK_GLYPH: &str = "•";
 /// [`SingleLineTextElement`] can render it.
 ///
 /// `display_offset` / `display_range` default to the identity, which suits
-/// non-masked inputs. Masked inputs (see `SettingsTextInput`) override them to
-/// translate content offsets into masked-display offsets.
+/// non-masked inputs. Masked implementations can override them to translate
+/// content offsets into masked-display offsets.
 pub trait SingleLineInput: EntityInputHandler + Focusable + 'static {
     fn content(&self) -> &SharedString;
     fn placeholder(&self) -> SharedString;
@@ -61,7 +61,7 @@ pub trait SingleLineInput: EntityInputHandler + Focusable + 'static {
     fn is_dragging(&self) -> bool;
 
     /// Map a display-text offset back to a content offset. Identity by
-    /// default; masked inputs override this (see `SettingsTextInput`).
+    /// default; masked inputs can override this.
     fn content_offset_for_display_offset(&self, offset: usize) -> usize {
         offset.min(self.content().len())
     }
@@ -130,8 +130,8 @@ fn horizontal_mouse_autoscroll_delta(
     px(scroll_delta * em_width.as_f32())
 }
 
-/// A generic single-line text element. Replaces the per-input
-/// `SettingsInputElement` / `SearchTextElement` / `PickerTextElement`.
+/// A generic single-line text element shared by lightweight document search
+/// and picker inputs.
 pub struct SingleLineTextElement<T: SingleLineInput> {
     input: Entity<T>,
 }

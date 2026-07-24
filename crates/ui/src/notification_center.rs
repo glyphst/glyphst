@@ -280,11 +280,11 @@ impl NotificationCenter {
                                 cx.stop_propagation();
                             }),
                         )
-                        .child(Icon::new(
-                            IconName::Circle,
-                            ui_rems(ACTIVITY_ICON_SIZE),
-                            rgb(theme.accent),
-                        ))
+                        .child(
+                            Icon::new(IconName::Circle)
+                                .size(ui_rems(ACTIVITY_ICON_SIZE))
+                                .text_color(rgb(theme.accent)),
+                        )
                         .child(
                             div()
                                 .min_w_0()
@@ -517,7 +517,11 @@ impl NotificationCenter {
                                     cx.stop_propagation();
                                 }),
                             )
-                            .child(Icon::new(IconName::X, ui_rems(13.0), rgb(theme.text_muted))),
+                            .child(
+                                Icon::new(IconName::X)
+                                    .size(ui_rems(13.0))
+                                    .text_color(rgb(theme.text_muted)),
+                            ),
                     ),
             )
             .children(notification.detail.map(|detail| {

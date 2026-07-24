@@ -35,7 +35,7 @@ use glyphst_settings::{
     ui_rems,
 };
 use glyphst_ui::{
-    icons::{Icon, IconButton, IconName},
+    icons::{Icon, IconName, toolbar_icon_button},
     markdown::{Markdown, MarkdownContextMenuRequest, MarkdownElement, MarkdownStyle},
     picker::fuzzy_match,
     scrollbar::{ScrollableHandle, WithScrollbar as _},
@@ -2132,7 +2132,11 @@ impl AiPanel {
                     cx.stop_propagation();
                 }),
             )
-            .child(Icon::new(icon, ui_rems(14.0), rgb(theme.text_muted)))
+            .child(
+                Icon::new(icon)
+                    .size(ui_rems(14.0))
+                    .text_color(rgb(theme.text_muted)),
+            )
             .child(label)
             .into_any_element()
     }
@@ -4108,17 +4112,14 @@ impl AiPanel {
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        IconButton::new(id, icon, rgb(icon_color), rgb(theme.element_hover))
-            .icon_size(ui_rems(13.0))
-            .into_div()
-            .tooltip(text_tooltip(tooltip))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    handler(this, window, cx);
-                    cx.stop_propagation();
-                }),
-            )
+        toolbar_icon_button(id, icon)
+            .text_color(rgb(icon_color))
+            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .tooltip(tooltip)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                handler(this, window, cx);
+                cx.stop_propagation();
+            }))
             .into_any_element()
     }
 
@@ -4419,11 +4420,11 @@ impl AiPanel {
                     .items_start()
                     .gap_2()
                     .text_color(rgb(theme.error))
-                    .child(Icon::new(
-                        IconName::TriangleAlert,
-                        ui_rems(14.0),
-                        rgb(theme.error),
-                    ))
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size(ui_rems(14.0))
+                            .text_color(rgb(theme.error)),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -4877,15 +4878,15 @@ impl AiPanel {
                                                     cx.stop_propagation();
                                                 }),
                                             )
-                                            .child(Icon::new(
-                                                Self::mention_icon(candidate.kind),
-                                                ui_rems(14.0),
-                                                rgb(if selected {
-                                                    theme.accent
-                                                } else {
-                                                    theme.text_muted
-                                                }),
-                                            ))
+                                            .child(
+                                                Icon::new(Self::mention_icon(candidate.kind))
+                                                    .size(ui_rems(14.0))
+                                                    .text_color(rgb(if selected {
+                                                        theme.accent
+                                                    } else {
+                                                        theme.text_muted
+                                                    })),
+                                            )
                                             .child(
                                                 div()
                                                     .flex()
@@ -4969,11 +4970,11 @@ impl AiPanel {
                             cx.stop_propagation();
                         }),
                     )
-                    .child(Icon::new(
-                        Self::mention_icon(mention),
-                        ui_rems(14.0),
-                        rgb(theme.text_muted),
-                    ))
+                    .child(
+                        Icon::new(Self::mention_icon(mention))
+                            .size(ui_rems(14.0))
+                            .text_color(rgb(theme.text_muted)),
+                    )
                     .child(
                         div()
                             .flex()
@@ -5850,34 +5851,33 @@ impl Render for AiPanel {
                                                     .items_center()
                                                     .gap_0p5()
                                                     .child(
-                                                        IconButton::new(
+                                                        toolbar_icon_button(
                                                             "ai-attachment-menu-button",
                                                             IconName::Plus,
-                                                            rgb(if attachment_menu_open {
+                                                        )
+                                                        .text_color(rgb(
+                                                            if attachment_menu_open {
                                                                 theme.accent
                                                             } else {
                                                                 theme.text_muted
-                                                            }),
-                                                            rgb(theme.element_hover),
-                                                        )
-                                                        .icon_size(ui_rems(13.0))
-                                                        .into_div()
-                                                        .tooltip(text_tooltip(tr("attach")))
-                                                        .on_mouse_down(
-                                                            MouseButton::Left,
-                                                            cx.listener(
-                                                                |this,
-                                                                 event: &MouseDownEvent,
-                                                                 _,
-                                                                 cx| {
+                                                            },
+                                                        ))
+                                                        .hover(move |style| {
+                                                            style.bg(rgb(theme.element_hover))
+                                                        })
+                                                        .tooltip(tr("attach"))
+                                                        .on_click(cx.listener(
+                                                            |this,
+                                                             event: &gpui::ClickEvent,
+                                                             _,
+                                                             cx| {
                                                                     this.toggle_attachment_menu(
-                                                                        event.position,
+                                                                        event.position(),
                                                                         cx,
                                                                     );
                                                                     cx.stop_propagation();
                                                                 },
-                                                            ),
-                                                        ),
+                                                            )),
                                                     )
                                                     .child(
                                                         div()
@@ -5921,15 +5921,17 @@ impl Render for AiPanel {
                                                                 "Think {}",
                                                                 selected_thinking_level.label()
                                                             ))
-                                                            .child(Icon::new(
-                                                                if thinking_menu_open {
-                                                                    IconName::ChevronUp
-                                                                } else {
-                                                                    IconName::ChevronDown
-                                                                },
-                                                                ui_rems(11.0),
-                                                                rgb(theme.text_muted),
-                                                            )),
+                                                            .child(
+                                                                Icon::new(
+                                                                    if thinking_menu_open {
+                                                                        IconName::ChevronUp
+                                                                    } else {
+                                                                        IconName::ChevronDown
+                                                                    },
+                                                                )
+                                                                .size(ui_rems(11.0))
+                                                                .text_color(rgb(theme.text_muted)),
+                                                            ),
                                                     ),
                                             )
                                             .child(
@@ -5983,15 +5985,15 @@ impl Render for AiPanel {
                                                                     .truncate()
                                                                     .child(model_label),
                                                             )
-                                                            .child(Icon::new(
-                                                                if model_menu_open {
+                                                            .child(
+                                                                Icon::new(if model_menu_open {
                                                                     IconName::ChevronUp
                                                                 } else {
                                                                     IconName::ChevronDown
-                                                                },
-                                                                ui_rems(11.0),
-                                                                rgb(theme.text_muted),
-                                                            )),
+                                                                })
+                                                                .size(ui_rems(11.0))
+                                                                .text_color(rgb(theme.text_muted)),
+                                                            ),
                                                     )
                                                     .child(
                                                         div()
@@ -6049,23 +6051,19 @@ impl Render for AiPanel {
                                                                 ),
                                                             )
                                                             .child(if loading {
-                                                                Icon::new(
-                                                                    IconName::Stop,
-                                                                    ui_rems(13.0),
-                                                                    rgb(theme.error),
-                                                                )
-                                                                .into_any_element()
+                                                                Icon::new(IconName::Stop)
+                                                                    .size(ui_rems(13.0))
+                                                                    .text_color(rgb(theme.error))
+                                                                    .into_any_element()
                                                             } else {
-                                                                Icon::new(
-                                                                    IconName::ArrowUp,
-                                                                    ui_rems(13.0),
-                                                                    rgb(if can_send {
+                                                                Icon::new(IconName::ArrowUp)
+                                                                    .size(ui_rems(13.0))
+                                                                    .text_color(rgb(if can_send {
                                                                         theme.accent
                                                                     } else {
                                                                         theme.text_muted
-                                                                    }),
-                                                                )
-                                                                .into_any_element()
+                                                                    }))
+                                                                    .into_any_element()
                                                             }),
                                                     ),
                                             ),

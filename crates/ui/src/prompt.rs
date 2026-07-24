@@ -4,6 +4,10 @@ use gpui::{
     PromptLevel, PromptResponse, Render, RenderablePromptHandle, Window, div, prelude::*, px, rgb,
     rgba,
 };
+use gpui_component::{
+    Selectable as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
+};
 
 pub fn init(cx: &mut App) {
     cx.set_prompt_builder(glyphst_prompt_renderer);
@@ -82,10 +86,6 @@ impl GlyphstPrompt {
 impl Render for GlyphstPrompt {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<SettingsStore>().resolved_theme;
-        let emphasis = match self.level {
-            PromptLevel::Info => theme.accent,
-            PromptLevel::Warning | PromptLevel::Critical => theme.error,
-        };
         let buttons = self
             .actions
             .iter()
@@ -94,37 +94,16 @@ impl Render for GlyphstPrompt {
                 let selected = index == self.active_action;
                 let destructive = !action.is_cancel()
                     && matches!(self.level, PromptLevel::Warning | PromptLevel::Critical);
-                div()
-                    .id(index)
-                    .h(px(30.0))
+                Button::new(("glyphst-prompt-action", index))
+                    .small()
+                    .label(action.label().clone())
                     .min_w(px(76.0))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(rgb(if selected {
-                        emphasis
-                    } else {
-                        theme.control_border
+                    .selected(selected)
+                    .when(destructive, |this| this.danger())
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(PromptResponse(index));
+                        cx.stop_propagation();
                     }))
-                    .bg(rgb(if selected {
-                        theme.element_selected
-                    } else {
-                        theme.control_background
-                    }))
-                    .text_color(rgb(if destructive { theme.error } else { theme.text }))
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.control_hover)))
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |_, _, _, cx| {
-                            cx.emit(PromptResponse(index));
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(action.label().clone())
             })
             .collect::<Vec<_>>();
 

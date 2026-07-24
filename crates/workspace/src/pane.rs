@@ -90,19 +90,19 @@ impl Render for LoadingDocumentView {
             } else {
                 theme.text_muted
             }))
-            .child(Icon::new(
-                if self.error.is_some() {
+            .child(
+                Icon::new(if self.error.is_some() {
                     IconName::TriangleAlert
                 } else {
                     IconName::Circle
-                },
-                ui_rems(14.0),
-                rgb(if self.error.is_some() {
+                })
+                .size(ui_rems(14.0))
+                .text_color(rgb(if self.error.is_some() {
                     theme.error
                 } else {
                     theme.accent
-                }),
-            ))
+                })),
+            )
             .child(detail)
     }
 }
@@ -508,7 +508,7 @@ impl Pane {
         }
 
         self.flush_active_tab(cx);
-        let tab = self.create_keymap_tab(cx);
+        let tab = self.create_keymap_tab(window, cx);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.sync_active_focus_handle();
@@ -733,7 +733,7 @@ impl Pane {
         };
         let pdf_view = cx.new(|cx| {
             pdf_view.register_cache_eviction(cx);
-            pdf_view.start_loading(cx);
+            pdf_view.start_loading(window, cx);
             pdf_view
         });
         self.subscribe_to_pdf_view(&pdf_view, window, cx);
@@ -767,9 +767,9 @@ impl Pane {
         tab
     }
 
-    fn create_keymap_tab(&mut self, cx: &mut Context<Self>) -> Tab {
+    fn create_keymap_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Tab {
         let focus_handle = self.focus_handle.clone();
-        let tab = Tab::Keymap(cx.new(|cx| KeymapEditor::new(focus_handle.clone(), cx)));
+        let tab = Tab::Keymap(cx.new(|cx| KeymapEditor::new(focus_handle.clone(), window, cx)));
         self.register_tab_focus_handle(&tab, focus_handle);
         tab
     }

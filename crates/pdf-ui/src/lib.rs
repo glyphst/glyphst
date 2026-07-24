@@ -31,5 +31,5 @@ pub use glyphst_actions::input;
 pub use glyphst_ai_ui::ai_panel;
 pub use glyphst_library as library;
 pub use glyphst_settings::{self as settings, localize, theme};
-pub use glyphst_ui::{icons, picker, scrollbar, smooth_scroll, style, text_input};
+pub use glyphst_ui::{icons, picker, scrollbar, smooth_scroll, style};
 pub use pdf_view::DocumentView;

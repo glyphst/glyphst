@@ -1,24 +1,22 @@
-use std::{ops::Range, time::Duration};
+use std::time::Duration;
 
 use crate::{
-    icons::{Icon, IconButton, IconName},
-    input,
+    icons::{Icon, IconName, toolbar_icon_button},
     pdf_view::{NextSearchResult, PrevSearchResult},
     settings::{SettingsStore, ui_rems},
     style::{CONTROL_ICON_SIZE, RADIUS_MD, SEARCH_BAR_HEIGHT, TextSize, elevated_shadow},
-    text_input::SingleLineTextElement,
 };
 pub use glyphst_actions::search::{SearchInputCancel, SearchInputConfirm, SearchInputPrevious};
-use glyphst_ui::text_edit::{
-    EditGroup, EditHistory, TextSnapshot, backward_word_deletion_start, forward_word_deletion_end,
-    next_grapheme_boundary, next_word_end, offset_from_utf16, offset_to_utf16,
-    previous_grapheme_boundary, previous_word_start, range_from_utf16, range_to_utf16,
-};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-    Point as GpuiPoint, Render, SharedString, Task, UTF16Selection, Window, div, point, prelude::*,
-    px, rgb,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, Render,
+    SharedString, Task, Window, div, prelude::*, px, rgb,
+};
+use gpui_component::{
+    Selectable as _, Sizable as _,
+    input::{
+        Escape as ComponentInputEscape, Input, InputEvent, InputState,
+        SelectAll as ComponentSelectAll,
+    },
 };
 
 pub enum SearchEvent {
@@ -36,59 +34,77 @@ pub enum SearchEvent {
     Dismissed,
 }
 
+pub(crate) struct SearchBarSnapshot {
+    pub query: SharedString,
+    pub active_match: Option<usize>,
+    pub match_count: usize,
+    pub ignore_case: bool,
+    pub indexing: bool,
+}
+
 pub struct SearchBar {
-    focus_handle: FocusHandle,
+    input: Entity<InputState>,
     previous_focus_handle: FocusHandle,
     content: SharedString,
-    placeholder: SharedString,
-    selected_range: Range<usize>,
-    selection_reversed: bool,
-    marked_range: Option<Range<usize>>,
-    last_layout: Option<gpui::ShapedLine>,
-    last_bounds: Option<Bounds<Pixels>>,
-    scroll_offset: Pixels,
-    drag_origin: Option<GpuiPoint<Pixels>>,
     applied_query: SharedString,
     active_match: Option<usize>,
     match_count: usize,
     ignore_case: bool,
     indexing: bool,
     search_debounce: Option<Task<()>>,
-    history: EditHistory<TextSnapshot>,
 }
 
 impl SearchBar {
-    pub fn new(
+    pub(crate) fn new(
         previous_focus_handle: FocusHandle,
-        content: SharedString,
-        active_match: Option<usize>,
-        match_count: usize,
-        ignore_case: bool,
-        indexing: bool,
+        snapshot: SearchBarSnapshot,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let content_len = content.len();
-        let applied_query = content.clone();
+        let SearchBarSnapshot {
+            query: content,
+            active_match,
+            match_count,
+            ignore_case,
+            indexing,
+        } = snapshot;
+        let input_content = content.clone();
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(input_content)
+                .placeholder(crate::fl!("search-document-placeholder"))
+        });
+
+        cx.subscribe(&input, |this, input, event, cx| match event {
+            InputEvent::Change => {
+                let content = input.read(cx).value();
+                if this.content != content {
+                    this.content = content;
+                    this.schedule_query(cx);
+                    cx.notify();
+                }
+            }
+            InputEvent::PressEnter { shift, .. } => this.activate(*shift, cx),
+            InputEvent::Focus | InputEvent::Blur => {}
+        })
+        .detach();
+
+        let input_focus = input.read(cx).focus_handle(cx);
+        window.on_next_frame(move |window, cx| {
+            input_focus.focus(window, cx);
+            input_focus.dispatch_action(&ComponentSelectAll, window, cx);
+        });
 
         Self {
-            focus_handle: cx.focus_handle(),
+            input,
             previous_focus_handle,
+            applied_query: content.clone(),
             content,
-            applied_query,
-            placeholder: crate::fl!("search-document-placeholder").into(),
-            selected_range: 0..content_len,
-            selection_reversed: false,
-            marked_range: None,
-            last_layout: None,
-            last_bounds: None,
-            scroll_offset: px(0.0),
-            drag_origin: None,
             active_match,
             match_count,
             ignore_case,
             indexing,
             search_debounce: None,
-            history: EditHistory::default(),
         }
     }
 
@@ -101,7 +117,7 @@ impl SearchBar {
         indexing: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.applied_query.as_ref() == applied_query.as_ref()
+        if self.applied_query == applied_query
             && self.active_match == active_match
             && self.match_count == match_count
             && self.ignore_case == ignore_case
@@ -172,600 +188,53 @@ impl SearchBar {
         self.dismiss(window, cx);
     }
 
-    fn left(&mut self, _: &input::Left, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        if self.selected_range.is_empty() {
-            self.move_to(
-                previous_grapheme_boundary(&self.content, self.cursor_offset()),
-                cx,
-            );
-        } else {
-            self.move_to(self.selected_range.start, cx);
-        }
-    }
-
-    fn right(&mut self, _: &input::Right, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        if self.selected_range.is_empty() {
-            self.move_to(
-                next_grapheme_boundary(&self.content, self.selected_range.end),
-                cx,
-            );
-        } else {
-            self.move_to(self.selected_range.end, cx);
-        }
-    }
-
-    fn word_left(&mut self, _: &input::WordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        if self.selected_range.is_empty() {
-            self.move_to(previous_word_start(&self.content, self.cursor_offset()), cx);
-        } else {
-            self.move_to(self.selected_range.start, cx);
-        }
-    }
-
-    fn word_right(&mut self, _: &input::WordRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        if self.selected_range.is_empty() {
-            self.move_to(next_word_end(&self.content, self.cursor_offset()), cx);
-        } else {
-            self.move_to(self.selected_range.end, cx);
-        }
-    }
-
-    fn select_all(&mut self, _: &input::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        self.move_to(0, cx);
-        self.select_to(self.content.len(), cx);
-    }
-
-    fn select_left(&mut self, _: &input::SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        self.select_to(
-            previous_grapheme_boundary(&self.content, self.cursor_offset()),
-            cx,
-        );
-    }
-
-    fn select_right(&mut self, _: &input::SelectRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        self.select_to(
-            next_grapheme_boundary(&self.content, self.cursor_offset()),
-            cx,
-        );
-    }
-
-    fn select_word_left(
+    fn component_cancel(
         &mut self,
-        _: &input::SelectWordLeft,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.history.break_group();
-        self.select_to(previous_word_start(&self.content, self.cursor_offset()), cx);
-    }
-
-    fn select_word_right(
-        &mut self,
-        _: &input::SelectWordRight,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.history.break_group();
-        self.select_to(next_word_end(&self.content, self.cursor_offset()), cx);
-    }
-
-    fn select_home(&mut self, _: &input::SelectHome, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        self.select_to(0, cx);
-    }
-
-    fn select_end(&mut self, _: &input::SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        self.select_to(self.content.len(), cx);
-    }
-
-    fn select_document_start(
-        &mut self,
-        _: &input::SelectDocumentStart,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.history.break_group();
-        self.select_to(0, cx);
-    }
-
-    fn select_document_end(
-        &mut self,
-        _: &input::SelectDocumentEnd,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.history.break_group();
-        self.select_to(self.content.len(), cx);
-    }
-
-    fn copy(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
-        self.copy_selected_text(cx);
-    }
-
-    fn cut(&mut self, _: &input::Cut, _: &mut Window, cx: &mut Context<Self>) {
-        if self.copy_selected_text(cx) {
-            self.replace_selected_text("", EditGroup::Isolated, cx);
-        }
-    }
-
-    fn home(&mut self, _: &input::Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        self.move_to(0, cx);
-    }
-
-    fn end(&mut self, _: &input::End, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        self.move_to(self.content.len(), cx);
-    }
-
-    fn document_start(&mut self, _: &input::DocumentStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        self.move_to(0, cx);
-    }
-
-    fn document_end(&mut self, _: &input::DocumentEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.history.break_group();
-        self.move_to(self.content.len(), cx);
-    }
-
-    fn backspace(&mut self, _: &input::Backspace, _: &mut Window, cx: &mut Context<Self>) {
-        let (range, group) = if self.selected_range.is_empty() {
-            (
-                previous_grapheme_boundary(&self.content, self.cursor_offset())
-                    ..self.cursor_offset(),
-                EditGroup::Backspace,
-            )
-        } else {
-            (self.selected_range.clone(), EditGroup::Isolated)
-        };
-        self.replace_range(range, "", group, cx);
-    }
-
-    fn delete(&mut self, _: &input::Delete, _: &mut Window, cx: &mut Context<Self>) {
-        let (range, group) = if self.selected_range.is_empty() {
-            (
-                self.cursor_offset()..next_grapheme_boundary(&self.content, self.cursor_offset()),
-                EditGroup::Delete,
-            )
-        } else {
-            (self.selected_range.clone(), EditGroup::Isolated)
-        };
-        self.replace_range(range, "", group, cx);
-    }
-
-    fn delete_word_backward(
-        &mut self,
-        _: &input::DeleteWordBackward,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = if self.selected_range.is_empty() {
-            backward_word_deletion_start(&self.content, self.cursor_offset())..self.cursor_offset()
-        } else {
-            self.selected_range.clone()
-        };
-        self.replace_range(range, "", EditGroup::Isolated, cx);
-    }
-
-    fn delete_word_forward(
-        &mut self,
-        _: &input::DeleteWordForward,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = if self.selected_range.is_empty() {
-            self.cursor_offset()..forward_word_deletion_end(&self.content, self.cursor_offset())
-        } else {
-            self.selected_range.clone()
-        };
-        self.replace_range(range, "", EditGroup::Isolated, cx);
-    }
-
-    fn delete_to_line_start(
-        &mut self,
-        _: &input::DeleteToLineStart,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = if self.selected_range.is_empty() {
-            0..self.cursor_offset()
-        } else {
-            self.selected_range.clone()
-        };
-        self.replace_range(range, "", EditGroup::Isolated, cx);
-    }
-
-    fn delete_to_line_end(
-        &mut self,
-        _: &input::DeleteToLineEnd,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = if self.selected_range.is_empty() {
-            self.cursor_offset()..self.content.len()
-        } else {
-            self.selected_range.clone()
-        };
-        self.replace_range(range, "", EditGroup::Isolated, cx);
-    }
-
-    fn paste(&mut self, _: &input::Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            let text = text.replace(['\n', '\r'], " ");
-            self.replace_selected_text(&text, EditGroup::Isolated, cx);
-        }
-    }
-
-    fn undo(&mut self, _: &input::Undo, _: &mut Window, cx: &mut Context<Self>) {
-        let current = self.snapshot();
-        if let Some(snapshot) = self.history.undo(current) {
-            self.restore_snapshot(snapshot, cx);
-        }
-    }
-
-    fn redo(&mut self, _: &input::Redo, _: &mut Window, cx: &mut Context<Self>) {
-        let current = self.snapshot();
-        if let Some(snapshot) = self.history.redo(current) {
-            self.restore_snapshot(snapshot, cx);
-        }
-    }
-
-    fn on_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
+        _: &ComponentInputEscape,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus_handle.focus(window, cx);
-        self.drag_origin = Some(event.position);
-        self.history.break_group();
-
-        if event.modifiers.shift {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
-        } else {
-            self.move_to(self.index_for_mouse_position(event.position), cx);
-        }
-        cx.stop_propagation();
-    }
-
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.drag_origin = None;
-        cx.stop_propagation();
-    }
-
-    fn on_mouse_down_out(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_selection(cx);
-    }
-
-    fn cancel_selection(&mut self, cx: &mut Context<Self>) {
-        self.drag_origin = None;
-        if !self.selected_range.is_empty() {
-            self.history.break_group();
-            self.move_to(self.cursor_offset(), cx);
-        }
-    }
-
-    fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        let offset = offset.min(self.content.len());
-        self.selected_range = offset..offset;
-        self.selection_reversed = false;
-        cx.notify();
-    }
-
-    fn cursor_offset(&self) -> usize {
-        if self.selection_reversed {
-            self.selected_range.start
-        } else {
-            self.selected_range.end
-        }
-    }
-
-    fn index_for_mouse_position(&self, position: GpuiPoint<Pixels>) -> usize {
-        if self.content.is_empty() {
-            return 0;
-        }
-
-        let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
-        else {
-            return 0;
-        };
-
-        crate::text_input::index_for_mouse_position_with_scroll(
-            line,
-            *bounds,
-            position,
-            self.scroll_offset,
-        )
-    }
-
-    fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        let offset = offset.min(self.content.len());
-        if self.selection_reversed {
-            self.selected_range.start = offset;
-        } else {
-            self.selected_range.end = offset;
-        };
-
-        if self.selected_range.end < self.selected_range.start {
-            self.selection_reversed = !self.selection_reversed;
-            self.selected_range = self.selected_range.end..self.selected_range.start;
-        }
-
-        cx.notify();
-    }
-
-    fn copy_selected_text(&self, cx: &mut Context<Self>) -> bool {
-        if self.selected_range.is_empty() {
-            return false;
-        }
-
-        cx.write_to_clipboard(ClipboardItem::new_string(
-            self.content[self.selected_range.clone()].to_string(),
-        ));
-        true
-    }
-
-    fn snapshot(&self) -> TextSnapshot {
-        TextSnapshot::new(
-            self.content.clone(),
-            self.selected_range.clone(),
-            self.selection_reversed,
-            self.marked_range.clone(),
-        )
-    }
-
-    fn restore_snapshot(&mut self, snapshot: TextSnapshot, cx: &mut Context<Self>) {
-        self.content = snapshot.content;
-        self.selected_range = snapshot.selected_range;
-        self.selection_reversed = snapshot.selection_reversed;
-        self.marked_range = snapshot.marked_range;
-        self.schedule_query(cx);
-        cx.notify();
-    }
-
-    fn replace_selected_text(&mut self, new_text: &str, group: EditGroup, cx: &mut Context<Self>) {
-        let range = self
-            .marked_range
-            .clone()
-            .unwrap_or_else(|| self.selected_range.clone());
-        self.replace_range(range, new_text, group, cx);
-    }
-
-    fn replace_range(
-        &mut self,
-        range: Range<usize>,
-        new_text: &str,
-        group: EditGroup,
-        cx: &mut Context<Self>,
-    ) {
-        let before = self.snapshot();
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
-        let cursor = range.start + new_text.len();
-        self.selected_range = cursor..cursor;
-        self.selection_reversed = false;
-        self.marked_range = None;
-        let after = self.snapshot();
-        self.history.record(before, &after, group);
-        self.schedule_query(cx);
-        cx.notify();
+        self.dismiss(window, cx);
     }
 
     fn counter_text(&self) -> String {
-        if self.applied_query.is_empty() || self.content.as_ref() != self.applied_query.as_ref() {
-            String::new()
-        } else if self.indexing {
-            "indexing…".to_string()
-        } else {
-            let active_match = self.active_match.map_or(0, |active| active + 1);
-            format!("{active_match}/{}", self.match_count)
-        }
+        search_counter_text(
+            &self.content,
+            &self.applied_query,
+            self.indexing,
+            self.active_match,
+            self.match_count,
+        )
     }
 }
 
-impl EntityInputHandler for SearchBar {
-    fn text_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        actual_range: &mut Option<Range<usize>>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<String> {
-        let range = range_from_utf16(&self.content, &range_utf16);
-        actual_range.replace(range_to_utf16(&self.content, &range));
-        Some(self.content[range].to_string())
-    }
-
-    fn selected_text_range(
-        &mut self,
-        _: bool,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        Some(UTF16Selection {
-            range: range_to_utf16(&self.content, &self.selected_range),
-            reversed: self.selection_reversed,
-        })
-    }
-
-    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        self.marked_range
-            .as_ref()
-            .map(|range| range_to_utf16(&self.content, range))
-    }
-
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
-        self.marked_range = None;
-        self.history.break_group();
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let group = if self.marked_range.is_some() {
-            EditGroup::Composition
-        } else {
-            EditGroup::Typing
-        };
-        let range = range_utf16
-            .as_ref()
-            .map(|range_utf16| range_from_utf16(&self.content, range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
-        self.replace_range(range, new_text, group, cx);
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        new_selected_range_utf16: Option<Range<usize>>,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|range_utf16| range_from_utf16(&self.content, range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
-        let selected_range_start = range.start;
-        let before = self.snapshot();
-
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
-        self.marked_range =
-            (!new_text.is_empty()).then_some(range.start..range.start + new_text.len());
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|range_utf16| {
-                let start = offset_from_utf16(new_text, range_utf16.start);
-                let end = offset_from_utf16(new_text, range_utf16.end);
-                selected_range_start + start..selected_range_start + end
-            })
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
-        self.selection_reversed = false;
-        let after = self.snapshot();
-        self.history.record(before, &after, EditGroup::Composition);
-        self.schedule_query(cx);
-        cx.notify();
-    }
-
-    fn bounds_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        bounds: Bounds<Pixels>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>> {
-        let last_layout = self.last_layout.as_ref()?;
-        let range = range_from_utf16(&self.content, &range_utf16);
-        Some(Bounds::from_corners(
-            point(
-                bounds.left() + last_layout.x_for_index(range.start) - self.scroll_offset,
-                bounds.top(),
-            ),
-            point(
-                bounds.left() + last_layout.x_for_index(range.end) - self.scroll_offset,
-                bounds.bottom(),
-            ),
-        ))
-    }
-
-    fn character_index_for_point(
-        &mut self,
-        point: GpuiPoint<Pixels>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<usize> {
-        let bounds = self.last_bounds?;
-        let line = self.last_layout.as_ref()?;
-        let utf8_index = line.index_for_x(point.x - bounds.left() + self.scroll_offset)?;
-        Some(offset_to_utf16(&self.content, utf8_index))
+fn search_counter_text(
+    content: &str,
+    applied_query: &str,
+    indexing: bool,
+    active_match: Option<usize>,
+    match_count: usize,
+) -> String {
+    if applied_query.is_empty() || content != applied_query {
+        String::new()
+    } else if indexing {
+        "indexing…".to_string()
+    } else {
+        let active_match = active_match.map_or(0, |active| active + 1);
+        format!("{active_match}/{match_count}")
     }
 }
 
 impl EventEmitter<SearchEvent> for SearchBar {}
 
 impl Focusable for SearchBar {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
-
-impl crate::text_input::SingleLineInput for SearchBar {
-    fn content(&self) -> &SharedString {
-        &self.content
-    }
-
-    fn placeholder(&self) -> SharedString {
-        self.placeholder.clone()
-    }
-
-    fn mask(&self) -> bool {
-        false
-    }
-
-    fn selected_range(&self) -> &Range<usize> {
-        &self.selected_range
-    }
-
-    fn marked_range(&self) -> Option<&Range<usize>> {
-        self.marked_range.as_ref()
-    }
-
-    fn cursor_offset(&self) -> usize {
-        Self::cursor_offset(self)
-    }
-
-    fn scroll_offset(&self) -> Pixels {
-        self.scroll_offset
-    }
-
-    fn set_render_state(
-        &mut self,
-        layout: gpui::ShapedLine,
-        bounds: Bounds<Pixels>,
-        scroll: Pixels,
-    ) {
-        self.last_layout = Some(layout);
-        self.last_bounds = Some(bounds);
-        self.scroll_offset = scroll;
-    }
-
-    fn set_scroll_offset(&mut self, scroll: Pixels) {
-        self.scroll_offset = scroll;
-    }
-
-    fn is_dragging(&self) -> bool {
-        self.drag_origin.is_some()
-    }
-
-    fn extend_selection_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.select_to(offset, cx);
-    }
-
-    fn end_drag(&mut self) {
-        self.drag_origin = None;
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.input.read(cx).focus_handle(cx)
     }
 }
 
 impl Render for SearchBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity();
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let counter = self.counter_text();
         let counter_color = if self.indexing {
@@ -776,10 +245,11 @@ impl Render for SearchBar {
             theme.text_muted
         };
         let ignore_case = self.ignore_case;
+        let focus_handle = self.focus_handle(cx);
 
         div()
-            .key_context("Search TextInput")
-            .track_focus(&self.focus_handle)
+            .key_context("Search")
+            .track_focus(&focus_handle)
             .flex()
             .flex_row()
             .items_center()
@@ -803,53 +273,18 @@ impl Render for SearchBar {
             .on_action(cx.listener(Self::next_result))
             .on_action(cx.listener(Self::prev_result))
             .on_action(cx.listener(Self::cancel))
-            .on_action(cx.listener(Self::backspace))
-            .on_action(cx.listener(Self::delete))
-            .on_action(cx.listener(Self::delete_word_backward))
-            .on_action(cx.listener(Self::delete_word_forward))
-            .on_action(cx.listener(Self::delete_to_line_start))
-            .on_action(cx.listener(Self::delete_to_line_end))
-            .on_action(cx.listener(Self::left))
-            .on_action(cx.listener(Self::right))
-            .on_action(cx.listener(Self::word_left))
-            .on_action(cx.listener(Self::word_right))
-            .on_action(cx.listener(Self::home))
-            .on_action(cx.listener(Self::end))
-            .on_action(cx.listener(Self::document_start))
-            .on_action(cx.listener(Self::document_end))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::select_left))
-            .on_action(cx.listener(Self::select_right))
-            .on_action(cx.listener(Self::select_word_left))
-            .on_action(cx.listener(Self::select_word_right))
-            .on_action(cx.listener(Self::select_home))
-            .on_action(cx.listener(Self::select_end))
-            .on_action(cx.listener(Self::select_document_start))
-            .on_action(cx.listener(Self::select_document_end))
-            .on_action(cx.listener(Self::copy))
-            .on_action(cx.listener(Self::cut))
-            .on_action(cx.listener(Self::paste))
-            .on_action(cx.listener(Self::undo))
-            .on_action(cx.listener(Self::redo))
-            .child(div().flex_none().mr_2().child(Icon::new(
-                IconName::Search,
-                ui_rems(CONTROL_ICON_SIZE),
-                rgb(theme.text_muted),
-            )))
+            .on_action(cx.listener(Self::component_cancel))
             .child(
-                div()
-                    .flex()
-                    .items_center()
+                Icon::new(IconName::Search)
+                    .size(ui_rems(CONTROL_ICON_SIZE))
+                    .text_color(rgb(theme.text_muted)),
+            )
+            .child(
+                Input::new(&self.input)
+                    .small()
+                    .appearance(false)
                     .flex_1()
-                    .min_w_0()
-                    .h(px(28.0))
-                    .pr_2()
-                    .cursor(CursorStyle::IBeam)
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
-                    .child(SingleLineTextElement::new(entity)),
+                    .min_w_0(),
             )
             .when(!counter.is_empty(), |this| {
                 this.child(
@@ -873,72 +308,55 @@ impl Render for SearchBar {
                     .bg(rgb(theme.border_variant)),
             )
             .child(
-                IconButton::new(
-                    "pdf-search-case-sensitive",
-                    IconName::CaseSensitive,
-                    rgb(theme.text_muted),
-                    rgb(theme.element_hover),
-                )
-                .icon_size(ui_rems(CONTROL_ICON_SIZE))
-                .toggle_state(ignore_case)
-                .toggled_icon_color(rgb(theme.surface_background))
-                .toggled_background(rgb(theme.accent))
-                .into_div()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
+                toolbar_icon_button("pdf-search-case-sensitive", IconName::CaseSensitive)
+                    .selected(ignore_case)
+                    .tooltip(crate::fl!("search-toggle-case-sensitivity"))
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.toggle_ignore_case(cx);
                         cx.stop_propagation();
-                    }),
-                ),
+                    })),
             )
             .child(
-                IconButton::new(
-                    "pdf-search-previous",
-                    IconName::ChevronUp,
-                    rgb(theme.text_muted),
-                    rgb(theme.element_hover),
-                )
-                .into_div()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
+                toolbar_icon_button("pdf-search-previous", IconName::ChevronUp)
+                    .tooltip(crate::fl!("search-previous-result"))
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.activate(true, cx);
                         cx.stop_propagation();
-                    }),
-                ),
+                    })),
             )
             .child(
-                IconButton::new(
-                    "pdf-search-next",
-                    IconName::ChevronDown,
-                    rgb(theme.text_muted),
-                    rgb(theme.element_hover),
-                )
-                .into_div()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
+                toolbar_icon_button("pdf-search-next", IconName::ChevronDown)
+                    .tooltip(crate::fl!("search-next-result"))
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.activate(false, cx);
                         cx.stop_propagation();
-                    }),
-                ),
+                    })),
             )
             .child(
-                IconButton::new(
-                    "pdf-search-close",
-                    IconName::X,
-                    rgb(theme.text_muted),
-                    rgb(theme.element_hover),
-                )
-                .into_div()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
+                toolbar_icon_button("pdf-search-close", IconName::X)
+                    .tooltip(crate::fl!("search-close"))
+                    .on_click(cx.listener(|this, _, window, cx| {
                         this.dismiss(window, cx);
                         cx.stop_propagation();
-                    }),
-                ),
+                    })),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::search_counter_text;
+
+    #[test]
+    fn counter_only_describes_the_applied_query() {
+        assert_eq!(
+            search_counter_text("rust", "rust", false, Some(1), 4),
+            "2/4"
+        );
+        assert_eq!(search_counter_text("rust", "ru", false, Some(0), 1), "");
+        assert_eq!(
+            search_counter_text("rust", "rust", true, None, 0),
+            "indexing…"
+        );
     }
 }

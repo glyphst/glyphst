@@ -11,17 +11,15 @@ use glyphst_pdf_translation_app::{
 use glyphst_settings::theme::Theme;
 use glyphst_settings::{Settings, SettingsStore, ui_rems};
 use glyphst_translation::TARGET_LANGUAGES;
-use glyphst_ui::{
-    notification_center::{
-        BackgroundTaskEntry, BackgroundTaskId, CenterAction, NotificationCenter, NotificationEntry,
-        NotificationId, NotificationLevel, TaskProgress,
-    },
-    searchable_dropdown::SearchableItem,
+use glyphst_ui::notification_center::{
+    BackgroundTaskEntry, BackgroundTaskId, CenterAction, NotificationCenter, NotificationEntry,
+    NotificationId, NotificationLevel, TaskProgress,
 };
 use gpui::{
     AnyElement, Context, EventEmitter, IntoElement, MouseButton, ParentElement as _, SharedString,
     Styled as _, Task, div, prelude::*, px, relative, rgb,
 };
+use gpui_component::searchable_list::SearchableListItem;
 
 const NOTIFICATION_WIDTH: f32 = 380.0;
 
@@ -1146,10 +1144,33 @@ fn job_status_content(snapshot: &DocumentTranslationJobSnapshot) -> (String, Str
     }
 }
 
-pub fn target_language_items(selected: &str) -> Vec<SearchableItem> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetLanguageOption {
+    pub value: String,
+    pub label: String,
+}
+
+impl SearchableListItem for TargetLanguageOption {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        let query = query.to_lowercase();
+        self.label.to_lowercase().contains(&query) || self.value.to_lowercase().contains(&query)
+    }
+}
+
+pub fn target_language_options(selected: &str) -> Vec<TargetLanguageOption> {
     let mut items = TARGET_LANGUAGES
         .iter()
-        .map(|language| SearchableItem {
+        .map(|language| TargetLanguageOption {
             value: language.code.to_string(),
             label: language.label.to_string(),
         })
@@ -1157,7 +1178,7 @@ pub fn target_language_items(selected: &str) -> Vec<SearchableItem> {
     if !items.iter().any(|item| item.value == selected) {
         items.insert(
             0,
-            SearchableItem {
+            TargetLanguageOption {
                 value: selected.to_string(),
                 label: selected.to_string(),
             },
@@ -1170,6 +1191,20 @@ pub fn target_language_items(selected: &str) -> Vec<SearchableItem> {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn target_language_options_are_searchable_and_preserve_custom_values() {
+        let options = target_language_options("custom-language");
+        assert_eq!(options[0].value, "custom-language");
+        assert_eq!(options[0].label, "custom-language");
+
+        let english = options
+            .iter()
+            .find(|option| option.value == "en")
+            .expect("English should be present in the target-language catalog");
+        assert!(english.matches("english"));
+        assert!(english.matches("EN"));
+    }
 
     fn running_record(
         id: DocumentTranslationJobId,

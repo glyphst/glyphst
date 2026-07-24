@@ -19,9 +19,8 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Par
 use smallvec::SmallVec;
 
 use crate::{
-    icons::{IconButton, IconName},
+    icons::{IconName, toolbar_icon_button},
     theme::Theme,
-    tooltip::text_tooltip,
 };
 use glyphst_actions::markdown::Copy;
 use glyphst_settings::localize::tr;
@@ -1645,7 +1644,7 @@ fn render_code_block_buttons(
         tr("markdown-unwrap-code")
     };
 
-    let wrap_button = IconButton::new(
+    let wrap_button = toolbar_icon_button(
         format!(
             "markdown-code-wrap-{}-{}",
             descriptor.id.0.start, descriptor.id.0.end
@@ -1655,14 +1654,8 @@ fn render_code_block_buttons(
         } else {
             IconName::TextUnwrap
         },
-        rgb(theme.text_muted),
-        rgb(theme.control_hover),
     )
-    .into_div()
-    .tooltip(text_tooltip(wrap_tooltip))
-    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-        cx.stop_propagation();
-    })
+    .tooltip(wrap_tooltip)
     .on_click(move |_, _, cx| {
         wrap_markdown.update(cx, |markdown, cx| {
             markdown.toggle_code_block_wrap(wrap_id.clone(), cx);
@@ -1670,7 +1663,7 @@ fn render_code_block_buttons(
     });
 
     let copy_markdown = markdown;
-    let copy_button = IconButton::new(
+    let copy_button = toolbar_icon_button(
         format!(
             "markdown-code-copy-{}-{}",
             descriptor.id.0.start, descriptor.id.0.end
@@ -1680,21 +1673,12 @@ fn render_code_block_buttons(
         } else {
             IconName::Copy
         },
-        if copied {
-            rgb(theme.success)
-        } else {
-            rgb(theme.text_muted)
-        },
-        rgb(theme.control_hover),
     )
-    .into_div()
-    .tooltip(text_tooltip(if copied {
+    .when(copied, |this| this.text_color(rgb(theme.success)))
+    .tooltip(if copied {
         tr("ai-copied")
     } else {
         tr("markdown-copy-code")
-    }))
-    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-        cx.stop_propagation();
     })
     .on_click(move |_, _, cx| {
         let copy_id = copy_id.clone();

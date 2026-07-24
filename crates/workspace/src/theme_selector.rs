@@ -223,11 +223,13 @@ impl PickerDelegate for ThemeSelectorDelegate {
                     .child(StyledText::new(name).with_highlights(highlights)),
             )
             .when(is_original, |this| {
-                this.child(div().flex_none().ml_3().child(Icon::new(
-                    IconName::Check,
-                    ui_rems(14.0),
-                    rgb(theme.text_muted),
-                )))
+                this.child(
+                    div().flex_none().ml_3().child(
+                        Icon::new(IconName::Check)
+                            .size(ui_rems(14.0))
+                            .text_color(rgb(theme.text_muted)),
+                    ),
+                )
             })
             .into_any_element()
     }

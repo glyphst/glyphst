@@ -3,7 +3,7 @@ use glyphst_settings::{
     ModelRef, Settings, SettingsStore, TranslationBoxCorner, TranslationProvider,
     TranslationProviderConfig,
 };
-use glyphst_translation_ui::target_language_items;
+use glyphst_translation_ui::target_language_options;
 use gpui::{App, Axis, Context, SharedString};
 use gpui_component::{
     Disableable as _, Sizable as _,
@@ -198,7 +198,7 @@ impl SettingsWindow {
         let view = cx.entity();
         let defaults = Settings::default();
 
-        let target_options = target_language_items(
+        let target_options = target_language_options(
             &cx.global::<SettingsStore>()
                 .settings
                 .translation

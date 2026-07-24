@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 
-use glyphst_ui::tooltip::text_tooltip;
 use gpui::{
     AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeybindingKeystroke, MouseButton, ParentElement, Render, SharedString, Styled, Subscription,
@@ -8,7 +7,7 @@ use gpui::{
 };
 
 use crate::{
-    icons::{Icon, IconButton, IconName},
+    icons::{Icon, IconName, toolbar_icon_button},
     settings::{SettingsStore, ui_rems},
     theme::Theme,
 };
@@ -165,14 +164,18 @@ impl Render for KeystrokeInput {
             .items_center()
             .gap_1()
             .when(recording, |this| {
-                this.child(Icon::new(IconName::Circle, ui_rems(8.0), rgb(theme.error)))
-                    .child(
-                        div()
-                            .text_size(ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(theme.error))
-                            .child("REC"),
-                    )
+                this.child(
+                    Icon::new(IconName::Circle)
+                        .size(ui_rems(8.0))
+                        .text_color(rgb(theme.error)),
+                )
+                .child(
+                    div()
+                        .text_size(ui_rems(11.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.error))
+                        .child("REC"),
+                )
             });
 
         let right = div()
@@ -184,58 +187,32 @@ impl Render for KeystrokeInput {
             .gap_1()
             .when(recording, |this| {
                 this.child(
-                    IconButton::new(
-                        "keystroke-stop",
-                        IconName::Stop,
-                        rgb(theme.error),
-                        rgb(theme.element_hover),
-                    )
-                    .into_div()
-                    .tooltip(text_tooltip("Stop Recording"))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
+                    toolbar_icon_button("keystroke-stop", IconName::Stop)
+                        .text_color(rgb(theme.error))
+                        .tooltip("Stop Recording")
+                        .on_click(cx.listener(|this, _, window, cx| {
                             this.focus_handle.focus(window, cx);
                             cx.stop_propagation();
-                        }),
-                    ),
+                        })),
                 )
                 .child(
-                    IconButton::new(
-                        "keystroke-clear",
-                        IconName::Delete,
-                        rgb(theme.text_muted),
-                        rgb(theme.element_hover),
-                    )
-                    .into_div()
-                    .tooltip(text_tooltip("Clear"))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
+                    toolbar_icon_button("keystroke-clear", IconName::Delete)
+                        .tooltip("Clear")
+                        .on_click(cx.listener(|this, _, window, cx| {
                             this.clear(cx);
                             this.inner_focus_handle.focus(window, cx);
                             cx.stop_propagation();
-                        }),
-                    ),
+                        })),
                 )
             })
             .when(!recording, |this| {
                 this.child(
-                    IconButton::new(
-                        "keystroke-record",
-                        IconName::Play,
-                        rgb(theme.text_muted),
-                        rgb(theme.element_hover),
-                    )
-                    .into_div()
-                    .tooltip(text_tooltip("Record"))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
+                    toolbar_icon_button("keystroke-record", IconName::Play)
+                        .tooltip("Record")
+                        .on_click(cx.listener(|this, _, window, cx| {
                             this.inner_focus_handle.focus(window, cx);
                             cx.stop_propagation();
-                        }),
-                    ),
+                        })),
                 )
             });
 
