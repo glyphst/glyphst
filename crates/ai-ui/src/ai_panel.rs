@@ -8276,12 +8276,12 @@ mod tests {
         });
 
         cx.update_window(window.into(), |_, window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         })
         .unwrap();
         handle.scroll_to_bottom();
         cx.update_window(window.into(), |_, window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         })
         .unwrap();
 
@@ -8301,12 +8301,12 @@ mod tests {
         });
 
         cx.update_window(window.into(), |_, window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         })
         .unwrap();
         handle.scroll_to_top_of_item(item_index);
         cx.update_window(window.into(), |_, window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         })
         .unwrap();
 
