@@ -62,26 +62,14 @@
             fontDirectories = [ ];
             includes = [ "${pkgs.fontconfig.out}/etc/fonts/conf.d" ];
           };
-          linuxLibraries = with pkgs; [
-            alsa-lib
+          buildLibraries = with pkgs; [
             fontconfig
             freetype
-            glib
-            libdrm
-            libgbm
-            libglvnd
-            libva
-            libxkbcommon
-            libx11
             libxcb
-            libxcomposite
-            libxcursor
-            libxdamage
-            libxext
-            libxfixes
-            libxi
-            libxrandr
-            mupdf
+            libxkbcommon
+          ];
+          runtimeLibraries = with pkgs; [
+            libglvnd
             vulkan-loader
             wayland
           ];
@@ -90,30 +78,19 @@
           default = pkgs.mkShell {
             packages = with pkgs; [
               cargo-audit
-              clang
-              lld
               mold
               pkg-config
               prek
               rust-analyzer
               rustToolchain
               typst
-              unzip
             ];
 
-            buildInputs = linuxLibraries;
+            buildInputs = buildLibraries;
 
             FONTCONFIG_FILE = fontsConf;
-            LD_LIBRARY_PATH = lib.makeLibraryPath linuxLibraries;
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
-            NIX_LDFLAGS = "-rpath ${
-              lib.makeLibraryPath [
-                pkgs.vulkan-loader
-                pkgs.wayland
-                pkgs.libva
-                pkgs.libglvnd
-              ]
-            }";
+            NIX_LDFLAGS = "-rpath ${lib.makeLibraryPath runtimeLibraries}";
             RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
           };
         }
