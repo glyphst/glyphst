@@ -75,7 +75,21 @@ impl TranslationBackend for GlyphstTranslationBackend {
         unit: &TranslationUnit,
         translated: &str,
     ) -> Result<(), String> {
-        validate_target_script(unit, translated, self.target_language.as_str())
+        validate_target_script(unit, None, translated, self.target_language.as_str())
+    }
+
+    fn validate_translated_output(
+        &self,
+        unit: &TranslationUnit,
+        protected_translation: &str,
+        translated: &str,
+    ) -> Result<(), String> {
+        validate_target_script(
+            unit,
+            Some(protected_translation),
+            translated,
+            self.target_language.as_str(),
+        )
     }
 
     fn cache_validated_translation(&self, unit: &TranslationUnit, translated: &str) {
@@ -192,6 +206,7 @@ fn translation_error(error: TranslationError) -> TranslationBackendError {
 
 fn validate_target_script(
     unit: &TranslationUnit,
+    protected_translation: Option<&str>,
     translated: &str,
     target_language: &str,
 ) -> Result<(), String> {
@@ -199,7 +214,10 @@ fn validate_target_script(
         target_language,
         "zh" | "zh-cn" | "zh-hans" | "zh-tw" | "zh-hant" | "ja" | "ko"
     );
-    if cjk_target && let Some(residue) = attached_source_language_residue(unit, translated) {
+    if cjk_target
+        && let Some(residue) =
+            protected_translation.and_then(|text| attached_source_language_residue(unit, text))
+    {
         return Err(format!(
             "translation left source-language text attached to a protected token: {residue}"
         ));
@@ -277,9 +295,12 @@ fn unchanged_prompt_heading(unit: &TranslationUnit, translated: &str) -> Option<
     .then(|| source_heading.to_string())
 }
 
-fn attached_source_language_residue(unit: &TranslationUnit, translated: &str) -> Option<String> {
+fn attached_source_language_residue(
+    unit: &TranslationUnit,
+    protected_translation: &str,
+) -> Option<String> {
     let source = unit.source_text.to_ascii_lowercase();
-    let translated = translated.to_ascii_lowercase();
+    let translated = protected_translation.to_ascii_lowercase();
     for token in &unit.protected.tokens {
         if !matches!(
             token.kind,
@@ -289,9 +310,9 @@ fn attached_source_language_residue(unit: &TranslationUnit, translated: &str) ->
         {
             continue;
         }
-        let original = token.original.to_ascii_lowercase();
-        for (start, _) in translated.match_indices(&original) {
-            let end = start + original.len();
+        let placeholder = token.placeholder.to_ascii_lowercase();
+        for (start, _) in translated.match_indices(&placeholder) {
+            let end = start + placeholder.len();
             let suffix = translated[end..]
                 .bytes()
                 .take_while(u8::is_ascii_alphabetic)
@@ -356,10 +377,11 @@ mod tests {
     #[test]
     fn rejects_long_english_residue_for_chinese_targets() {
         let source = "This is a sufficiently long English paragraph that should be translated into Chinese before it reaches layout.";
-        assert!(validate_target_script(&body_unit(source), source, "zh-hans").is_err());
+        assert!(validate_target_script(&body_unit(source), None, source, "zh-hans").is_err());
         assert!(
             validate_target_script(
                 &body_unit(source),
+                None,
                 "这是一段已经翻译成中文的长文本，其中保留 AI 作为必要的技术名称。",
                 "zh-hans"
             )
@@ -379,16 +401,50 @@ mod tests {
                 "WORDTOURaligns与人类判断一致。",
             ),
         ] {
+            let unit = body_unit(source);
+            let protected_translation = translated_with_placeholders(&unit, translated);
             assert!(
-                validate_target_script(&body_unit(source), translated, "zh-hans").is_err(),
+                validate_target_script(&unit, Some(&protected_translation), translated, "zh-hans")
+                    .is_err(),
                 "{translated}"
             );
         }
 
         let mut footnote = body_unit("3 This environment is created manually.");
         footnote.role = BlockRole::Footnote;
-        assert!(validate_target_script(&footnote, "3This 环境由人工创建。", "zh-hans").is_err());
-        assert!(validate_target_script(&footnote, "3该环境由人工创建。", "zh-hans").is_ok());
+        let bad = "3This 环境由人工创建。";
+        let protected_bad = translated_with_placeholders(&footnote, bad);
+        assert!(validate_target_script(&footnote, Some(&protected_bad), bad, "zh-hans").is_err());
+        let good = "3该环境由人工创建。";
+        let protected_good = translated_with_placeholders(&footnote, good);
+        assert!(validate_target_script(&footnote, Some(&protected_good), good, "zh-hans").is_ok());
+    }
+
+    #[test]
+    fn protected_placeholder_validation_handles_overlapping_identifier_values() {
+        let unit = body_unit("PDF-document-specific and PDF-level");
+        let full = unit
+            .protected
+            .tokens
+            .iter()
+            .find(|token| token.original == "PDF-document-specific")
+            .unwrap();
+        let prefix = unit
+            .protected
+            .tokens
+            .iter()
+            .find(|token| token.original == "PDF-")
+            .unwrap();
+        let translated = format!("{} 文档与 {} 级别", full.placeholder, prefix.placeholder);
+        let restored = unit.protected.validate_and_restore(&translated).unwrap();
+
+        assert!(validate_target_script(&unit, Some(&translated), &restored, "zh-hans").is_ok());
+
+        let residue = format!("{}level", prefix.placeholder);
+        assert_eq!(
+            attached_source_language_residue(&unit, &residue).as_deref(),
+            Some("PDF-level")
+        );
     }
 
     #[test]
@@ -399,6 +455,7 @@ mod tests {
         assert!(
             validate_target_script(
                 &unit,
+                None,
                 "[Agent’s Summary Description]\n观察：约翰看到艾迪在散步。",
                 "zh-hans"
             )
@@ -407,10 +464,19 @@ mod tests {
         assert!(
             validate_target_script(
                 &unit,
+                None,
                 "[智能体摘要描述]\n观察：约翰看到艾迪在散步。",
                 "zh-hans"
             )
             .is_ok()
         );
+    }
+
+    fn translated_with_placeholders(unit: &TranslationUnit, translated: &str) -> String {
+        let mut protected = translated.to_string();
+        for token in &unit.protected.tokens {
+            protected = protected.replacen(&token.original, &token.placeholder, 1);
+        }
+        protected
     }
 }

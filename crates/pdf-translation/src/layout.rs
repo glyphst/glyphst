@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Block, BlockRole, BoundingBox, FontFamilyClass, PageGeometry, StyledRun, TextFlow, TextStyle,
-    TranslatedDocument,
+    Block, BlockRole, BoundingBox, FontFamilyClass, PageGeometry, ProtectedRegion, StructureKind,
+    StyledRun, TextFlow, TextStyle, TranslatedDocument,
 };
+
+const MATERIAL_COLLISION_RATIO: f32 = 0.12;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayoutDocument {
@@ -103,6 +105,8 @@ impl FontWeight {
 pub struct LayoutWarning {
     pub unit_id: String,
     pub message: String,
+    #[serde(default)]
+    pub fatal: bool,
 }
 
 pub fn build_layout(translated: &TranslatedDocument) -> LayoutDocument {
@@ -148,6 +152,7 @@ pub fn build_layout_with_options(
             warnings.push(LayoutWarning {
                 unit_id: unit.id.clone(),
                 message: "translation unit has no source layout boxes".to_string(),
+                fatal: false,
             });
             continue;
         }
@@ -166,6 +171,7 @@ pub fn build_layout_with_options(
                 unit_id: unit.id.clone(),
                 message: "translation could not be distributed across continuation boxes"
                     .to_string(),
+                fatal: false,
             });
             continue;
         }
@@ -179,7 +185,13 @@ pub fn build_layout_with_options(
             let font_size = profile.font_size_pt;
             let minimum_font_size = preferred_minimum_font_size(block.role, font_size);
             let emergency_minimum_font_size = emergency_minimum_font_size(block.role, font_size);
-            let layout_bbox = structural_layout_bbox(block);
+            let protected_regions = translated
+                .document
+                .pages
+                .get(block.page_index)
+                .map(|page| page.protected_regions.as_slice())
+                .unwrap_or_default();
+            let layout_bbox = structural_layout_bbox(block, protected_regions);
             let item = LayoutItem {
                 unit_id: unit.id.clone(),
                 block_id: block.id.clone(),
@@ -237,7 +249,13 @@ pub fn build_layout_with_options(
     }
     expand_into_safe_vertical_space(&mut pages, &translated.document);
     for page in &pages {
-        detect_collisions(page, &mut warnings);
+        let protected_regions = translated
+            .document
+            .pages
+            .get(page.page_index)
+            .map(|source_page| source_page.protected_regions.as_slice())
+            .unwrap_or_default();
+        detect_collisions(page, protected_regions, &mut warnings);
     }
     LayoutDocument {
         pages,
@@ -278,7 +296,7 @@ fn source_text_regions(block: &Block) -> Vec<BoundingBox> {
     regions
 }
 
-fn structural_layout_bbox(block: &Block) -> BoundingBox {
+fn structural_layout_bbox(block: &Block, protected_regions: &[ProtectedRegion]) -> BoundingBox {
     let Some(structure) = block
         .structure
         .as_ref()
@@ -286,6 +304,16 @@ fn structural_layout_bbox(block: &Block) -> BoundingBox {
     else {
         return block.bbox;
     };
+    if !matches!(
+        structure.kind,
+        StructureKind::PromptHeading
+            | StructureKind::PromptQuestion
+            | StructureKind::OrderedListItem
+            | StructureKind::BulletListItem
+            | StructureKind::DialogueTurn
+    ) {
+        return block.bbox;
+    }
     let Some(group_bbox) = structure.group_bbox else {
         return block.bbox;
     };
@@ -296,7 +324,12 @@ fn structural_layout_bbox(block: &Block) -> BoundingBox {
     {
         return block.bbox;
     }
-    BoundingBox::new(group_bbox.x0, block.bbox.y0, group_bbox.x1, block.bbox.y1)
+    let candidate = BoundingBox::new(group_bbox.x0, block.bbox.y0, group_bbox.x1, block.bbox.y1);
+    if creates_protected_region_collision(block.bbox, candidate, protected_regions) {
+        block.bbox
+    } else {
+        candidate
+    }
 }
 
 pub fn split_text_for_layout_boxes(text: &str, capacities: &[usize]) -> Vec<String> {
@@ -594,12 +627,18 @@ fn expand_into_safe_vertical_space(pages: &mut [LayoutPage], document: &crate::D
             continue;
         };
         for item in &mut page.items {
+            let protected_nearest = nearest_protected_vertical_obstacle(
+                item.source_bbox,
+                item.bbox,
+                &source_page.protected_regions,
+            );
             let nearest = source_page
                 .blocks
                 .iter()
                 .filter(|block| block.id != item.block_id && block.bbox.y0 >= item.source_bbox.y1)
                 .filter(|block| horizontal_overlap(item.source_bbox, block.bbox) >= 0.25)
                 .map(|block| block.bbox.y0)
+                .chain(protected_nearest)
                 .min_by(f32::total_cmp)
                 .unwrap_or(page.geometry.height - 2.0);
             let growth_cap = (item.source_bbox.height() * 0.35).clamp(0.0, 24.0);
@@ -618,6 +657,38 @@ fn horizontal_overlap(left: BoundingBox, right: BoundingBox) -> f32 {
     overlap / left.width().min(right.width()).max(1.0)
 }
 
+fn nearest_protected_vertical_obstacle(
+    source_bbox: BoundingBox,
+    layout_bbox: BoundingBox,
+    protected_regions: &[ProtectedRegion],
+) -> Option<f32> {
+    protected_regions
+        .iter()
+        .filter(|region| region.bbox.y0 >= source_bbox.y1)
+        .filter(|region| horizontal_overlap(layout_bbox, region.bbox) >= 0.25)
+        .map(|region| region.bbox.y0)
+        .min_by(f32::total_cmp)
+}
+
+fn materially_overlaps(left: BoundingBox, right: BoundingBox) -> bool {
+    let Some(intersection) = left.intersection(right) else {
+        return false;
+    };
+    let minimum_area = left.area().min(right.area()).max(1.0);
+    intersection.area() / minimum_area > MATERIAL_COLLISION_RATIO
+}
+
+fn creates_protected_region_collision(
+    source_bbox: BoundingBox,
+    candidate_bbox: BoundingBox,
+    protected_regions: &[ProtectedRegion],
+) -> bool {
+    protected_regions.iter().any(|region| {
+        !materially_overlaps(source_bbox, region.bbox)
+            && materially_overlaps(candidate_bbox, region.bbox)
+    })
+}
+
 fn text_capacity(bbox: BoundingBox, font_size: f32) -> usize {
     let characters_per_line = (bbox.width() / (font_size * 0.92)).floor().max(4.0);
     let lines = (bbox.height() / (font_size * 1.12)).floor().max(1.0);
@@ -629,14 +700,14 @@ fn contains_long_unbreakable(text: &str) -> bool {
         .any(|word| word.chars().count() >= 36)
 }
 
-fn detect_collisions(page: &LayoutPage, warnings: &mut Vec<LayoutWarning>) {
+fn detect_collisions(
+    page: &LayoutPage,
+    protected_regions: &[ProtectedRegion],
+    warnings: &mut Vec<LayoutWarning>,
+) {
     for (index, item) in page.items.iter().enumerate() {
         for other in page.items.iter().skip(index + 1) {
-            let Some(intersection) = item.bbox.intersection(other.bbox) else {
-                continue;
-            };
-            let minimum_area = item.bbox.area().min(other.bbox.area()).max(1.0);
-            if intersection.area() / minimum_area > 0.12 {
+            if materially_overlaps(item.bbox, other.bbox) {
                 warnings.push(LayoutWarning {
                     unit_id: item.unit_id.clone(),
                     message: format!(
@@ -644,6 +715,23 @@ fn detect_collisions(page: &LayoutPage, warnings: &mut Vec<LayoutWarning>) {
                         other.block_id,
                         page.page_index + 1
                     ),
+                    fatal: false,
+                });
+            }
+        }
+        for region in protected_regions {
+            if !materially_overlaps(item.source_bbox, region.bbox)
+                && materially_overlaps(item.bbox, region.bbox)
+            {
+                warnings.push(LayoutWarning {
+                    unit_id: item.unit_id.clone(),
+                    message: format!(
+                        "translated layout box overlaps protected {} region {} on page {}",
+                        region.kind.as_str(),
+                        region.id,
+                        page.page_index + 1
+                    ),
+                    fatal: true,
                 });
             }
         }
@@ -660,7 +748,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        BlockContent, BlockKind, BlockStructure, SourceProvenance, StructureKind, TranslationPolicy,
+        BlockContent, BlockKind, BlockStructure, ProtectedRegionKind, SourceProvenance,
+        StructureKind, TranslationPolicy,
     };
 
     #[test]
@@ -694,12 +783,75 @@ mod tests {
         });
 
         assert_eq!(
-            structural_layout_bbox(&block),
+            structural_layout_bbox(&block, &[]),
             BoundingBox::new(30.0, 20.0, 120.0, 32.0)
         );
 
         block.structure.as_mut().unwrap().confidence = 0.94;
-        assert_eq!(structural_layout_bbox(&block), source_bbox);
+        assert_eq!(structural_layout_bbox(&block, &[]), source_bbox);
+    }
+
+    #[test]
+    fn generic_regions_keep_their_source_horizontal_bounds() {
+        let source_bbox = BoundingBox::new(40.0, 20.0, 90.0, 32.0);
+        let mut block = layout_test_block(source_bbox);
+        block.structure = Some(BlockStructure {
+            kind: StructureKind::Region,
+            flow: TextFlow::Reflow,
+            group_id: Some("region".to_string()),
+            group_bbox: Some(BoundingBox::new(30.0, 10.0, 120.0, 80.0)),
+            marker: None,
+            provider: "paddle".to_string(),
+            confidence: 0.98,
+        });
+
+        assert_eq!(structural_layout_bbox(&block, &[]), source_bbox);
+    }
+
+    #[test]
+    fn structured_expansion_stops_before_a_protected_region() {
+        let source_bbox = BoundingBox::new(40.0, 20.0, 90.0, 32.0);
+        let mut block = layout_test_block(source_bbox);
+        block.structure = Some(BlockStructure {
+            kind: StructureKind::OrderedListItem,
+            flow: TextFlow::Reflow,
+            group_id: Some("prompt".to_string()),
+            group_bbox: Some(BoundingBox::new(30.0, 10.0, 120.0, 80.0)),
+            marker: Some("1.".to_string()),
+            provider: "paddle".to_string(),
+            confidence: 0.98,
+        });
+        let protected = ProtectedRegion {
+            id: "chart".to_string(),
+            page_index: 0,
+            kind: ProtectedRegionKind::Chart,
+            bbox: BoundingBox::new(92.0, 15.0, 130.0, 40.0),
+            source: "test".to_string(),
+            confidence: 1.0,
+            reason: "chart".to_string(),
+        };
+
+        assert_eq!(structural_layout_bbox(&block, &[protected]), source_bbox);
+    }
+
+    #[test]
+    fn protected_regions_limit_vertical_growth_across_expanded_width() {
+        let source_bbox = BoundingBox::new(10.0, 10.0, 40.0, 40.0);
+        let layout_bbox = BoundingBox::new(10.0, 10.0, 90.0, 40.0);
+        let protected = ProtectedRegion {
+            id: "chart".to_string(),
+            page_index: 0,
+            kind: ProtectedRegionKind::Chart,
+            bbox: BoundingBox::new(50.0, 44.0, 100.0, 80.0),
+            source: "test".to_string(),
+            confidence: 1.0,
+            reason: "chart".to_string(),
+        };
+
+        assert_eq!(
+            nearest_protected_vertical_obstacle(source_bbox, layout_bbox, &[protected]),
+            Some(44.0)
+        );
     }
 
     #[test]

@@ -746,20 +746,23 @@ fn append_typst_layout_item(
     while index < runs.len() {
         let run = &runs[index];
         let style = merged_text_style(&base_style, run.style.as_ref());
-        if style.font_class == Some(FontFamilyClass::Math) {
+        if let Some(end) = formula_cluster_end(runs, &base_style, index) {
+            append_typst_formula_cluster(source, &runs[index..end], &base_style, item);
+            index = end;
+        } else if is_formula_anchor(&style) {
             source.push_str("#box[");
             while index < runs.len() {
                 let run = &runs[index];
                 let style = merged_text_style(&base_style, run.style.as_ref());
-                if style.font_class != Some(FontFamilyClass::Math) {
+                if !is_formula_anchor(&style) {
                     break;
                 }
-                append_typst_styled_run(source, run, &style, item);
+                append_typst_styled_run(source, run, &style, item, true);
                 index += 1;
             }
             source.push(']');
         } else {
-            append_typst_styled_run(source, run, &style, item);
+            append_typst_styled_run(source, run, &style, item, false);
             index += 1;
         }
     }
@@ -805,19 +808,216 @@ fn merged_text_style(base: &TextStyle, override_style: Option<&TextStyle>) -> Te
     }
 }
 
+fn is_formula_anchor(style: &TextStyle) -> bool {
+    style.font_class == Some(FontFamilyClass::Math)
+        || style.baseline_position != BaselinePosition::Normal
+}
+
+fn formula_cluster_end(runs: &[StyledRun], base_style: &TextStyle, start: usize) -> Option<usize> {
+    let first_style = merged_text_style(base_style, runs.get(start)?.style.as_ref());
+    if !is_formula_anchor(&first_style) {
+        return None;
+    }
+
+    let mut end = start + 1;
+    let mut anchors = 1usize;
+    while end < runs.len() {
+        let style = merged_text_style(base_style, runs[end].style.as_ref());
+        if is_formula_anchor(&style) {
+            anchors += 1;
+            end += 1;
+            continue;
+        }
+        if !is_formula_bridge(&runs[end].text) {
+            break;
+        }
+
+        let bridge_start = end;
+        while end < runs.len() {
+            let style = merged_text_style(base_style, runs[end].style.as_ref());
+            if is_formula_anchor(&style) || !is_formula_bridge(&runs[end].text) {
+                break;
+            }
+            end += 1;
+        }
+        if end >= runs.len()
+            || !is_formula_anchor(&merged_text_style(base_style, runs[end].style.as_ref()))
+        {
+            end = bridge_start;
+            break;
+        }
+    }
+
+    (anchors > 1 || end > start + 1).then_some(end)
+}
+
+fn is_formula_bridge(text: &str) -> bool {
+    !text.is_empty()
+        && text.chars().all(|character| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '+' | '-'
+                        | '−'
+                        | '±'
+                        | '∓'
+                        | '='
+                        | '≠'
+                        | '<'
+                        | '>'
+                        | '≤'
+                        | '≥'
+                        | '≈'
+                        | '≃'
+                        | '∼'
+                        | '~'
+                        | '·'
+                        | '⋅'
+                        | '×'
+                        | '÷'
+                        | '/'
+                        | '\\'
+                        | '*'
+                        | '^'
+                        | '_'
+                        | '%'
+                        | ':'
+                        | ';'
+                        | ','
+                        | '.'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '|'
+                        | '‖'
+                        | '&'
+                        | '!'
+                        | '?'
+                )
+        })
+}
+
+fn is_formula_break_bridge(text: &str) -> bool {
+    text.chars().any(|character| {
+        matches!(
+            character,
+            '+' | '-'
+                | '−'
+                | '±'
+                | '∓'
+                | '='
+                | '≠'
+                | '<'
+                | '>'
+                | '≤'
+                | '≥'
+                | '≈'
+                | '≃'
+                | '∼'
+                | '~'
+        )
+    })
+}
+
+fn append_typst_formula_cluster(
+    source: &mut String,
+    runs: &[StyledRun],
+    base_style: &TextStyle,
+    item: &LayoutItem,
+) {
+    let mut chunk_start = 0usize;
+    let mut previous_was_anchor = true;
+    for index in 1..runs.len() {
+        let style = merged_text_style(base_style, runs[index].style.as_ref());
+        if is_formula_anchor(&style) {
+            previous_was_anchor = true;
+        } else {
+            if previous_was_anchor && is_formula_break_bridge(&runs[index].text) {
+                append_typst_formula_chunk(
+                    source,
+                    &runs[chunk_start..index],
+                    base_style,
+                    item,
+                    chunk_start > 0,
+                );
+                chunk_start = index;
+            }
+            previous_was_anchor = false;
+        }
+    }
+    append_typst_formula_chunk(
+        source,
+        &runs[chunk_start..],
+        base_style,
+        item,
+        chunk_start > 0,
+    );
+}
+
+fn append_typst_formula_chunk(
+    source: &mut String,
+    runs: &[StyledRun],
+    base_style: &TextStyle,
+    item: &LayoutItem,
+    break_before: bool,
+) {
+    if runs.is_empty() {
+        return;
+    }
+
+    let first_style = merged_text_style(base_style, runs[0].style.as_ref());
+    let first_text = if break_before {
+        let content_start = runs[0]
+            .text
+            .find(|character: char| !character.is_whitespace())
+            .unwrap_or(runs[0].text.len());
+        let (leading, content) = runs[0].text.split_at(content_start);
+        if !leading.is_empty() {
+            append_typst_styled_run_text(source, leading, &first_style, item, true);
+        } else {
+            source.push_str("#text(\"\u{200B}\")");
+        }
+        content
+    } else {
+        runs[0].text.as_str()
+    };
+
+    source.push_str("#box[");
+    append_typst_styled_run_text(source, first_text, &first_style, item, true);
+    for run in &runs[1..] {
+        let style = merged_text_style(base_style, run.style.as_ref());
+        append_typst_styled_run(source, run, &style, item, true);
+    }
+    source.push(']');
+}
+
 fn append_typst_styled_run(
     source: &mut String,
     run: &StyledRun,
     style: &TextStyle,
     item: &LayoutItem,
+    literal: bool,
 ) {
-    if run.text.is_empty() {
+    append_typst_styled_run_text(source, &run.text, style, item, literal);
+}
+
+fn append_typst_styled_run_text(
+    source: &mut String,
+    run_text: &str,
+    style: &TextStyle,
+    item: &LayoutItem,
+    literal: bool,
+) {
+    if run_text.is_empty() {
         return;
     }
     let parts = if item.preserve_line_breaks {
-        run.text.split('\n').collect::<Vec<_>>()
+        run_text.split('\n').collect::<Vec<_>>()
     } else {
-        vec![run.text.as_str()]
+        vec![run_text]
     };
     for (index, part) in parts.into_iter().enumerate() {
         if index > 0 {
@@ -831,12 +1031,22 @@ fn append_typst_styled_run(
         if text.is_empty() {
             continue;
         }
-        append_typst_styled_text(source, &text, style, item);
+        append_typst_styled_text(source, &text, style, item, literal);
     }
 }
 
-fn append_typst_styled_text(source: &mut String, text: &str, style: &TextStyle, item: &LayoutItem) {
-    let markdown = normalize_markdown_math(text);
+fn append_typst_styled_text(
+    source: &mut String,
+    text: &str,
+    style: &TextStyle,
+    item: &LayoutItem,
+    literal: bool,
+) {
+    let markdown = if literal {
+        text.to_string()
+    } else {
+        normalize_markdown_math(text)
+    };
     let font = typst_font_name(style.font_class.unwrap_or(FontFamilyClass::Serif));
     let source_size = style
         .font_size
@@ -849,7 +1059,7 @@ fn append_typst_styled_text(source: &mut String, text: &str, style: &TextStyle, 
     };
     let [red, green, blue] = argb_to_rgb(style.color_argb.unwrap_or(0xff00_0000));
     let escaped = escape_typst_string(&markdown);
-    let mut content = if style.font_class == Some(FontFamilyClass::Math) {
+    let mut content = if literal || style.font_class == Some(FontFamilyClass::Math) {
         format!("#text(\"{escaped}\")")
     } else {
         format!("#cmarker.render(\"{escaped}\", math: mitex)")
@@ -1276,6 +1486,50 @@ mod tests {
                         },
                         StyledRun {
                             text: "+n2d)".to_string(),
+                            style: Some(math_style.clone()),
+                        },
+                        StyledRun {
+                            text: " + ".to_string(),
+                            style: Some(TextStyle {
+                                font_class: Some(FontFamilyClass::Serif),
+                                font_size: Some(10.0),
+                                ..TextStyle::default()
+                            }),
+                        },
+                        StyledRun {
+                            text: "α".to_string(),
+                            style: Some(math_style.clone()),
+                        },
+                        StyledRun {
+                            text: "recency".to_string(),
+                            style: Some(TextStyle {
+                                font_size: Some(8.0),
+                                baseline_position: BaselinePosition::Subscript,
+                                ..math_style.clone()
+                            }),
+                        },
+                        StyledRun {
+                            text: "·".to_string(),
+                            style: Some(TextStyle {
+                                font_class: Some(FontFamilyClass::Serif),
+                                font_size: Some(10.0),
+                                ..TextStyle::default()
+                            }),
+                        },
+                        StyledRun {
+                            text: "recency".to_string(),
+                            style: Some(math_style.clone()),
+                        },
+                        StyledRun {
+                            text: "+".to_string(),
+                            style: Some(TextStyle {
+                                font_class: Some(FontFamilyClass::Serif),
+                                font_size: Some(10.0),
+                                ..TextStyle::default()
+                            }),
+                        },
+                        StyledRun {
+                            text: "importance".to_string(),
                             style: Some(math_style),
                         },
                     ],
@@ -1303,7 +1557,12 @@ mod tests {
         assert!(source.contains("#box["));
         assert!(source.contains("#text(\"+n2d)\")"));
         assert!(!source.contains("cmarker.render(\"+n2d)\""));
+        assert!(source.contains("#text(\"+ \")"));
+        assert!(!source.contains("cmarker.render(\" + \")"));
+        assert!(!source.contains("cmarker.render(\"·\")"));
+        assert!(source.contains('\u{200B}'));
         assert!(source.contains("#super[#text(\"3\")]"));
+        assert!(source.contains("#sub[#text(\"recency\")]"));
         assert!(!source.contains("#text(\"O(n\")\n#super"));
         assert!(!source.contains("clip: true"));
         assert!(source.contains("let size-floor = if strict"));

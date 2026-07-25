@@ -125,16 +125,37 @@ impl ProtectedText {
                 ));
             }
         }
+        let mut normalized = translated.to_string();
         for pair in self.tokens.windows(2) {
             let adjacent = format!("{}{}", pair[0].placeholder, pair[1].placeholder);
-            if self.text.contains(&adjacent) && !translated.contains(&adjacent) {
-                return Err(format!(
-                    "adjacent placeholders {} and {} were separated",
-                    pair[0].placeholder, pair[1].placeholder
-                ));
+            if self.text.contains(&adjacent) && !normalized.contains(&adjacent) {
+                let left_end = normalized
+                    .find(&pair[0].placeholder)
+                    .map(|start| start + pair[0].placeholder.len());
+                let right_start = left_end.and_then(|left_end| {
+                    normalized[left_end..]
+                        .find(&pair[1].placeholder)
+                        .map(|offset| left_end + offset)
+                });
+                let whitespace_only =
+                    left_end
+                        .zip(right_start)
+                        .is_some_and(|(left_end, right_start)| {
+                            normalized[left_end..right_start]
+                                .chars()
+                                .all(char::is_whitespace)
+                        });
+                if !whitespace_only {
+                    return Err(format!(
+                        "adjacent placeholders {} and {} were separated",
+                        pair[0].placeholder, pair[1].placeholder
+                    ));
+                }
+                let (left_end, right_start) = left_end.zip(right_start).expect("checked above");
+                normalized.replace_range(left_end..right_start, "");
             }
         }
-        let mut restored = translated.to_string();
+        let mut restored = normalized;
         for token in &self.tokens {
             if restored.contains(&token.placeholder) {
                 restored = restored.replace(
@@ -206,6 +227,15 @@ pub trait TranslationBackend: Sync {
         _translated: &str,
     ) -> Result<(), String> {
         Ok(())
+    }
+
+    fn validate_translated_output(
+        &self,
+        unit: &TranslationUnit,
+        _protected_translation: &str,
+        translated: &str,
+    ) -> Result<(), String> {
+        self.validate_translated_text(unit, translated)
     }
 
     fn cache_validated_translation(&self, _unit: &TranslationUnit, _translated: &str) {}
@@ -626,7 +656,7 @@ fn process_completed_request(
                 validate_translation(&unit, &normalized_output, backend.reject_unchanged_output())
                     .and_then(|translated| {
                         backend
-                            .validate_translated_text(&unit, &translated.text)
+                            .validate_translated_output(&unit, &normalized_output, &translated.text)
                             .map(|()| translated)
                     })
                     .map(|translated| (translated, output.cached, normalized_output))
@@ -2565,6 +2595,39 @@ mod tests {
             source
         );
         assert_eq!(protected.tokens.len(), 3);
+    }
+
+    #[test]
+    fn adjacent_placeholders_accept_only_inserted_whitespace() {
+        let first = ProtectedToken {
+            placeholder: "[[GLYPHST_NUMBER_0000_AAAAAAAA]]".to_string(),
+            original: "1".to_string(),
+            kind: ProtectedTokenKind::NumericLiteral,
+            styled_restoration: None,
+        };
+        let second = ProtectedToken {
+            placeholder: "[[GLYPHST_NUMBER_0001_BBBBBBBB]]".to_string(),
+            original: "2".to_string(),
+            kind: ProtectedTokenKind::NumericLiteral,
+            styled_restoration: None,
+        };
+        let protected = ProtectedText {
+            text: format!("{}{}", first.placeholder, second.placeholder),
+            tokens: vec![first.clone(), second.clone()],
+        };
+        let whitespace_separated = format!("{}\n  {}", first.placeholder, second.placeholder);
+        let text_separated = format!("{} and {}", first.placeholder, second.placeholder);
+        let reordered = format!("{}{}", second.placeholder, first.placeholder);
+
+        assert_eq!(
+            protected
+                .restore_translation(&whitespace_separated)
+                .unwrap()
+                .0,
+            "12"
+        );
+        assert!(protected.restore_translation(&text_separated).is_err());
+        assert!(protected.restore_translation(&reordered).is_err());
     }
 
     #[test]

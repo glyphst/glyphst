@@ -30,7 +30,7 @@ use crate::backend::GlyphstTranslationBackend;
 use crate::reviewer::GlyphstPolicyReviewer;
 
 const ARTIFACT_VERSION: u32 = 3;
-const PIPELINE_VERSION: &str = "native-rust-v17-ocr-semantic-lines";
+const PIPELINE_VERSION: &str = "native-rust-v18-ocr-semantic-lines";
 const CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone)]
@@ -962,6 +962,15 @@ fn validate_layout_completeness(
     translated: &TranslatedDocument,
     layout: &LayoutDocument,
 ) -> Result<(), PdfTranslationError> {
+    if let Some(warning) = layout.warnings.iter().find(|warning| warning.fatal) {
+        return Err(PdfTranslationError::message(
+            PdfTranslationStage::Layout,
+            format!(
+                "Unsafe translated layout for {}: {}",
+                warning.unit_id, warning.message
+            ),
+        ));
+    }
     if !layout.preserved_on_overflow.is_empty() {
         return Err(PdfTranslationError::message(
             PdfTranslationStage::Layout,
@@ -1294,6 +1303,37 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fatal_layout_warnings_stop_pdf_generation() {
+        let translated = TranslatedDocument {
+            document: DocumentV1::new(
+                crate::DocumentMetadata {
+                    document_id: "layout-warning".to_string(),
+                    source_path: PathBuf::from("source.pdf"),
+                    provider: "test".to_string(),
+                    provider_version: "1".to_string(),
+                    extra: Default::default(),
+                },
+                Vec::new(),
+            ),
+            units: Vec::new(),
+        };
+        let layout = LayoutDocument {
+            pages: Vec::new(),
+            warnings: vec![glyphst_pdf_translation::LayoutWarning {
+                unit_id: "unit".to_string(),
+                message: "translated layout box overlaps protected chart region".to_string(),
+                fatal: true,
+            }],
+            preserved_on_overflow: Vec::new(),
+            overflow_policy: glyphst_pdf_translation::OverflowPolicy::Adaptive,
+        };
+
+        let error = validate_layout_completeness(&translated, &layout).unwrap_err();
+
+        assert!(error.to_string().contains("Unsafe translated layout"));
+    }
 
     #[test]
     fn fingerprint_does_not_include_ocr_or_translation_secrets() {

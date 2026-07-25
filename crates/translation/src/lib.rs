@@ -1613,9 +1613,14 @@ fn validate_google_semantic_output(
         ));
     }
     let reject_unchanged = source_language.is_none_or(|source| source != target_language);
-    let alphabetic = unit
-        .text
-        .chars()
+    let alphabetic = prepared
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            GoogleSemanticSegment::NaturalLanguage(text) => Some(text.as_str()),
+            GoogleSemanticSegment::Protected(_) => None,
+        })
+        .flat_map(str::chars)
         .filter(|character| character.is_alphabetic())
         .count();
     if reject_unchanged
@@ -2232,6 +2237,59 @@ mod tests {
         assert_eq!(
             restore_google_semantic_html(&prepared, &prepared.html, "batch HTML").unwrap(),
             unit.text
+        );
+    }
+
+    #[test]
+    fn google_unchanged_detection_ignores_token_only_units() {
+        let placeholder = "[[GLYPHST_NUMBER_0000_AAAAAAAA]]";
+        let unit = test_semantic_unit(
+            "unit-google-token-only",
+            placeholder,
+            vec![test_semantic_token(
+                placeholder,
+                "(1)",
+                SemanticProtectedTokenKind::NumericLiteral,
+            )],
+        );
+        let prepared = prepare_google_semantic_unit(&unit).unwrap();
+        let source = LanguageCode::new("en").unwrap();
+        let target = LanguageCode::new("zh-hans").unwrap();
+
+        assert!(
+            validate_google_semantic_output(
+                &unit,
+                &prepared,
+                &unit.text,
+                Some(&source),
+                &target,
+                "test",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn google_unchanged_detection_still_rejects_natural_language() {
+        let unit = test_semantic_unit(
+            "unit-google-natural-language",
+            "This sentence still needs translation.",
+            Vec::new(),
+        );
+        let prepared = prepare_google_semantic_unit(&unit).unwrap();
+        let source = LanguageCode::new("en").unwrap();
+        let target = LanguageCode::new("zh-hans").unwrap();
+
+        assert!(
+            validate_google_semantic_output(
+                &unit,
+                &prepared,
+                &unit.text,
+                Some(&source),
+                &target,
+                "test",
+            )
+            .is_err()
         );
     }
 
