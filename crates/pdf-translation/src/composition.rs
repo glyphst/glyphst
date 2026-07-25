@@ -633,16 +633,23 @@ fn restore_pdf_structure(
             copy_dict_entry(&source_catalog, &mut output_catalog, key, &mut graft)?;
         }
     }
+    let options = final_pdf_write_options();
+    output
+        .save_with_options(&output_path.to_string_lossy(), options)
+        .map_err(PdfCompositionError::mupdf)
+}
+
+fn final_pdf_write_options() -> PdfWriteOptions {
     let mut options = PdfWriteOptions::default();
     options
         .set_compress(true)
         .set_compress_fonts(true)
         .set_compress_images(true)
-        .set_clean(true)
+        // MuPDF content cleaning can attach a form's resources to a Type 3
+        // font that omitted /Resources. Renumbering those objects afterwards
+        // leaves the form pointing at a non-font object.
         .set_garbage_level(3);
-    output
-        .save_with_options(&output_path.to_string_lossy(), options)
-        .map_err(PdfCompositionError::mupdf)
+    options
 }
 
 fn collect_links(page: &mupdf::pdf::PdfPage) -> Result<Vec<PdfLink>, PdfCompositionError> {
@@ -687,6 +694,7 @@ fn temporary_composition_path(output_path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::{
@@ -695,6 +703,172 @@ mod tests {
     };
 
     use super::*;
+
+    struct TempDirectory(PathBuf);
+
+    impl TempDirectory {
+        fn new(name: &str) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir()
+                .join(format!("glyphst-{name}-{}-{nonce:x}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn append_pdf_object(pdf: &mut Vec<u8>, offsets: &mut Vec<usize>, id: usize, body: &[u8]) {
+        assert_eq!(id, offsets.len() + 1);
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+        pdf.extend_from_slice(body);
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+
+    fn pdf_stream(dictionary: &str, bytes: &[u8]) -> Vec<u8> {
+        let mut stream =
+            format!("<< {dictionary} /Length {} >>\nstream\n", bytes.len()).into_bytes();
+        stream.extend_from_slice(bytes);
+        stream.extend_from_slice(b"endstream");
+        stream
+    }
+
+    fn nested_type3_pdf() -> Vec<u8> {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+
+        append_pdf_object(
+            &mut pdf,
+            &mut offsets,
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+        );
+        append_pdf_object(
+            &mut pdf,
+            &mut offsets,
+            2,
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        );
+        append_pdf_object(
+            &mut pdf,
+            &mut offsets,
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
+              /Resources << /XObject << /X0 4 0 R >> >> /Contents 5 0 R >>",
+        );
+        append_pdf_object(
+            &mut pdf,
+            &mut offsets,
+            4,
+            &pdf_stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 100 100] \
+                 /Resources << /XObject << /Fm1 6 0 R >> >>",
+                b"q /Fm1 Do Q\n",
+            ),
+        );
+        append_pdf_object(&mut pdf, &mut offsets, 5, &pdf_stream("", b"q /X0 Do Q\n"));
+        append_pdf_object(
+            &mut pdf,
+            &mut offsets,
+            6,
+            &pdf_stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 100 100] \
+                 /Resources << /Font << /F1 9 0 R >> >>",
+                b"0 0 1 rg BT /F1 40 Tf 20 20 Td (A) Tj ET\n",
+            ),
+        );
+        append_pdf_object(&mut pdf, &mut offsets, 7, b"<< /Unused true >>");
+        append_pdf_object(&mut pdf, &mut offsets, 8, b"<< /Unused true >>");
+        append_pdf_object(
+            &mut pdf,
+            &mut offsets,
+            9,
+            b"<< /Type /Font /Subtype /Type3 /Name /F1 \
+              /FontBBox [0 0 1000 1000] /FontMatrix [.001 0 0 .001 0 0] \
+              /CharProcs << /A 11 0 R >> \
+              /Encoding << /Type /Encoding /Differences [65 /A] >> \
+              /FirstChar 65 /LastChar 65 /Widths [1000] >>",
+        );
+        append_pdf_object(&mut pdf, &mut offsets, 10, b"<< /Unused true >>");
+        append_pdf_object(
+            &mut pdf,
+            &mut offsets,
+            11,
+            &pdf_stream("", b"1000 0 d0 100 100 800 800 re f\n"),
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", offsets.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size 12 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n")
+                .as_bytes(),
+        );
+        pdf
+    }
+
+    fn required_dict_object(object: &PdfObject, key: &str) -> PdfObject {
+        let value = object
+            .get_dict(key)
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing PDF dictionary key /{key}"));
+        if value.is_indirect().unwrap() {
+            value
+                .resolve()
+                .unwrap()
+                .unwrap_or_else(|| panic!("could not resolve PDF dictionary key /{key}"))
+        } else {
+            value
+        }
+    }
+
+    #[test]
+    fn finalization_preserves_nested_type3_font_references() {
+        let directory = TempDirectory::new("nested-type3-composition");
+        let input_path = directory.path().join("input.pdf");
+        let output_path = directory.path().join("output.pdf");
+        fs::write(&input_path, nested_type3_pdf()).unwrap();
+
+        restore_pdf_structure(
+            &input_path,
+            &input_path,
+            &output_path,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        let output = PdfDocument::open(output_path.to_string_lossy().as_ref()).unwrap();
+        let page = output.load_pdf_page(0).unwrap();
+        let page_resources = required_dict_object(&page.object(), "Resources");
+        let page_xobjects = required_dict_object(&page_resources, "XObject");
+        let outer_form = required_dict_object(&page_xobjects, "X0");
+        let outer_resources = required_dict_object(&outer_form, "Resources");
+        let outer_xobjects = required_dict_object(&outer_resources, "XObject");
+        let nested_form = required_dict_object(&outer_xobjects, "Fm1");
+        let nested_resources = required_dict_object(&nested_form, "Resources");
+        let fonts = required_dict_object(&nested_resources, "Font");
+        let font = required_dict_object(&fonts, "F1");
+        let subtype = required_dict_object(&font, "Subtype");
+
+        assert_eq!(subtype.as_name().unwrap(), b"Type3");
+        assert!(!final_pdf_write_options().clean());
+        assert_eq!(final_pdf_write_options().garbage_level(), 3);
+    }
 
     #[test]
     fn sampled_patch_falls_back_to_white_for_empty_pixmap_inputs() {
