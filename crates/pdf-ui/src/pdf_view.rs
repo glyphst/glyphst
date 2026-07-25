@@ -49,7 +49,10 @@ use glyphst_core::{
     DocumentCapabilities, DocumentFormat, DocumentLayout, DocumentRotation, EpubReaderPreferences,
     EpubTheme, PageIndex, PageRegion, RegionImageReference, SemanticTextAnchor,
 };
-use glyphst_pdf::{DocumentSnapshot, ReloadCoordinator, ReloadDisposition};
+use glyphst_pdf::{
+    DocumentRenderSession, DocumentSnapshot, ReloadCoordinator, ReloadDisposition,
+    RetainedDisplayList,
+};
 use glyphst_pdf_translation_app::{PdfTranslationRequest, PdfTranslationService};
 use glyphst_translation::{LanguageCode, TranslationRequest, TranslationService};
 use glyphst_translation_ui::{
@@ -161,21 +164,21 @@ struct PdfPage {
 
 struct PageImageExport {
     page_idx: usize,
-    display_list: Arc<DisplayList>,
+    display_list: RetainedDisplayList,
     bounds: Rect,
     width: f32,
     height: f32,
     rotation: DocumentRotation,
 }
 
-struct RegionImageExport {
-    display_list: Arc<DisplayList>,
+struct RegionImageExport<L = RetainedDisplayList> {
+    display_list: L,
     page_bounds: Rect,
     region: PageRegion,
     rotation: DocumentRotation,
 }
 
-impl RegionImageExport {
+impl<L> RegionImageExport<L> {
     fn view_region(&self) -> Rect {
         let region = self.region.normalized();
         PdfView::pdf_rect_to_view(
@@ -236,6 +239,7 @@ struct LoadedText {
 
 struct ReloadData {
     snapshot: Arc<DocumentSnapshot>,
+    render_session: DocumentRenderSession,
     page_count: usize,
     loaded: LoadedPages,
     toc: Vec<TocEntry>,
@@ -272,7 +276,7 @@ struct CachedRender {
 struct CachedDisplayList {
     doc_id: u64,
     page_idx: usize,
-    display_list: Arc<DisplayList>,
+    display_list: RetainedDisplayList,
     last_access: u64,
 }
 
@@ -389,7 +393,7 @@ impl RenderCache {
         removed
     }
 
-    fn display_list(&mut self, doc_id: u64, page_idx: usize) -> Option<Arc<DisplayList>> {
+    fn display_list(&mut self, doc_id: u64, page_idx: usize) -> Option<RetainedDisplayList> {
         let index = self
             .display_lists
             .iter()
@@ -403,8 +407,8 @@ impl RenderCache {
         &mut self,
         doc_id: u64,
         page_idx: usize,
-        display_list: Arc<DisplayList>,
-    ) -> Arc<DisplayList> {
+        display_list: RetainedDisplayList,
+    ) -> RetainedDisplayList {
         let last_access = self.next_access();
 
         if let Some(index) = self
@@ -808,6 +812,7 @@ pub struct PreparedPdfOpen {
     document_layout: DocumentLayout,
     epub_preferences: EpubReaderPreferences,
     document_snapshot: Arc<DocumentSnapshot>,
+    render_session: DocumentRenderSession,
     pages: Vec<PdfPage>,
     page_count: usize,
     max_page_width: f32,
@@ -976,6 +981,7 @@ pub struct PdfView {
     epub_preferences: EpubReaderPreferences,
     epub_style_panel_position: Option<GpuiPoint<Pixels>>,
     document_snapshot: Arc<DocumentSnapshot>,
+    render_session: DocumentRenderSession,
     pages: Vec<PdfPage>,
     page_count: usize,
     max_page_width: f32,
@@ -2009,6 +2015,9 @@ impl PdfView {
 
         let page_count = page_count as usize;
         let loaded = Self::load_pages_from_document(&document, page_count, page_gap)?;
+        drop(document);
+        let render_session =
+            DocumentRenderSession::open(document_snapshot.clone(), document_layout)?;
 
         Ok(PreparedPdfOpen {
             path,
@@ -2018,6 +2027,7 @@ impl PdfView {
             document_layout,
             epub_preferences,
             document_snapshot,
+            render_session,
             pages: loaded.pages,
             page_count,
             max_page_width: loaded.max_page_width.max(1.0),
@@ -2041,6 +2051,7 @@ impl PdfView {
             document_layout,
             epub_preferences,
             document_snapshot,
+            render_session,
             pages,
             page_count,
             max_page_width,
@@ -2068,6 +2079,7 @@ impl PdfView {
             epub_preferences,
             epub_style_panel_position: None,
             document_snapshot,
+            render_session,
             pages,
             page_count,
             max_page_width,
@@ -2448,9 +2460,12 @@ impl PdfView {
             }
         };
         let loaded = Self::load_pages_from_document(&document, page_count, page_gap)?;
+        drop(document);
+        let render_session = DocumentRenderSession::open(snapshot.clone(), document_layout)?;
 
         Ok(ReloadData {
             snapshot,
+            render_session,
             page_count,
             loaded,
             toc,
@@ -2517,6 +2532,7 @@ impl PdfView {
         self.schedule_previous_document_eviction(previous_doc_id, cx);
 
         self.document_snapshot = reload.snapshot;
+        self.render_session = reload.render_session;
         self.page_count = reload.page_count;
         self.toc = reload.toc;
         self.toc_collapsed
@@ -5247,20 +5263,14 @@ impl PdfView {
         let cached_display_list = cx
             .global_mut::<RenderCache>()
             .display_list(self.doc_id, key.page_idx);
-        let snapshot = self.document_snapshot.clone();
-        let document_layout = self.document_layout;
+        let render_session = self.render_session.clone();
 
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     let display_list = match cached_display_list {
                         Some(display_list) => display_list,
-                        None => Self::create_display_list(
-                            &snapshot,
-                            document_layout,
-                            key.page_idx,
-                            page_bounds,
-                        )?,
+                        None => render_session.create_display_list(key.page_idx, page_bounds)?,
                     };
                     let image = Self::render_page(
                         &display_list,
@@ -5325,7 +5335,7 @@ impl PdfView {
         &self,
         page_idx: usize,
         cx: &mut Context<Self>,
-    ) -> Result<Arc<DisplayList>> {
+    ) -> Result<RetainedDisplayList> {
         if let Some(display_list) = cx
             .global_mut::<RenderCache>()
             .display_list(self.doc_id, page_idx)
@@ -5338,29 +5348,12 @@ impl PdfView {
             .get(page_idx)
             .ok_or_else(|| anyhow::anyhow!("PDF page index {page_idx} is out of bounds"))?
             .bounds;
-        let display_list = Self::create_display_list(
-            &self.document_snapshot,
-            self.document_layout,
-            page_idx,
-            page_bounds,
-        )?;
+        let display_list = self
+            .render_session
+            .create_display_list(page_idx, page_bounds)?;
         Ok(cx
             .global_mut::<RenderCache>()
             .insert_display_list(self.doc_id, page_idx, display_list))
-    }
-
-    fn create_display_list(
-        snapshot: &DocumentSnapshot,
-        document_layout: DocumentLayout,
-        page_idx: usize,
-        page_bounds: Rect,
-    ) -> Result<Arc<DisplayList>> {
-        let document = snapshot.open_with_layout(document_layout)?.into_inner();
-        let page = document.load_page(page_idx as i32)?;
-        let display_list = Arc::new(DisplayList::new(page_bounds)?);
-        let device = Device::from_display_list(&display_list)?;
-        page.run(&device, &Matrix::IDENTITY)?;
-        Ok(display_list)
     }
 
     fn take_previous_render_for_diff(
@@ -5827,7 +5820,7 @@ impl PdfView {
     }
 
     fn copy_image_to_clipboard(
-        display_list: Arc<DisplayList>,
+        display_list: RetainedDisplayList,
         image_idx: usize,
     ) -> Result<Clipboard> {
         let (width, height, rgba) =
@@ -5885,7 +5878,7 @@ impl PdfView {
     }
 
     fn save_image_to_path(
-        display_list: Arc<DisplayList>,
+        display_list: RetainedDisplayList,
         image_idx: usize,
         path: PathBuf,
     ) -> Result<()> {
@@ -6075,8 +6068,8 @@ impl PdfView {
         .detach();
     }
 
-    fn rasterize_region_stack_to_rgba(
-        exports: &[RegionImageExport],
+    fn rasterize_region_stack_to_rgba<L: AsRef<DisplayList>>(
+        exports: &[RegionImageExport<L>],
         scale: f32,
     ) -> Result<(u32, u32, Vec<u8>)> {
         if exports.is_empty() || !scale.is_finite() || scale <= 0.0 {
@@ -6134,8 +6127,8 @@ impl PdfView {
         Ok((max_width, total_height, image.into_raw()))
     }
 
-    fn rasterize_pdf_region_to_rgba(
-        export: &RegionImageExport,
+    fn rasterize_pdf_region_to_rgba<L: AsRef<DisplayList>>(
+        export: &RegionImageExport<L>,
         scale: f32,
     ) -> Result<(u32, u32, Vec<u8>)> {
         let view_region = export.view_region();
@@ -6162,6 +6155,7 @@ impl PdfView {
             let device = Device::from_pixmap(&pixmap)?;
             export
                 .display_list
+                .as_ref()
                 .run(&device, &matrix, Rect::INF)
                 .context("failed to rasterize PDF image region")?;
         }
@@ -6179,8 +6173,8 @@ impl PdfView {
         Ok((width, height, samples.to_vec()))
     }
 
-    fn render_region_jpeg(
-        exports: &[RegionImageExport],
+    fn render_region_jpeg<L: AsRef<DisplayList>>(
+        exports: &[RegionImageExport<L>],
         quality: PageImageQuality,
     ) -> Result<Vec<u8>> {
         if exports.is_empty() {
@@ -6188,12 +6182,12 @@ impl PdfView {
         }
         let max_width = exports
             .iter()
-            .map(RegionImageExport::view_region)
+            .map(|export| export.view_region())
             .map(|rect| rect.x1 - rect.x0)
             .fold(0.0_f32, f32::max);
         let total_height = exports
             .iter()
-            .map(RegionImageExport::view_region)
+            .map(|export| export.view_region())
             .map(|rect| rect.y1 - rect.y0)
             .sum::<f32>();
         let scale = quality.max_dimension() as f32 / max_width.max(total_height).max(1.0);
@@ -6333,7 +6327,7 @@ impl PdfView {
     }
 
     fn save_selected_pages_text_to_path(
-        pages: Vec<(usize, Arc<DisplayList>)>,
+        pages: Vec<(usize, RetainedDisplayList)>,
         path: PathBuf,
     ) -> Result<()> {
         let mut text = String::new();
@@ -6419,7 +6413,7 @@ impl PdfView {
     }
 
     fn save_page_to_path(
-        display_list: Arc<DisplayList>,
+        display_list: RetainedDisplayList,
         page_bounds: Rect,
         page_width: f32,
         page_height: f32,
