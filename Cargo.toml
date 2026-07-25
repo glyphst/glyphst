@@ -58,6 +58,14 @@ smallvec = "1"
 tikv-jemalloc-sys = { version = "0.7", features = ["override_allocator_on_supported_platforms"] }
 tikv-jemallocator = { version = "0.7", features = ["override_allocator_on_supported_platforms"] }
 tracing = "0.1"
+typst = "=0.15.1"
+typst-kit = { version = "=0.15.1", default-features = false, features = [
+    "embedded-fonts",
+    "emit-diagnostics",
+    "scan-fonts",
+] }
+typst-layout = "=0.15.1"
+typst-pdf = "=0.15.1"
 unicode-segmentation = "1"
 ztracing = { git = "https://github.com/zed-industries/zed" }
 

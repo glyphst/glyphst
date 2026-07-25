@@ -49,8 +49,9 @@ pub use translate::{
     TranslationUnitOutput, protect_text, translate_document, translate_document_resuming,
 };
 pub use typst::{
-    TypstCompiler, TypstCompilerConfig, TypstError, TypstOutput, generate_translated_pdf_source,
-    generate_typst_source, resolve_translation_assets_dir,
+    TypstCompiler, TypstCompilerConfig, TypstError, TypstErrorKind, TypstExecutionMode,
+    TypstOutput, generate_translated_pdf_source, generate_typst_source,
+    resolve_translation_assets_dir, run_typst_worker_if_requested,
 };
 pub use unlimited::{
     UnlimitedClient, UnlimitedClientConfig, UnlimitedError, UnlimitedErrorCategory,

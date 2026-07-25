@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("no PDF samples found in {}", sample_directory.display()).into());
     }
 
-    let service = PdfTranslationService::new(TranslationService::new()?);
+    let service = PdfTranslationService::new_in_process(TranslationService::new()?);
     let target_language = LanguageCode::new("zh-hans")?;
     let mut failures = Vec::new();
     for source_path in samples {

@@ -1,30 +1,63 @@
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use mupdf::{Colorspace, Document, Matrix};
+use serde::{Deserialize, Serialize};
+use typst::diag::{FileError, FileResult, SourceDiagnostic};
+use typst::foundations::{Bytes, Datetime, Duration as TypstDuration};
+use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
+use typst::text::{Font, FontBook};
+use typst::utils::LazyHash;
+use typst::{Library, LibraryExt, World};
+use typst_kit::diagnostics::{DiagnosticFormat, DiagnosticWorld, emit, termcolor::NoColor};
+use typst_kit::files::{FileLoader, FileStore};
+use typst_kit::fonts::{self, FontStore};
+use typst_layout::PagedDocument;
+use typst_pdf::PdfOptions;
 
 use crate::{
     BaselinePosition, BoundingBox, CancellationToken, FontFamilyClass, LayoutDocument, LayoutItem,
     OverflowPolicy, StyledRun, TextStyle,
 };
 
+const TYPST_WORKER_FLAG: &str = "--glyphst-typst-worker";
+const TYPST_WORKER_PROTOCOL_VERSION: u32 = 1;
+const TYPST_WORKER_OUTPUT_LIMIT: usize = 64 * 1024;
+const CMARKER_PACKAGE: &str = "@preview/cmarker:0.1.8";
+const MITEX_PACKAGE: &str = "@preview/mitex:0.2.6";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TypstExecutionMode {
+    #[default]
+    InProcess,
+    CurrentExecutableWorker,
+}
+
 #[derive(Debug, Clone)]
 pub struct TypstCompilerConfig {
-    pub executable: OsString,
     pub assets_dir: PathBuf,
+    pub execution: TypstExecutionMode,
 }
 
 impl Default for TypstCompilerConfig {
     fn default() -> Self {
         Self {
-            executable: std::env::var_os("GLYPHST_TYPST_BIN")
-                .unwrap_or_else(|| OsString::from("typst")),
             assets_dir: resolve_translation_assets_dir(),
+            execution: TypstExecutionMode::InProcess,
+        }
+    }
+}
+
+impl TypstCompilerConfig {
+    pub fn current_executable_worker() -> Self {
+        Self {
+            execution: TypstExecutionMode::CurrentExecutableWorker,
+            ..Self::default()
         }
     }
 }
@@ -105,74 +138,358 @@ impl TypstCompiler {
             ))
         })?;
 
-        let font_path = self.config.assets_dir.join("fonts");
-        let package_path = self.config.assets_dir.join("typst/packages");
-        validate_asset(&font_path, "translation font directory")?;
-        validate_asset(&package_path, "Typst package directory")?;
-        let mut child = Command::new(&self.config.executable)
-            .arg("compile")
-            .arg("--root")
+        let result = match self.config.execution {
+            TypstExecutionMode::InProcess => {
+                compile_source_in_process(job_directory, &self.config.assets_dir, file_stem)
+            }
+            TypstExecutionMode::CurrentExecutableWorker => self.compile_source_in_worker(
+                job_directory,
+                file_stem,
+                &source_path,
+                &output_path,
+                cancellation,
+            ),
+        };
+        cancellation.check().map_err(|_| TypstError::cancelled())?;
+        result
+    }
+
+    fn compile_source_in_worker(
+        &self,
+        job_directory: &Path,
+        file_stem: &str,
+        source_path: &Path,
+        output_path: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<TypstOutput, TypstError> {
+        validate_file_stem(file_stem)?;
+        validate_compiler_assets(&self.config.assets_dir)?;
+        let executable = std::env::current_exe().map_err(|error| {
+            TypstError::process(format!(
+                "failed to locate the Glyphst executable for the Typst worker: {error}"
+            ))
+        })?;
+        let mut child = Command::new(&executable)
+            .arg(TYPST_WORKER_FLAG)
             .arg(job_directory)
-            .arg("--font-path")
-            .arg(&font_path)
-            .arg("--ignore-system-fonts")
-            .arg("--package-path")
-            .arg(&package_path)
-            .arg("--package-cache-path")
-            .arg(&package_path)
-            .arg(&source_path)
-            .arg(&output_path)
+            .arg(&self.config.assets_dir)
+            .arg(file_stem)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| {
                 TypstError::process(format!(
-                    "failed to start Typst executable {:?}: {error}",
-                    self.config.executable
+                    "failed to start the Glyphst Typst worker {}: {error}",
+                    executable.display()
                 ))
             })?;
 
+        let stdout_reader = spawn_pipe_reader(child.stdout.take());
+        let stderr_reader = spawn_pipe_reader(child.stderr.take());
         let status = loop {
             if cancellation.is_cancelled() {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                let _ = fs::remove_file(output_path.with_extension("pdf.part"));
                 return Err(TypstError::cancelled());
             }
             match child.try_wait() {
                 Ok(Some(status)) => break status,
-                Ok(None) => std::thread::sleep(Duration::from_millis(80)),
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
                 Err(error) => {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    let _ = fs::remove_file(output_path.with_extension("pdf.part"));
                     return Err(TypstError::process(format!(
-                        "failed while waiting for Typst: {error}"
+                        "failed while waiting for the Glyphst Typst worker: {error}"
                     )));
                 }
             }
         };
-        let stdout = read_pipe(child.stdout.take());
-        let stderr = read_pipe(child.stderr.take());
+
+        let stdout = join_pipe_reader(stdout_reader, "stdout")?;
+        let stderr = join_pipe_reader(stderr_reader, "stderr")?;
+        let response =
+            serde_json::from_str::<TypstWorkerResponse>(stdout.trim()).map_err(|error| {
+                TypstError::process(worker_failure_message(
+                    format!("the worker returned an invalid response: {error}"),
+                    &stdout,
+                    &stderr,
+                ))
+            })?;
+        if response.protocol_version != TYPST_WORKER_PROTOCOL_VERSION {
+            return Err(TypstError::process(format!(
+                "unsupported Glyphst Typst worker protocol version {}",
+                response.protocol_version
+            )));
+        }
+        if let Some(error) = response.error {
+            return Err(error);
+        }
         if !status.success() {
-            let detail = if stderr.trim().is_empty() {
-                stdout.trim()
-            } else {
-                stderr.trim()
-            };
-            return Err(TypstError::compile(if detail.is_empty() {
-                "Typst compilation failed without diagnostics".to_string()
-            } else {
-                detail.chars().take(8_000).collect()
-            }));
+            return Err(TypstError::process(worker_failure_message(
+                format!("the worker exited with status {status}"),
+                &stdout,
+                &stderr,
+            )));
         }
         if !output_path.is_file() {
             return Err(TypstError::compile(
-                "Typst reported success without producing an overlay PDF".to_string(),
+                "the embedded Typst compiler reported success without producing a PDF".to_string(),
             ));
         }
         Ok(TypstOutput {
-            source_path,
-            pdf_path: output_path,
+            source_path: source_path.to_path_buf(),
+            pdf_path: output_path.to_path_buf(),
         })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TypstWorkerResponse {
+    protocol_version: u32,
+    error: Option<TypstError>,
+}
+
+/// Handles Glyphst's private Typst worker invocation before the desktop
+/// application initializes. Returns `None` for normal application invocations.
+pub fn run_typst_worker_if_requested() -> Option<i32> {
+    let mut arguments = std::env::args_os();
+    let _executable = arguments.next();
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new(TYPST_WORKER_FLAG)) {
+        return None;
+    }
+
+    let result = (|| {
+        let job_directory = arguments
+            .next()
+            .ok_or_else(|| TypstError::process("Typst worker is missing its job directory"))?;
+        let assets_dir = arguments
+            .next()
+            .ok_or_else(|| TypstError::process("Typst worker is missing its assets directory"))?;
+        let file_stem = arguments
+            .next()
+            .ok_or_else(|| TypstError::process("Typst worker is missing its source file stem"))?;
+        if arguments.next().is_some() {
+            return Err(TypstError::process(
+                "Typst worker received unexpected arguments",
+            ));
+        }
+        let file_stem = file_stem
+            .to_str()
+            .ok_or_else(|| TypstError::process("Typst worker file stem is not valid UTF-8"))?;
+        compile_source_in_process(Path::new(&job_directory), Path::new(&assets_dir), file_stem)
+    })();
+
+    let exit_code = if result.is_ok() { 0 } else { 1 };
+    let response = TypstWorkerResponse {
+        protocol_version: TYPST_WORKER_PROTOCOL_VERSION,
+        error: result.err(),
+    };
+    let mut stdout = io::stdout().lock();
+    if serde_json::to_writer(&mut stdout, &response).is_err()
+        || stdout.write_all(b"\n").is_err()
+        || stdout.flush().is_err()
+    {
+        return Some(2);
+    }
+    Some(exit_code)
+}
+
+fn compile_source_in_process(
+    job_directory: &Path,
+    assets_dir: &Path,
+    file_stem: &str,
+) -> Result<TypstOutput, TypstError> {
+    validate_file_stem(file_stem)?;
+    validate_compiler_assets(assets_dir)?;
+    let source_path = job_directory.join(format!("{file_stem}.typ"));
+    validate_file_asset(&source_path, "generated Typst source")?;
+
+    let world = GlyphstTypstWorld::new(job_directory, assets_dir, file_stem)?;
+    let compilation = typst::compile::<PagedDocument>(&world);
+    if !compilation.warnings.is_empty() {
+        tracing::warn!(
+            diagnostics = %format_typst_diagnostics(&world, &compilation.warnings),
+            "embedded Typst compilation produced warnings"
+        );
+    }
+    let document = compilation.output.map_err(|diagnostics| {
+        TypstError::compile(format_typst_diagnostics(&world, &diagnostics))
+    })?;
+    let pdf = typst_pdf::pdf(&document, &PdfOptions::default()).map_err(|diagnostics| {
+        TypstError::compile(format_typst_diagnostics(&world, &diagnostics))
+    })?;
+    let output_path = job_directory.join(format!("{file_stem}.pdf"));
+    write_pdf_atomically(&output_path, &pdf)?;
+
+    Ok(TypstOutput {
+        source_path,
+        pdf_path: output_path,
+    })
+}
+
+struct GlyphstTypstWorld {
+    library: LazyHash<Library>,
+    fonts: FontStore,
+    main: FileId,
+    files: FileStore<RestrictedFileLoader>,
+}
+
+impl GlyphstTypstWorld {
+    fn new(job_directory: &Path, assets_dir: &Path, file_stem: &str) -> Result<Self, TypstError> {
+        let font_path = assets_dir.join("fonts");
+        let font_entries = fonts::scan(&font_path).collect::<Vec<_>>();
+        if font_entries.is_empty() {
+            return Err(TypstError::missing_asset(format!(
+                "translation font directory contains no readable fonts at {}",
+                font_path.display()
+            )));
+        }
+        let mut font_store = FontStore::new();
+        font_store.extend(fonts::embedded());
+        font_store.extend(font_entries);
+
+        let main_name = format!("{file_stem}.typ");
+        let main_path = VirtualPath::new(&main_name).map_err(|error| {
+            TypstError::io(format!("failed to create Typst source path: {error}"))
+        })?;
+        let main = RootedPath::new(VirtualRoot::Project, main_path).intern();
+        let loader = RestrictedFileLoader::new(job_directory, assets_dir, main_name)?;
+
+        Ok(Self {
+            library: LazyHash::new(Library::builder().build()),
+            fonts: font_store,
+            main,
+            files: FileStore::new(loader),
+        })
+    }
+}
+
+impl World for GlyphstTypstWorld {
+    fn library(&self) -> &LazyHash<Library> {
+        &self.library
+    }
+
+    fn book(&self) -> &LazyHash<FontBook> {
+        self.fonts.book()
+    }
+
+    fn main(&self) -> FileId {
+        self.main
+    }
+
+    fn source(&self, id: FileId) -> FileResult<Source> {
+        self.files.source(id)
+    }
+
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        self.files.file(id)
+    }
+
+    fn font(&self, index: usize) -> Option<Font> {
+        self.fonts.font(index)
+    }
+
+    fn today(&self, _offset: Option<TypstDuration>) -> Option<Datetime> {
+        None
+    }
+}
+
+impl DiagnosticWorld for GlyphstTypstWorld {
+    fn name(&self, id: FileId) -> String {
+        match id.root() {
+            VirtualRoot::Project => id.vpath().get_without_slash().to_string(),
+            VirtualRoot::Package(package) => {
+                format!("{package}{}", id.vpath().get_with_slash())
+            }
+        }
+    }
+}
+
+struct RestrictedFileLoader {
+    project: RestrictedRoot,
+    main_name: String,
+    cmarker: RestrictedRoot,
+    mitex: RestrictedRoot,
+}
+
+impl RestrictedFileLoader {
+    fn new(job_directory: &Path, assets_dir: &Path, main_name: String) -> Result<Self, TypstError> {
+        let packages = assets_dir.join("typst/packages/preview");
+        Ok(Self {
+            project: RestrictedRoot::new(job_directory, "Typst job directory")?,
+            main_name,
+            cmarker: RestrictedRoot::new(packages.join("cmarker/0.1.8"), "cmarker Typst package")?,
+            mitex: RestrictedRoot::new(packages.join("mitex/0.2.6"), "mitex Typst package")?,
+        })
+    }
+}
+
+impl FileLoader for RestrictedFileLoader {
+    fn load(&self, id: FileId) -> FileResult<Bytes> {
+        match id.root() {
+            VirtualRoot::Project => {
+                let path = id.vpath().get_without_slash();
+                if path != self.main_name && path != "source.pdf" {
+                    return Err(FileError::AccessDenied);
+                }
+                self.project.load(id.vpath())
+            }
+            VirtualRoot::Package(package) => match package.to_string().as_str() {
+                CMARKER_PACKAGE => self.cmarker.load(id.vpath()),
+                MITEX_PACKAGE => self.mitex.load(id.vpath()),
+                _ => Err(FileError::Other(Some(
+                    format!("package {package} is not bundled with Glyphst").into(),
+                ))),
+            },
+        }
+    }
+}
+
+struct RestrictedRoot {
+    path: PathBuf,
+    canonical_path: PathBuf,
+}
+
+impl RestrictedRoot {
+    fn new(path: impl AsRef<Path>, label: &str) -> Result<Self, TypstError> {
+        let path = path.as_ref();
+        validate_asset(path, label)?;
+        let canonical_path = fs::canonicalize(path).map_err(|error| {
+            TypstError::io(format!(
+                "failed to resolve {label} {}: {error}",
+                path.display()
+            ))
+        })?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            canonical_path,
+        })
+    }
+
+    fn load(&self, virtual_path: &VirtualPath) -> FileResult<Bytes> {
+        let path = virtual_path
+            .realize(&self.path)
+            .map_err(FileError::Realize)?;
+        let canonical_path =
+            fs::canonicalize(&path).map_err(|error| FileError::from_io(error, &path))?;
+        if !canonical_path.starts_with(&self.canonical_path) {
+            return Err(FileError::AccessDenied);
+        }
+        let metadata = fs::metadata(&canonical_path)
+            .map_err(|error| FileError::from_io(error, &canonical_path))?;
+        if metadata.is_dir() {
+            return Err(FileError::IsDirectory);
+        }
+        fs::read(&canonical_path)
+            .map(Bytes::new)
+            .map_err(|error| FileError::from_io(error, &canonical_path))
     }
 }
 
@@ -182,7 +499,7 @@ pub struct TypstOutput {
     pub pdf_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypstErrorKind {
     Cancelled,
     MissingAsset,
@@ -191,7 +508,7 @@ pub enum TypstErrorKind {
     Compile,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypstError {
     pub kind: TypstErrorKind,
     pub message: String,
@@ -727,6 +1044,28 @@ fn is_escaped(bytes: &[u8], index: usize) -> bool {
     backslashes % 2 == 1
 }
 
+fn validate_file_stem(file_stem: &str) -> Result<(), TypstError> {
+    if matches!(file_stem, "translation-overlay" | "translated-document") {
+        Ok(())
+    } else {
+        Err(TypstError::process(format!(
+            "unsupported Typst worker source file stem {file_stem:?}"
+        )))
+    }
+}
+
+fn validate_compiler_assets(assets_dir: &Path) -> Result<(), TypstError> {
+    validate_asset(&assets_dir.join("fonts"), "translation font directory")?;
+    validate_asset(
+        &assets_dir.join("typst/packages/preview/cmarker/0.1.8"),
+        "cmarker Typst package",
+    )?;
+    validate_asset(
+        &assets_dir.join("typst/packages/preview/mitex/0.2.6"),
+        "mitex Typst package",
+    )
+}
+
 fn validate_asset(path: &Path, label: &str) -> Result<(), TypstError> {
     if path.is_dir() {
         Ok(())
@@ -738,13 +1077,134 @@ fn validate_asset(path: &Path, label: &str) -> Result<(), TypstError> {
     }
 }
 
-fn read_pipe(pipe: Option<impl Read>) -> String {
+fn validate_file_asset(path: &Path, label: &str) -> Result<(), TypstError> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(TypstError::missing_asset(format!(
+            "{label} is missing at {}",
+            path.display()
+        )))
+    }
+}
+
+fn write_pdf_atomically(output_path: &Path, contents: &[u8]) -> Result<(), TypstError> {
+    let part_path = output_path.with_extension("pdf.part");
+    match fs::remove_file(&part_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(TypstError::io(format!(
+                "failed to remove stale Typst output {}: {error}",
+                part_path.display()
+            )));
+        }
+    }
+    fs::write(&part_path, contents).map_err(|error| {
+        TypstError::io(format!(
+            "failed to write embedded Typst output {}: {error}",
+            part_path.display()
+        ))
+    })?;
+
+    match fs::rename(&part_path, output_path) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if output_path.is_file()
+                && matches!(
+                    error.kind(),
+                    io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied
+                ) =>
+        {
+            fs::remove_file(output_path).map_err(|remove_error| {
+                TypstError::io(format!(
+                    "failed to replace prior Typst output {}: {remove_error}",
+                    output_path.display()
+                ))
+            })?;
+            fs::rename(&part_path, output_path).map_err(|rename_error| {
+                TypstError::io(format!(
+                    "failed to publish embedded Typst output {}: {rename_error}",
+                    output_path.display()
+                ))
+            })
+        }
+        Err(error) => Err(TypstError::io(format!(
+            "failed to publish embedded Typst output {}: {error}",
+            output_path.display()
+        ))),
+    }
+}
+
+fn format_typst_diagnostics(world: &GlyphstTypstWorld, diagnostics: &[SourceDiagnostic]) -> String {
+    let mut output = NoColor::new(Vec::new());
+    let emitted = emit(
+        &mut output,
+        world,
+        diagnostics.iter(),
+        DiagnosticFormat::Human,
+    )
+    .is_ok();
+    let rendered = if emitted {
+        String::from_utf8_lossy(&output.into_inner()).into_owned()
+    } else {
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let rendered = rendered.trim();
+    if rendered.is_empty() {
+        "Typst compilation failed without diagnostics".to_string()
+    } else {
+        rendered.chars().take(8_000).collect()
+    }
+}
+
+fn spawn_pipe_reader<R>(pipe: Option<R>) -> JoinHandle<String>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || read_pipe_bounded(pipe, TYPST_WORKER_OUTPUT_LIMIT))
+}
+
+fn join_pipe_reader(reader: JoinHandle<String>, stream_name: &str) -> Result<String, TypstError> {
+    reader.join().map_err(|_| {
+        TypstError::process(format!(
+            "failed to collect Typst worker {stream_name} because its reader panicked"
+        ))
+    })
+}
+
+fn read_pipe_bounded(pipe: Option<impl Read>, limit: usize) -> String {
     let Some(mut pipe) = pipe else {
         return String::new();
     };
-    let mut output = String::new();
-    let _ = pipe.read_to_string(&mut output);
-    output
+    let mut output = Vec::with_capacity(limit.min(8 * 1024));
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = match pipe.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        let remaining = limit.saturating_sub(output.len());
+        output.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn worker_failure_message(summary: String, stdout: &str, stderr: &str) -> String {
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    if detail.is_empty() {
+        summary
+    } else {
+        format!("{summary}: {detail}").chars().take(8_000).collect()
+    }
 }
 
 #[cfg(test)]
@@ -910,6 +1370,78 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unknown_worker_file_stems() {
+        let error = validate_file_stem("../document").unwrap_err();
+
+        assert_eq!(error.kind, TypstErrorKind::Process);
+        assert!(error.message.contains("unsupported"));
+    }
+
+    #[test]
+    fn restricted_loader_denies_other_project_files_and_packages() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("glyphst-typst-loader-test-{nonce:x}"));
+        fs::create_dir_all(&directory).unwrap();
+        let loader = RestrictedFileLoader::new(
+            &directory,
+            &resolve_translation_assets_dir(),
+            "translation-overlay.typ".to_string(),
+        )
+        .unwrap();
+
+        let project_file = RootedPath::new(
+            VirtualRoot::Project,
+            VirtualPath::new("unrelated.typ").unwrap(),
+        )
+        .intern();
+        assert!(matches!(
+            loader.load(project_file),
+            Err(FileError::AccessDenied)
+        ));
+
+        let package = "@preview/example:1.0.0"
+            .parse::<typst::syntax::package::PackageSpec>()
+            .unwrap();
+        let package_file = RootedPath::new(
+            VirtualRoot::Package(package),
+            VirtualPath::new("lib.typ").unwrap(),
+        )
+        .intern();
+        assert!(matches!(
+            loader.load(package_file),
+            Err(FileError::Other(Some(_)))
+        ));
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restricted_root_denies_symlinks_outside_its_root() {
+        use std::os::unix::fs::symlink;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("glyphst-typst-symlink-test-{nonce:x}"));
+        let job_directory = directory.join("job");
+        fs::create_dir_all(&job_directory).unwrap();
+        let outside_file = directory.join("outside.pdf");
+        fs::write(&outside_file, b"not a PDF").unwrap();
+        symlink(&outside_file, job_directory.join("source.pdf")).unwrap();
+        let root = RestrictedRoot::new(&job_directory, "test root").unwrap();
+
+        let result = root.load(&VirtualPath::new("source.pdf").unwrap());
+
+        assert!(matches!(result, Err(FileError::AccessDenied)));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn compiles_overlay_with_bundled_assets_when_requested() {
         if std::env::var_os("GLYPHST_RUN_TYPST_TEST").is_none() {
             return;
@@ -961,6 +1493,7 @@ mod tests {
             .unwrap();
 
         assert!(output.pdf_path.is_file());
+        assert!(!output.pdf_path.with_extension("pdf.part").exists());
         let _ = fs::remove_dir_all(directory);
     }
 }

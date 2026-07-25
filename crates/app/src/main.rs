@@ -15,7 +15,7 @@ mod instance;
 
 use glyphst_keymap::keybindings;
 use glyphst_library::{DocumentPosition, LibraryStore};
-use glyphst_pdf_translation_app::PdfTranslationService;
+use glyphst_pdf_translation_app::{PdfTranslationService, run_typst_worker_if_requested};
 use glyphst_pdf_ui::pdf_view::RenderCache;
 use glyphst_settings::{SettingsStore, localize, sync_component_theme};
 use glyphst_translation::TranslationService;
@@ -25,6 +25,10 @@ use glyphst_workspace::{
 };
 
 fn main() {
+    if let Some(exit_code) = run_typst_worker_if_requested() {
+        std::process::exit(exit_code);
+    }
+
     let request = instance::parse_args();
     match instance::try_forward(&request) {
         Ok(true) => return,

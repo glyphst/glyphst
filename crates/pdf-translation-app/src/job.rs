@@ -62,9 +62,23 @@ impl gpui::Global for PdfTranslationService {}
 
 impl PdfTranslationService {
     pub fn new(translation: TranslationService) -> Self {
+        Self::with_typst_config(
+            translation,
+            TypstCompilerConfig::current_executable_worker(),
+        )
+    }
+
+    pub fn new_in_process(translation: TranslationService) -> Self {
+        Self::with_typst_config(translation, TypstCompilerConfig::default())
+    }
+
+    fn with_typst_config(
+        translation: TranslationService,
+        typst_config: TypstCompilerConfig,
+    ) -> Self {
         Self {
             translation,
-            typst: TypstCompiler::new(TypstCompilerConfig::default()),
+            typst: TypstCompiler::new(typst_config),
             composer: PdfComposer,
             artifact_cache_state: Arc::new(Mutex::new(ArtifactCacheState::default())),
         }

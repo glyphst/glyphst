@@ -8,7 +8,6 @@
   perl,
   gnumake,
   python3,
-  typst,
   unzip,
   makeFontsConf,
   makeWrapper,
@@ -114,8 +113,7 @@ in
       cp -R crates/pdf-translation/assets/. $out/share/glyphst/pdf-translation/
       wrapProgram $out/bin/glyphst \
         --set FONTCONFIG_FILE ${fontsConf} \
-        --set GLYPHST_PDF_TRANSLATION_ASSETS $out/share/glyphst/pdf-translation \
-        --prefix PATH : ${lib.makeBinPath [ typst ]}
+        --set GLYPHST_PDF_TRANSLATION_ASSETS $out/share/glyphst/pdf-translation
       install -Dm644 crates/app/glyphst.desktop $out/share/applications/glyphst.desktop
     '';
 

@@ -83,7 +83,6 @@
               prek
               rust-analyzer
               rustToolchain
-              typst
             ];
 
             buildInputs = buildLibraries;

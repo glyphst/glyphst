@@ -11,3 +11,7 @@ reqwest = { workspace = true, features = ["multipart"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+typst.workspace = true
+typst-kit.workspace = true
+typst-layout.workspace = true
+typst-pdf.workspace = true
