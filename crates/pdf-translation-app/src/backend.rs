@@ -230,6 +230,30 @@ fn validate_target_script(
             "translation left a prompt heading unchanged: {heading}"
         ));
     }
+    if cjk_target
+        && let Some((source_label, source_entry_count)) =
+            labeled_proper_name_list(&unit.source_text)
+        && let Some((translated_label, translated_values)) = translated.split_once([':', '：'])
+    {
+        let translated_entry_count = translated_values
+            .split([',', '，', ';', '；'])
+            .filter(|entry| !entry.trim().is_empty())
+            .count();
+        if translated_entry_count < source_entry_count.div_ceil(2) {
+            return Err("translation omitted entries from a proper-name list".to_string());
+        }
+        let target_characters =
+            target_script_character_count(translated_label, target_language).unwrap_or_default();
+        if target_characters < 2 {
+            return Err(format!(
+                "translation left a proper-name list label without enough {target_language} target-script text"
+            ));
+        }
+        if normalize_label(source_label) == normalize_label(translated_label) {
+            return Err("translation left a proper-name list label unchanged".to_string());
+        }
+        return Ok(());
+    }
     if !matches!(
         unit.role,
         glyphst_pdf_translation::BlockRole::Body
@@ -248,26 +272,8 @@ fn validate_target_script(
     {
         return Ok(());
     }
-    let target_characters = match target_language {
-        "zh" | "zh-cn" | "zh-hans" | "zh-tw" | "zh-hant" => {
-            translated.chars().filter(|character| is_cjk(*character)).count()
-        }
-        "ja" => translated
-            .chars()
-            .filter(|character| {
-                is_cjk(*character)
-                    || matches!(*character, '\u{3040}'..='\u{30ff}' | '\u{31f0}'..='\u{31ff}')
-            })
-            .count(),
-        "ko" => translated
-            .chars()
-            .filter(|character| {
-                is_cjk(*character)
-                    || matches!(*character, '\u{1100}'..='\u{11ff}' | '\u{3130}'..='\u{318f}' | '\u{ac00}'..='\u{d7af}')
-            })
-            .count(),
-        _ => return Ok(()),
-    };
+    let target_characters =
+        target_script_character_count(translated, target_language).unwrap_or_default();
     let ascii_letters = translated
         .chars()
         .filter(|character| character.is_ascii_alphabetic())
@@ -278,6 +284,97 @@ fn validate_target_script(
         ))
     } else {
         Ok(())
+    }
+}
+
+fn labeled_proper_name_list(source: &str) -> Option<(&str, usize)> {
+    let (label, values) = source.split_once([':', '：'])?;
+    let label = label.trim();
+    let label_words = label.split_whitespace().collect::<Vec<_>>();
+    if label.is_empty()
+        || label.chars().count() > 48
+        || !(1..=6).contains(&label_words.len())
+        || !label_words.iter().all(|word| {
+            word.chars()
+                .all(|character| character.is_alphabetic() || matches!(character, '-' | '\'' | '’'))
+        })
+    {
+        return None;
+    }
+    let entries = values
+        .split([',', '，', ';', '；'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    if entries.len() < 3 {
+        return None;
+    }
+    let name_like = entries
+        .iter()
+        .filter(|entry| looks_like_person_name(entry))
+        .count();
+    (name_like * 3 >= entries.len() * 2).then_some((label, entries.len()))
+}
+
+fn looks_like_person_name(value: &str) -> bool {
+    let words = value
+        .trim_matches(|character: char| {
+            character.is_whitespace() || matches!(character, '*' | '†' | '‡')
+        })
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    (1..=5).contains(&words.len())
+        && words.iter().all(|word| {
+            word.chars().all(|character| {
+                character.is_alphabetic()
+                    || matches!(character, '.' | '-' | '\'' | '’' | '*' | '†' | '‡')
+            })
+        })
+        && words.iter().any(|word| {
+            word.chars()
+                .find(|character| character.is_alphabetic())
+                .is_some_and(char::is_uppercase)
+        })
+}
+
+fn normalize_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn target_script_character_count(text: &str, target_language: &str) -> Option<usize> {
+    match target_language {
+        "zh" | "zh-cn" | "zh-hans" | "zh-tw" | "zh-hant" => {
+            Some(text.chars().filter(|character| is_cjk(*character)).count())
+        }
+        "ja" => Some(
+            text.chars()
+                .filter(|character| {
+                    is_cjk(*character)
+                        || matches!(
+                            *character,
+                            '\u{3040}'..='\u{30ff}' | '\u{31f0}'..='\u{31ff}'
+                        )
+                })
+                .count(),
+        ),
+        "ko" => Some(
+            text.chars()
+                .filter(|character| {
+                    is_cjk(*character)
+                        || matches!(
+                            *character,
+                            '\u{1100}'..='\u{11ff}'
+                                | '\u{3130}'..='\u{318f}'
+                                | '\u{ac00}'..='\u{d7af}'
+                        )
+                })
+                .count(),
+        ),
+        _ => None,
     }
 }
 
@@ -386,6 +483,20 @@ mod tests {
                 "zh-hans"
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn accepts_translated_labels_with_retained_latin_name_lists() {
+        let source = "Contributors:Qunyi Xie, Chaorun Liu, Shiqi Yang, Shaohua Wang, Zhanlong Liu, Hao Zou, Jinyue Chen, Shu Wei, Jingjing Wu, Mingxin Huang, Zhen Wu, Guibin Wang, Tengyu Du, Lei Jia";
+        let unit = body_unit(source);
+        let translated = "贡献者：Qunyi Xie, Chaorun Liu, Shiqi Yang, Shaohua Wang, Zhanlong Liu, Hao Zou, Jinyue Chen, Shu Wei, Jingjing Wu, Mingxin Huang, Zhen Wu, Guibin Wang, Tengyu Du, Lei Jia";
+
+        assert!(validate_target_script(&unit, None, translated, "zh-hans").is_ok());
+        assert!(validate_target_script(&unit, None, source, "zh-hans").is_err());
+        assert!(
+            validate_target_script(&unit, None, "贡献者：Qunyi Xie, Chaorun Liu", "zh-hans")
+                .is_err()
         );
     }
 

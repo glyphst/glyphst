@@ -29,8 +29,8 @@ use glyphst_pdf_translation::{
 use crate::backend::GlyphstTranslationBackend;
 use crate::reviewer::GlyphstPolicyReviewer;
 
-const ARTIFACT_VERSION: u32 = 3;
-const PIPELINE_VERSION: &str = "native-rust-v20-ocr-semantic-lines";
+const ARTIFACT_VERSION: u32 = 4;
+const PIPELINE_VERSION: &str = "native-rust-v21-structured-toc";
 const CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone)]

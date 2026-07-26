@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Block, BlockRole, BoundingBox, FontFamilyClass, PageGeometry, ProtectedRegion, StructureKind,
-    StyledRun, TextFlow, TextStyle, TranslatedDocument,
+    StyledRun, TableOfContentsLeader, TextFlow, TextStyle, TranslatedDocument,
 };
 
 const MATERIAL_COLLISION_RATIO: f32 = 0.12;
@@ -36,6 +36,8 @@ pub struct LayoutItem {
     pub source_regions: Vec<BoundingBox>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structure_group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toc: Option<TableOfContentsLayout>,
     pub bbox: BoundingBox,
     pub text: String,
     pub role: BlockRole,
@@ -56,6 +58,15 @@ pub struct LayoutItem {
     pub first_line_indent_pt: f32,
     pub justify: bool,
     pub preserve_line_breaks: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TableOfContentsLayout {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    pub page_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader: Option<TableOfContentsLeader>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +213,11 @@ pub fn build_layout_with_options(
                     .structure
                     .as_ref()
                     .and_then(|structure| structure.group_id.clone()),
+                toc: block.toc_entry.as_ref().map(|entry| TableOfContentsLayout {
+                    marker: entry.marker.clone(),
+                    page_label: entry.page_label.clone(),
+                    leader: entry.leader.clone(),
+                }),
                 bbox: layout_bbox,
                 text,
                 role: block.role,
@@ -227,11 +243,17 @@ pub fn build_layout_with_options(
                     Vec::new()
                 },
                 first_line_indent_pt: if index == 0 {
-                    profile.first_line_indent_pt
+                    if block.toc_entry.is_some() {
+                        0.0
+                    } else {
+                        profile.first_line_indent_pt
+                    }
                 } else {
                     0.0
                 },
-                justify: profile.justify && !contains_long_unbreakable(&unit.translated_text),
+                justify: block.toc_entry.is_none()
+                    && profile.justify
+                    && !contains_long_unbreakable(&unit.translated_text),
                 preserve_line_breaks: profile.preserve_line_breaks,
             };
             if let Some(page) = pages.get_mut(block.page_index) {
@@ -708,6 +730,7 @@ fn detect_collisions(
     for (index, item) in page.items.iter().enumerate() {
         for other in page.items.iter().skip(index + 1) {
             if materially_overlaps(item.bbox, other.bbox) {
+                let structured_toc_collision = item.toc.is_some() || other.toc.is_some();
                 warnings.push(LayoutWarning {
                     unit_id: item.unit_id.clone(),
                     message: format!(
@@ -715,7 +738,7 @@ fn detect_collisions(
                         other.block_id,
                         page.page_index + 1
                     ),
-                    fatal: false,
+                    fatal: structured_toc_collision,
                 });
             }
         }
@@ -892,6 +915,7 @@ mod tests {
             policy: TranslationPolicy::translate("test"),
             continuation: None,
             structure: None,
+            toc_entry: None,
             source: SourceProvenance {
                 provider: "test".to_string(),
                 raw_label: "text".to_string(),

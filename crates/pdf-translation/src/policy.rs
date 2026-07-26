@@ -632,6 +632,7 @@ mod tests {
             ),
             continuation: None,
             structure: None,
+            toc_entry: None,
             source: SourceProvenance {
                 provider: "fixture".to_string(),
                 raw_label: "text".to_string(),

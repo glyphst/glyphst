@@ -12,6 +12,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::policy::{derive_protected_regions_from_blocks, enforce_page_protected_regions};
+use crate::toc::annotate_table_of_contents_page;
 use crate::{
     Block, BlockContent, BlockKind, BlockRole, BlockStructure, BoundingBox, CancellationToken,
     ContinuationHint, ContinuationScope, DocumentMetadata, DocumentV1, Line, Page, PageGeometry,
@@ -682,6 +683,7 @@ pub fn normalize_paddle_payload(
                         confidence: structure_confidence,
                     }
                 }),
+                toc_entry: None,
                 source: SourceProvenance {
                     provider: "paddle".to_string(),
                     raw_label,
@@ -708,6 +710,7 @@ pub fn normalize_paddle_payload(
             protected_regions: Vec::new(),
             metadata,
         };
+        annotate_table_of_contents_page(&mut page);
         derive_protected_regions_from_blocks(&mut page);
         enforce_page_protected_regions(&mut page);
         pages.push(page);

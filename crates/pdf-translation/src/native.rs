@@ -173,7 +173,7 @@ fn classify_native_role(
     BlockRole::Body
 }
 
-fn policy_for_role(role: BlockRole) -> TranslationPolicy {
+pub(crate) fn policy_for_role(role: BlockRole) -> TranslationPolicy {
     match role {
         BlockRole::Title => TranslationPolicy::candidate(
             true,

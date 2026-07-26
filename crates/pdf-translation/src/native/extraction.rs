@@ -3,6 +3,7 @@ use super::fusion::{
     reclassify_standalone_prompt_blocks,
 };
 use super::*;
+use crate::toc::annotate_table_of_contents_page;
 
 pub fn inspect_pdf(path: &Path, cancellation: &CancellationToken) -> Result<PdfInspection> {
     let document =
@@ -366,6 +367,7 @@ pub fn extract_native_document(
                 policy,
                 continuation: None,
                 structure: None,
+                toc_entry: None,
                 source: SourceProvenance {
                     provider: "mupdf".to_string(),
                     raw_label: "text".to_string(),
@@ -383,6 +385,7 @@ pub fn extract_native_document(
             protected_regions,
             metadata: BTreeMap::new(),
         };
+        annotate_table_of_contents_page(&mut page);
         enforce_page_protected_regions(&mut page);
         reclassify_standalone_prompt_blocks(&mut page);
         reclassify_dialogue_blocks(&mut page);

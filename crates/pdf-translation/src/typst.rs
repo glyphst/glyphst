@@ -742,29 +742,30 @@ fn append_typst_layout_item(
         item.styled_runs.as_slice()
     };
     source.push_str(&format!("#let {name}_content(text-size) = ["));
-    let mut index = 0usize;
-    while index < runs.len() {
-        let run = &runs[index];
-        let style = merged_text_style(&base_style, run.style.as_ref());
-        if let Some(end) = formula_cluster_end(runs, &base_style, index) {
-            append_typst_formula_cluster(source, &runs[index..end], &base_style, item);
-            index = end;
-        } else if is_formula_anchor(&style) {
-            source.push_str("#box[");
-            while index < runs.len() {
-                let run = &runs[index];
-                let style = merged_text_style(&base_style, run.style.as_ref());
-                if !is_formula_anchor(&style) {
-                    break;
-                }
-                append_typst_styled_run(source, run, &style, item, true);
-                index += 1;
-            }
-            source.push(']');
-        } else {
-            append_typst_styled_run(source, run, &style, item, false);
-            index += 1;
+    if let Some(toc) = &item.toc {
+        if let Some(marker) = toc
+            .marker
+            .as_deref()
+            .filter(|marker| !marker.trim().is_empty())
+        {
+            append_typst_styled_text(source, marker, &base_style, item, true);
+            source.push_str("#h(0.55em)");
         }
+        append_typst_runs(source, runs, &base_style, item);
+        source.push_str("#h(0.45em)");
+        if let Some(leader) = &toc.leader {
+            source.push_str(&format!(
+                "#box(width: 1fr, repeat(text(\"{}\"), gap: {:.3}em))",
+                escape_typst_string(&leader.glyph),
+                leader.gap_em.clamp(0.0, 2.0)
+            ));
+        } else {
+            source.push_str("#box(width: 1fr)[]");
+        }
+        source.push_str("#h(0.35em)");
+        append_typst_styled_text(source, &toc.page_label, &base_style, item, true);
+    } else {
+        append_typst_runs(source, runs, &base_style, item);
     }
     source.push_str("]\n");
     source.push_str(&format!(
@@ -786,6 +787,38 @@ fn append_typst_layout_item(
         "#context {{ place(top + left, dx: {:.3}pt, dy: {:.3}pt, {name}_body) }}\n",
         item.bbox.x0, item.bbox.y0
     ));
+}
+
+fn append_typst_runs(
+    source: &mut String,
+    runs: &[StyledRun],
+    base_style: &TextStyle,
+    item: &LayoutItem,
+) {
+    let mut index = 0usize;
+    while index < runs.len() {
+        let run = &runs[index];
+        let style = merged_text_style(base_style, run.style.as_ref());
+        if let Some(end) = formula_cluster_end(runs, base_style, index) {
+            append_typst_formula_cluster(source, &runs[index..end], base_style, item);
+            index = end;
+        } else if is_formula_anchor(&style) {
+            source.push_str("#box[");
+            while index < runs.len() {
+                let run = &runs[index];
+                let style = merged_text_style(base_style, run.style.as_ref());
+                if !is_formula_anchor(&style) {
+                    break;
+                }
+                append_typst_styled_run(source, run, &style, item, true);
+                index += 1;
+            }
+            source.push(']');
+        } else {
+            append_typst_styled_run(source, run, &style, item, false);
+            index += 1;
+        }
+    }
 }
 
 fn merged_text_style(base: &TextStyle, override_style: Option<&TextStyle>) -> TextStyle {
@@ -1042,11 +1075,6 @@ fn append_typst_styled_text(
     item: &LayoutItem,
     literal: bool,
 ) {
-    let markdown = if literal {
-        text.to_string()
-    } else {
-        normalize_markdown_math(text)
-    };
     let font = typst_font_name(style.font_class.unwrap_or(FontFamilyClass::Serif));
     let source_size = style
         .font_size
@@ -1058,12 +1086,10 @@ fn append_typst_styled_text(
         1.0
     };
     let [red, green, blue] = argb_to_rgb(style.color_argb.unwrap_or(0xff00_0000));
-    let escaped = escape_typst_string(&markdown);
-    let mut content = if literal || style.font_class == Some(FontFamilyClass::Math) {
-        format!("#text(\"{escaped}\")")
-    } else {
-        format!("#cmarker.render(\"{escaped}\", math: mitex)")
-    };
+    let mut content = typst_literal_with_math(
+        text,
+        !literal && style.font_class != Some(FontFamilyClass::Math),
+    );
     if style.strikeout {
         content = format!("#strike[{content}]");
     }
@@ -1086,6 +1112,125 @@ fn append_typst_styled_text(
         blue,
         content
     ));
+}
+
+fn typst_literal_with_math(value: &str, recognize_math: bool) -> String {
+    if !recognize_math {
+        return format!("#text(\"{}\")", escape_typst_string(value));
+    }
+    let spans = recognized_math_spans(value);
+    if spans.iter().all(|span| !span.math) {
+        return format!("#text(\"{}\")", escape_typst_string(value));
+    }
+    let mut content = String::from("[");
+    for span in spans {
+        if span.text.is_empty() {
+            continue;
+        }
+        let escaped = escape_typst_string(&span.text);
+        if span.math {
+            content.push_str(&format!("#cmarker.render(\"{escaped}\", math: mitex)"));
+        } else {
+            content.push_str(&format!("#text(\"{escaped}\")"));
+        }
+    }
+    content.push(']');
+    content
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypstTextSpan {
+    text: String,
+    math: bool,
+}
+
+fn recognized_math_spans(value: &str) -> Vec<TypstTextSpan> {
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+    while let Some((start, end, normalized)) = next_math_span(value, cursor) {
+        if start > cursor {
+            spans.push(TypstTextSpan {
+                text: value[cursor..start].to_string(),
+                math: false,
+            });
+        }
+        spans.push(TypstTextSpan {
+            text: normalized,
+            math: true,
+        });
+        cursor = end;
+    }
+    if cursor < value.len() {
+        spans.push(TypstTextSpan {
+            text: value[cursor..].to_string(),
+            math: false,
+        });
+    }
+    if spans.is_empty() {
+        spans.push(TypstTextSpan {
+            text: value.to_string(),
+            math: false,
+        });
+    }
+    spans
+}
+
+fn next_math_span(value: &str, search_from: usize) -> Option<(usize, usize, String)> {
+    let bytes = value.as_bytes();
+    let mut index = search_from;
+    while index < bytes.len() {
+        if bytes[index] == b'$' && !is_escaped(bytes, index) {
+            let delimiter_len = usize::from(bytes.get(index + 1) == Some(&b'$')) + 1;
+            let content_start = index + delimiter_len;
+            let mut cursor = content_start;
+            while cursor + delimiter_len <= bytes.len() {
+                if bytes[cursor] == b'$'
+                    && !is_escaped(bytes, cursor)
+                    && (delimiter_len == 1 || bytes.get(cursor + 1) == Some(&b'$'))
+                {
+                    let content = value[content_start..cursor].trim();
+                    if !content.is_empty() {
+                        let delimiter = "$".repeat(delimiter_len);
+                        return Some((
+                            index,
+                            cursor + delimiter_len,
+                            format!("{delimiter}{content}{delimiter}"),
+                        ));
+                    }
+                    break;
+                }
+                cursor += value[cursor..].chars().next()?.len_utf8();
+            }
+        } else if bytes[index] == b'\\'
+            && !is_escaped(bytes, index)
+            && matches!(bytes.get(index + 1), Some(b'(' | b'['))
+        {
+            let opening = bytes[index + 1];
+            let closing = if opening == b'(' { b')' } else { b']' };
+            let content_start = index + 2;
+            let mut cursor = content_start;
+            while cursor + 1 < bytes.len() {
+                if bytes[cursor] == b'\\'
+                    && bytes[cursor + 1] == closing
+                    && !is_escaped(bytes, cursor)
+                {
+                    let content = value[content_start..cursor].trim();
+                    if !content.is_empty() {
+                        let delimiter = if opening == b'(' { "$" } else { "$$" };
+                        return Some((
+                            index,
+                            cursor + 2,
+                            format!("{delimiter}{content}{delimiter}"),
+                        ));
+                    }
+                    break;
+                }
+                cursor += value[cursor..].chars().next()?.len_utf8();
+            }
+        }
+        index += value[index..].chars().next()?.len_utf8();
+    }
+    None
 }
 
 fn typst_font_name(font_class: FontFamilyClass) -> &'static str {
@@ -1199,6 +1344,7 @@ fn escape_typst_string(value: &str) -> String {
     escaped
 }
 
+#[cfg(test)]
 fn normalize_markdown_math(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut normalized = String::with_capacity(value.len());
@@ -1422,7 +1568,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::{
-        BoundingBox, FontWeight, LayoutItem, LayoutPage, PageGeometry, layout::LayoutDocument,
+        BoundingBox, FontWeight, LayoutItem, LayoutPage, PageGeometry, TableOfContentsLayout,
+        TableOfContentsLeader, layout::LayoutDocument,
     };
 
     use super::*;
@@ -1445,6 +1592,7 @@ mod tests {
                     source_bbox: BoundingBox::new(10.0, 20.0, 90.0, 60.0),
                     source_regions: vec![BoundingBox::new(10.0, 20.0, 90.0, 60.0)],
                     structure_group_id: None,
+                    toc: None,
                     bbox: BoundingBox::new(10.0, 20.0, 90.0, 60.0),
                     text: "你好 $E = mc^2$".to_string(),
                     role: crate::BlockRole::Body,
@@ -1578,6 +1726,7 @@ mod tests {
             source_bbox: BoundingBox::new(10.0, 10.0, 190.0, 100.0),
             source_regions: Vec::new(),
             structure_group_id: None,
+            toc: None,
             bbox: BoundingBox::new(10.0, 10.0, 190.0, 100.0),
             text: "甲：第一句。\n乙：第二句。".to_string(),
             role: crate::BlockRole::Dialogue,
@@ -1614,6 +1763,81 @@ mod tests {
         assert!(source.contains("第一句。"));
         assert!(source.contains("#linebreak()"));
         assert!(!source.contains("  \n"));
+    }
+
+    #[test]
+    fn ordinary_prose_metacharacters_are_literal_while_formula_spans_use_cmarker() {
+        let mut item = test_layout_item("* 表示项目负责人；†表示技术总监。公式 $x + y$。");
+        item.block_id = "literal-marker".to_string();
+        let source = generate_typst_source(&test_layout(item));
+
+        assert!(source.contains("#text(\"* 表示项目负责人；†表示技术总监。公式 \")"));
+        assert!(source.contains("#cmarker.render(\"$x + y$\", math: mitex)"));
+        assert!(!source.contains("#cmarker.render(\"* 表示项目负责人"));
+    }
+
+    #[test]
+    fn toc_rows_render_source_owned_leaders_and_page_labels() {
+        let mut item = test_layout_item("流水线框架");
+        item.role = crate::BlockRole::TableOfContents;
+        item.toc = Some(TableOfContentsLayout {
+            marker: Some("2.1".to_string()),
+            page_label: "4".to_string(),
+            leader: Some(TableOfContentsLeader {
+                glyph: ".".to_string(),
+                gap_em: 0.32,
+            }),
+        });
+        let source = generate_typst_source(&test_layout(item));
+
+        assert!(source.contains("#text(\"2.1\")"));
+        assert!(source.contains("#text(\"流水线框架\")"));
+        assert!(source.contains("#box(width: 1fr, repeat(text(\".\"), gap: 0.320em))"));
+        assert!(source.contains("#text(\"4\")"));
+    }
+
+    fn test_layout(item: LayoutItem) -> LayoutDocument {
+        LayoutDocument {
+            pages: vec![LayoutPage {
+                page_index: 0,
+                geometry: PageGeometry::new(200.0, 200.0),
+                items: vec![item],
+            }],
+            warnings: Vec::new(),
+            preserved_on_overflow: Vec::new(),
+            overflow_policy: OverflowPolicy::Adaptive,
+        }
+    }
+
+    fn test_layout_item(text: &str) -> LayoutItem {
+        LayoutItem {
+            unit_id: "unit".to_string(),
+            block_id: "block".to_string(),
+            page_index: 0,
+            source_bbox: BoundingBox::new(10.0, 10.0, 190.0, 30.0),
+            source_regions: Vec::new(),
+            structure_group_id: None,
+            toc: None,
+            bbox: BoundingBox::new(10.0, 10.0, 190.0, 30.0),
+            text: text.to_string(),
+            role: crate::BlockRole::Body,
+            source_font_size_pt: 10.0,
+            font_size_pt: 10.0,
+            minimum_font_size_pt: 7.0,
+            emergency_minimum_font_size_pt: 5.0,
+            leading_em: 0.58,
+            minimum_leading_em: 0.4,
+            font_weight: FontWeight::Regular,
+            font_class: FontFamilyClass::Serif,
+            italic: false,
+            underline: false,
+            strikeout: false,
+            color_argb: 0xff00_0000,
+            styled_runs: Vec::new(),
+            first_line_indent_pt: 0.0,
+            justify: false,
+            preserve_line_breaks: false,
+        }
     }
 
     #[test]
@@ -1716,6 +1940,7 @@ mod tests {
                     source_bbox: BoundingBox::new(10.0, 10.0, 190.0, 100.0),
                     source_regions: vec![BoundingBox::new(10.0, 10.0, 190.0, 100.0)],
                     structure_group_id: None,
+                    toc: None,
                     bbox: BoundingBox::new(10.0, 10.0, 190.0, 100.0),
                     text: "简体中文第一行不应裁切。\nDansk: Ålborg, dejlig og lang.\nDeutsch: Ältere Übung, deutlich und lang. $E = mc^2$.".to_string(),
                     role: crate::BlockRole::Body,

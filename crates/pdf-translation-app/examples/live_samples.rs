@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use glyphst_pdf_translation_app::{
     CancellationToken, PdfTranslationProgress, PdfTranslationRequest, PdfTranslationService,
 };
-use glyphst_settings::{Settings, app_paths, parse_settings};
+use glyphst_settings::{
+    OcrMode, OcrProvider, Settings, TranslationProvider, app_paths, parse_settings,
+};
 use glyphst_translation::{LanguageCode, TranslationService};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,6 +49,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(secret_key) = env_value("GLYPHST_BAIDU_OCR_SECRET_KEY") {
         settings.ocr.unlimited.secret_key = secret_key;
+    }
+    if let Some(mode) = env_value("GLYPHST_LIVE_OCR_MODE") {
+        settings.ocr.mode = match mode.trim().to_ascii_lowercase().as_str() {
+            "always" => OcrMode::Always,
+            "auto" => OcrMode::Auto,
+            "off" => OcrMode::Off,
+            _ => return Err(format!("unsupported GLYPHST_LIVE_OCR_MODE {mode:?}").into()),
+        };
+    }
+    if let Some(provider) = env_value("GLYPHST_LIVE_OCR_PROVIDER") {
+        settings.ocr.provider = match provider.trim().to_ascii_lowercase().as_str() {
+            "paddle" | "paddle-ocr" | "paddleocr" => OcrProvider::Paddle,
+            "unlimited" | "unlimited-ocr" => OcrProvider::Unlimited,
+            _ => {
+                return Err(format!("unsupported GLYPHST_LIVE_OCR_PROVIDER {provider:?}").into());
+            }
+        };
+    }
+    if let Some(provider) = env_value("GLYPHST_LIVE_TRANSLATION_PROVIDER") {
+        let Some(provider) = TranslationProvider::parse(&provider) else {
+            return Err(
+                format!("unsupported GLYPHST_LIVE_TRANSLATION_PROVIDER {provider:?}").into(),
+            );
+        };
+        settings.translation.active_provider = provider;
     }
     settings.sanitize();
     let resolved_ai = settings.ai.resolved_translation();

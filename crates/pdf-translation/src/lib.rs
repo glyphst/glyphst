@@ -6,6 +6,7 @@ mod native;
 mod paddle;
 mod policy;
 mod progress;
+mod toc;
 mod translate;
 mod typst;
 mod unlimited;
@@ -18,11 +19,13 @@ pub use document::{
     BaselinePosition, Block, BlockContent, BlockKind, BlockRole, BlockStructure, BoundingBox,
     ContinuationHint, ContinuationScope, DocumentMetadata, DocumentV1, FontFamilyClass, Line, Page,
     PageGeometry, PolicyDecisionSource, ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind,
-    SourceProvenance, StructureKind, TextFlow, TextStyle, TranslationPolicy,
+    SourceProvenance, StructureKind, TableOfContentsEntry, TableOfContentsLeader, TextFlow,
+    TextStyle, TranslationPolicy,
 };
 pub use layout::{
     FontWeight, LayoutDocument, LayoutItem, LayoutOptions, LayoutPage, LayoutWarning,
-    OverflowPolicy, build_layout, build_layout_with_options, split_text_for_layout_boxes,
+    OverflowPolicy, TableOfContentsLayout, build_layout, build_layout_with_options,
+    split_text_for_layout_boxes,
 };
 pub use native::{
     OcrFusionDecision, OcrFusionPageReport, OcrFusionRelation, OcrFusionReport, OcrFusionResult,

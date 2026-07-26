@@ -42,6 +42,14 @@ pub(super) fn protect_block_text(
     block: &Block,
     role: BlockRole,
 ) -> (String, ProtectedText, Vec<StyleDefinition>) {
+    if let Some(entry) = &block.toc_entry {
+        let source = entry.title.trim().to_string();
+        return (
+            source.clone(),
+            protect_text_for_role(&source, BlockRole::TableOfContents),
+            Vec::new(),
+        );
+    }
     let source = block.content.text.trim();
     let Some(dominant) = dominant_text_style(block) else {
         let source = normalize_block_hard_wraps(block, role);

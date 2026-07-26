@@ -9,7 +9,8 @@ use super::*;
 use crate::{
     Block, BlockContent, BlockKind, BlockStructure, BoundingBox, ContinuationHint,
     ContinuationScope, DocumentMetadata, Line, Page, PageGeometry, Segment, SegmentKind,
-    SourceProvenance, StructureKind, TranslationPolicy,
+    SourceProvenance, StructureKind, TableOfContentsEntry, TableOfContentsLeader,
+    TranslationPolicy,
 };
 
 struct EchoBackend {
@@ -148,6 +149,30 @@ fn translation_units_keep_exact_protected_token_metadata() {
         assert!(unit.protected.text.contains(&token.placeholder));
         assert!(!token.original.is_empty());
     }
+}
+
+#[test]
+fn toc_units_translate_only_the_entry_title() {
+    let mut document = test_document("2.1\nPipeline Framework. . . . . . . . .\n4");
+    let block = &mut document.pages[0].blocks[0];
+    block.role = BlockRole::TableOfContents;
+    block.toc_entry = Some(TableOfContentsEntry {
+        marker: Some("2.1".to_string()),
+        title: "Pipeline Framework".to_string(),
+        page_label: "4".to_string(),
+        leader: Some(TableOfContentsLeader {
+            glyph: ".".to_string(),
+            gap_em: 0.32,
+        }),
+    });
+
+    let unit = build_translation_units(&document).remove(0);
+
+    assert_eq!(unit.source_text, "Pipeline Framework");
+    assert_eq!(unit.protected.text, "Pipeline Framework");
+    assert!(!unit.protected.text.contains("2.1"));
+    assert!(!unit.protected.text.contains('4'));
+    assert!(!unit.protected.text.contains('.'));
 }
 
 #[test]
@@ -1239,6 +1264,7 @@ fn test_document_with_blocks(blocks: Vec<(BlockRole, String)>) -> DocumentV1 {
                     policy: TranslationPolicy::translate("test"),
                     continuation: None,
                     structure: None,
+                    toc_entry: None,
                     source: SourceProvenance {
                         provider: "test".to_string(),
                         raw_label: "text".to_string(),

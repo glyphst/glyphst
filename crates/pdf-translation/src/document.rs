@@ -66,6 +66,21 @@ impl DocumentV1 {
                         bail!("block {} has an invalid structure group box", block.id);
                     }
                 }
+                if let Some(entry) = &block.toc_entry {
+                    if entry.title.trim().is_empty() || entry.page_label.trim().is_empty() {
+                        bail!(
+                            "block {} has an incomplete table-of-contents entry",
+                            block.id
+                        );
+                    }
+                    if let Some(leader) = &entry.leader
+                        && (leader.glyph.trim().is_empty()
+                            || !leader.gap_em.is_finite()
+                            || !(0.0..=2.0).contains(&leader.gap_em))
+                    {
+                        bail!("block {} has an invalid table-of-contents leader", block.id);
+                    }
+                }
             }
             for region in &page.protected_regions {
                 if region.page_index != page_index {
@@ -141,11 +156,29 @@ pub struct Block {
     pub continuation: Option<ContinuationHint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structure: Option<BlockStructure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toc_entry: Option<TableOfContentsEntry>,
     pub source: SourceProvenance,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
     pub metadata: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TableOfContentsEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    pub title: String,
+    pub page_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader: Option<TableOfContentsLeader>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TableOfContentsLeader {
+    pub glyph: String,
+    pub gap_em: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -181,6 +214,7 @@ pub enum StructureKind {
     OrderedListItem,
     BulletListItem,
     DialogueTurn,
+    TableOfContentsEntry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -608,6 +642,7 @@ mod tests {
                     policy: TranslationPolicy::translate("test"),
                     continuation: None,
                     structure: None,
+                    toc_entry: None,
                     source: SourceProvenance {
                         provider: "test".to_string(),
                         raw_label: "text".to_string(),

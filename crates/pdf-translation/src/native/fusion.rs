@@ -1,5 +1,8 @@
 use super::extraction::{merge_inline_native_lines, native_block_from_lines};
 use super::*;
+use crate::toc::{
+    annotate_table_of_contents_page, parse_table_of_contents_entry, semantic_member_bbox,
+};
 
 pub fn reconcile_ocr_geometry(document: &mut DocumentV1, native: &DocumentV1) {
     for page in &mut document.pages {
@@ -35,6 +38,7 @@ pub fn fuse_native_with_ocr(native: DocumentV1, ocr: &DocumentV1) -> DocumentV1 
 pub fn fuse_native_with_ocr_report(mut native: DocumentV1, ocr: &DocumentV1) -> OcrFusionResult {
     let mut report = OcrFusionReport::default();
     for page in &mut native.pages {
+        annotate_table_of_contents_page(page);
         let Some(source_ocr_page) = ocr
             .pages
             .iter()
@@ -286,6 +290,7 @@ pub fn fuse_native_with_ocr_report(mut native: DocumentV1, ocr: &DocumentV1) -> 
             output_blocks.push(inserted);
         }
         page.blocks = output_blocks;
+        annotate_table_of_contents_page(page);
         enforce_page_protected_regions(page);
         reclassify_standalone_prompt_blocks(page);
         reclassify_dialogue_blocks(page);
@@ -332,18 +337,22 @@ enum OcrLineTopology {
     Dialogue,
     OrderedList,
     BulletList,
+    TableOfContents,
 }
 
 fn expand_ocr_semantic_regions(page: &Page) -> Page {
-    let mut expanded = page.clone();
+    let mut annotated = page.clone();
+    annotate_table_of_contents_page(&mut annotated);
+    let mut expanded = annotated.clone();
     let mut blocks = Vec::new();
-    for block in &page.blocks {
+    for block in &annotated.blocks {
         let Some((topology, members)) = ocr_semantic_line_members(block) else {
             blocks.push(block.clone());
             continue;
         };
         let group_id = format!("{}-semantic-lines", block.id);
         let group_bbox = ocr_structure_bbox(block);
+        let member_count = members.len();
         let confidence = block
             .structure
             .as_ref()
@@ -356,11 +365,18 @@ fn expand_ocr_semantic_regions(page: &Page) -> Page {
                 OcrLineTopology::Prompt => BlockRole::Prompt,
                 OcrLineTopology::Dialogue => BlockRole::Dialogue,
                 OcrLineTopology::OrderedList | OcrLineTopology::BulletList => BlockRole::Body,
+                OcrLineTopology::TableOfContents => BlockRole::TableOfContents,
             };
             expanded_block.policy = policy_for_role(expanded_block.role);
             expanded_block.policy.source = PolicyDecisionSource::OcrSemantic;
             expanded_block.policy.confidence = confidence;
-            let marker = structural_marker(&member);
+            let toc_entry = matches!(topology, OcrLineTopology::TableOfContents)
+                .then(|| parse_table_of_contents_entry(&member))
+                .flatten();
+            let marker = toc_entry
+                .as_ref()
+                .and_then(|entry| entry.marker.clone())
+                .or_else(|| structural_marker(&member));
             let kind = match topology {
                 OcrLineTopology::Prompt
                     if member_index == 0 && native_bracketed_prompt_heading(&member) =>
@@ -373,6 +389,7 @@ fn expand_ocr_semantic_regions(page: &Page) -> Page {
                 OcrLineTopology::Dialogue => StructureKind::DialogueTurn,
                 OcrLineTopology::OrderedList if marker.is_some() => StructureKind::OrderedListItem,
                 OcrLineTopology::BulletList if marker.is_some() => StructureKind::BulletListItem,
+                OcrLineTopology::TableOfContents => StructureKind::TableOfContentsEntry,
                 _ => StructureKind::Region,
             };
             let provider = expanded_block
@@ -389,6 +406,10 @@ fn expand_ocr_semantic_regions(page: &Page) -> Page {
                 provider,
                 confidence,
             });
+            let member_bbox = semantic_member_bbox(group_bbox, member_index, member_count);
+            expanded_block.bbox = member_bbox;
+            expanded_block.source.raw_bbox = member_bbox;
+            expanded_block.toc_entry = toc_entry;
             let style = block
                 .content
                 .segments
@@ -398,17 +419,17 @@ fn expand_ocr_semantic_regions(page: &Page) -> Page {
             let segment = Segment {
                 kind: SegmentKind::Text,
                 text: member.clone(),
-                bbox: group_bbox,
+                bbox: member_bbox,
                 style,
             };
             expanded_block.content = BlockContent {
                 text: member.clone(),
                 lines: vec![Line {
-                    bbox: group_bbox,
+                    bbox: member_bbox,
                     text: member,
                     segments: vec![segment.clone()],
                     baseline_y: None,
-                    line_height: None,
+                    line_height: Some(member_bbox.height()),
                 }],
                 segments: vec![segment],
                 markdown: None,
@@ -461,7 +482,16 @@ fn ocr_semantic_line_members(block: &Block) -> Option<(OcrLineTopology, Vec<Stri
         .iter()
         .filter(|line| bullet_list_marker(line).is_some())
         .count();
-    let topology = if native_text_looks_like_prompt(&block.content.text) {
+    let toc_count = raw_lines
+        .iter()
+        .filter(|line| parse_table_of_contents_entry(line).is_some())
+        .count();
+    let topology = if block.role == BlockRole::TableOfContents
+        && toc_count >= 3
+        && toc_count * 4 >= raw_lines.len() * 3
+    {
+        OcrLineTopology::TableOfContents
+    } else if native_text_looks_like_prompt(&block.content.text) {
         OcrLineTopology::Prompt
     } else if native_text_looks_like_dialogue(&block.content.text) {
         OcrLineTopology::Dialogue
@@ -488,6 +518,9 @@ fn ocr_semantic_line_members(block: &Block) -> Option<(OcrLineTopology, Vec<Stri
 }
 
 fn semantic_ocr_line_boundary(previous: &str, current: &str, topology: OcrLineTopology) -> bool {
+    if matches!(topology, OcrLineTopology::TableOfContents) {
+        return true;
+    }
     if matches!(topology, OcrLineTopology::OrderedList) {
         return ordered_list_marker(current).is_some();
     }
@@ -590,7 +623,9 @@ fn assign_native_lines_to_ocr(
             let margin = candidates
                 .get(1)
                 .map_or(f32::INFINITY, |candidate| score - candidate.1);
-            (score >= 0.70 && (margin >= 0.08 || geometry >= 0.92))
+            let structured_toc_match =
+                table_of_contents_match_score(native_block, &ocr_page.blocks[ocr_index]).is_some();
+            (score >= 0.70 && (structured_toc_match || margin >= 0.08 || geometry >= 0.92))
                 .then_some(LineOcrAssignment { ocr_index, score })
         })
         .collect()
@@ -647,6 +682,14 @@ fn line_ocr_match_score(
     ) / atom.line.bbox.width().max(1.0);
     let center_inside = bbox_contains_with_padding(ocr_bbox, atom.line.bbox, 2.5);
     let text_similarity = partial_text_similarity(&atom.line.text, &ocr_block.content.text);
+    if native_block.toc_entry.is_some() && ocr_block.toc_entry.is_some() {
+        let toc_score = table_of_contents_match_score(native_block, ocr_block)?;
+        let geometry = (vertical_overlap.clamp(0.0, 1.0) * 0.65
+            + horizontal_overlap.clamp(0.0, 1.0) * 0.25
+            + if center_inside { 0.10 } else { 0.0 })
+        .clamp(0.0, 1.0);
+        return Some((toc_score, geometry.max(0.50)));
+    }
     if (vertical_overlap < 0.20 || horizontal_overlap < 0.05)
         && !(text_similarity >= 0.90 && native_block.bbox.intersection(ocr_bbox).is_some())
     {
@@ -668,6 +711,19 @@ fn line_ocr_match_score(
     .clamp(0.0, 1.0);
     let score = geometry * 0.60 + text_similarity * 0.30 + 0.10;
     Some((score, geometry))
+}
+
+fn table_of_contents_match_score(native_block: &Block, ocr_block: &Block) -> Option<f32> {
+    let native = native_block.toc_entry.as_ref()?;
+    let ocr = ocr_block.toc_entry.as_ref()?;
+    if native.marker.as_deref().map(normalize_match_text)
+        != ocr.marker.as_deref().map(normalize_match_text)
+        || normalize_match_text(&native.page_label) != normalize_match_text(&ocr.page_label)
+    {
+        return None;
+    }
+    let title_similarity = normalized_text_similarity(&native.title, &ocr.title);
+    (title_similarity >= 0.72).then_some(0.84 + title_similarity * 0.15)
 }
 
 fn ocr_structure_bbox(block: &Block) -> BoundingBox {
@@ -1019,6 +1075,10 @@ fn build_topology_fused_block(
         policy,
         continuation: ocr_block.continuation.clone(),
         structure: Some(structure),
+        toc_entry: first_native
+            .toc_entry
+            .clone()
+            .or_else(|| ocr_block.toc_entry.clone()),
         source: SourceProvenance {
             provider: format!("mupdf+{}-structure", ocr_block.source.provider),
             raw_label: ocr_block.source.raw_label.clone(),
@@ -1118,6 +1178,9 @@ fn apply_ocr_semantics(native_block: &mut Block, ocr_block: &Block, score: f32) 
             .clone_from(&ocr_block.continuation);
     }
     native_block.structure.clone_from(&ocr_block.structure);
+    if native_block.toc_entry.is_none() {
+        native_block.toc_entry.clone_from(&ocr_block.toc_entry);
+    }
     native_block.reading_order = ocr_block.reading_order;
     native_block
         .tags
@@ -1178,6 +1241,14 @@ fn classify_ocr_structure_groups(page: &mut Page) {
             .iter()
             .filter(|index| page.blocks[**index].role == BlockRole::Prompt)
             .count();
+        let toc_group = members.iter().any(|index| {
+            page.blocks[*index].role == BlockRole::TableOfContents
+                || page.blocks[*index].toc_entry.is_some()
+                || page.blocks[*index]
+                    .structure
+                    .as_ref()
+                    .is_some_and(|structure| structure.kind == StructureKind::TableOfContentsEntry)
+        });
         let bracketed_prompt_heading = members.first().is_some_and(|index| {
             page.blocks[*index]
                 .content
@@ -1187,14 +1258,19 @@ fn classify_ocr_structure_groups(page: &mut Page) {
                 .find(|line| !line.is_empty())
                 .is_some_and(native_bracketed_prompt_heading)
         });
-        let prompt_group = ordered_count >= 2
-            || semantic_prompt_count >= 2
-            || (members.len() >= 2 && bracketed_prompt_heading);
-        let bullet_group = bullet_count >= 2;
+        let prompt_group = !toc_group
+            && (ordered_count >= 2
+                || semantic_prompt_count >= 2
+                || (members.len() >= 2 && bracketed_prompt_heading));
+        let bullet_group = !toc_group && bullet_count >= 2;
         for (position, index) in members.iter().enumerate() {
             let block = &mut page.blocks[*index];
             let ordered_marker = ordered_list_marker(&block.content.text);
             let bullet_marker = bullet_list_marker(&block.content.text);
+            let toc_marker = block
+                .toc_entry
+                .as_ref()
+                .and_then(|entry| entry.marker.clone());
             let structure = block.structure.get_or_insert_with(|| BlockStructure {
                 kind: StructureKind::Region,
                 flow: TextFlow::Reflow,
@@ -1207,7 +1283,13 @@ fn classify_ocr_structure_groups(page: &mut Page) {
             structure.group_id = Some(group_id.clone());
             structure.group_bbox = group_bbox;
             structure.flow = TextFlow::Reflow;
-            if prompt_group {
+            if toc_group {
+                block.role = BlockRole::TableOfContents;
+                block.policy = policy_for_role(BlockRole::TableOfContents);
+                block.policy.source = PolicyDecisionSource::OcrSemantic;
+                structure.kind = StructureKind::TableOfContentsEntry;
+                structure.marker = toc_marker;
+            } else if prompt_group {
                 block.role = BlockRole::Prompt;
                 block.policy = policy_for_role(BlockRole::Prompt);
                 structure.kind = if ordered_marker.is_some() {

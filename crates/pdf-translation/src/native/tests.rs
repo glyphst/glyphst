@@ -611,6 +611,73 @@ fn coarse_ocr_semantic_newlines_expand_without_promoting_visual_wraps() {
 }
 
 #[test]
+fn coarse_paddle_toc_rows_keep_unique_native_geometry() {
+    let rows = [
+        ("native-1", "1 Introduction\n3", 12.0, 20.0),
+        ("native-2", "2 Related Works\n4", 32.0, 40.0),
+        (
+            "native-3",
+            "2.1\nPipeline Framework. . . . .\n4",
+            42.0,
+            50.0,
+        ),
+        ("native-4", "3 Conclusion\n8", 72.0, 80.0),
+    ];
+    let native = fusion_document(
+        "native",
+        rows.iter()
+            .enumerate()
+            .map(|(index, (id, text, y0, y1))| {
+                let mut block = fusion_block(
+                    id,
+                    BoundingBox::new(10.0, *y0, 90.0, *y1),
+                    BlockRole::Body,
+                    text,
+                    TextStyle::default(),
+                );
+                block.order = index;
+                block.reading_order = index;
+                block
+            })
+            .collect(),
+    );
+    let mut coarse_ocr = fusion_block(
+        "paddle-toc",
+        BoundingBox::new(10.0, 8.0, 90.0, 88.0),
+        BlockRole::TableOfContents,
+        "1 Introduction 3\n2 Related Works 4\n2.1 Pipeline Framework ..... 4\n3 Conclusion 8",
+        TextStyle::default(),
+    );
+    coarse_ocr.source.provider = "paddle".to_string();
+    coarse_ocr.structure = Some(BlockStructure {
+        provider: "paddle".to_string(),
+        confidence: 0.98,
+        ..test_structure(0.98)
+    });
+    let ocr = fusion_document("paddle", vec![coarse_ocr]);
+
+    let fusion = fuse_native_with_ocr_report(native, &ocr);
+    let blocks = &fusion.document.pages[0].blocks;
+
+    assert_eq!(blocks.len(), 4, "{:#?}", fusion.report);
+    assert_eq!(fusion.report.pages[0].one_to_one_matches, 4);
+    assert_eq!(fusion.report.pages[0].accepted_many_to_many, 0);
+    assert!(blocks.iter().all(|block| {
+        block.role == BlockRole::TableOfContents
+            && block.toc_entry.is_some()
+            && block
+                .structure
+                .as_ref()
+                .is_some_and(|structure| structure.kind == StructureKind::TableOfContentsEntry)
+    }));
+    assert!(
+        blocks
+            .windows(2)
+            .all(|pair| pair[0].bbox.y1 < pair[1].bbox.y0)
+    );
+}
+
+#[test]
 fn ocr_topology_merges_caption_fragments_without_losing_native_styles() {
     let red = TextStyle {
         font_size: Some(9.0),
@@ -1003,6 +1070,7 @@ fn fusion_block(
         policy: policy_for_role(role),
         continuation: None,
         structure: None,
+        toc_entry: None,
         source: SourceProvenance {
             provider: "fixture".to_string(),
             raw_label: "text".to_string(),
