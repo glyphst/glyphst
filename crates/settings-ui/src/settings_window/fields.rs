@@ -9,6 +9,7 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, AxisExt as _, Disableable as _, Sizable as _, StyledExt as _,
+    Theme as ComponentTheme,
     button::{Button, ButtonVariants as _},
     color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
     h_flex,
@@ -62,7 +63,7 @@ pub(super) struct ColorSetting {
     pub label: &'static str,
     pub with_alpha: bool,
     pub override_value: fn(&PartialTheme) -> Option<u32>,
-    pub resolved_value: fn(&Theme) -> u32,
+    pub resolved_value: fn(&Theme, &ComponentTheme) -> u32,
     pub set_override: fn(&mut PartialTheme, Option<u32>),
 }
 
@@ -70,7 +71,7 @@ fn channel_to_u8(channel: f32) -> u32 {
     (channel.clamp(0.0, 1.0) * 255.0).round() as u32
 }
 
-fn hsla_to_u32(color: Hsla, with_alpha: bool) -> u32 {
+pub(super) fn hsla_to_u32(color: Hsla, with_alpha: bool) -> u32 {
     let color_rgb = color.to_rgb();
     let rgb = (channel_to_u8(color_rgb.r) << 16)
         | (channel_to_u8(color_rgb.g) << 8)
@@ -827,7 +828,9 @@ impl SettingsWindow {
             move |options, window, cx| {
                 let settings = &cx.global::<SettingsStore>();
                 let current = (setting.override_value)(&settings.settings.overrides)
-                    .unwrap_or_else(|| (setting.resolved_value)(&settings.resolved_theme));
+                    .unwrap_or_else(|| {
+                        (setting.resolved_value)(&settings.resolved_theme, cx.theme())
+                    });
                 let state = window.use_keyed_state(
                     SharedString::from(format!("theme-color-{}", setting.id)),
                     cx,

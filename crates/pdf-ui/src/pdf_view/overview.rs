@@ -326,7 +326,7 @@ impl PdfView {
 
     pub(super) fn render_thumbnail_sidebar(
         &mut self,
-        theme: Theme,
+        theme: ThemeColor,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -421,7 +421,7 @@ impl PdfView {
             .when_some(toolbar_label, |this, label| {
                 this.child(
                     div()
-                        .text_color(rgb(theme.text_muted))
+                        .text_color(theme.muted_foreground)
                         .truncate()
                         .child(label),
                 )
@@ -460,8 +460,9 @@ impl PdfView {
                                 page_count,
                                 cx.processor(
                                     move |this, visible_range: Range<usize>, _window, cx| {
-                                        let theme =
+                                        let document_theme =
                                             cx.global::<SettingsStore>().resolved_theme;
+                                        let theme = cx.theme().colors;
                                         let current_page =
                                             this.current_page_index().min(this.last_page_index());
                                         let selecting = this.thumbnail_sidebar_selecting;
@@ -476,14 +477,14 @@ impl PdfView {
                                                     .thumbnail_sidebar_selection
                                                     .contains(&page_idx);
                                                 let border_color = if selected || current {
-                                                    theme.accent
+                                                    theme.primary
                                                 } else {
                                                     theme.border
                                                 };
                                                 let label_color = if selected || current {
-                                                    theme.accent
+                                                    theme.primary
                                                 } else {
-                                                    theme.text_muted
+                                                    theme.muted_foreground
                                                 };
                                                 let thumbnail_view = cx.entity();
                                                 let thumbnail = canvas(
@@ -506,7 +507,7 @@ impl PdfView {
                                                     move |bounds, image, window, _| {
                                                         window.paint_quad(fill(
                                                             bounds,
-                                                            rgb(theme.page),
+                                                            rgb(document_theme.page),
                                                         ));
                                                         if let Some(image) = image {
                                                             let _ = window.paint_image(
@@ -534,7 +535,7 @@ impl PdfView {
                                                         .px(px(THUMBNAIL_SIDEBAR_HORIZONTAL_PADDING))
                                                         .cursor_pointer()
                                                         .hover(move |style| {
-                                                            style.bg(rgb(theme.element_hover))
+                                                            style.bg(theme.list_hover)
                                                         })
                                                         .on_mouse_down(
                                                             MouseButton::Left,
@@ -584,19 +585,17 @@ impl PdfView {
                                                                 .w(px(thumbnail_box_width))
                                                                 .h(px(thumbnail_box_height))
                                                                 .border_1()
-                                                                .border_color(rgb(border_color))
+                                                                .border_color(border_color)
                                                                 .bg(if selected {
-                                                                    rgba(Self::with_alpha(
-                                                                        theme.accent,
-                                                                        0x22,
-                                                                    ))
+                                                                    theme
+                                                                        .primary
+                                                                        .opacity(0x22 as f32 / 255.0)
                                                                 } else if current {
-                                                                    rgba(Self::with_alpha(
-                                                                        theme.accent,
-                                                                        0x18,
-                                                                    ))
+                                                                    theme
+                                                                        .primary
+                                                                        .opacity(0x18 as f32 / 255.0)
                                                                 } else {
-                                                                    rgba(0x00000000)
+                                                                    transparent_black()
                                                                 })
                                                                 .child(thumbnail)
                                                                 .when(selecting, |this| {
@@ -611,28 +610,29 @@ impl PdfView {
                                                                             .w(px(22.0))
                                                                             .h(px(22.0))
                                                                             .border_1()
-                                                                            .border_color(rgb(
+                                                                            .border_color(
                                                                                 if selected {
-                                                                                    theme.accent
+                                                                                    theme.primary
                                                                                 } else {
                                                                                     theme.border
                                                                                 },
-                                                                            ))
-                                                                            .bg(rgba(
-                                                                                Self::with_alpha(
-                                                                                    theme
-                                                                                        .surface_background,
-                                                                                    0xe8,
-                                                                                ),
-                                                                            ))
+                                                                            )
+                                                                            .bg(
+                                                                                theme
+                                                                                    .popover
+                                                                                    .opacity(
+                                                                                        0xe8 as f32
+                                                                                            / 255.0,
+                                                                                    ),
+                                                                            )
                                                                             .text_size(ui_rems(13.0))
-                                                                            .text_color(rgb(
+                                                                            .text_color(
                                                                                 if selected {
-                                                                                    theme.accent
+                                                                                    theme.primary
                                                                                 } else {
-                                                                                    theme.text_muted
+                                                                                    theme.muted_foreground
                                                                                 },
-                                                                            ))
+                                                                            )
                                                                             .child(if selected {
                                                                                 "☑"
                                                                             } else {
@@ -646,7 +646,7 @@ impl PdfView {
                                                                 .mt_1()
                                                                 .h(px(THUMBNAIL_SIDEBAR_LABEL_HEIGHT))
                                                                 .text_size(ui_rems(11.0))
-                                                                .text_color(rgb(label_color))
+                                                                .text_color(label_color)
                                                                 .child(format!("{}", page_idx + 1)),
                                                         ),
                                                 )
@@ -698,7 +698,7 @@ impl PdfView {
 
     pub(super) fn render_grid_overview(
         &mut self,
-        theme: Theme,
+        theme: ThemeColor,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -757,9 +757,9 @@ impl PdfView {
             .key_context("GridOverview")
             .flex()
             .flex_col()
-            .bg(rgb(theme.surface_background))
+            .bg(theme.popover)
             .text_size(ui_rems(12.0))
-            .text_color(rgb(theme.text))
+            .text_color(theme.foreground)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -796,7 +796,7 @@ impl PdfView {
                     .h(px(GRID_OVERVIEW_HEADER_HEIGHT))
                     .px_3()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.border))
+                    .border_color(theme.border)
                     .child(
                         div()
                             .text_size(ui_rems(13.0))
@@ -888,7 +888,9 @@ impl PdfView {
                                     .collect();
                                 cx.global_mut::<RenderCache>().set_protected_pages(protected);
 
-                                let theme = cx.global::<SettingsStore>().resolved_theme;
+                                let document_theme =
+                                    cx.global::<SettingsStore>().resolved_theme;
+                                let theme = cx.theme().colors;
                                 let current_page =
                                     this.grid_overview_cursor.min(this.last_page_index());
 
@@ -916,14 +918,14 @@ impl PdfView {
                                                     .grid_overview_selection
                                                     .contains(&page_idx);
                                                 let border_color = if selected || current {
-                                                    theme.accent
+                                                    theme.primary
                                                 } else {
                                                     theme.border
                                                 };
                                                 let label_color = if selected || current {
-                                                    theme.accent
+                                                    theme.primary
                                                 } else {
-                                                    theme.text_muted
+                                                    theme.muted_foreground
                                                 };
                                                 let thumbnail_view = cx.entity();
                                                 let thumbnail = canvas(
@@ -945,7 +947,7 @@ impl PdfView {
                                                     move |bounds, image, window, _| {
                                                         window.paint_quad(fill(
                                                             bounds,
-                                                            rgb(theme.page),
+                                                            rgb(document_theme.page),
                                                         ));
                                                         if let Some(image) = image {
                                                             let _ = window.paint_image(
@@ -972,7 +974,7 @@ impl PdfView {
                                                         .w(px(thumbnail_box_width))
                                                         .cursor_pointer()
                                                         .hover(move |style| {
-                                                            style.bg(rgb(theme.element_hover))
+                                                            style.bg(theme.list_hover)
                                                         })
                                                         .on_mouse_down(
                                                             MouseButton::Left,
@@ -1027,19 +1029,17 @@ impl PdfView {
                                                                 .w(px(thumbnail_box_width))
                                                                 .h(px(thumbnail_box_height))
                                                                 .border_1()
-                                                                .border_color(rgb(border_color))
+                                                                .border_color(border_color)
                                                                 .bg(if selected {
-                                                                    rgba(Self::with_alpha(
-                                                                        theme.accent,
-                                                                        0x22,
-                                                                    ))
+                                                                    theme
+                                                                        .primary
+                                                                        .opacity(0x22 as f32 / 255.0)
                                                                 } else if current {
-                                                                    rgba(Self::with_alpha(
-                                                                        theme.accent,
-                                                                        0x18,
-                                                                    ))
+                                                                    theme
+                                                                        .primary
+                                                                        .opacity(0x18 as f32 / 255.0)
                                                                 } else {
-                                                                    rgba(0x00000000)
+                                                                    transparent_black()
                                                                 })
                                                                 .child(thumbnail)
                                                                 .when(selecting, |this| {
@@ -1054,28 +1054,29 @@ impl PdfView {
                                                                             .w(px(22.0))
                                                                             .h(px(22.0))
                                                                             .border_1()
-                                                                            .border_color(rgb(
+                                                                            .border_color(
                                                                                 if selected {
-                                                                                    theme.accent
+                                                                                    theme.primary
                                                                                 } else {
                                                                                     theme.border
                                                                                 },
-                                                                            ))
-                                                                            .bg(rgba(
-                                                                                Self::with_alpha(
-                                                                                    theme
-                                                                                        .surface_background,
-                                                                                    0xe8,
-                                                                                ),
-                                                                            ))
+                                                                            )
+                                                                            .bg(
+                                                                                theme
+                                                                                    .popover
+                                                                                    .opacity(
+                                                                                        0xe8 as f32
+                                                                                            / 255.0,
+                                                                                    ),
+                                                                            )
                                                                             .text_size(ui_rems(13.0))
-                                                                            .text_color(rgb(
+                                                                            .text_color(
                                                                                 if selected {
-                                                                                    theme.accent
+                                                                                    theme.primary
                                                                                 } else {
-                                                                                    theme.text_muted
+                                                                                    theme.muted_foreground
                                                                                 },
-                                                                            ))
+                                                                            )
                                                                             .child(if selected {
                                                                                 "☑"
                                                                             } else {
@@ -1088,7 +1089,7 @@ impl PdfView {
                                                             div()
                                                                 .mt_1()
                                                                 .text_size(ui_rems(11.0))
-                                                                .text_color(rgb(label_color))
+                                                                .text_color(label_color)
                                                                 .child(format!("{}", page_idx + 1)),
                                                         ),
                                                 );

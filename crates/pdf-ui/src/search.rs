@@ -3,16 +3,16 @@ use std::time::Duration;
 use crate::{
     icons::{Icon, IconName, toolbar_icon_button},
     pdf_view::{NextSearchResult, PrevSearchResult},
-    settings::{SettingsStore, ui_rems},
-    style::{CONTROL_ICON_SIZE, RADIUS_MD, SEARCH_BAR_HEIGHT, TextSize, elevated_shadow},
+    settings::ui_rems,
+    style::{CONTROL_ICON_SIZE, RADIUS_MD, SEARCH_BAR_HEIGHT, TextSize},
 };
 pub use glyphst_actions::search::{SearchInputCancel, SearchInputConfirm, SearchInputPrevious};
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, Render,
-    SharedString, Task, Window, div, prelude::*, px, rgb,
+    SharedString, Task, Window, div, prelude::*, px,
 };
 use gpui_component::{
-    Selectable as _, Sizable as _,
+    ActiveTheme as _, Selectable as _, Sizable as _,
     input::{
         Escape as ComponentInputEscape, Input, InputEvent, InputState,
         SelectAll as ComponentSelectAll,
@@ -235,14 +235,14 @@ impl Focusable for SearchBar {
 
 impl Render for SearchBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let theme = cx.theme();
         let counter = self.counter_text();
         let counter_color = if self.indexing {
-            theme.text_muted
+            theme.muted_foreground
         } else if !counter.is_empty() && self.match_count == 0 {
-            theme.error
+            theme.danger
         } else {
-            theme.text_muted
+            theme.muted_foreground
         };
         let ignore_case = self.ignore_case;
         let focus_handle = self.focus_handle(cx);
@@ -259,12 +259,12 @@ impl Render for SearchBar {
             .pr_1()
             .rounded(px(RADIUS_MD))
             .border_1()
-            .border_color(rgb(theme.border_variant))
-            .shadow(elevated_shadow(theme))
+            .border_color(theme.input)
+            .shadow_xs()
             .overflow_hidden()
-            .bg(rgb(theme.surface_background))
+            .bg(theme.popover)
             .text_size(TextSize::Default.rems())
-            .text_color(rgb(theme.text))
+            .text_color(theme.foreground)
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
@@ -277,7 +277,7 @@ impl Render for SearchBar {
             .child(
                 Icon::new(IconName::Search)
                     .size(ui_rems(CONTROL_ICON_SIZE))
-                    .text_color(rgb(theme.text_muted)),
+                    .text_color(theme.muted_foreground),
             )
             .child(
                 Input::new(&self.input)
@@ -294,7 +294,7 @@ impl Render for SearchBar {
                         .w(px(58.0))
                         .text_size(TextSize::Small.rems())
                         .text_align(gpui::TextAlign::Right)
-                        .text_color(rgb(counter_color))
+                        .text_color(counter_color)
                         .child(counter),
                 )
             })
@@ -305,7 +305,7 @@ impl Render for SearchBar {
                     .mr_1()
                     .w(px(1.0))
                     .h(px(18.0))
-                    .bg(rgb(theme.border_variant)),
+                    .bg(theme.input),
             )
             .child(
                 toolbar_icon_button("pdf-search-case-sensitive", IconName::CaseSensitive)

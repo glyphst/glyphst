@@ -1,4 +1,3 @@
-use super::helpers::*;
 use super::*;
 
 impl AiPanel {
@@ -10,13 +9,13 @@ impl AiPanel {
             .max_w(px(420.0))
             .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(theme.error))
-            .bg(rgb(theme.surface_background))
+            .border_color(theme.danger)
+            .bg(theme.popover)
             .px_3()
             .py_2()
             .shadow_sm()
             .text_size(ui_rems(12.0))
-            .text_color(rgb(theme.error))
+            .text_color(theme.danger)
             .child(message)
     }
 
@@ -25,21 +24,18 @@ impl AiPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (theme, quick_ask, base_text_style) = {
+        let theme = cx.theme().colors;
+        let (quick_ask, base_text_style) = {
             let store = cx.global::<SettingsStore>();
             let font = &store.settings.font;
             let base_text_style = TextStyle {
                 font_family: font.ui_font_family.clone().into(),
                 font_size: px(store.settings.ai.quick_ask.text_size).into(),
-                color: rgb(store.resolved_theme.text).into(),
+                color: theme.foreground,
                 font_weight: FontWeight(font.ui_font_weight),
                 ..Default::default()
             };
-            (
-                store.resolved_theme,
-                store.settings.ai.quick_ask,
-                base_text_style,
-            )
+            (store.settings.ai.quick_ask, base_text_style)
         };
         let loading = self.loading;
         let validation_toast = self.validation_toast.clone();
@@ -78,13 +74,12 @@ impl AiPanel {
             .flex_col()
             .w_full()
             .border_t(px(1.0))
-            .border_color(rgb(theme.border))
-            .bg(rgba(with_alpha(
-                theme.surface_background,
-                quick_ask.background_alpha(),
-            )))
+            .border_color(theme.border)
+            .bg(theme
+                .popover
+                .opacity(f32::from(quick_ask.background_alpha()) / 255.0))
             .text_size(px(quick_ask.text_size))
-            .text_color(rgb(theme.text))
+            .text_color(theme.foreground)
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
@@ -115,12 +110,12 @@ impl AiPanel {
                         .top_1()
                         .right_2()
                         .rounded(px(4.0))
-                        .bg(rgb(theme.surface_background))
+                        .bg(theme.popover)
                         .child(Self::message_action_button(
                             "quick-ask-stop",
                             IconName::Stop,
                             tr("ai-stop-generation"),
-                            theme.error,
+                            theme.danger,
                             theme,
                             |this, _, cx| {
                                 this.stop_generation(cx);
@@ -135,7 +130,7 @@ impl AiPanel {
                         .relative()
                         .group("quick-ask-answer")
                         .border_t(px(1.0))
-                        .border_color(rgb(theme.border_variant))
+                        .border_color(theme.input)
                         .child(
                             div()
                                 .id("quick-ask-answer")
@@ -145,7 +140,7 @@ impl AiPanel {
                                 .flex()
                                 .flex_col()
                                 .overflow_y_scroll()
-                                .text_color(rgb(theme.text))
+                                .text_color(theme.foreground)
                                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                                 .when(loading && answer.is_empty(), |this| {
                                     this.child(Self::render_loading_indicator(
@@ -185,7 +180,7 @@ impl AiPanel {
                                         .top_2()
                                         .right_3()
                                         .rounded(px(4.0))
-                                        .bg(rgb(theme.surface_background))
+                                        .bg(theme.popover)
                                         .child(Self::message_action_button(
                                             "quick-ask-copy-response",
                                             if copied_answer {
@@ -201,7 +196,7 @@ impl AiPanel {
                                             if copied_answer {
                                                 theme.success
                                             } else {
-                                                theme.text_muted
+                                                theme.muted_foreground
                                             },
                                             theme,
                                             move |this, _, cx| this.copy_message(index, cx),
@@ -240,14 +235,14 @@ impl AiPanel {
         id: impl Into<ElementId>,
         icon: IconName,
         tooltip: String,
-        icon_color: u32,
+        icon_color: Hsla,
         theme: Theme,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         toolbar_icon_button(id, icon)
-            .text_color(rgb(icon_color))
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .text_color(icon_color)
+            .hover(move |style| style.bg(theme.list_hover))
             .tooltip(tooltip)
             .on_click(cx.listener(move |this, _, window, cx| {
                 handler(this, window, cx);
@@ -323,7 +318,7 @@ impl AiPanel {
             if copied {
                 theme.success
             } else {
-                theme.text_muted
+                theme.muted_foreground
             },
             theme,
             move |this, _, cx| this.copy_message(message_index, cx),
@@ -339,7 +334,7 @@ impl AiPanel {
                     ("ai-message-cancel-edit", message_index),
                     IconName::X,
                     tr("cancel"),
-                    theme.error,
+                    theme.danger,
                     theme,
                     |this, window, cx| {
                         this.cancel_editing(window, cx);
@@ -350,7 +345,7 @@ impl AiPanel {
                     ("ai-message-submit-edit", message_index),
                     IconName::Return,
                     tr("ai-submit-edit"),
-                    theme.text_muted,
+                    theme.muted_foreground,
                     theme,
                     |this, window, cx| this.submit_edited_message(window, cx),
                     cx,
@@ -364,7 +359,7 @@ impl AiPanel {
                         ("ai-message-edit", message_index),
                         IconName::Pencil,
                         tr("edit"),
-                        theme.text_muted,
+                        theme.muted_foreground,
                         theme,
                         move |this, window, cx| {
                             this.start_editing_message(message_index, window, cx)
@@ -379,7 +374,7 @@ impl AiPanel {
                         } else {
                             tr("ai-regenerate-from-message")
                         },
-                        theme.text_muted,
+                        theme.muted_foreground,
                         theme,
                         move |this, _, cx| this.regenerate_from_user(message_index, cx),
                         cx,
@@ -393,7 +388,7 @@ impl AiPanel {
                     } else {
                         tr("ai-retry-response")
                     },
-                    theme.text_muted,
+                    theme.muted_foreground,
                     theme,
                     move |this, _, cx| this.retry_assistant(message_index, cx),
                     cx,
@@ -435,22 +430,18 @@ impl AiPanel {
                 div()
                     .w_full()
                     .text_size(ui_rems(13.0))
-                    .text_color(rgb(theme.text))
+                    .text_color(theme.foreground)
                     .when(is_user, |this| {
                         this.relative()
                             .rounded(px(6.0))
                             .border_1()
-                            .border_color(rgb(if is_editing {
-                                theme.border_focused
-                            } else {
-                                theme.border
-                            }))
+                            .border_color(if is_editing { theme.ring } else { theme.border })
                             .when(is_editing && !editing_focused, |this| this.border_dashed())
-                            .bg(rgb(theme.tab_active_background))
+                            .bg(theme.tab_active)
                             .px_2()
                             .py_3()
                             .pb_3()
-                            .hover(move |style| style.border_color(rgb(theme.border_focused)))
+                            .hover(move |style| style.border_color(theme.ring))
                     })
                     .when(!is_user, |this| this.px_1().pt_4().pb_2())
                     .when(is_editing, |this| {
@@ -476,8 +467,8 @@ impl AiPanel {
                     .right_3()
                     .rounded(px(4.0))
                     .border_1()
-                    .border_color(rgb(theme.border_variant))
-                    .bg(rgb(theme.surface_background))
+                    .border_color(theme.input)
+                    .bg(theme.popover)
                     .when(!is_editing, |this| {
                         this.opacity(0.0)
                             .group_hover("ai-message-row", |style| style.opacity(1.0))
@@ -524,8 +515,8 @@ impl AiPanel {
             .gap_2()
             .rounded(px(6.0))
             .border_1()
-            .border_color(rgba(with_alpha(theme.error, 0x88)))
-            .bg(rgba(with_alpha(theme.error, 0x16)))
+            .border_color(theme.danger.opacity(0x88 as f32 / 255.0))
+            .bg(theme.danger.opacity(0x16 as f32 / 255.0))
             .p_2()
             .text_size(ui_rems(12.0))
             .child(
@@ -533,17 +524,17 @@ impl AiPanel {
                     .flex()
                     .items_start()
                     .gap_2()
-                    .text_color(rgb(theme.error))
+                    .text_color(theme.danger)
                     .child(
                         Icon::new(IconName::TriangleAlert)
                             .size(ui_rems(14.0))
-                            .text_color(rgb(theme.error)),
+                            .text_color(theme.danger),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_color(rgb(theme.text))
+                            .text_color(theme.foreground)
                             .child(failure.message),
                     ),
             )
@@ -568,7 +559,7 @@ impl AiPanel {
                         if copied_error {
                             theme.success
                         } else {
-                            theme.text_muted
+                            theme.muted_foreground
                         },
                         theme,
                         |this, _, cx| this.copy_generation_error(cx),
@@ -578,7 +569,7 @@ impl AiPanel {
                         format!("{id_prefix}-retry-{assistant_index}"),
                         IconName::RotateCcw,
                         tr("ai-retry-response"),
-                        theme.text_muted,
+                        theme.muted_foreground,
                         theme,
                         move |this, _, cx| this.retry_assistant(assistant_index, cx),
                         cx,
@@ -587,7 +578,7 @@ impl AiPanel {
                         format!("{id_prefix}-dismiss-{assistant_index}"),
                         IconName::X,
                         tr("ai-dismiss-error"),
-                        theme.text_muted,
+                        theme.muted_foreground,
                         theme,
                         |this, _, cx| this.dismiss_generation_error(cx),
                         cx,
@@ -604,7 +595,7 @@ impl AiPanel {
                 .w(px(4.0))
                 .h(px(4.0))
                 .rounded_full()
-                .bg(rgb(theme.text_muted))
+                .bg(theme.muted_foreground)
                 .with_animation(
                     (id_prefix, index),
                     Animation::new(Duration::from_millis(900)).repeat(),
@@ -654,7 +645,7 @@ impl AiPanel {
                 if copied {
                     theme.success
                 } else {
-                    theme.text_muted
+                    theme.muted_foreground
                 },
                 theme,
                 move |this, _, cx| this.copy_message(assistant_index, cx),
@@ -664,7 +655,7 @@ impl AiPanel {
                 "ai-footer-latest-user",
                 IconName::Return,
                 tr("ai-scroll-latest-user"),
-                theme.text_muted,
+                theme.muted_foreground,
                 theme,
                 |this, _, cx| this.scroll_to_latest_user(cx),
                 cx,
@@ -673,7 +664,7 @@ impl AiPanel {
                 "ai-footer-scroll-top",
                 IconName::ArrowUp,
                 tr("ai-scroll-top"),
-                theme.text_muted,
+                theme.muted_foreground,
                 theme,
                 |this, _, cx| this.scroll_to_top(cx),
                 cx,

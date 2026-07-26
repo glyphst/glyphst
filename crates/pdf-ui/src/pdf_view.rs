@@ -72,10 +72,10 @@ use gpui::{
     Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement, Task, TextAlign, TextRun,
     TextStyle, UniformListScrollHandle, Window, WrappedLine, anchored, canvas, deferred, div, fill,
-    outline, point, prelude::*, px, rgb, rgba, size, uniform_list,
+    outline, point, prelude::*, px, rgb, rgba, size, transparent_black, uniform_list,
 };
 use gpui_component::{
-    IndexPath, Sizable as _,
+    ActiveTheme as _, IndexPath, Sizable as _, ThemeColor,
     searchable_list::SearchableVec,
     select::{Select, SelectEvent, SelectState},
 };

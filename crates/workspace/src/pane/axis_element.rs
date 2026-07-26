@@ -298,7 +298,7 @@ impl Element for PaneAxisElement {
             };
 
             if self.dim_inactive_panes && child.is_leaf_pane && self.active_pane_ix != Some(ix) {
-                window.paint_quad(fill(overlay_bounds, rgba(self.theme.overlay)));
+                window.paint_quad(fill(overlay_bounds, self.theme.overlay));
             }
 
             if child.is_leaf_pane && self.active_pane_ix == Some(ix) {
@@ -307,7 +307,7 @@ impl Element for PaneAxisElement {
                     0.0,
                     transparent_black(),
                     px(1.0),
-                    rgb(self.theme.accent),
+                    self.theme.primary,
                     BorderStyle::Solid,
                 ));
             }
@@ -329,7 +329,7 @@ impl Element for PaneAxisElement {
                     window.set_cursor_style(cursor_style, &handle.hitbox);
                 }
 
-                window.paint_quad(fill(handle.divider_bounds, rgb(self.theme.border)));
+                window.paint_quad(fill(handle.divider_bounds, self.theme.border));
 
                 window.on_mouse_event({
                     let drag = layout.drag.clone();

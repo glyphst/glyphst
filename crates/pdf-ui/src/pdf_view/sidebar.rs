@@ -77,7 +77,7 @@ impl PdfView {
 
     pub(super) fn render_toc_sidebar(
         &mut self,
-        theme: Theme,
+        theme: ThemeColor,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -104,7 +104,7 @@ impl PdfView {
                         "toc-sidebar-list",
                         visible_len,
                         cx.processor(|this, visible_range: Range<usize>, _window, cx| {
-                            let theme = cx.global::<SettingsStore>().resolved_theme;
+                            let theme = cx.theme().colors;
                             let selected = this.toc_sidebar_selected;
 
                             visible_range
@@ -118,9 +118,9 @@ impl PdfView {
                                     let current = selected == Some(entry_ix);
                                     let title = entry.title.clone();
                                     let title_color = if entry.navigable {
-                                        theme.text
+                                        theme.foreground
                                     } else {
-                                        theme.text_muted
+                                        theme.muted_foreground
                                     };
                                     let depth = entry.depth;
                                     let has_children = entry.has_children;
@@ -137,15 +137,13 @@ impl PdfView {
                                             .h(px(TOC_SIDEBAR_ROW_HEIGHT))
                                             .px_2()
                                             .bg(if current {
-                                                rgb(theme.element_selected)
+                                                theme.list_active
                                             } else {
-                                                rgba(0x00000000)
+                                                transparent_black()
                                             })
                                             .when(navigable, |this| {
                                                 this.cursor_pointer()
-                                                    .hover(move |style| {
-                                                        style.bg(rgb(theme.element_hover))
-                                                    })
+                                                    .hover(move |style| style.bg(theme.list_hover))
                                                     .on_mouse_down(
                                                         MouseButton::Left,
                                                         cx.listener(move |this, _, _, cx| {
@@ -166,11 +164,11 @@ impl PdfView {
                                                     .justify_center()
                                                     .w(px(18.0))
                                                     .h(px(24.0))
-                                                    .text_color(rgb(theme.text_muted))
+                                                    .text_color(theme.muted_foreground)
                                                     .when(has_children, |this| {
                                                         this.cursor_pointer()
                                                         .hover(move |style| {
-                                                            style.bg(rgb(theme.element_hover))
+                                                            style.bg(theme.list_hover)
                                                         })
                                                         .on_mouse_down(
                                                             MouseButton::Left,
@@ -206,7 +204,7 @@ impl PdfView {
                                                     .px_1()
                                                     .truncate()
                                                     .tooltip(text_tooltip(title.clone()))
-                                                    .text_color(rgb(title_color))
+                                                    .text_color(title_color)
                                                     .child(title),
                                             )
                                             .child(
@@ -215,7 +213,7 @@ impl PdfView {
                                                     .ml_2()
                                                     .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
                                                     .text_align(gpui::TextAlign::Right)
-                                                    .text_color(rgb(theme.text_muted))
+                                                    .text_color(theme.muted_foreground)
                                                     .child(if navigable {
                                                         format!("{}", page_number)
                                                     } else {
@@ -257,7 +255,7 @@ impl PdfView {
 
     pub(super) fn render_notes_sidebar(
         &mut self,
-        theme: Theme,
+        theme: ThemeColor,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -282,7 +280,7 @@ impl PdfView {
                         "notes-sidebar-list",
                         visible_len,
                         cx.processor(|this, visible_range: Range<usize>, _window, cx| {
-                            let theme = cx.global::<SettingsStore>().resolved_theme;
+                            let theme = cx.theme().colors;
                             let selected = this.notes_sidebar_selected;
 
                             visible_range
@@ -307,12 +305,12 @@ impl PdfView {
                                             .px_2()
                                             .gap_2()
                                             .bg(if current {
-                                                rgb(theme.element_selected)
+                                                theme.list_active
                                             } else {
-                                                rgba(0x00000000)
+                                                transparent_black()
                                             })
                                             .cursor_pointer()
-                                            .hover(move |style| style.bg(rgb(theme.element_hover)))
+                                            .hover(move |style| style.bg(theme.list_hover))
                                             .on_mouse_down(
                                                 MouseButton::Left,
                                                 cx.listener(move |this, _, _, cx| {
@@ -320,13 +318,15 @@ impl PdfView {
                                                     cx.stop_propagation();
                                                 }),
                                             )
-                                            .child(
-                                                div()
-                                                    .flex_none()
-                                                    .w(px(8.0))
-                                                    .h(px(8.0))
-                                                    .bg(rgba(theme.note_color(color))),
-                                            )
+                                            .child(div().flex_none().w(px(8.0)).h(px(8.0)).bg(
+                                                match color {
+                                                    HighlightColor::Yellow => theme.yellow,
+                                                    HighlightColor::Green => theme.green,
+                                                    HighlightColor::Blue => theme.blue,
+                                                    HighlightColor::Pink => theme.magenta,
+                                                    HighlightColor::Orange => theme.warning,
+                                                },
+                                            ))
                                             .child(
                                                 div()
                                                     .flex()
@@ -337,14 +337,14 @@ impl PdfView {
                                                         div()
                                                             .truncate()
                                                             .text_size(ui_rems(13.0))
-                                                            .text_color(rgb(theme.text))
+                                                            .text_color(theme.foreground)
                                                             .child(body),
                                                     )
                                                     .child(
                                                         div()
                                                             .truncate()
                                                             .text_size(ui_rems(11.0))
-                                                            .text_color(rgb(theme.text_muted))
+                                                            .text_color(theme.muted_foreground)
                                                             .child(text),
                                                     ),
                                             )
@@ -354,7 +354,7 @@ impl PdfView {
                                                     .ml_2()
                                                     .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
                                                     .text_align(gpui::TextAlign::Right)
-                                                    .text_color(rgb(theme.text_muted))
+                                                    .text_color(theme.muted_foreground)
                                                     .child(format!("{}", page)),
                                             ),
                                     )

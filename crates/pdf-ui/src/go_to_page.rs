@@ -1,9 +1,9 @@
 use crate::{
     pdf_view::PdfView,
     picker::{Picker, PickerDelegate},
-    theme::Theme,
 };
 use gpui::{AnyElement, Context, FocusHandle, SharedString, WeakEntity, Window, div, prelude::*};
+use gpui_component::ThemeColor;
 
 const PROMPT_WIDTH: f32 = 360.0;
 const PROMPT_ROW_HEIGHT: f32 = 44.0;
@@ -63,7 +63,7 @@ impl PickerDelegate for GoToPagePromptDelegate {
 
     fn update_matches(&mut self, _: &str) {}
 
-    fn render_match(&self, _: usize, _: Theme, _: &FocusHandle, _: &Window) -> AnyElement {
+    fn render_match(&self, _: usize, _: ThemeColor, _: &FocusHandle, _: &Window) -> AnyElement {
         div().into_any_element()
     }
 

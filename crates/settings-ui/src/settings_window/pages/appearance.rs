@@ -1,4 +1,7 @@
-use super::super::{SettingsWindow, fields::ColorSetting};
+use super::super::{
+    SettingsWindow,
+    fields::{ColorSetting, hsla_to_u32},
+};
 use glyphst_settings::{
     Settings, SettingsStore,
     theme::{PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode},
@@ -11,60 +14,73 @@ use gpui_component::{
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage},
 };
 
-macro_rules! color_setting {
+macro_rules! document_color_setting {
     ($field:ident, $label:literal, $with_alpha:expr) => {
         ColorSetting {
             id: stringify!($field),
             label: $label,
             with_alpha: $with_alpha,
             override_value: |theme: &PartialTheme| theme.$field,
-            resolved_value: |theme: &Theme| theme.$field,
+            resolved_value: |theme: &Theme, _| theme.$field,
+            set_override: |theme: &mut PartialTheme, value| theme.$field = value,
+        }
+    };
+}
+
+macro_rules! component_color_setting {
+    ($field:ident => $component_field:ident, $label:literal, $with_alpha:expr) => {
+        ColorSetting {
+            id: stringify!($field),
+            label: $label,
+            with_alpha: $with_alpha,
+            override_value: |theme: &PartialTheme| theme.$field,
+            resolved_value: |_, theme| hsla_to_u32(theme.$component_field, $with_alpha),
             set_override: |theme: &mut PartialTheme, value| theme.$field = value,
         }
     };
 }
 
 const DOCUMENT_COLORS: [ColorSetting; 9] = [
-    color_setting!(background, "Document background", false),
-    color_setting!(page, "Page", false),
-    color_setting!(selection_highlight, "Text selection", true),
-    color_setting!(highlight_yellow, "Yellow highlight", true),
-    color_setting!(highlight_green, "Green highlight", true),
-    color_setting!(highlight_blue, "Blue highlight", true),
-    color_setting!(highlight_pink, "Pink highlight", true),
-    color_setting!(highlight_orange, "Orange highlight", true),
-    color_setting!(overlay, "Overlay", true),
+    document_color_setting!(background, "Document background", false),
+    document_color_setting!(page, "Page", false),
+    document_color_setting!(selection_highlight, "Text selection", true),
+    document_color_setting!(highlight_yellow, "Yellow highlight", true),
+    document_color_setting!(highlight_green, "Green highlight", true),
+    document_color_setting!(highlight_blue, "Blue highlight", true),
+    document_color_setting!(highlight_pink, "Pink highlight", true),
+    document_color_setting!(highlight_orange, "Orange highlight", true),
+    document_color_setting!(match_highlight, "Search match", false),
 ];
 
-const CHROME_COLORS: [ColorSetting; 12] = [
-    color_setting!(footer_background, "Footer background", false),
-    color_setting!(footer_border, "Footer border", false),
-    color_setting!(footer_text, "Footer text", false),
-    color_setting!(panel_background, "Panel background", false),
-    color_setting!(panel_border, "Panel border", false),
-    color_setting!(surface_background, "Surface background", false),
-    color_setting!(border, "Border", false),
-    color_setting!(border_variant, "Subtle border", false),
-    color_setting!(border_focused, "Focused border", false),
-    color_setting!(tab_bar_background, "Tab bar background", false),
-    color_setting!(tab_active_background, "Active tab", false),
-    color_setting!(tab_inactive_background, "Inactive tab", false),
+const CHROME_COLORS: [ColorSetting; 13] = [
+    component_color_setting!(overlay => overlay, "Overlay", true),
+    component_color_setting!(footer_background => status_bar, "Footer background", false),
+    component_color_setting!(footer_border => status_bar_border, "Footer border", false),
+    component_color_setting!(footer_text => muted_foreground, "Footer text", false),
+    component_color_setting!(panel_background => sidebar, "Panel background", false),
+    component_color_setting!(panel_border => sidebar_border, "Panel border", false),
+    component_color_setting!(surface_background => popover, "Surface background", false),
+    component_color_setting!(border => border, "Border", false),
+    component_color_setting!(border_variant => input, "Subtle border", false),
+    component_color_setting!(border_focused => ring, "Focused border", false),
+    component_color_setting!(tab_bar_background => tab_bar, "Tab bar background", false),
+    component_color_setting!(tab_active_background => tab_active, "Active tab", false),
+    component_color_setting!(tab_inactive_background => tab, "Inactive tab", false),
 ];
 
-const CONTROL_COLORS: [ColorSetting; 13] = [
-    color_setting!(element_hover, "Hovered element", false),
-    color_setting!(element_selected, "Selected element", false),
-    color_setting!(text, "Text", false),
-    color_setting!(text_muted, "Muted text", false),
-    color_setting!(placeholder_text, "Placeholder text", true),
-    color_setting!(accent, "Accent", false),
-    color_setting!(match_highlight, "Search match", false),
-    color_setting!(selected_row, "Selected row", true),
-    color_setting!(control_background, "Control background", false),
-    color_setting!(control_border, "Control border", false),
-    color_setting!(control_hover, "Control hover", false),
-    color_setting!(success, "Success", false),
-    color_setting!(error, "Error", false),
+const CONTROL_COLORS: [ColorSetting; 12] = [
+    component_color_setting!(element_hover => list_hover, "Hovered element", false),
+    component_color_setting!(element_selected => list_active, "Selected element", false),
+    component_color_setting!(text => foreground, "Text", false),
+    component_color_setting!(text_muted => muted_foreground, "Muted text", false),
+    component_color_setting!(placeholder_text => muted_foreground, "Placeholder text", true),
+    component_color_setting!(accent => primary, "Accent", false),
+    component_color_setting!(selected_row => list_active, "Selected row", true),
+    component_color_setting!(control_background => button, "Control background", false),
+    component_color_setting!(control_border => input, "Control border", false),
+    component_color_setting!(control_hover => button_hover, "Control hover", false),
+    component_color_setting!(success => success, "Success", false),
+    component_color_setting!(error => danger, "Error", false),
 ];
 
 impl SettingsWindow {

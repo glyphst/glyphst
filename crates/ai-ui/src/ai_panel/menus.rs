@@ -44,9 +44,9 @@ impl AiPanel {
             .h(px(30.0))
             .px_3()
             .text_size(ui_rems(13.0))
-            .text_color(rgb(theme.text))
+            .text_color(theme.foreground)
             .cursor_pointer()
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .hover(move |style| style.bg(theme.list_hover))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -58,7 +58,7 @@ impl AiPanel {
             .child(
                 Icon::new(icon)
                     .size(ui_rems(14.0))
-                    .text_color(rgb(theme.text_muted)),
+                    .text_color(theme.muted_foreground),
             )
             .child(label)
             .into_any_element()
@@ -88,9 +88,9 @@ impl AiPanel {
             .w(px(220.0))
             .py_1()
             .border_1()
-            .border_color(rgb(theme.border))
+            .border_color(theme.border)
             .overflow_hidden()
-            .bg(rgb(theme.surface_background))
+            .bg(theme.popover)
             .shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -171,7 +171,7 @@ impl AiPanel {
                     cx,
                 ))
             })
-            .child(div().h(px(1.0)).my_1().mx_1().bg(rgb(theme.border)))
+            .child(div().h(px(1.0)).my_1().mx_1().bg(theme.border))
             .child(Self::context_menu_entry(
                 "ai-scroll-top",
                 tr("ai-scroll-top"),
@@ -317,8 +317,8 @@ impl AiPanel {
             .flex_col()
             .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
+            .border_color(theme.border)
+            .bg(theme.popover)
             .shadow_sm()
             .overflow_hidden()
             .text_size(ui_rems(12.0))
@@ -341,7 +341,7 @@ impl AiPanel {
                     .px_2()
                     .py_2()
                     .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.element_hover)))
+                    .hover(move |style| style.bg(theme.list_hover))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
@@ -352,7 +352,7 @@ impl AiPanel {
                     .child(
                         Icon::new(Self::mention_icon(mention))
                             .size(ui_rems(14.0))
-                            .text_color(rgb(theme.text_muted)),
+                            .text_color(theme.muted_foreground),
                     )
                     .child(
                         div()
@@ -360,12 +360,12 @@ impl AiPanel {
                             .flex_col()
                             .min_w_0()
                             .gap_1()
-                            .child(div().text_color(rgb(theme.text)).child(mention.label()))
+                            .child(div().text_color(theme.foreground).child(mention.label()))
                             .child(
                                 div()
                                     .truncate()
                                     .text_size(ui_rems(11.0))
-                                    .text_color(rgb(theme.text_muted))
+                                    .text_color(theme.muted_foreground)
                                     .child(mention.description()),
                             ),
                     ),
@@ -411,8 +411,8 @@ impl AiPanel {
             .flex_col()
             .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
+            .border_color(theme.border)
+            .bg(theme.popover)
             .shadow_sm()
             .overflow_hidden()
             .text_size(ui_rems(12.0))
@@ -434,7 +434,7 @@ impl AiPanel {
                     .child(
                         div()
                             .text_size(ui_rems(11.0))
-                            .text_color(rgb(theme.text_muted))
+                            .text_color(theme.muted_foreground)
                             .child(tr("ai-select-provider-model")),
                     ),
             );
@@ -444,7 +444,7 @@ impl AiPanel {
                 div()
                     .px_2()
                     .py_2()
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(theme.muted_foreground)
                     .child(tr("no-matching-models")),
             );
         }
@@ -461,7 +461,7 @@ impl AiPanel {
                         .items_center()
                         .px_2()
                         .text_size(ui_rems(11.0))
-                        .text_color(rgb(theme.text_muted))
+                        .text_color(theme.muted_foreground)
                         .child(provider.label())
                         .into_any_element(),
                     ModelMenuEntry::Model(provider, model) => {
@@ -478,13 +478,17 @@ impl AiPanel {
                             .pr_2()
                             .rounded(px(4.0))
                             .bg(if selected {
-                                rgb(theme.element_selected)
+                                theme.list_active
                             } else {
-                                rgba(0x00000000)
+                                transparent_black()
                             })
-                            .text_color(rgb(if selected { theme.accent } else { theme.text }))
+                            .text_color(if selected {
+                                theme.primary
+                            } else {
+                                theme.foreground
+                            })
                             .cursor_pointer()
-                            .hover(move |style| style.bg(rgb(theme.element_hover)))
+                            .hover(move |style| style.bg(theme.list_hover))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
@@ -499,7 +503,7 @@ impl AiPanel {
                                     .max_w(px(96.0))
                                     .truncate()
                                     .text_size(ui_rems(11.0))
-                                    .text_color(rgb(theme.text_muted))
+                                    .text_color(theme.muted_foreground)
                                     .child(model.group),
                             )
                             .into_any_element()
@@ -537,8 +541,8 @@ impl AiPanel {
             .flex_col()
             .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
+            .border_color(theme.border)
+            .bg(theme.popover)
             .shadow_sm()
             .overflow_hidden()
             .text_size(ui_rems(12.0))
@@ -563,13 +567,17 @@ impl AiPanel {
                     .px_2()
                     .py_2()
                     .bg(if selected {
-                        rgb(theme.element_selected)
+                        theme.list_active
                     } else {
-                        rgba(0x00000000)
+                        transparent_black()
                     })
-                    .text_color(rgb(if selected { theme.accent } else { theme.text }))
+                    .text_color(if selected {
+                        theme.primary
+                    } else {
+                        theme.foreground
+                    })
                     .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.element_hover)))
+                    .hover(move |style| style.bg(theme.list_hover))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
@@ -581,7 +589,7 @@ impl AiPanel {
                     .child(
                         div()
                             .text_size(ui_rems(11.0))
-                            .text_color(rgb(theme.text_muted))
+                            .text_color(theme.muted_foreground)
                             .child(thinking_level_description(level)),
                     ),
             );

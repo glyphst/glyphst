@@ -9,13 +9,12 @@ use gpui::{
     Window, div, prelude::*,
 };
 use gpui_component::{
-    StyledExt as _,
+    StyledExt as _, ThemeColor,
     clipboard::Clipboard,
     highlighter::HighlightTheme,
     text::{TextView, TextViewContextMenuRequest, TextViewState, TextViewStyle},
 };
 
-use crate::theme::Theme;
 use glyphst_settings::localize::tr;
 
 /// Glyphst's compatibility name for gpui-component's context-menu payload.
@@ -36,8 +35,11 @@ pub struct MarkdownStyle {
 }
 
 impl MarkdownStyle {
-    pub fn from_theme(theme: Theme, base_text_style: TextStyle) -> Self {
-        let is_dark = background_is_dark(theme.background);
+    pub fn from_theme(theme: ThemeColor, base_text_style: TextStyle) -> Self {
+        let is_dark = theme.background.to_rgb().r * 0.2126
+            + theme.background.to_rgb().g * 0.7152
+            + theme.background.to_rgb().b * 0.0722
+            < 0.5;
         let mut text_view_style = TextViewStyle::default();
         text_view_style.is_dark = is_dark;
         text_view_style.highlight_theme = if is_dark {
@@ -177,13 +179,6 @@ fn base_text_style_refinement(mut container: StyleRefinement, base: TextStyle) -
     container
 }
 
-fn background_is_dark(rgb: u32) -> bool {
-    let red = ((rgb >> 16) & 0xff) as f32;
-    let green = ((rgb >> 8) & 0xff) as f32;
-    let blue = (rgb & 0xff) as f32;
-    red * 0.2126 + green * 0.7152 + blue * 0.0722 < 128.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,11 +194,5 @@ mod tests {
             assert_eq!(markdown.source().as_ref(), "after");
             assert!(markdown.selected_text(cx).is_none());
         });
-    }
-
-    #[test]
-    fn detects_dark_backgrounds() {
-        assert!(background_is_dark(0x101010));
-        assert!(!background_is_dark(0xf0f0f0));
     }
 }

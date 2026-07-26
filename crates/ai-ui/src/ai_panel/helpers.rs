@@ -760,7 +760,3 @@ pub(super) fn library_occurrence_to_ai(
         region_reference,
     })
 }
-
-pub(super) fn with_alpha(rgb: u32, alpha: u8) -> u32 {
-    (rgb << 8) | u32::from(alpha)
-}

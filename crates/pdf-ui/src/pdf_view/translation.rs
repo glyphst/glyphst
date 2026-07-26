@@ -570,7 +570,7 @@ impl PdfView {
         &self,
         state: TranslationCardState,
         pinned: bool,
-        theme: Theme,
+        theme: ThemeColor,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -586,7 +586,7 @@ impl PdfView {
         let base_text_style = TextStyle {
             font_family: font.ui_font_family.clone().into(),
             font_size: ui_rems(13.0).into(),
-            color: rgb(theme.text).into(),
+            color: theme.foreground,
             font_weight: FontWeight(font.ui_font_weight),
             ..Default::default()
         };
@@ -594,7 +594,7 @@ impl PdfView {
             TranslationStatus::Idle => div().into_any_element(),
             TranslationStatus::Loading => div()
                 .py_2()
-                .text_color(rgb(theme.text_muted))
+                .text_color(theme.muted_foreground)
                 .child(crate::fl!("translation-loading"))
                 .into_any_element(),
             TranslationStatus::Ready { markdown, .. } => div()
@@ -607,7 +607,7 @@ impl PdfView {
                 .into_any_element(),
             TranslationStatus::Error(error) => div()
                 .py_2()
-                .text_color(rgb(theme.error))
+                .text_color(theme.danger)
                 .child(error.clone())
                 .into_any_element(),
         };
@@ -643,8 +643,8 @@ impl PdfView {
             .flex_col()
             .rounded(px(8.0))
             .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
+            .border_color(theme.border)
+            .bg(theme.popover)
             .text_size(ui_rems(13.0))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -666,9 +666,9 @@ impl PdfView {
                     .gap_2()
                     .p_2()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.border_variant))
+                    .border_color(theme.input)
                     .text_size(ui_rems(11.0))
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(theme.muted_foreground)
                     .when_some(language_select, |this, select| {
                         this.child(
                             Select::new(&select.state)

@@ -47,7 +47,7 @@ impl PdfView {
 
     fn context_menu_entry(
         label: String,
-        theme: Theme,
+        theme: ThemeColor,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -58,9 +58,9 @@ impl PdfView {
             .h(px(30.0))
             .px_3()
             .text_size(ui_rems(13.0))
-            .text_color(rgb(theme.text))
+            .text_color(theme.foreground)
             .cursor_pointer()
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .hover(move |style| style.bg(theme.list_hover))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -73,7 +73,7 @@ impl PdfView {
     }
 
     fn context_menu_copy_entry(
-        theme: Theme,
+        theme: ThemeColor,
         copy_submenu_open: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -84,8 +84,8 @@ impl PdfView {
             .w(px(190.0))
             .py_1()
             .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
+            .border_color(theme.border)
+            .bg(theme.popover)
             .child(Self::context_menu_entry(
                 crate::fl!("pdf-context-copy-plain-text"),
                 theme,
@@ -111,9 +111,9 @@ impl PdfView {
                     .h(px(30.0))
                     .px_3()
                     .text_size(ui_rems(13.0))
-                    .text_color(rgb(theme.text))
+                    .text_color(theme.foreground)
                     .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.element_hover)))
+                    .hover(move |style| style.bg(theme.list_hover))
                     .on_hover(cx.listener(|this, hovered, _, cx| {
                         if *hovered && !this.context_menu_copy_submenu_open {
                             this.context_menu_copy_submenu_open = true;
@@ -134,21 +134,21 @@ impl PdfView {
             )
     }
 
-    fn context_menu_label(label: String, theme: Theme) -> impl IntoElement {
+    fn context_menu_label(label: String, theme: ThemeColor) -> impl IntoElement {
         div()
             .flex()
             .items_center()
             .h(px(24.0))
             .px_3()
             .text_size(ui_rems(12.0))
-            .text_color(rgb(theme.text_muted))
+            .text_color(theme.muted_foreground)
             .child(label)
     }
 
     pub(super) fn grid_overview_toolbar_button(
         id: &'static str,
         label: String,
-        theme: Theme,
+        theme: ThemeColor,
         handler: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -160,12 +160,12 @@ impl PdfView {
             .h(px(24.0))
             .px_2()
             .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgba(0x00000000))
+            .border_color(theme.border)
+            .bg(transparent_black())
             .text_size(ui_rems(12.0))
-            .text_color(rgb(theme.text))
+            .text_color(theme.foreground)
             .cursor_pointer()
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .hover(move |style| style.bg(theme.list_hover))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -178,7 +178,7 @@ impl PdfView {
 
     fn grid_overview_action_entry(
         label: String,
-        theme: Theme,
+        theme: ThemeColor,
         handler: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -189,9 +189,9 @@ impl PdfView {
             .h(px(30.0))
             .px_3()
             .text_size(ui_rems(13.0))
-            .text_color(rgb(theme.text))
+            .text_color(theme.foreground)
             .cursor_pointer()
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .hover(move |style| style.bg(theme.list_hover))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
@@ -204,7 +204,7 @@ impl PdfView {
 
     fn render_page_selection_actions_menu(
         source: PageSelectionSource,
-        theme: Theme,
+        theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let text_source = source;
@@ -217,8 +217,8 @@ impl PdfView {
             .min_w(px(160.0))
             .py_1()
             .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
+            .border_color(theme.border)
+            .bg(theme.popover)
             .child(Self::grid_overview_action_entry(
                 crate::fl!("pdf-export-as-text"),
                 theme,
@@ -234,20 +234,20 @@ impl PdfView {
     }
 
     pub(super) fn render_grid_overview_actions_menu(
-        theme: Theme,
+        theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         Self::render_page_selection_actions_menu(PageSelectionSource::GridOverview, theme, cx)
     }
 
     pub(super) fn render_thumbnail_sidebar_actions_menu(
-        theme: Theme,
+        theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         Self::render_page_selection_actions_menu(PageSelectionSource::ThumbnailSidebar, theme, cx)
     }
 
-    pub(super) fn render_note_popup(body: SharedString, theme: Theme) -> impl IntoElement {
+    pub(super) fn render_note_popup(body: SharedString, theme: ThemeColor) -> impl IntoElement {
         let mut note = div()
             .occlude()
             .flex()
@@ -256,10 +256,10 @@ impl PdfView {
             .max_w(px(360.0))
             .p_3()
             .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
+            .border_color(theme.border)
+            .bg(theme.popover)
             .text_size(ui_rems(13.0))
-            .text_color(rgb(theme.text));
+            .text_color(theme.foreground);
 
         for line in body.as_ref().lines() {
             note = note.child(div().child(line.to_string()));
@@ -271,7 +271,7 @@ impl PdfView {
     pub(super) fn render_centered_overlay(
         content: impl IntoElement + 'static,
         close: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-        theme: Theme,
+        theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
@@ -282,7 +282,7 @@ impl PdfView {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(theme.overlay))
+            .bg(theme.overlay)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| close(this, window, cx)),
@@ -335,7 +335,7 @@ impl PdfView {
         header_end: impl IntoElement + 'static,
         content: impl IntoElement + 'static,
         resize_handle: impl IntoElement + 'static,
-        theme: Theme,
+        theme: ThemeColor,
         pdf_view: gpui::WeakEntity<Self>,
     ) -> impl IntoElement {
         div()
@@ -346,10 +346,10 @@ impl PdfView {
             .min_h_0()
             .w(px(width))
             .border_r(px(1.0))
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
+            .border_color(theme.border)
+            .bg(theme.popover)
             .text_size(ui_rems(12.0))
-            .text_color(rgb(theme.text))
+            .text_color(theme.foreground)
             .capture_any_mouse_down(move |_: &MouseDownEvent, _, cx| {
                 let _ = pdf_view.update(cx, |this, cx| {
                     this.close_context_menu(cx);
@@ -370,7 +370,7 @@ impl PdfView {
                     .h(px(40.0))
                     .px_3()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.border))
+                    .border_color(theme.border)
                     .child(
                         div()
                             .flex_1()
@@ -385,13 +385,16 @@ impl PdfView {
             .child(resize_handle)
     }
 
-    pub(super) fn render_sidebar_count(count: usize, theme: Theme) -> impl IntoElement {
+    pub(super) fn render_sidebar_count(count: usize, theme: ThemeColor) -> impl IntoElement {
         div()
-            .text_color(rgb(theme.text_muted))
+            .text_color(theme.muted_foreground)
             .child(crate::fl!("item-count", count = count as i64))
     }
 
-    pub(super) fn render_sidebar_empty_message(message: String, theme: Theme) -> impl IntoElement {
+    pub(super) fn render_sidebar_empty_message(
+        message: String,
+        theme: ThemeColor,
+    ) -> impl IntoElement {
         div()
             .flex_1()
             .min_h_0()
@@ -399,21 +402,27 @@ impl PdfView {
             .items_center()
             .justify_center()
             .px_3()
-            .text_color(rgb(theme.text_muted))
+            .text_color(theme.muted_foreground)
             .child(message)
     }
 
     fn context_menu_highlight_color_row(
         action: HighlightColorAction,
         current: Option<HighlightColor>,
-        theme: Theme,
+        document_theme: Theme,
+        theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut row = div().flex().flex_row().gap_2().px_3().pb_2();
 
         for color in HighlightColor::ALL {
             row = row.child(Self::context_menu_highlight_swatch(
-                color, current, action, theme, cx,
+                color,
+                current,
+                action,
+                document_theme,
+                theme,
+                cx,
             ));
         }
 
@@ -424,7 +433,8 @@ impl PdfView {
         color: HighlightColor,
         current: Option<HighlightColor>,
         action: HighlightColorAction,
-        theme: Theme,
+        document_theme: Theme,
+        theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
@@ -433,13 +443,13 @@ impl PdfView {
             .h(px(22.0))
             .border_1()
             .border_color(if current == Some(color) {
-                rgb(theme.accent)
+                theme.primary
             } else {
-                rgb(theme.border)
+                theme.border
             })
-            .bg(rgba(theme.highlight_color(color)))
+            .bg(rgba(document_theme.highlight_color(color)))
             .cursor_pointer()
-            .hover(move |style| style.border_color(rgb(theme.accent)))
+            .hover(move |style| style.border_color(theme.primary))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
@@ -457,16 +467,17 @@ impl PdfView {
             )
     }
 
-    fn context_menu_separator(theme: Theme) -> impl IntoElement {
-        div().h(px(1.0)).my_1().mx_1().bg(rgb(theme.border))
+    fn context_menu_separator(theme: ThemeColor) -> impl IntoElement {
+        div().h(px(1.0)).my_1().mx_1().bg(theme.border)
     }
 
     pub(super) fn render_context_menu(
         state: ContextMenuState,
         is_fullscreen: bool,
-        theme: Theme,
+        document_theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let theme = cx.theme().colors;
         let fullscreen_label = if is_fullscreen {
             crate::fl!("pdf-context-exit-full-screen")
         } else {
@@ -480,8 +491,8 @@ impl PdfView {
             .w(px(190.0))
             .py_1()
             .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
+            .border_color(theme.border)
+            .bg(theme.popover)
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
@@ -524,6 +535,7 @@ impl PdfView {
                 .child(Self::context_menu_highlight_color_row(
                     HighlightColorAction::Change,
                     Some(color),
+                    document_theme,
                     theme,
                     cx,
                 ))
@@ -545,6 +557,7 @@ impl PdfView {
                     .child(Self::context_menu_highlight_color_row(
                         HighlightColorAction::Create,
                         None,
+                        document_theme,
                         theme,
                         cx,
                     ))

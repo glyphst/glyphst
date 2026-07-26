@@ -1,4 +1,3 @@
-use super::helpers::*;
 use super::*;
 
 impl Render for AiPanel {
@@ -14,21 +13,18 @@ impl Render for AiPanel {
         }
 
         let entity = cx.entity();
-        let (theme, ai_settings, base_text_style) = {
+        let theme = cx.theme().colors;
+        let (ai_settings, base_text_style) = {
             let store = cx.global::<SettingsStore>();
             let font = &store.settings.font;
             let base_text_style = TextStyle {
                 font_family: font.ui_font_family.clone().into(),
                 font_size: ui_rems(13.0).into(),
-                color: rgb(store.resolved_theme.text).into(),
+                color: theme.foreground,
                 font_weight: FontWeight(font.ui_font_weight),
                 ..Default::default()
             };
-            (
-                store.resolved_theme,
-                store.settings.ai.clone(),
-                base_text_style,
-            )
+            (store.settings.ai.clone(), base_text_style)
         };
         let editing = self.editing_turn.is_some();
         let can_send = !self.loading
@@ -144,9 +140,9 @@ impl Render for AiPanel {
             .w(px(self.width))
             .h_full()
             .border_l(px(1.0))
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
-            .text_color(rgb(theme.text))
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .text_color(theme.foreground)
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
                 this.close_message_context_menu(cx);
             }))
@@ -163,7 +159,7 @@ impl Render for AiPanel {
                     .h(px(42.0))
                     .px_2()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.border))
+                    .border_color(theme.border)
                     .text_size(ui_rems(12.0))
                     .child(
                         div()
@@ -173,14 +169,14 @@ impl Render for AiPanel {
                             .child(
                                 div()
                                     .text_size(ui_rems(10.0))
-                                    .text_color(rgb(theme.text_muted))
+                                    .text_color(theme.muted_foreground)
                                     .child(tr("ai-title")),
                             )
                             .child(
                                 div()
                                     .truncate()
                                     .text_size(ui_rems(13.0))
-                                    .text_color(rgb(theme.text))
+                                    .text_color(theme.foreground)
                                     .child(session_title),
                             ),
                     )
@@ -194,9 +190,9 @@ impl Render for AiPanel {
                                 IconName::Plus,
                                 tr("ai-new-chat"),
                                 if loading {
-                                    theme.text_muted
+                                    theme.muted_foreground
                                 } else {
-                                    theme.text
+                                    theme.foreground
                                 },
                                 theme,
                                 |this, window, cx| this.new_session(window, cx),
@@ -211,9 +207,9 @@ impl Render for AiPanel {
                                     tr("ai-show-history")
                                 },
                                 if showing_sessions {
-                                    theme.accent
+                                    theme.primary
                                 } else {
-                                    theme.text_muted
+                                    theme.muted_foreground
                                 },
                                 theme,
                                 |this, window, cx| {
@@ -229,7 +225,7 @@ impl Render for AiPanel {
                                 "ai-panel-close",
                                 IconName::X,
                                 tr("ai-close-panel"),
-                                theme.text_muted,
+                                theme.muted_foreground,
                                 theme,
                                 |this, window, cx| this.dismiss(window, cx),
                                 cx,
@@ -284,14 +280,14 @@ impl Render for AiPanel {
                                         .bottom_2()
                                         .rounded(px(6.0))
                                         .border_1()
-                                        .border_color(rgb(theme.border))
-                                        .bg(rgb(theme.surface_background))
+                                        .border_color(theme.border)
+                                        .bg(theme.popover)
                                         .shadow_md()
                                         .child(Self::message_action_button(
                                             "ai-scroll-to-bottom",
                                             IconName::ChevronDown,
                                             tr("ai-scroll-bottom"),
-                                            theme.text_muted,
+                                            theme.muted_foreground,
                                             theme,
                                             |this, _, cx| this.scroll_to_bottom(cx),
                                             cx,
@@ -306,10 +302,10 @@ impl Render for AiPanel {
                             .flex()
                             .flex_col()
                             .py_2()
-                            .bg(rgb(theme.tab_active_background))
+                            .bg(theme.tab_active)
                             .when(empty_chat, |this| this.flex_1().min_h_0())
                             .when(!empty_chat, |this| {
-                                this.border_t(px(1.0)).border_color(rgb(theme.border))
+                                this.border_t(px(1.0)).border_color(theme.border)
                             })
                             .child(
                                 div()
@@ -338,7 +334,7 @@ impl Render for AiPanel {
                                         this.child(
                                             div()
                                                 .text_size(ui_rems(11.0))
-                                                .text_color(rgb(theme.error))
+                                                .text_color(theme.danger)
                                                 .child(notice),
                                         )
                                     })
@@ -352,7 +348,7 @@ impl Render for AiPanel {
                                             .justify_between()
                                             .gap_2()
                                             .text_size(ui_rems(11.0))
-                                            .text_color(rgb(theme.text_muted))
+                                            .text_color(theme.muted_foreground)
                                             .child(
                                                 div()
                                                     .flex()
@@ -363,15 +359,13 @@ impl Render for AiPanel {
                                                             "ai-attachment-menu-button",
                                                             IconName::Plus,
                                                         )
-                                                        .text_color(rgb(
-                                                            if attachment_menu_open {
-                                                                theme.accent
-                                                            } else {
-                                                                theme.text_muted
-                                                            },
-                                                        ))
+                                                        .text_color(if attachment_menu_open {
+                                                            theme.primary
+                                                        } else {
+                                                            theme.muted_foreground
+                                                        })
                                                         .hover(move |style| {
-                                                            style.bg(rgb(theme.element_hover))
+                                                            style.bg(theme.list_hover)
                                                         })
                                                         .tooltip(tr("attach"))
                                                         .on_click(cx.listener(
@@ -396,19 +390,19 @@ impl Render for AiPanel {
                                                             .gap_1()
                                                             .px_2()
                                                             .rounded(px(4.0))
-                                                            .text_color(rgb(
+                                                            .text_color(
                                                                 if thinking_menu_open
                                                                     || selected_thinking_level
                                                                         != AiThinkingLevel::Off
                                                                 {
-                                                                    theme.accent
+                                                                    theme.primary
                                                                 } else {
-                                                                    theme.text_muted
+                                                                    theme.muted_foreground
                                                                 },
-                                                            ))
+                                                            )
                                                             .cursor_pointer()
                                                             .hover(move |style| {
-                                                                style.bg(rgb(theme.element_hover))
+                                                                style.bg(theme.list_hover)
                                                             })
                                                             .on_mouse_down(
                                                                 MouseButton::Left,
@@ -438,7 +432,7 @@ impl Render for AiPanel {
                                                                     },
                                                                 )
                                                                 .size(ui_rems(11.0))
-                                                                .text_color(rgb(theme.text_muted)),
+                                                                .text_color(theme.muted_foreground),
                                                             ),
                                                     ),
                                             )
@@ -460,16 +454,14 @@ impl Render for AiPanel {
                                                             .gap_1()
                                                             .px_2()
                                                             .rounded(px(4.0))
-                                                            .text_color(rgb(
-                                                                if model_menu_open {
-                                                                    theme.accent
-                                                                } else {
-                                                                    theme.text_muted
-                                                                },
-                                                            ))
+                                                            .text_color(if model_menu_open {
+                                                                theme.primary
+                                                            } else {
+                                                                theme.muted_foreground
+                                                            })
                                                             .cursor_pointer()
                                                             .hover(move |style| {
-                                                                style.bg(rgb(theme.element_hover))
+                                                                style.bg(theme.list_hover)
                                                             })
                                                             .on_mouse_down(
                                                                 MouseButton::Left,
@@ -500,7 +492,7 @@ impl Render for AiPanel {
                                                                     IconName::ChevronDown
                                                                 })
                                                                 .size(ui_rems(11.0))
-                                                                .text_color(rgb(theme.text_muted)),
+                                                                .text_color(theme.muted_foreground),
                                                             ),
                                                     )
                                                     .child(
@@ -520,27 +512,25 @@ impl Render for AiPanel {
                                                             .w(ui_rems(28.0))
                                                             .h(ui_rems(28.0))
                                                             .rounded(px(4.0))
-                                                            .bg(rgb(theme.control_background))
+                                                            .bg(theme.button)
                                                             .when(can_send, |this| {
                                                                 this.cursor_pointer().hover(
                                                                     move |style| {
-                                                                        style.bg(rgb(
-                                                                            theme.control_hover,
-                                                                        ))
+                                                                        style.bg(theme.button_hover)
                                                                     },
                                                                 )
                                                             })
                                                             .when(loading, |this| {
                                                                 this.cursor_pointer()
-                                                                    .bg(rgba(with_alpha(
-                                                                        theme.error,
-                                                                        0x20,
-                                                                    )))
+                                                                    .bg(theme.danger.opacity(
+                                                                        0x20 as f32 / 255.0,
+                                                                    ))
                                                                     .hover(move |style| {
-                                                                        style.bg(rgba(with_alpha(
-                                                                            theme.error,
-                                                                            0x30,
-                                                                        )))
+                                                                        style.bg(
+                                                                            theme.danger.opacity(
+                                                                                0x30 as f32 / 255.0,
+                                                                            ),
+                                                                        )
                                                                     })
                                                             })
                                                             .on_mouse_down(
@@ -561,16 +551,16 @@ impl Render for AiPanel {
                                                             .child(if loading {
                                                                 Icon::new(IconName::Stop)
                                                                     .size(ui_rems(13.0))
-                                                                    .text_color(rgb(theme.error))
+                                                                    .text_color(theme.danger)
                                                                     .into_any_element()
                                                             } else {
                                                                 Icon::new(IconName::ArrowUp)
                                                                     .size(ui_rems(13.0))
-                                                                    .text_color(rgb(if can_send {
-                                                                        theme.accent
+                                                                    .text_color(if can_send {
+                                                                        theme.primary
                                                                     } else {
-                                                                        theme.text_muted
-                                                                    }))
+                                                                        theme.muted_foreground
+                                                                    })
                                                                     .into_any_element()
                                                             }),
                                                     ),

@@ -4,12 +4,12 @@ use crate::{
     library::{DocumentPosition, HistoryEntry},
     pdf_view::PdfView,
     picker::{Picker, PickerDelegate, fuzzy_match, normalize_query},
-    theme::Theme,
 };
 use gpui::{
     AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, SharedString, StyledText,
-    WeakEntity, Window, div, prelude::*, rgb,
+    WeakEntity, Window, div, prelude::*,
 };
+use gpui_component::ThemeColor;
 
 const MAX_VISIBLE_MATCHES: usize = 12;
 const MATCH_ROW_HEIGHT: f32 = 44.0;
@@ -141,7 +141,7 @@ impl PickerDelegate for HistoryPaletteDelegate {
     fn render_match(
         &self,
         match_ix: usize,
-        theme: Theme,
+        theme: ThemeColor,
         _: &FocusHandle,
         _: &Window,
     ) -> AnyElement {
@@ -157,7 +157,7 @@ impl PickerDelegate for HistoryPaletteDelegate {
                 (
                     range,
                     HighlightStyle {
-                        color: Some(rgb(theme.match_highlight).into()),
+                        color: Some(theme.warning),
                         font_weight: Some(FontWeight::BOLD),
                         ..Default::default()
                     },
@@ -183,14 +183,14 @@ impl PickerDelegate for HistoryPaletteDelegate {
                         div()
                             .truncate()
                             .text_size(gpui::px(11.0))
-                            .text_color(rgb(theme.text_muted))
+                            .text_color(theme.muted_foreground)
                             .child(entry.directory.clone()),
                     ),
             )
             .child(
                 div()
                     .flex_none()
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(theme.muted_foreground)
                     .child(format!("p. {}", entry.page)),
             )
             .into_any_element()

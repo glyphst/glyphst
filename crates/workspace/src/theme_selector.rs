@@ -3,12 +3,13 @@ use crate::{
     picker::{Picker, PickerDelegate, fuzzy_match},
     settings::{SettingsStore, sync_component_theme, ui_rems},
     style::TextSize,
-    theme::{Theme, ThemeAppearance, ThemeMetadata, ThemeSelection},
+    theme::{ThemeAppearance, ThemeMetadata, ThemeSelection},
 };
 use gpui::{
     AnyElement, Context, FocusHandle, HighlightStyle, SharedString, StyledText, Window, div,
-    prelude::*, rgb,
+    prelude::*,
 };
+use gpui_component::ThemeColor;
 use std::ops::Range;
 
 const MAX_VISIBLE_MATCHES: usize = 10;
@@ -184,7 +185,7 @@ impl PickerDelegate for ThemeSelectorDelegate {
     fn render_match(
         &self,
         match_ix: usize,
-        theme: Theme,
+        theme: ThemeColor,
         _previous_focus_handle: &FocusHandle,
         _window: &Window,
     ) -> AnyElement {
@@ -201,7 +202,7 @@ impl PickerDelegate for ThemeSelectorDelegate {
                 (
                     range,
                     HighlightStyle {
-                        color: Some(rgb(theme.match_highlight).into()),
+                        color: Some(theme.warning),
                         ..Default::default()
                     },
                 )
@@ -227,7 +228,7 @@ impl PickerDelegate for ThemeSelectorDelegate {
                     div().flex_none().ml_3().child(
                         Icon::new(IconName::Check)
                             .size(ui_rems(14.0))
-                            .text_color(rgb(theme.text_muted)),
+                            .text_color(theme.muted_foreground),
                     ),
                 )
             })

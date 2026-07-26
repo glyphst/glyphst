@@ -234,32 +234,7 @@ pub struct Theme {
     pub highlight_blue: u32,
     pub highlight_pink: u32,
     pub highlight_orange: u32,
-    pub overlay: u32,
-    pub footer_background: u32,
-    pub footer_border: u32,
-    pub footer_text: u32,
-    pub panel_background: u32,
-    pub panel_border: u32,
-    pub surface_background: u32,
-    pub border: u32,
-    pub border_variant: u32,
-    pub border_focused: u32,
-    pub tab_bar_background: u32,
-    pub tab_active_background: u32,
-    pub tab_inactive_background: u32,
-    pub element_hover: u32,
-    pub element_selected: u32,
-    pub text: u32,
-    pub text_muted: u32,
-    pub placeholder_text: u32,
-    pub accent: u32,
     pub match_highlight: u32,
-    pub selected_row: u32,
-    pub control_background: u32,
-    pub control_border: u32,
-    pub control_hover: u32,
-    pub success: u32,
-    pub error: u32,
     pub page_gap: f32,
 }
 
@@ -276,32 +251,7 @@ impl Theme {
             highlight_blue: hsla_to_rgba_with_alpha(theme.blue, 0x66),
             highlight_pink: hsla_to_rgba_with_alpha(theme.magenta, 0x66),
             highlight_orange: hsla_to_rgba_with_alpha(theme.warning, 0x66),
-            overlay: hsla_to_rgba(theme.overlay),
-            footer_background: hsla_to_rgb(theme.status_bar),
-            footer_border: hsla_to_rgb(theme.status_bar_border),
-            footer_text: hsla_to_rgb(theme.muted_foreground),
-            panel_background: hsla_to_rgb(theme.sidebar),
-            panel_border: hsla_to_rgb(theme.sidebar_border),
-            surface_background: hsla_to_rgb(theme.popover),
-            border: hsla_to_rgb(theme.border),
-            border_variant: hsla_to_rgb(theme.input),
-            border_focused: hsla_to_rgb(theme.ring),
-            tab_bar_background: hsla_to_rgb(theme.tab_bar),
-            tab_active_background: hsla_to_rgb(theme.tab_active),
-            tab_inactive_background: hsla_to_rgb(theme.tab),
-            element_hover: hsla_to_rgb(theme.list_hover),
-            element_selected: hsla_to_rgb(theme.list_active),
-            text: hsla_to_rgb(theme.foreground),
-            text_muted: hsla_to_rgb(theme.muted_foreground),
-            placeholder_text: hsla_to_rgba(theme.muted_foreground),
-            accent: hsla_to_rgb(theme.primary),
             match_highlight: hsla_to_rgb(theme.warning),
-            selected_row: hsla_to_rgba(theme.list_active),
-            control_background: hsla_to_rgb(theme.button),
-            control_border: hsla_to_rgb(theme.input),
-            control_hover: hsla_to_rgb(theme.button_hover),
-            success: hsla_to_rgb(theme.success),
-            error: hsla_to_rgb(theme.danger),
             page_gap: DEFAULT_PAGE_GAP,
         }
     }
@@ -323,32 +273,7 @@ impl Theme {
         apply!(highlight_blue);
         apply!(highlight_pink);
         apply!(highlight_orange);
-        apply!(overlay);
-        apply!(footer_background);
-        apply!(footer_border);
-        apply!(footer_text);
-        apply!(panel_background);
-        apply!(panel_border);
-        apply!(surface_background);
-        apply!(border);
-        apply!(border_variant);
-        apply!(border_focused);
-        apply!(tab_bar_background);
-        apply!(tab_active_background);
-        apply!(tab_inactive_background);
-        apply!(element_hover);
-        apply!(element_selected);
-        apply!(text);
-        apply!(text_muted);
-        apply!(placeholder_text);
-        apply!(accent);
         apply!(match_highlight);
-        apply!(selected_row);
-        apply!(control_background);
-        apply!(control_border);
-        apply!(control_hover);
-        apply!(success);
-        apply!(error);
 
         if let Some(page_gap) = partial.page_gap {
             self.page_gap = page_gap;
@@ -367,32 +292,7 @@ impl Theme {
         mask_rgba(&mut self.highlight_blue);
         mask_rgba(&mut self.highlight_pink);
         mask_rgba(&mut self.highlight_orange);
-        mask_rgba(&mut self.overlay);
-        mask_rgb(&mut self.footer_background);
-        mask_rgb(&mut self.footer_border);
-        mask_rgb(&mut self.footer_text);
-        mask_rgb(&mut self.panel_background);
-        mask_rgb(&mut self.panel_border);
-        mask_rgb(&mut self.surface_background);
-        mask_rgb(&mut self.border);
-        mask_rgb(&mut self.border_variant);
-        mask_rgb(&mut self.border_focused);
-        mask_rgb(&mut self.tab_bar_background);
-        mask_rgb(&mut self.tab_active_background);
-        mask_rgb(&mut self.tab_inactive_background);
-        mask_rgb(&mut self.element_hover);
-        mask_rgb(&mut self.element_selected);
-        mask_rgb(&mut self.text);
-        mask_rgb(&mut self.text_muted);
-        mask_rgba(&mut self.placeholder_text);
-        mask_rgb(&mut self.accent);
         mask_rgb(&mut self.match_highlight);
-        mask_rgba(&mut self.selected_row);
-        mask_rgb(&mut self.control_background);
-        mask_rgb(&mut self.control_border);
-        mask_rgb(&mut self.control_hover);
-        mask_rgb(&mut self.success);
-        mask_rgb(&mut self.error);
         self.page_gap = self.page_gap.clamp(MIN_PAGE_GAP, MAX_PAGE_GAP);
     }
 

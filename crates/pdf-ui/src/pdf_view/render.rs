@@ -8,6 +8,7 @@ impl Render for PdfView {
             let store = cx.global::<SettingsStore>();
             (store.resolved_theme, store.settings.window)
         };
+        let ui_theme = cx.theme().colors;
         if self.window_settings != window_settings {
             self.transparency_enabled = window_settings.transparency_enabled_by_default();
             self.window_settings = window_settings;
@@ -17,7 +18,7 @@ impl Render for PdfView {
         }
         let opacity = window_settings.effective_opacity(self.transparency_enabled);
         if self.loading || self.loading_error.is_some() {
-            return self.render_loading_state(theme, opacity, cx);
+            return self.render_loading_state(ui_theme, opacity, cx);
         }
 
         if !self.diff_flashes.is_empty() {
@@ -79,7 +80,7 @@ impl Render for PdfView {
                     .snap_to_window_with_margin(px(8.0))
                     .position(position)
                     .anchor(Anchor::TopRight)
-                    .child(Self::render_region_popover(theme, cx)),
+                    .child(Self::render_region_popover(ui_theme, cx)),
             )
             .with_priority(2)
         });
@@ -89,7 +90,7 @@ impl Render for PdfView {
                     .snap_to_window_with_margin(px(8.0))
                     .position(position)
                     .anchor(Anchor::BottomLeft)
-                    .child(self.render_epub_style_panel(theme, cx)),
+                    .child(self.render_epub_style_panel(ui_theme, cx)),
             )
             .with_priority(3)
         });
@@ -102,7 +103,7 @@ impl Render for PdfView {
                             .snap_to_window_with_margin(px(8.0))
                             .position(point(position.x + px(12.0), position.y + px(12.0)))
                             .anchor(Anchor::TopLeft)
-                            .child(Self::render_note_popup(body, theme)),
+                            .child(Self::render_note_popup(body, ui_theme)),
                     )
                     .with_priority(1)
                 })
@@ -116,7 +117,13 @@ impl Render for PdfView {
                         .snap_to_window_with_margin(px(8.0))
                         .position(point(position.x + px(12.0), position.y + px(12.0)))
                         .anchor(Anchor::TopLeft)
-                        .child(self.render_translation_card(state, false, theme, window, cx)),
+                        .child(self.render_translation_card(
+                            state,
+                            false,
+                            cx.theme().colors,
+                            window,
+                            cx,
+                        )),
                 )
                 .with_priority(2)
             })
@@ -128,7 +135,7 @@ impl Render for PdfView {
                 .translation
                 .pinned
                 .corner;
-            let card = self.render_translation_card(state, true, theme, window, cx);
+            let card = self.render_translation_card(state, true, cx.theme().colors, window, cx);
             let mut container = div().absolute().m(px(16.0));
             container = match corner {
                 TranslationBoxCorner::TopLeft => container.top(px(0.0)).left(px(0.0)),
@@ -592,7 +599,7 @@ impl Render for PdfView {
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .bg(rgb(theme.tab_active_background))
+                    .bg(rgb(theme.background))
                     .when(opacity < 1.0, |this| this.opacity(opacity))
                     .child(
                         div()
@@ -662,10 +669,9 @@ impl Render for PdfView {
                                             for overlay in paint_data.diff_flash_overlays {
                                                 window.paint_quad(fill(
                                                     overlay.bounds,
-                                                    rgba(Self::with_alpha(
-                                                        theme.accent,
-                                                        overlay.alpha,
-                                                    )),
+                                                    ui_theme
+                                                        .primary
+                                                        .opacity(f32::from(overlay.alpha) / 255.0),
                                                 ));
                                             }
 
@@ -719,34 +725,43 @@ impl Render for PdfView {
                                             for highlight in paint_data.active_search_highlights {
                                                 window.paint_quad(fill(
                                                     highlight,
-                                                    rgba(Self::with_alpha(theme.accent, 0x99)),
+                                                    ui_theme
+                                                        .primary
+                                                        .opacity(0x99 as f32 / 255.0),
                                                 ));
                                             }
 
                                             for highlight in paint_data.link_highlights {
                                                 window.paint_quad(fill(
                                                     highlight,
-                                                    rgba(Self::with_alpha(theme.accent, 0x33)),
+                                                    ui_theme
+                                                        .primary
+                                                        .opacity(0x33 as f32 / 255.0),
                                                 ));
                                             }
 
                                             for highlight in paint_data.linked_hover_highlights {
                                                 window.paint_quad(fill(
                                                     highlight,
-                                                    rgba(Self::with_alpha(theme.accent, 0x44)),
+                                                    ui_theme
+                                                        .primary
+                                                        .opacity(0x44 as f32 / 255.0),
                                                 ));
                                             }
 
                                             for highlight in paint_data.linked_selection_highlights {
                                                 window.paint_quad(fill(
                                                     highlight,
-                                                    rgba(Self::with_alpha(theme.accent, 0x66)),
+                                                    ui_theme
+                                                        .primary
+                                                        .opacity(0x66 as f32 / 255.0),
                                                 ));
                                             }
 
                                             for border in paint_data.selected_highlight_borders {
-                                                let color =
-                                                    rgba(Self::with_alpha(theme.accent, 0xdd));
+                                                let color = ui_theme
+                                                    .primary
+                                                    .opacity(0xdd as f32 / 255.0);
                                                 let thickness = px(1.0);
                                                 window.paint_quad(fill(
                                                     Bounds::new(
@@ -796,11 +811,15 @@ impl Render for PdfView {
                                             for region in paint_data.region_overlays {
                                                 window.paint_quad(fill(
                                                     region,
-                                                    rgba(Self::with_alpha(theme.accent, 0x33)),
+                                                    ui_theme
+                                                        .primary
+                                                        .opacity(0x33 as f32 / 255.0),
                                                 ));
                                                 window.paint_quad(outline(
                                                     region,
-                                                    rgba(Self::with_alpha(theme.accent, 0xee)),
+                                                    ui_theme
+                                                        .primary
+                                                        .opacity(0xee as f32 / 255.0),
                                                     BorderStyle::Solid,
                                                 ));
                                             }
@@ -818,7 +837,7 @@ impl Render for PdfView {
                     ),
             )
             .when(self.grid_overview_open, |this| {
-                this.child(self.render_grid_overview(theme, window, cx))
+                this.child(self.render_grid_overview(ui_theme, window, cx))
             })
             .when_some(self.search_bar.clone(), |this, search_bar| {
                 this.child(
@@ -846,7 +865,7 @@ impl Render for PdfView {
                 this.child(Self::render_centered_overlay(
                     palette,
                     |this, window, cx| this.close_toc_palette(window, cx),
-                    theme,
+                    ui_theme,
                     cx,
                 ))
             })
@@ -856,7 +875,7 @@ impl Render for PdfView {
                 this.child(Self::render_centered_overlay(
                     palette,
                     |this, window, cx| this.close_notes_palette(window, cx),
-                    theme,
+                    ui_theme,
                     cx,
                 ))
             })
@@ -864,7 +883,7 @@ impl Render for PdfView {
                 this.child(Self::render_centered_overlay(
                     palette,
                     |this, window, cx| this.close_history_palette(window, cx),
-                    theme,
+                    ui_theme,
                     cx,
                 ))
             })
@@ -872,7 +891,7 @@ impl Render for PdfView {
                 this.child(Self::render_centered_overlay(
                     palette,
                     |this, window, cx| this.close_bookmark_palette(window, cx),
-                    theme,
+                    ui_theme,
                     cx,
                 ))
             })
@@ -880,7 +899,7 @@ impl Render for PdfView {
                 this.child(Self::render_centered_overlay(
                     prompt,
                     |this, window, cx| this.close_bookmark_prompt(window, cx),
-                    theme,
+                    ui_theme,
                     cx,
                 ))
             })
@@ -888,7 +907,7 @@ impl Render for PdfView {
                 this.child(Self::render_centered_overlay(
                     prompt,
                     |this, window, cx| this.close_go_to_page_prompt(window, cx),
-                    theme,
+                    ui_theme,
                     cx,
                 ))
             })
@@ -896,7 +915,7 @@ impl Render for PdfView {
                 this.child(Self::render_centered_overlay(
                     editor,
                     |this, window, cx| this.close_note_editor(window, cx),
-                    theme,
+                    ui_theme,
                     cx,
                 ))
             })

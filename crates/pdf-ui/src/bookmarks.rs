@@ -5,12 +5,12 @@ use crate::{
     pdf_view::PdfView,
     picker::{Picker, PickerDelegate, fuzzy_match, normalize_query},
     settings::ui_rems,
-    theme::Theme,
 };
 use gpui::{
     AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, SharedString, StyledText,
-    WeakEntity, Window, div, prelude::*, rgb,
+    WeakEntity, Window, div, prelude::*,
 };
+use gpui_component::ThemeColor;
 
 const MAX_VISIBLE_MATCHES: usize = 12;
 const MATCH_ROW_HEIGHT: f32 = 46.0;
@@ -176,7 +176,7 @@ impl PickerDelegate for BookmarkPaletteDelegate {
     fn render_match(
         &self,
         match_ix: usize,
-        theme: Theme,
+        theme: ThemeColor,
         _: &FocusHandle,
         _: &Window,
     ) -> AnyElement {
@@ -192,7 +192,7 @@ impl PickerDelegate for BookmarkPaletteDelegate {
                 (
                     range,
                     HighlightStyle {
-                        color: Some(rgb(theme.match_highlight).into()),
+                        color: Some(theme.warning),
                         font_weight: Some(FontWeight::BOLD),
                         ..Default::default()
                     },
@@ -218,7 +218,7 @@ impl PickerDelegate for BookmarkPaletteDelegate {
                         div()
                             .truncate()
                             .text_size(ui_rems(11.0))
-                            .text_color(rgb(theme.text_muted))
+                            .text_color(theme.muted_foreground)
                             .child(entry.file_name.clone()),
                     ),
             )
@@ -227,15 +227,15 @@ impl PickerDelegate for BookmarkPaletteDelegate {
                     div()
                         .flex_none()
                         .px_1()
-                        .bg(gpui::rgb(theme.element_selected))
-                        .text_color(rgb(theme.accent))
+                        .bg(theme.list_active)
+                        .text_color(theme.primary)
                         .child(crate::fl!("current")),
                 )
             })
             .child(
                 div()
                     .flex_none()
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(theme.muted_foreground)
                     .child(format!("p. {}", entry.page)),
             )
             .into_any_element()
@@ -317,7 +317,7 @@ impl PickerDelegate for BookmarkPromptDelegate {
 
     fn update_matches(&mut self, _: &str) {}
 
-    fn render_match(&self, _: usize, _: Theme, _: &FocusHandle, _: &Window) -> AnyElement {
+    fn render_match(&self, _: usize, _: ThemeColor, _: &FocusHandle, _: &Window) -> AnyElement {
         div().into_any_element()
     }
 

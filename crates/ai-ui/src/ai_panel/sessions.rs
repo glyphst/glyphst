@@ -254,18 +254,18 @@ impl AiPanel {
                 .items_center()
                 .justify_between()
                 .border_1()
-                .border_color(rgb(theme.accent))
-                .bg(rgba(with_alpha(theme.accent, 0x18)))
+                .border_color(theme.primary)
+                .bg(theme.primary.opacity(0x18 as f32 / 255.0))
                 .px_2()
                 .py_2()
                 .text_size(ui_rems(13.0))
                 .text_color(if loading {
-                    rgb(theme.text_muted)
+                    theme.muted_foreground
                 } else {
-                    rgb(theme.text)
+                    theme.foreground
                 })
                 .cursor_pointer()
-                .hover(move |style| style.bg(rgba(with_alpha(theme.accent, 0x24))))
+                .hover(move |style| style.bg(theme.primary.opacity(0x24 as f32 / 255.0)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {
@@ -285,7 +285,7 @@ impl AiPanel {
                     .justify_center()
                     .h(px(120.0))
                     .text_size(ui_rems(13.0))
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(theme.muted_foreground)
                     .child(tr("ai-no-previous-sessions")),
             );
         }
@@ -304,12 +304,12 @@ impl AiPanel {
                     .px_2()
                     .py_2()
                     .bg(if active {
-                        rgb(theme.element_selected)
+                        theme.list_active
                     } else {
-                        rgba(0x00000000)
+                        transparent_black()
                     })
                     .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.element_hover)))
+                    .hover(move |style| style.bg(theme.list_hover))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
@@ -321,13 +321,17 @@ impl AiPanel {
                         div()
                             .truncate()
                             .text_size(ui_rems(13.0))
-                            .text_color(rgb(if active { theme.accent } else { theme.text }))
+                            .text_color(if active {
+                                theme.primary
+                            } else {
+                                theme.foreground
+                            })
                             .child(title),
                     )
                     .child(
                         div()
                             .text_size(ui_rems(11.0))
-                            .text_color(rgb(theme.text_muted))
+                            .text_color(theme.muted_foreground)
                             .child(meta),
                     ),
             );

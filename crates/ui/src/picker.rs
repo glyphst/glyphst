@@ -6,16 +6,14 @@ use gpui::{
     WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IndexPath, StyledExt as _,
+    ActiveTheme as _, IndexPath, StyledExt as _, ThemeColor,
     input::{Input, InputEvent, InputState},
     list::{List, ListDelegate, ListItem, ListState},
 };
 
 use crate::{
     menu,
-    settings::SettingsStore,
     style::{INPUT_ROW_HEIGHT, TextSize},
-    theme::Theme,
 };
 
 pub enum PickerEvent {
@@ -42,7 +40,7 @@ pub trait PickerDelegate: Sized + 'static {
     fn render_match(
         &self,
         match_ix: usize,
-        theme: Theme,
+        theme: ThemeColor,
         previous_focus_handle: &FocusHandle,
         window: &Window,
     ) -> AnyElement;
@@ -357,7 +355,7 @@ impl<D: PickerDelegate> ListDelegate for PickerListDelegate<D> {
     ) -> Option<Self::Item> {
         let picker = self.picker.upgrade()?;
         let picker = picker.read(cx);
-        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let theme = cx.theme().colors;
         let content =
             picker
                 .delegate

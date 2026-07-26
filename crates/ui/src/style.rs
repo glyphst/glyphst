@@ -1,5 +1,5 @@
-use crate::{settings::ui_rems, theme::Theme};
-use gpui::{BoxShadow, Rems, hsla, px};
+use crate::settings::ui_rems;
+use gpui::Rems;
 
 pub const RADIUS_SM: f32 = 4.0;
 pub const RADIUS_MD: f32 = 6.0;
@@ -25,50 +25,4 @@ impl TextSize {
             Self::Default => 13.0,
         })
     }
-}
-
-pub fn elevated_shadow(theme: Theme) -> Vec<BoxShadow> {
-    let is_light = is_light_surface(theme);
-
-    vec![
-        BoxShadow::new(px(0.0), px(2.0), hsla(0.0, 0.0, 0.0, 0.12)).blur_radius(px(3.0)),
-        BoxShadow::new(
-            px(0.0),
-            px(1.0),
-            hsla(0.0, 0.0, 0.0, if is_light { 0.03 } else { 0.06 }),
-        ),
-    ]
-}
-
-pub fn modal_shadow(theme: Theme) -> Vec<BoxShadow> {
-    let is_light = is_light_surface(theme);
-
-    vec![
-        BoxShadow::new(
-            px(0.0),
-            px(2.0),
-            hsla(0.0, 0.0, 0.0, if is_light { 0.06 } else { 0.12 }),
-        )
-        .blur_radius(px(3.0)),
-        BoxShadow::new(
-            px(0.0),
-            px(3.0),
-            hsla(0.0, 0.0, 0.0, if is_light { 0.06 } else { 0.08 }),
-        )
-        .blur_radius(px(6.0)),
-        BoxShadow::new(px(0.0), px(6.0), hsla(0.0, 0.0, 0.0, 0.04)).blur_radius(px(12.0)),
-        BoxShadow::new(
-            px(0.0),
-            px(1.0),
-            hsla(0.0, 0.0, 0.0, if is_light { 0.04 } else { 0.12 }),
-        ),
-    ]
-}
-
-fn is_light_surface(theme: Theme) -> bool {
-    let color = theme.surface_background;
-    let r = ((color >> 16) & 0xff) as f32 / 255.0;
-    let g = ((color >> 8) & 0xff) as f32 / 255.0;
-    let b = (color & 0xff) as f32 / 255.0;
-    0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5
 }

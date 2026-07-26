@@ -285,8 +285,8 @@ impl AiPanel {
             .py_1()
             .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
+            .border_color(theme.border)
+            .bg(theme.popover)
             .shadow_sm()
             .overflow_hidden()
             .text_size(ui_rems(12.0))
@@ -308,7 +308,7 @@ impl AiPanel {
                                         (
                                             range,
                                             HighlightStyle {
-                                                color: Some(rgb(theme.match_highlight).into()),
+                                                color: Some(theme.warning.into()),
                                                 font_weight: Some(FontWeight::BOLD),
                                                 ..Default::default()
                                             },
@@ -326,12 +326,12 @@ impl AiPanel {
                                             .px_2()
                                             .rounded(px(4.0))
                                             .bg(if selected {
-                                                rgb(theme.element_selected)
+                                                theme.list_active
                                             } else {
-                                                rgba(0x00000000)
+                                                transparent_black()
                                             })
                                             .cursor_pointer()
-                                            .hover(move |style| style.bg(rgb(theme.element_hover)))
+                                            .hover(move |style| style.bg(theme.list_hover))
                                             .on_mouse_down(
                                                 MouseButton::Left,
                                                 cx.listener(move |this, _, _, cx| {
@@ -342,11 +342,11 @@ impl AiPanel {
                                             .child(
                                                 Icon::new(Self::mention_icon(candidate.kind))
                                                     .size(ui_rems(14.0))
-                                                    .text_color(rgb(if selected {
-                                                        theme.accent
+                                                    .text_color(if selected {
+                                                        theme.primary
                                                     } else {
-                                                        theme.text_muted
-                                                    })),
+                                                        theme.muted_foreground
+                                                    }),
                                             )
                                             .child(
                                                 div()
@@ -357,11 +357,11 @@ impl AiPanel {
                                                     .child(
                                                         div()
                                                             .truncate()
-                                                            .text_color(rgb(if selected {
-                                                                theme.accent
+                                                            .text_color(if selected {
+                                                                theme.primary
                                                             } else {
-                                                                theme.text
-                                                            }))
+                                                                theme.foreground
+                                                            })
                                                             .child(
                                                                 StyledText::new(label)
                                                                     .with_highlights(highlights),
@@ -371,7 +371,7 @@ impl AiPanel {
                                                         div()
                                                             .truncate()
                                                             .text_size(ui_rems(10.0))
-                                                            .text_color(rgb(theme.text_muted))
+                                                            .text_color(theme.muted_foreground)
                                                             .child(candidate.kind.description()),
                                                     ),
                                             ),

@@ -4,12 +4,12 @@ use crate::{
     keybindings,
     picker::{Picker, PickerDelegate, fuzzy_match},
     style::TextSize,
-    theme::Theme,
 };
 use gpui::{
     Action, AnyElement, Context, FocusHandle, HighlightStyle, SharedString, StyledText, Window,
-    div, prelude::*, rgb,
+    div, prelude::*,
 };
+use gpui_component::ThemeColor;
 
 const MAX_VISIBLE_MATCHES: usize = 10;
 const MATCH_ROW_HEIGHT: f32 = 40.0;
@@ -140,7 +140,7 @@ impl PickerDelegate for CommandPaletteDelegate {
     fn render_match(
         &self,
         match_ix: usize,
-        theme: Theme,
+        theme: ThemeColor,
         previous_focus_handle: &FocusHandle,
         window: &Window,
     ) -> AnyElement {
@@ -158,7 +158,7 @@ impl PickerDelegate for CommandPaletteDelegate {
                 (
                     range,
                     HighlightStyle {
-                        color: Some(rgb(theme.match_highlight).into()),
+                        color: Some(theme.warning),
                         ..Default::default()
                     },
                 )
@@ -184,7 +184,7 @@ impl PickerDelegate for CommandPaletteDelegate {
                     div()
                         .flex_none()
                         .ml_3()
-                        .text_color(rgb(theme.text_muted))
+                        .text_color(theme.muted_foreground)
                         .child(keybinding),
                 )
             })

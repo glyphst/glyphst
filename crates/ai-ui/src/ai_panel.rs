@@ -21,8 +21,7 @@ use glyphst_library::{
     LibraryStore, current_timestamp,
 };
 use glyphst_settings::{
-    AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore, localize::tr, theme::Theme,
-    ui_rems,
+    AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore, localize::tr, ui_rems,
 };
 use glyphst_ui::{
     icons::{Icon, IconName, toolbar_icon_button},
@@ -33,13 +32,16 @@ use glyphst_ui::{
 };
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, ElementId, Entity,
-    EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, IntoElement, MouseButton,
-    MouseDownEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta, ScrollHandle, ScrollStrategy,
-    ScrollWheelEvent, SharedString, StyledText, Subscription, Task, TextStyle,
-    UniformListScrollHandle, Window, anchored, deferred, div, point, prelude::*, px, rgb, rgba,
-    uniform_list,
+    EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement,
+    MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta, ScrollHandle,
+    ScrollStrategy, ScrollWheelEvent, SharedString, StyledText, Subscription, Task, TextStyle,
+    UniformListScrollHandle, Window, anchored, deferred, div, point, prelude::*, px,
+    transparent_black, uniform_list,
 };
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::{
+    ActiveTheme as _, ThemeColor as Theme,
+    input::{Input, InputEvent, InputState},
+};
 
 pub const AI_PANEL_WIDTH: f32 = 360.0;
 const COMPLETION_MENU_MIN_WIDTH: f32 = 280.0;

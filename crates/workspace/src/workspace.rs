@@ -10,9 +10,11 @@ use glyphst_ui::root::render_overlays;
 use gpui::{
     AnyElement, App, Context, DismissEvent, DragMoveEvent, Entity, FocusHandle, Focusable,
     IntoElement, MouseButton, MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString,
-    Window, WindowAppearance, div, point, prelude::*, px, rgba,
+    Window, WindowAppearance, div, point, prelude::*, px,
 };
-use gpui_component::{WindowExt as _, menu::PopupMenu, status_bar::StatusBar};
+use gpui_component::{
+    ActiveTheme as _, ThemeColor, WindowExt as _, menu::PopupMenu, status_bar::StatusBar,
+};
 
 mod chrome;
 
@@ -36,7 +38,7 @@ use crate::{
     },
     picker::{Picker, PickerEvent},
     settings::{SettingsStore, setup_ui_font, sync_component_theme},
-    theme::{Theme, ThemeAppearance, ThemeAppearanceMode},
+    theme::{ThemeAppearance, ThemeAppearanceMode},
     theme_selector::{ThemeSelector, ThemeSelectorDelegate},
 };
 
@@ -974,7 +976,7 @@ impl Workspace {
 
     fn render_body(
         &self,
-        theme: Theme,
+        theme: ThemeColor,
         dim_inactive_panes: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1482,7 +1484,7 @@ impl Workspace {
     fn render_top_aligned_overlay(
         content: impl IntoElement + 'static,
         close: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-        theme: Theme,
+        theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
@@ -1494,7 +1496,7 @@ impl Workspace {
             .items_start()
             .justify_center()
             .pt(px(96.0))
-            .bg(rgba(theme.overlay))
+            .bg(theme.overlay)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| close(this, window, cx)),
@@ -1510,13 +1512,12 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root_overlays = render_overlays(window, cx);
         let ui_font = setup_ui_font(window, cx);
-        let (theme, dim_inactive_panes) = {
-            let store = cx.global::<SettingsStore>();
-            (
-                store.resolved_theme,
-                store.settings.behavior.dim_inactive_panes,
-            )
-        };
+        let theme = cx.theme().colors;
+        let dim_inactive_panes = cx
+            .global::<SettingsStore>()
+            .settings
+            .behavior
+            .dim_inactive_panes;
         let active_pdf_is_presentation = self
             .active_pane
             .read(cx)

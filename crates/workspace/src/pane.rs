@@ -14,11 +14,10 @@ use gpui::{
     DispatchPhase, DragMoveEvent, Element, ElementId, Entity, EntityId, EventEmitter, FocusHandle,
     GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Point, Render, SharedString, Style, Styled, Task, Window,
-    WindowHandle, div, fill, point, prelude::*, px, quad, relative, rgb, rgba, size,
-    transparent_black,
+    WindowHandle, div, fill, point, prelude::*, px, quad, relative, size, transparent_black,
 };
 use gpui_component::{
-    Root, Selectable as _, Sizable as _,
+    ActiveTheme as _, Root, Selectable as _, Sizable as _, ThemeColor as Theme,
     button::{Button, ButtonVariants as _},
     tab::{Tab as ComponentTab, TabBar as ComponentTabBar},
 };
@@ -35,7 +34,6 @@ use crate::{
     new_tab::{NewTab, NewTabEvent},
     pdf_view::{PdfAnnotations, PdfOpenOptions, PdfView, PdfViewEvent, PreparedPdfOpen},
     settings::{SettingsStore, TabBarVisibility, ui_rems},
-    theme::Theme,
 };
 
 pub(crate) const PANE_TAB_BAR_HEIGHT: f32 = 32.0;
@@ -67,7 +65,7 @@ pub(crate) struct LoadingDocumentView {
 
 impl Render for LoadingDocumentView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let theme = cx.theme().colors;
         let detail = self.error.clone().unwrap_or_else(|| {
             format!(
                 "Loading {}…",
@@ -84,12 +82,12 @@ impl Render for LoadingDocumentView {
             .items_center()
             .justify_center()
             .gap_2()
-            .bg(rgb(theme.background))
-            .text_color(rgb(if self.error.is_some() {
-                theme.error
+            .bg(theme.background)
+            .text_color(if self.error.is_some() {
+                theme.danger
             } else {
-                theme.text_muted
-            }))
+                theme.muted_foreground
+            })
             .child(
                 Icon::new(if self.error.is_some() {
                     IconName::TriangleAlert
@@ -97,11 +95,11 @@ impl Render for LoadingDocumentView {
                     IconName::Circle
                 })
                 .size(ui_rems(14.0))
-                .text_color(rgb(if self.error.is_some() {
-                    theme.error
+                .text_color(if self.error.is_some() {
+                    theme.danger
                 } else {
-                    theme.accent
-                })),
+                    theme.primary
+                }),
             )
             .child(detail)
     }
@@ -394,7 +392,7 @@ impl Pane {
         if !Self::is_supported_document_path(&path) {
             bail!("unsupported file type: {}", path.display());
         }
-        let (behavior, window_settings, theme) = {
+        let (behavior, window_settings, document_theme) = {
             let store = cx.global::<SettingsStore>();
             (
                 store.settings.behavior,
@@ -462,8 +460,12 @@ impl Pane {
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    PdfView::prepare_open(prepare_path, prepare_preferences, theme.page_gap)
-                        .map_err(|error| format!("{error:#}"))
+                    PdfView::prepare_open(
+                        prepare_path,
+                        prepare_preferences,
+                        document_theme.page_gap,
+                    )
+                    .map_err(|error| format!("{error:#}"))
                 })
                 .await;
             _ = this.update_in(cx, |this, window, cx| {
@@ -995,11 +997,11 @@ impl Pane {
                         |tab, _, _, cx| cx.new(|_| tab.clone()),
                     )
                     .drag_over::<DraggedTab>(move |style, dragged_tab, _, _| {
-                        let style = style.bg(rgb(theme.element_hover));
+                        let style = style.bg(theme.list_hover);
                         if dragged_tab.source_pane != drag_source_pane || tab_ix < dragged_tab.ix {
-                            style.border_l(px(2.0)).border_color(rgb(theme.accent))
+                            style.border_l(px(2.0)).border_color(theme.primary)
                         } else if tab_ix > dragged_tab.ix {
-                            style.border_r(px(2.0)).border_color(rgb(theme.accent))
+                            style.border_r(px(2.0)).border_color(theme.primary)
                         } else {
                             style
                         }
@@ -1049,9 +1051,9 @@ impl Pane {
             .h_full()
             .drag_over::<DraggedTab>(move |style, _, _, _| {
                 style
-                    .bg(rgb(theme.element_hover))
+                    .bg(theme.list_hover)
                     .border_l(px(2.0))
-                    .border_color(rgb(theme.accent))
+                    .border_color(theme.primary)
             })
             .on_drop(cx.listener(move |_, dragged_tab: &DraggedTab, _, cx| {
                 cx.emit(PaneEvent::TabDrop {
@@ -1156,7 +1158,7 @@ impl Pane {
                     this.handle_content_drag_move(event, cx);
                 },
             ))
-            .child(preview.bg(rgba(theme.overlay)))
+            .child(preview.bg(theme.overlay))
             .into_any_element()
     }
 }
@@ -1165,10 +1167,8 @@ impl EventEmitter<PaneEvent> for Pane {}
 
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (theme, tab_bar_visibility) = {
-            let store = cx.global::<SettingsStore>();
-            (store.resolved_theme, store.settings.tab_bar_visibility)
-        };
+        let theme = cx.theme().colors;
+        let tab_bar_visibility = cx.global::<SettingsStore>().settings.tab_bar_visibility;
         let show_tab_bar = tab_bar_visibility == TabBarVisibility::Always
             || self.force_show_tab_bar
             || self.tabs.len() >= 2;

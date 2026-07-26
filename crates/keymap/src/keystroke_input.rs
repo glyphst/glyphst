@@ -3,14 +3,14 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeybindingKeystroke, MouseButton, ParentElement, Render, SharedString, Styled, Subscription,
-    Window, div, prelude::*, px, rgb,
+    Window, div, prelude::*, px,
 };
 
 use crate::{
     icons::{Icon, IconName, toolbar_icon_button},
-    settings::{SettingsStore, ui_rems},
-    theme::Theme,
+    settings::ui_rems,
 };
+use gpui_component::{ActiveTheme as _, ThemeColor as Theme};
 
 pub const KEYSTROKE_COUNT_MAX: usize = 3;
 const CLOSE_KEYSTROKE_WINDOW: Duration = Duration::from_millis(300);
@@ -126,7 +126,7 @@ impl Focusable for KeystrokeInput {
 
 impl Render for KeystrokeInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let theme = cx.theme().colors;
         let recording = self.inner_focus_handle.is_focused(window);
         let has_keystrokes = !self.keystrokes.is_empty();
 
@@ -147,7 +147,7 @@ impl Render for KeystrokeInput {
                 .into_any_element()
         } else {
             div()
-                .text_color(rgb(theme.placeholder_text))
+                .text_color(theme.muted_foreground.opacity(0.7))
                 .text_size(ui_rems(13.0))
                 .child(if recording {
                     "Recording…"
@@ -167,13 +167,13 @@ impl Render for KeystrokeInput {
                 this.child(
                     Icon::new(IconName::Circle)
                         .size(ui_rems(8.0))
-                        .text_color(rgb(theme.error)),
+                        .text_color(theme.danger),
                 )
                 .child(
                     div()
                         .text_size(ui_rems(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme.error))
+                        .text_color(theme.danger)
                         .child("REC"),
                 )
             });
@@ -188,7 +188,7 @@ impl Render for KeystrokeInput {
             .when(recording, |this| {
                 this.child(
                     toolbar_icon_button("keystroke-stop", IconName::Stop)
-                        .text_color(rgb(theme.error))
+                        .text_color(theme.danger)
                         .tooltip("Stop Recording")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.focus_handle.focus(window, cx);
@@ -230,16 +230,12 @@ impl Render for KeystrokeInput {
             .gap_2()
             .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(if recording {
-                theme.border_focused
+            .border_color(if recording { theme.ring } else { theme.input })
+            .bg(if recording {
+                theme.list_active
             } else {
-                theme.border_variant
-            }))
-            .bg(rgb(if recording {
-                theme.element_selected
-            } else {
-                theme.surface_background
-            }))
+                theme.popover
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -269,10 +265,10 @@ pub fn render_keybinding_keystroke(theme: Theme, keystroke: impl AsRef<str>) -> 
         .items_center()
         .rounded(px(4.0))
         .border_1()
-        .border_color(rgb(theme.border_variant))
-        .bg(rgb(theme.surface_background))
+        .border_color(theme.input)
+        .bg(theme.popover)
         .text_size(ui_rems(12.0))
-        .text_color(rgb(theme.text))
+        .text_color(theme.foreground)
         .child(format_keystroke(keystroke.as_ref()))
         .into_any_element()
 }

@@ -3,7 +3,7 @@ use super::*;
 impl PdfView {
     pub(super) fn render_loading_state(
         &self,
-        theme: Theme,
+        theme: ThemeColor,
         opacity: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -17,14 +17,14 @@ impl PdfView {
                 .child(
                     div()
                         .text_size(ui_rems(15.0))
-                        .text_color(rgb(theme.error))
+                        .text_color(theme.danger)
                         .child(crate::fl!("pdf-failed-to-load")),
                 )
                 .child(
                     div()
                         .max_w(px(520.0))
                         .text_size(ui_rems(12.0))
-                        .text_color(rgb(theme.text_muted))
+                        .text_color(theme.muted_foreground)
                         .child(error.clone()),
                 )
                 .into_any_element()
@@ -61,7 +61,7 @@ impl PdfView {
                                     div()
                                         .w(px(GRID_SQUARE_SIZE))
                                         .h(px(GRID_SQUARE_SIZE))
-                                        .bg(rgb(theme.accent))
+                                        .bg(theme.primary)
                                         .with_animation(
                                             ("pdf-grid-loader-square", index),
                                             Animation::new(Duration::from_millis(GRID_DURATION_MS))
@@ -80,13 +80,13 @@ impl PdfView {
                 .child(
                     div()
                         .text_size(ui_rems(14.0))
-                        .text_color(rgb(theme.text_muted))
+                        .text_color(theme.muted_foreground)
                         .child(crate::fl!("pdf-loading", name = self.file_name.as_ref())),
                 )
                 .child(
                     div()
                         .text_size(ui_rems(12.0))
-                        .text_color(rgb(theme.text_muted))
+                        .text_color(theme.muted_foreground)
                         .child(format!("{} pages", self.page_count)),
                 )
                 .into_any_element()
@@ -101,7 +101,7 @@ impl PdfView {
             }))
             .flex()
             .flex_col()
-            .bg(rgb(theme.tab_active_background))
+            .bg(theme.tab_active)
             .when(opacity < 1.0, |this| this.opacity(opacity))
             .child(
                 div()
@@ -123,7 +123,7 @@ impl PdfView {
     pub fn render_workspace_body_with_chrome(
         &mut self,
         center: AnyElement,
-        theme: Theme,
+        theme: ThemeColor,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -133,7 +133,7 @@ impl PdfView {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(theme.tab_active_background))
+            .bg(theme.tab_active)
             .child(
                 div()
                     .flex_1()
@@ -244,7 +244,11 @@ impl PdfView {
             .into_any_element()
     }
 
-    pub fn render_workspace_footbar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub fn render_workspace_footbar(
+        &self,
+        theme: ThemeColor,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let background_activity =
             ActivityCenter::try_global(cx).and_then(|center| center.read(cx).render_activity());
         div()
@@ -257,10 +261,10 @@ impl PdfView {
             .h(ui_rems(FOOTBAR_HEIGHT))
             .px_3()
             .border_t(px(1.0))
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.tab_bar_background))
+            .border_color(theme.border)
+            .bg(theme.status_bar)
             .text_size(ui_rems(12.0))
-            .text_color(rgb(theme.footer_text))
+            .text_color(theme.muted_foreground)
             .child(
                 div()
                     .flex_1()

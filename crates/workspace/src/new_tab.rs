@@ -12,8 +12,9 @@ use anyhow::{Context as _, Result, bail};
 use gpui::{
     AnyElement, Context, Corners, EventEmitter, FocusHandle, IntoElement, MouseButton, Pixels,
     Render, RenderImage, SharedString, UniformListScrollHandle, Window, canvas, div, fill, point,
-    prelude::*, px, rgb, rgba, uniform_list,
+    prelude::*, px, rgb, transparent_black, uniform_list,
 };
+use gpui_component::{ActiveTheme as _, ThemeColor};
 use image::{Frame, ImageFormat, RgbaImage};
 use mupdf::{Colorspace, Device, DisplayList, Matrix, Pixmap, Rect};
 use smallvec::smallvec;
@@ -25,7 +26,6 @@ use crate::{
     pdf_view::{NextHalfPage, PreviousHalfPage, ScrollLineDown, ScrollLineUp},
     scrollbar::{Scrollbar, ScrollbarHandle as _},
     settings::{SettingsStore, ui_rems},
-    theme::Theme,
 };
 
 const BOARD_WIDTH: f32 = 900.0;
@@ -42,10 +42,6 @@ const NEW_TAB_ROW_HEIGHT: f32 = CARD_HEIGHT + GRID_GAP;
 const NEW_TAB_HEADER_HEIGHT: f32 = 40.0;
 const THUMBNAIL_CACHE_VERSION: &str = "v1";
 const MAX_PERSISTENT_THUMBNAILS: usize = 256;
-
-fn with_alpha(rgb: u32, alpha: u8) -> u32 {
-    ((rgb & 0x00ff_ffff) << 8) | alpha as u32
-}
 
 #[derive(Clone)]
 struct ThumbnailImage {
@@ -363,7 +359,7 @@ impl NewTab {
 
     fn render_toolbar_button(
         label: String,
-        theme: Theme,
+        theme: ThemeColor,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -375,12 +371,12 @@ impl NewTab {
             .h(px(24.0))
             .px_2()
             .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgba(0x00000000))
+            .border_color(theme.border)
+            .bg(transparent_black())
             .text_size(ui_rems(12.0))
-            .text_color(rgb(theme.text))
+            .text_color(theme.foreground)
             .cursor_pointer()
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .hover(move |style| style.bg(theme.list_hover))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -397,18 +393,23 @@ impl NewTab {
         selecting: bool,
         selected: bool,
         entry_ix: usize,
-        theme: Theme,
+        theme: ThemeColor,
+        page_color: u32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let path = entry.path.clone();
         let file_name = entry.file_name.clone();
         let directory = entry.directory.clone();
         let last_read = entry.last_read.clone();
-        let border_color = if selected { theme.accent } else { theme.border };
-        let card_bg = if selected {
-            rgba(with_alpha(theme.accent, 0x22))
+        let border_color = if selected {
+            theme.primary
         } else {
-            rgb(theme.surface_background)
+            theme.border
+        };
+        let card_bg = if selected {
+            theme.primary.opacity(0x22 as f32 / 255.0)
+        } else {
+            theme.popover
         };
 
         div()
@@ -422,9 +423,9 @@ impl NewTab {
             .h(px(CARD_HEIGHT))
             .p_3()
             .border_1()
-            .border_color(rgb(border_color))
+            .border_color(border_color)
             .bg(card_bg)
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .hover(move |style| style.bg(theme.list_hover))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -449,14 +450,18 @@ impl NewTab {
                         .w(px(22.0))
                         .h(px(22.0))
                         .border_1()
-                        .border_color(rgb(if selected { theme.accent } else { theme.border }))
-                        .bg(rgba(with_alpha(theme.surface_background, 0xe8)))
-                        .text_size(ui_rems(13.0))
-                        .text_color(rgb(if selected {
-                            theme.accent
+                        .border_color(if selected {
+                            theme.primary
                         } else {
-                            theme.text_muted
-                        }))
+                            theme.border
+                        })
+                        .bg(theme.popover.opacity(0xe8 as f32 / 255.0))
+                        .text_size(ui_rems(13.0))
+                        .text_color(if selected {
+                            theme.primary
+                        } else {
+                            theme.muted_foreground
+                        })
                         .child(if selected { "☑" } else { "☐" }),
                 )
             })
@@ -467,7 +472,7 @@ impl NewTab {
                     .justify_center()
                     .w(px(THUMBNAIL_MAX_WIDTH))
                     .h(px(THUMBNAIL_MAX_HEIGHT))
-                    .child(Self::render_thumbnail(thumbnail, theme)),
+                    .child(Self::render_thumbnail(thumbnail, theme, page_color)),
             )
             .child(
                 div()
@@ -483,7 +488,7 @@ impl NewTab {
                     .w_full()
                     .truncate()
                     .text_size(ui_rems(11.0))
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(theme.muted_foreground)
                     .child(directory),
             )
             .child(
@@ -492,19 +497,23 @@ impl NewTab {
                     .w_full()
                     .truncate()
                     .text_size(ui_rems(11.0))
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(theme.muted_foreground)
                     .child(last_read),
             )
     }
 
-    fn render_thumbnail(thumbnail: ThumbnailState, theme: Theme) -> AnyElement {
+    fn render_thumbnail(
+        thumbnail: ThumbnailState,
+        theme: ThemeColor,
+        page_color: u32,
+    ) -> AnyElement {
         match thumbnail {
             ThumbnailState::Ready(thumbnail) => {
                 let image = thumbnail.image.clone();
                 canvas(
                     move |_, _, _| image.clone(),
                     move |bounds, image, window, _| {
-                        window.paint_quad(fill(bounds, rgb(theme.page)));
+                        window.paint_quad(fill(bounds, rgb(page_color)));
                         if let Err(error) =
                             window.paint_image(bounds, Corners::default(), image, 0, false)
                         {
@@ -515,7 +524,7 @@ impl NewTab {
                 .w(px(thumbnail.width))
                 .h(px(thumbnail.height))
                 .border_1()
-                .border_color(rgb(theme.border))
+                .border_color(theme.border)
                 .into_any_element()
             }
             ThumbnailState::Loading => div()
@@ -525,10 +534,10 @@ impl NewTab {
                 .w(px(THUMBNAIL_MAX_WIDTH))
                 .h(px(THUMBNAIL_MAX_HEIGHT))
                 .border_1()
-                .border_color(rgb(theme.border))
-                .bg(rgb(theme.page))
+                .border_color(theme.border)
+                .bg(rgb(page_color))
                 .text_size(ui_rems(11.0))
-                .text_color(rgb(theme.text_muted))
+                .text_color(theme.muted_foreground)
                 .child(crate::fl!("new-tab-rendering-preview"))
                 .into_any_element(),
             ThumbnailState::Failed => div()
@@ -538,10 +547,10 @@ impl NewTab {
                 .w(px(THUMBNAIL_MAX_WIDTH))
                 .h(px(THUMBNAIL_MAX_HEIGHT))
                 .border_1()
-                .border_color(rgb(theme.border))
-                .bg(rgba(((theme.error & 0x00ff_ffff) << 8) | 0x18))
+                .border_color(theme.border)
+                .bg(theme.danger.opacity(0x18 as f32 / 255.0))
                 .text_size(ui_rems(11.0))
-                .text_color(rgb(theme.text_muted))
+                .text_color(theme.muted_foreground)
                 .child(crate::fl!("new-tab-preview-unavailable"))
                 .into_any_element(),
         }
@@ -594,7 +603,7 @@ impl EventEmitter<NewTabEvent> for NewTab {}
 
 impl Render for NewTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let theme = cx.theme().colors;
         let cols = self.cols.max(1);
         let rows = self.entries.len().div_ceil(cols);
         let horizontal_gap = Self::horizontal_gap(self.viewport_width, cols);
@@ -624,7 +633,7 @@ impl Render for NewTab {
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .text_color(rgb(theme.text_muted))
+                .text_color(theme.muted_foreground)
                 .child(
                     div()
                         .text_size(ui_rems(16.0))
@@ -652,7 +661,9 @@ impl Render for NewTab {
                                 rows,
                                 cx.processor(
                                     move |this, visible_range: Range<usize>, _window, cx| {
-                                        let theme = cx.global::<SettingsStore>().resolved_theme;
+                                        let document_theme =
+                                            cx.global::<SettingsStore>().resolved_theme;
+                                        let theme = cx.theme().colors;
                                         let prewarm_range = visible_range.start.saturating_sub(1)
                                             ..(visible_range.end + 1).min(rows);
                                         let visible_paths = prewarm_range
@@ -698,8 +709,14 @@ impl Render for NewTab {
                                                             this.selection.contains(&entry_ix);
 
                                                         row = row.child(Self::render_card(
-                                                            entry, thumbnail, selecting, selected,
-                                                            entry_ix, theme, cx,
+                                                            entry,
+                                                            thumbnail,
+                                                            selecting,
+                                                            selected,
+                                                            entry_ix,
+                                                            theme,
+                                                            document_theme.page,
+                                                            cx,
                                                         ));
                                                     } else {
                                                         row = row.child(
@@ -740,7 +757,7 @@ impl Render for NewTab {
             .h(px(NEW_TAB_HEADER_HEIGHT))
             .px_3()
             .border_b(px(1.0))
-            .border_color(rgb(theme.border))
+            .border_color(theme.border)
             .child(
                 div()
                     .text_size(ui_rems(13.0))
@@ -811,9 +828,9 @@ impl Render for NewTab {
             }))
             .flex()
             .flex_col()
-            .bg(rgb(theme.tab_active_background))
+            .bg(theme.tab_active)
             .text_size(ui_rems(12.0))
-            .text_color(rgb(theme.text))
+            .text_color(theme.foreground)
             .child(measure)
             .when_some(library_error, |this, error| {
                 this.child(
@@ -822,8 +839,8 @@ impl Render for NewTab {
                         .mt_3()
                         .p_2()
                         .rounded(px(4.0))
-                        .bg(rgb(theme.element_hover))
-                        .text_color(rgb(theme.accent))
+                        .bg(theme.list_hover)
+                        .text_color(theme.primary)
                         .child(error),
                 )
             })

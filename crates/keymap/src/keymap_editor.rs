@@ -3,8 +3,8 @@ use std::{cmp::Ordering, ops::Range};
 use gpui::{
     Anchor, AnyElement, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString, Styled,
-    UniformListScrollHandle, Window, anchored, deferred, div, prelude::*, px, rems, rgb, rgba,
-    uniform_list,
+    UniformListScrollHandle, Window, anchored, deferred, div, prelude::*, px, rems,
+    transparent_black, uniform_list,
 };
 
 use crate::{
@@ -15,11 +15,10 @@ use crate::{
     },
     scrollbar::Scrollbar,
     settings::{Settings, SettingsStore, ui_rems},
-    theme::Theme,
 };
 use glyphst_ui::tooltip::text_tooltip;
 use gpui_component::{
-    Sizable as _,
+    ActiveTheme as _, Sizable as _, ThemeColor as Theme,
     input::{Input, InputEvent, InputState},
 };
 
@@ -380,7 +379,7 @@ impl KeymapEditor {
             .flex()
             .items_center()
             .text_size(ui_rems(12.0))
-            .text_color(rgb(theme.text_muted));
+            .text_color(theme.muted_foreground);
         let base = match width {
             Some(width) => base.w(px(width)).flex_none(),
             None => base.flex_1().min_w_0(),
@@ -389,7 +388,7 @@ impl KeymapEditor {
         match column {
             Some(column) => base
                 .id(format!("keymap-column-{column:?}"))
-                .hover(move |style| style.bg(rgb(theme.element_hover)))
+                .hover(move |style| style.bg(theme.list_hover))
                 .cursor_pointer()
                 .on_mouse_down(
                     MouseButton::Left,
@@ -455,12 +454,10 @@ impl KeymapEditor {
             .flex_row()
             .items_center()
             .border_2()
-            .when(is_selected, |this| {
-                this.border_color(rgb(theme.border_focused))
-            })
-            .when(!is_selected, |this| this.border_color(rgba(0x00000000)))
-            .text_color(rgb(theme.text))
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .when(is_selected, |this| this.border_color(theme.ring))
+            .when(!is_selected, |this| this.border_color(transparent_black()))
+            .text_color(theme.foreground)
+            .hover(move |style| style.bg(theme.list_hover))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -515,7 +512,7 @@ impl KeymapEditor {
                             IconName::Pencil
                         })
                         .size(ui_rems(14.0))
-                        .text_color(rgb(theme.text_muted)),
+                        .text_color(theme.muted_foreground),
                     ),
             )
             .child(
@@ -541,7 +538,7 @@ impl KeymapEditor {
                         vec![
                             div()
                                 .text_size(ui_rems(12.0))
-                                .text_color(rgb(theme.text_muted))
+                                .text_color(theme.muted_foreground)
                                 .child(crate::fl!("keymap-unbound"))
                                 .into_any_element(),
                         ]
@@ -558,7 +555,7 @@ impl KeymapEditor {
                     .flex_none()
                     .px_2()
                     .text_size(ui_rems(12.0))
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(theme.muted_foreground)
                     .truncate()
                     .child(category.label()),
             )
@@ -568,7 +565,7 @@ impl KeymapEditor {
                     .flex_none()
                     .px_2()
                     .text_size(ui_rems(12.0))
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(theme.muted_foreground)
                     .child(source_label),
             )
             .into_any_element()
@@ -591,24 +588,24 @@ impl KeymapEditor {
             .justify_center()
             .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(theme.border_variant))
-            .bg(rgb(if primary {
-                theme.accent
+            .border_color(theme.input)
+            .bg(if primary {
+                theme.primary
             } else {
-                theme.surface_background
-            }))
+                theme.popover
+            })
             .text_size(ui_rems(12.0))
-            .text_color(rgb(if primary {
-                theme.background
+            .text_color(if primary {
+                theme.primary_foreground
             } else {
-                theme.text
-            }))
+                theme.foreground
+            })
             .hover(move |style| {
-                style.bg(rgb(if primary {
-                    theme.accent
+                style.bg(if primary {
+                    theme.primary
                 } else {
-                    theme.element_hover
-                }))
+                    theme.list_hover
+                })
             })
             .cursor_pointer()
             .on_mouse_down(
@@ -637,9 +634,9 @@ impl KeymapEditor {
             .h(px(30.0))
             .px_3()
             .text_size(ui_rems(13.0))
-            .text_color(rgb(theme.text))
+            .text_color(theme.foreground)
             .cursor_pointer()
-            .hover(move |style| style.bg(rgb(theme.element_hover)))
+            .hover(move |style| style.bg(theme.list_hover))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -651,7 +648,7 @@ impl KeymapEditor {
             .child(
                 Icon::new(icon)
                     .size(ui_rems(14.0))
-                    .text_color(rgb(theme.text_muted)),
+                    .text_color(theme.muted_foreground),
             )
             .child(label)
             .into_any_element()
@@ -662,7 +659,7 @@ impl KeymapEditor {
             .h(px(1.0))
             .my_1()
             .mx_1()
-            .bg(rgb(theme.border))
+            .bg(theme.border)
             .into_any_element()
     }
 
@@ -684,9 +681,9 @@ impl KeymapEditor {
             .w(px(220.0))
             .py_1()
             .border_1()
-            .border_color(rgb(theme.border))
+            .border_color(theme.border)
             .overflow_hidden()
-            .bg(rgb(theme.surface_background))
+            .bg(theme.popover)
             .shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
@@ -785,7 +782,7 @@ impl KeymapEditor {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(0x00000066))
+            .bg(theme.overlay)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -801,8 +798,8 @@ impl KeymapEditor {
                     .gap_3()
                     .rounded(px(8.0))
                     .border_1()
-                    .border_color(rgb(theme.border_variant))
-                    .bg(rgb(theme.surface_background))
+                    .border_color(theme.input)
+                    .bg(theme.popover)
                     .shadow_lg()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
@@ -814,7 +811,7 @@ impl KeymapEditor {
                             .gap_1()
                             .pb_3()
                             .border_b_1()
-                            .border_color(rgb(theme.border))
+                            .border_color(theme.border)
                             .child(
                                 div()
                                     .text_size(ui_rems(16.0))
@@ -824,7 +821,7 @@ impl KeymapEditor {
                             .child(
                                 div()
                                     .text_size(ui_rems(12.0))
-                                    .text_color(rgb(theme.text_muted))
+                                    .text_color(theme.muted_foreground)
                                     .child(crate::fl!(
                                         "keymap-modal-subtitle",
                                         action = editing.label.as_str(),
@@ -856,7 +853,7 @@ impl KeymapEditor {
                                 .child(
                                     div()
                                         .text_size(ui_rems(12.0))
-                                        .text_color(rgb(theme.text_muted))
+                                        .text_color(theme.muted_foreground)
                                         .child(crate::fl!(
                                             "keymap-conflicting-bindings",
                                             count = matching_count as i64
@@ -873,10 +870,10 @@ impl KeymapEditor {
                                         .gap_1()
                                         .rounded(px(4.0))
                                         .border_1()
-                                        .border_color(rgb(theme.border_variant))
+                                        .border_color(theme.input)
                                         .text_size(ui_rems(11.0))
-                                        .text_color(rgb(theme.text_muted))
-                                        .hover(|style| style.bg(rgb(theme.element_hover)))
+                                        .text_color(theme.muted_foreground)
+                                        .hover(|style| style.bg(theme.list_hover))
                                         .cursor_pointer()
                                         .on_mouse_down(
                                             MouseButton::Left,
@@ -893,7 +890,7 @@ impl KeymapEditor {
                                         .child(
                                             Icon::new(IconName::ArrowUpRight)
                                                 .size(ui_rems(11.0))
-                                                .text_color(rgb(theme.text_muted)),
+                                                .text_color(theme.muted_foreground),
                                         ),
                                 ),
                         )
@@ -901,7 +898,7 @@ impl KeymapEditor {
                     .child(
                         div()
                             .text_size(ui_rems(12.0))
-                            .text_color(rgb(theme.text_muted))
+                            .text_color(theme.muted_foreground)
                             .child(crate::fl!(
                                 "keymap-context",
                                 context = editing.category.label()
@@ -910,11 +907,11 @@ impl KeymapEditor {
                     .when_some(editing.error.clone(), |this, error| {
                         let (bg_color, border_color, text_color) = match error.severity {
                             InputSeverity::Warning => {
-                                let warn = rgb(theme.error).opacity(0.7);
+                                let warn = theme.danger.opacity(0.7);
                                 (warn.opacity(0.1), warn, warn)
                             }
                             InputSeverity::Error => {
-                                let err = rgb(theme.error);
+                                let err = theme.danger;
                                 (err.opacity(0.1), err, err)
                             }
                         };
@@ -978,10 +975,8 @@ impl Focusable for KeymapEditor {
 
 impl Render for KeymapEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (settings, theme) = {
-            let store = cx.global::<SettingsStore>();
-            (store.settings.clone(), store.resolved_theme)
-        };
+        let theme = cx.theme().colors;
+        let settings = cx.global::<SettingsStore>().settings.clone();
         let rows = self.filtered_bindings(&settings);
         let row_count = rows.len();
         let scroll_handle = self.scroll.clone();
@@ -996,8 +991,8 @@ impl Render for KeymapEditor {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(theme.tab_active_background))
-            .text_color(rgb(theme.text))
+            .bg(theme.tab_active)
+            .text_color(theme.foreground)
             .text_size(ui_rems(13.0))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1018,7 +1013,7 @@ impl Render for KeymapEditor {
                     .items_center()
                     .justify_between()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.border))
+                    .border_color(theme.border)
                     .child(
                         div()
                             .text_size(ui_rems(18.0))
@@ -1038,8 +1033,8 @@ impl Render for KeymapEditor {
                     .flex_row()
                     .items_center()
                     .border_b(px(1.0))
-                    .border_color(rgb(theme.border_variant))
-                    .bg(rgb(theme.surface_background))
+                    .border_color(theme.input)
+                    .bg(theme.popover)
                     .child(self.header_cell(String::new(), None, Some(ICON_COL), theme, cx))
                     .child(self.header_cell(
                         crate::fl!("keymap-header-action"),
@@ -1121,7 +1116,7 @@ impl Render for KeymapEditor {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_color(rgb(theme.text_muted))
+                        .text_color(theme.muted_foreground)
                         .child(crate::fl!("keymap-empty")),
                 )
             })
@@ -1147,9 +1142,9 @@ impl Render for KeymapEditor {
                         .py_2()
                         .rounded(px(6.0))
                         .border_1()
-                        .border_color(rgb(theme.error))
-                        .bg(rgb(theme.surface_background))
-                        .text_color(rgb(theme.error))
+                        .border_color(theme.danger)
+                        .bg(theme.popover)
+                        .text_color(theme.danger)
                         .child(error),
                 )
             })

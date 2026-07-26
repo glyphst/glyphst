@@ -841,13 +841,11 @@ fn theme_resolution_layers_selected_theme_and_overrides() {
         ..Settings::default()
     };
 
-    let base = catalog.resolve(DEFAULT_DARK_THEME_ID, PartialTheme::default());
     let theme = catalog.resolve(
         settings.theme.name(ThemeAppearance::Light),
         settings.overrides,
     );
 
-    assert_eq!(theme.accent, base.accent);
     assert_eq!(theme.background, 0x101010);
     assert_eq!(theme.page_gap, 48.0);
 }
@@ -935,7 +933,6 @@ fn loads_user_theme_from_themes_directory() {
         .unwrap();
 
     assert_eq!(theme.background, 0x123456);
-    assert_eq!(theme.accent, 0xabcdef);
     assert_eq!(metadata.name, "Solar");
     assert_eq!(metadata.appearance.as_str(), "light");
     assert_eq!(metadata.origin, ThemeOrigin::User(root.join("solar.json")));

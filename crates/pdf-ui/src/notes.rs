@@ -5,12 +5,12 @@ use crate::{
     pdf_view::PdfView,
     picker::{Picker, PickerDelegate, fuzzy_match, normalize_query},
     settings::ui_rems,
-    theme::Theme,
 };
 use gpui::{
     AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, SharedString, StyledText,
-    WeakEntity, Window, div, prelude::*, px, rgb, rgba,
+    WeakEntity, Window, div, prelude::*, px,
 };
+use gpui_component::ThemeColor;
 
 const MAX_VISIBLE_MATCHES: usize = 12;
 const MATCH_ROW_HEIGHT: f32 = 52.0;
@@ -175,7 +175,7 @@ impl PickerDelegate for NotesPaletteDelegate {
     fn render_match(
         &self,
         match_ix: usize,
-        theme: Theme,
+        theme: ThemeColor,
         _: &FocusHandle,
         _: &Window,
     ) -> AnyElement {
@@ -191,7 +191,7 @@ impl PickerDelegate for NotesPaletteDelegate {
                 (
                     range,
                     HighlightStyle {
-                        color: Some(rgb(theme.match_highlight).into()),
+                        color: Some(theme.warning),
                         font_weight: Some(FontWeight::BOLD),
                         ..Default::default()
                     },
@@ -211,7 +211,13 @@ impl PickerDelegate for NotesPaletteDelegate {
                     .flex_none()
                     .w(px(8.0))
                     .h(px(8.0))
-                    .bg(rgba(theme.note_color(entry.color))),
+                    .bg(match entry.color {
+                        HighlightColor::Yellow => theme.yellow,
+                        HighlightColor::Green => theme.green,
+                        HighlightColor::Blue => theme.blue,
+                        HighlightColor::Pink => theme.magenta,
+                        HighlightColor::Orange => theme.warning,
+                    }),
             )
             .child(
                 div()
@@ -224,14 +230,14 @@ impl PickerDelegate for NotesPaletteDelegate {
                         div()
                             .truncate()
                             .text_size(ui_rems(11.0))
-                            .text_color(rgb(theme.text_muted))
+                            .text_color(theme.muted_foreground)
                             .child(entry.text.clone()),
                     ),
             )
             .child(
                 div()
                     .flex_none()
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(theme.muted_foreground)
                     .child(format!("p. {}", entry.page)),
             )
             .into_any_element()

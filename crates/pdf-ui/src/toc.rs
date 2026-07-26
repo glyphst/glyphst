@@ -2,12 +2,12 @@ use std::ops::Range;
 
 use crate::pdf_view::PdfView;
 use crate::picker::{Picker, PickerDelegate, fuzzy_match, normalize_query};
-use crate::theme::Theme;
 use glyphst_ui::tooltip::text_tooltip;
 use gpui::{
     AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, SharedString, StyledText,
-    WeakEntity, Window, div, prelude::*, px, rgb,
+    WeakEntity, Window, div, prelude::*, px,
 };
+use gpui_component::ThemeColor;
 
 const MAX_VISIBLE_MATCHES: usize = 12;
 const MATCH_ROW_HEIGHT: f32 = 40.0;
@@ -111,7 +111,7 @@ impl PickerDelegate for TocPaletteDelegate {
     fn render_match(
         &self,
         match_ix: usize,
-        theme: Theme,
+        theme: ThemeColor,
         _: &FocusHandle,
         _: &Window,
     ) -> AnyElement {
@@ -130,7 +130,7 @@ impl PickerDelegate for TocPaletteDelegate {
                 (
                     range,
                     HighlightStyle {
-                        color: Some(rgb(theme.match_highlight).into()),
+                        color: Some(theme.warning),
                         font_weight: Some(FontWeight::BOLD),
                         ..Default::default()
                     },
@@ -158,7 +158,7 @@ impl PickerDelegate for TocPaletteDelegate {
                 div()
                     .flex_none()
                     .ml_3()
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(theme.muted_foreground)
                     .child(format!("{}", page_number)),
             )
             .into_any_element()
