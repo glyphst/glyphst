@@ -6,14 +6,13 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
+use glyphst_core::HighlightColor;
 use gpui::{App, Hsla, rgb, rgba};
 use gpui_component::{
     Theme as ComponentTheme, ThemeConfig as ComponentThemeConfig, ThemeMode as ComponentThemeMode,
     ThemeRegistry as ComponentThemeRegistry, ThemeSet as ComponentThemeSet,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
-
-use glyphst_library::HighlightColor;
 
 pub const DEFAULT_LIGHT_THEME_ID: &str = "Default Light";
 pub const DEFAULT_DARK_THEME_ID: &str = "Default Dark";

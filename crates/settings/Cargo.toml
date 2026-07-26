@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 glyphst-core = { path = "../core" }
-glyphst-library = { path = "../library" }
 gpui.workspace = true
 gpui_component.workspace = true
 i18n-embed.workspace = true

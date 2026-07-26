@@ -1,0 +1,170 @@
+use super::edits::replace_snapshot_by_id;
+use super::*;
+
+impl Library {
+    pub(super) fn record_history_at(
+        &mut self,
+        path: &Path,
+        position: DocumentPosition,
+        opened: u64,
+    ) {
+        let path = normalize_path(path);
+        self.history.retain(|entry| entry.path != path);
+        self.history.push(HistoryEntry {
+            path,
+            opened,
+            position,
+        });
+        self.sanitize();
+    }
+
+    pub(super) fn apply_bookmark_snapshot(&mut self, id: u64, target: Option<Bookmark>) {
+        replace_snapshot_by_id(&mut self.bookmarks, id, target, |bookmark| bookmark.id);
+        self.bookmarks.sort_by(|left, right| {
+            right
+                .created
+                .cmp(&left.created)
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.next_bookmark_id = self.next_bookmark_id.max(id.saturating_add(1));
+    }
+
+    pub(super) fn apply_highlight_snapshot(&mut self, id: u64, target: Option<Highlight>) {
+        replace_snapshot_by_id(&mut self.highlights, id, target, |highlight| highlight.id);
+        self.highlights.sort_by(|left, right| {
+            left.created
+                .cmp(&right.created)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.next_highlight_id = self.next_highlight_id.max(id.saturating_add(1));
+    }
+
+    pub(super) fn apply_note_snapshot(&mut self, id: u64, target: Option<Note>) {
+        replace_snapshot_by_id(&mut self.notes, id, target, |note| note.id);
+        self.notes.sort_by(|left, right| {
+            left.created
+                .cmp(&right.created)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.next_note_id = self.next_note_id.max(id.saturating_add(1));
+    }
+
+    pub(super) fn sanitize(&mut self) {
+        self.history
+            .retain(|entry| !entry.path.as_os_str().is_empty());
+        self.history.sort_by(|left, right| {
+            right
+                .opened
+                .cmp(&left.opened)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        self.history.dedup_by(|left, right| left.path == right.path);
+        self.history.truncate(MAX_HISTORY_ENTRIES);
+
+        self.bookmarks.retain_mut(|bookmark| {
+            bookmark.normalize();
+            bookmark.is_valid()
+        });
+        self.bookmarks.sort_by(|left, right| {
+            right
+                .created
+                .cmp(&left.created)
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        self.highlights.retain_mut(|highlight| {
+            highlight.normalize();
+            highlight.is_valid()
+        });
+        self.highlights.sort_by(|left, right| {
+            left.created
+                .cmp(&right.created)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        self.notes.retain_mut(|note| {
+            note.normalize();
+            note.is_valid()
+        });
+        self.notes.sort_by(|left, right| {
+            left.created
+                .cmp(&right.created)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        self.ai_sessions.retain_mut(|session| {
+            session.path = normalize_path(&session.path);
+            session.title = session.title.trim().to_string();
+            if session.title.is_empty() {
+                session.title = "New Chat".to_string();
+            }
+            session.messages.retain_mut(|message| {
+                message.content = message.content.trim().to_string();
+                message.request_content = message
+                    .request_content
+                    .take()
+                    .map(|content| content.trim().to_string())
+                    .filter(|content| !content.is_empty() && *content != message.content);
+                !message.content.is_empty()
+            });
+            !session.path.as_os_str().is_empty()
+                && session.id > 0
+                && !session.messages.is_empty()
+                && session.created > 0
+                && session.updated > 0
+        });
+        self.ai_sessions.sort_by(|left, right| {
+            right
+                .updated
+                .cmp(&left.updated)
+                .then_with(|| right.created.cmp(&left.created))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.ai_sessions.dedup_by(|left, right| left.id == right.id);
+        self.ai_sessions.truncate(MAX_AI_SESSIONS);
+
+        self.document_preferences.retain_mut(|preferences| {
+            preferences.path = normalize_path(&preferences.path);
+            preferences.target_language = preferences.target_language.trim().to_ascii_lowercase();
+            preferences.epub = preferences.epub.map(EpubReaderPreferences::sanitized);
+            !preferences.path.as_os_str().is_empty()
+                && (!preferences.target_language.is_empty()
+                    || preferences.epub.is_some()
+                    || preferences.rotation != DocumentRotation::default())
+        });
+        self.document_preferences
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        self.document_preferences
+            .dedup_by(|left, right| left.path == right.path);
+
+        self.next_bookmark_id = self.next_bookmark_id.max(
+            self.bookmarks
+                .iter()
+                .map(|bookmark| bookmark.id)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
+        self.next_highlight_id = self.next_highlight_id.max(
+            self.highlights
+                .iter()
+                .map(|highlight| highlight.id)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
+        self.next_note_id = self
+            .next_note_id
+            .max(self.notes.iter().map(|note| note.id).max().unwrap_or(0) + 1);
+        self.next_ai_session_id = self.next_ai_session_id.max(
+            self.ai_sessions
+                .iter()
+                .map(|session| session.id)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
+    }
+}

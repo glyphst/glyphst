@@ -2767,7 +2767,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "glyphst-core",
- "glyphst-library",
  "gpui",
  "gpui-component",
  "i18n-embed",
