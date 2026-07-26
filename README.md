@@ -88,7 +88,9 @@ Clippy, and `cargo audit`; see `prek.toml`.
 ## Credits
 (TODO: add links)
 
+- Mupdf
 - Zed editor
+- GPUI Components
 - Zathura
 - Sioyek
 - Retain-pdf
