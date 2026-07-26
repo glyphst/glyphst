@@ -83,6 +83,7 @@
               prek
               rust-analyzer
               rustToolchain
+              unzip
             ];
 
             buildInputs = buildLibraries;
