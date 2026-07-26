@@ -19,7 +19,7 @@ use crate::bookmarks::{
 };
 use crate::go_to_page::{GoToPagePrompt, GoToPagePromptDelegate};
 use crate::history::{HistoryPalette, HistoryPaletteDelegate};
-use crate::icons::{Icon, IconName};
+use crate::icons::IconName;
 use crate::library::{
     DocumentEditRevision, DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore,
     Note, SemanticTextRange, SidebarWidths, normalize_path,
@@ -66,16 +66,21 @@ use glyphst_ui::{
     tooltip::text_tooltip,
 };
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, AsyncApp, BorderStyle, Bounds, ClipboardItem,
-    Context, Corners, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, Font,
-    FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy,
+    Anchor, Animation, AnimationExt, AnyElement, AsyncApp, BorderStyle, Bounds, ClickEvent,
+    ClipboardItem, Context, Corners, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    Font, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement, Task, TextAlign, TextRun,
     TextStyle, UniformListScrollHandle, Window, WrappedLine, anchored, canvas, deferred, div, fill,
     outline, point, prelude::*, px, rgb, rgba, size, transparent_black, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, IndexPath, Sizable as _, ThemeColor,
+    ActiveTheme as _, IndexPath, Selectable as _, Sizable as _, StyledExt as _, ThemeColor,
+    alert::Alert,
+    button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
+    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
+    resizable::{ResizablePanelEvent, ResizablePanelGroup, ResizableState, resizable_panel},
     searchable_list::SearchableVec,
     select::{Select, SelectEvent, SelectState},
 };
@@ -114,7 +119,6 @@ const THUMBNAIL_SIDEBAR_ROW_PADDING_Y: f32 = 12.0;
 const THUMBNAIL_SIDEBAR_MIN_THUMBNAIL_WIDTH: f32 = 96.0;
 const THUMBNAIL_SIDEBAR_MAX_THUMBNAIL_WIDTH: f32 = 220.0;
 const THUMBNAIL_SIDEBAR_COMPACT_HEADER_WIDTH: f32 = 300.0;
-const SIDEBAR_RESIZE_HANDLE_SIZE: f32 = 6.0;
 const SIDEBAR_MIN_WIDTH: f32 = 150.0;
 const SIDEBAR_MAX_WIDTH_RATIO: f32 = 0.5;
 const GRID_OVERVIEW_DEFAULT_ZOOM: f32 = 1.0;
@@ -141,7 +145,6 @@ const DIFF_FLASH_PIXEL_THRESHOLD: u16 = 32;
 const DIFF_FLASH_MAX_RECTS: usize = 64;
 const FOOTBAR_HEIGHT: f32 = 26.0;
 const FOOTBAR_BUTTON_HEIGHT: f32 = 20.0;
-const FOOTBAR_ICON_SIZE: f32 = 14.0;
 const MAX_CACHED_TRANSLATED_LAYOUTS: usize = 512;
 const TRANSLATED_LAYOUT_KEEP_FRAMES: u64 = 120;
 
@@ -692,7 +695,6 @@ struct ContextMenuState {
     has_note: bool,
     has_region: bool,
     grid_overview: bool,
-    copy_submenu_open: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -934,14 +936,6 @@ struct JumpPosition {
     scroll_y_doc: f32,
 }
 
-#[derive(Clone, Copy)]
-enum DraggedSidebar {
-    Thumbnails,
-    Toc,
-    Notes,
-    AiPanel,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LeftSidebar {
     Thumbnails,
@@ -960,12 +954,6 @@ struct EpubStepperConfig {
     value: String,
     decrease_id: &'static str,
     increase_id: &'static str,
-}
-
-impl Render for DraggedSidebar {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
 }
 
 pub struct PdfView {
@@ -1068,8 +1056,10 @@ pub struct PdfView {
     thumbnail_sidebar_current_page: usize,
     thumbnail_sidebar_selecting: bool,
     thumbnail_sidebar_selection: BTreeSet<usize>,
-    thumbnail_sidebar_actions_position: Option<GpuiPoint<Pixels>>,
     ai_panel_width: f32,
+    sidebar_resizable_state: Option<Entity<ResizableState>>,
+    resizable_left_sidebar: Option<LeftSidebar>,
+    resizable_ai_panel_open: bool,
     sidebar_width_save_task: Option<Task<()>>,
     grid_overview_open: bool,
     grid_overview_scroll: UniformListScrollHandle,
@@ -1079,7 +1069,6 @@ pub struct PdfView {
     grid_overview_viewport_width: f32,
     grid_overview_selecting: bool,
     grid_overview_selection: BTreeSet<usize>,
-    grid_overview_actions_position: Option<GpuiPoint<Pixels>>,
     presentation_page: Option<usize>,
     jump_back: Vec<JumpPosition>,
     jump_forward: Vec<JumpPosition>,
@@ -1105,12 +1094,12 @@ pub struct PdfView {
     text_indexing_task: Option<Task<()>>,
     position_save_task: Option<Task<()>>,
     context_menu_position: Option<GpuiPoint<Pixels>>,
+    context_menu_popup: Option<Entity<PopupMenu>>,
     context_menu_page: Option<usize>,
     context_menu_image: Option<(usize, usize)>,
     context_menu_highlight: Option<u64>,
     context_menu_note: Option<u64>,
     context_menu_region: bool,
-    context_menu_copy_submenu_open: bool,
     document_edit_revision: DocumentEditRevision,
     bookmarks_revision: u64,
     _image_clipboard: Option<Clipboard>,

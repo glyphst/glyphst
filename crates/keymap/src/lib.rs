@@ -2,7 +2,6 @@
 
 pub mod keybindings;
 mod keymap_editor;
-mod keystroke_input;
 
 #[macro_export]
 macro_rules! fl {

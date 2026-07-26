@@ -97,8 +97,6 @@ impl PdfView {
         let page_idx = self.current_page_index().min(self.last_page_index());
         self.close_all_overlays(window, cx);
         self.close_context_menu(cx);
-        self.close_grid_overview_actions(cx);
-        self.close_thumbnail_sidebar_actions(cx);
         self.set_grid_overview_open(false, cx);
         self.panning = None;
         self.dragging = false;

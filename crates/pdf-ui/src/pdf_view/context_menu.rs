@@ -11,8 +11,6 @@ impl PdfView {
         self.dragging = false;
         self.pending_selection_anchor = None;
         self.panning = None;
-        self.grid_overview_actions_position = None;
-        self.thumbnail_sidebar_actions_position = None;
         self.context_menu_region =
             !self.grid_overview_open && self.point_in_selected_region(position);
         self.context_menu_image = if self.grid_overview_open
@@ -24,8 +22,46 @@ impl PdfView {
         } else {
             self.image_at_screen(position, cx)
         };
-        self.context_menu_copy_submenu_open = false;
         self.context_menu_position = Some(position);
+
+        let state = ContextMenuState {
+            has_page: self.capabilities.page_export
+                && !self.context_menu_region
+                && self.context_menu_page.is_some(),
+            has_image: !self.grid_overview_open && self.context_menu_image.is_some(),
+            has_selection: !self.grid_overview_open && self.selected_text().is_some(),
+            highlight_color: if self.grid_overview_open {
+                None
+            } else {
+                self.context_menu_highlight
+                    .and_then(|id| self.highlight_color_for_id(id))
+            },
+            has_note: !self.grid_overview_open && self.context_menu_note.is_some(),
+            has_region: self.context_menu_region,
+            grid_overview: self.grid_overview_open,
+        };
+        let document_theme = cx.global::<SettingsStore>().resolved_theme;
+        let view = cx.entity();
+        let action_context = self.focus_handle.clone();
+        let popup = PopupMenu::build(window, cx, move |menu, window, menu_cx| {
+            Self::build_context_menu_popup(
+                menu.action_context(action_context.clone()),
+                state,
+                window.is_fullscreen(),
+                document_theme,
+                view.clone(),
+                window,
+                menu_cx,
+            )
+        });
+        cx.subscribe_in(&popup, window, |this, popup, _: &DismissEvent, _, cx| {
+            if this.context_menu_popup.as_ref() == Some(popup) {
+                this.close_context_menu(cx);
+            }
+        })
+        .detach();
+        self.context_menu_popup = Some(popup.clone());
+        popup.focus_handle(cx).focus(window, cx);
         window.prevent_default();
         cx.stop_propagation();
         cx.notify();
@@ -33,11 +69,11 @@ impl PdfView {
 
     pub(super) fn close_context_menu(&mut self, cx: &mut Context<Self>) -> bool {
         let was_open = self.context_menu_position.take().is_some();
+        self.context_menu_popup = None;
         self.context_menu_page = None;
         self.context_menu_image = None;
         self.context_menu_highlight = None;
         self.context_menu_region = false;
-        self.context_menu_copy_submenu_open = false;
         if was_open {
             self.context_menu_note = None;
             cx.notify();
@@ -45,209 +81,77 @@ impl PdfView {
         was_open
     }
 
-    fn context_menu_entry(
+    fn context_menu_item(
         label: String,
-        theme: ThemeColor,
+        view: Entity<Self>,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id(label.clone())
-            .flex()
-            .items_center()
-            .h(px(30.0))
-            .px_3()
-            .text_size(ui_rems(13.0))
-            .text_color(theme.foreground)
-            .cursor_pointer()
-            .hover(move |style| style.bg(theme.list_hover))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    handler(this, window, cx);
-                    this.close_context_menu(cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(label)
-    }
-
-    fn context_menu_copy_entry(
-        theme: ThemeColor,
-        copy_submenu_open: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let submenu = div()
-            .absolute()
-            .left(px(188.0))
-            .top_0()
-            .w(px(190.0))
-            .py_1()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .child(Self::context_menu_entry(
-                crate::fl!("pdf-context-copy-plain-text"),
-                theme,
-                |this, _, cx| this.copy_selection_as(CopyFormat::PlainText, cx),
-                cx,
-            ))
-            .child(Self::context_menu_entry(
-                crate::fl!("pdf-context-copy-markdown"),
-                theme,
-                |this, _, cx| this.copy_selection_as(CopyFormat::Markdown, cx),
-                cx,
-            ));
-
-        div()
-            .relative()
-            .when(copy_submenu_open, |this| this.child(submenu))
-            .child(
-                div()
-                    .id("pdf-context-copy")
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(30.0))
-                    .px_3()
-                    .text_size(ui_rems(13.0))
-                    .text_color(theme.foreground)
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(theme.list_hover))
-                    .on_hover(cx.listener(|this, hovered, _, cx| {
-                        if *hovered && !this.context_menu_copy_submenu_open {
-                            this.context_menu_copy_submenu_open = true;
-                            cx.notify();
-                        }
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.copy_selection(cx);
-                            this.close_context_menu(cx);
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(crate::fl!("copy"))
-                    .child("›"),
-            )
-    }
-
-    fn context_menu_label(label: String, theme: ThemeColor) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .h(px(24.0))
-            .px_3()
-            .text_size(ui_rems(12.0))
-            .text_color(theme.muted_foreground)
-            .child(label)
+    ) -> PopupMenuItem {
+        PopupMenuItem::new(label).on_click(move |_, window, cx| {
+            view.update(cx, |this, cx| {
+                handler(this, window, cx);
+                this.close_context_menu(cx);
+            });
+        })
     }
 
     pub(super) fn grid_overview_toolbar_button(
         id: &'static str,
         label: String,
-        theme: ThemeColor,
-        handler: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        handler: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .justify_center()
-            .h(px(24.0))
-            .px_2()
-            .border_1()
-            .border_color(theme.border)
-            .bg(transparent_black())
-            .text_size(ui_rems(12.0))
-            .text_color(theme.foreground)
-            .cursor_pointer()
-            .hover(move |style| style.bg(theme.list_hover))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    handler(this, event, window, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(label)
+        Button::new(id)
+            .small()
+            .outline()
+            .label(label)
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                handler(this, event, window, cx);
+                cx.stop_propagation();
+            }))
     }
 
-    fn grid_overview_action_entry(
+    pub(super) fn page_selection_actions_button(
+        id: &'static str,
         label: String,
-        theme: ThemeColor,
-        handler: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id(label.clone())
-            .flex()
-            .items_center()
-            .h(px(30.0))
-            .px_3()
-            .text_size(ui_rems(13.0))
-            .text_color(theme.foreground)
-            .cursor_pointer()
-            .hover(move |style| style.bg(theme.list_hover))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    handler(this, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(label)
-    }
-
-    fn render_page_selection_actions_menu(
         source: PageSelectionSource,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let view = cx.entity();
+        let text_view = view.clone();
+        let image_view = view;
+        Button::new(id)
+            .small()
+            .outline()
+            .label(label)
+            .dropdown_menu(move |menu, _, _| {
+                menu.item(
+                    PopupMenuItem::new(crate::fl!("pdf-export-as-text")).on_click({
+                        let view = text_view.clone();
+                        move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.export_selected_pages_as_text(source, cx);
+                            });
+                        }
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new(crate::fl!("pdf-export-as-image")).on_click({
+                        let view = image_view.clone();
+                        move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.export_selected_pages_as_image(source, cx);
+                            });
+                        }
+                    }),
+                )
+            })
+    }
+
+    pub(super) fn render_note_popup(
+        body: SharedString,
         theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let text_source = source;
-        let image_source = source;
-
-        div()
-            .occlude()
-            .flex()
-            .flex_col()
-            .min_w(px(160.0))
-            .py_1()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .child(Self::grid_overview_action_entry(
-                crate::fl!("pdf-export-as-text"),
-                theme,
-                move |this, cx| this.export_selected_pages_as_text(text_source, cx),
-                cx,
-            ))
-            .child(Self::grid_overview_action_entry(
-                crate::fl!("pdf-export-as-image"),
-                theme,
-                move |this, cx| this.export_selected_pages_as_image(image_source, cx),
-                cx,
-            ))
-    }
-
-    pub(super) fn render_grid_overview_actions_menu(
-        theme: ThemeColor,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        Self::render_page_selection_actions_menu(PageSelectionSource::GridOverview, theme, cx)
-    }
-
-    pub(super) fn render_thumbnail_sidebar_actions_menu(
-        theme: ThemeColor,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        Self::render_page_selection_actions_menu(PageSelectionSource::ThumbnailSidebar, theme, cx)
-    }
-
-    pub(super) fn render_note_popup(body: SharedString, theme: ThemeColor) -> impl IntoElement {
         let mut note = div()
             .occlude()
             .flex()
@@ -255,9 +159,7 @@ impl PdfView {
             .gap_1()
             .max_w(px(360.0))
             .p_3()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
+            .popover_style(cx)
             .text_size(ui_rems(13.0))
             .text_color(theme.foreground);
 
@@ -293,58 +195,21 @@ impl PdfView {
             .child(content)
     }
 
-    pub(super) fn render_sidebar_resize_handle(
-        id: &'static str,
-        sidebar: DraggedSidebar,
-        on_left: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + 'static {
-        let offset = px(-SIDEBAR_RESIZE_HANDLE_SIZE / 2.0);
-        let handle = div()
-            .id(id)
-            .on_drag(sidebar, |sidebar, _, _, cx| {
-                cx.stop_propagation();
-                cx.new(|_| *sidebar)
-            })
-            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                this.close_context_menu(cx);
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _: &MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                }),
-            )
-            .absolute()
-            .top(px(0.0))
-            .h_full()
-            .w(px(SIDEBAR_RESIZE_HANDLE_SIZE))
-            .cursor_col_resize()
-            .occlude();
-
-        if on_left {
-            deferred(handle.left(offset))
-        } else {
-            deferred(handle.right(offset))
-        }
-    }
-
     pub(super) fn render_sidebar_shell(
         title: String,
-        width: f32,
         header_end: impl IntoElement + 'static,
         content: impl IntoElement + 'static,
-        resize_handle: impl IntoElement + 'static,
         theme: ThemeColor,
         pdf_view: gpui::WeakEntity<Self>,
     ) -> impl IntoElement {
         div()
             .relative()
             .flex()
-            .flex_none()
+            .flex_1()
             .flex_col()
+            .size_full()
+            .min_w_0()
             .min_h_0()
-            .w(px(width))
             .border_r(px(1.0))
             .border_color(theme.border)
             .bg(theme.popover)
@@ -382,7 +247,6 @@ impl PdfView {
                     .child(div().flex_none().child(header_end)),
             )
             .child(content)
-            .child(resize_handle)
     }
 
     pub(super) fn render_sidebar_count(count: usize, theme: ThemeColor) -> impl IntoElement {
@@ -411,7 +275,7 @@ impl PdfView {
         current: Option<HighlightColor>,
         document_theme: Theme,
         theme: ThemeColor,
-        cx: &mut Context<Self>,
+        view: Entity<Self>,
     ) -> impl IntoElement {
         let mut row = div().flex().flex_row().gap_2().px_3().pb_2();
 
@@ -422,7 +286,7 @@ impl PdfView {
                 action,
                 document_theme,
                 theme,
-                cx,
+                view.clone(),
             ));
         }
 
@@ -435,7 +299,7 @@ impl PdfView {
         action: HighlightColorAction,
         document_theme: Theme,
         theme: ThemeColor,
-        cx: &mut Context<Self>,
+        view: Entity<Self>,
     ) -> impl IntoElement {
         div()
             .id(format!("highlight-swatch-{action:?}-{color:?}"))
@@ -450,9 +314,8 @@ impl PdfView {
             .bg(rgba(document_theme.highlight_color(color)))
             .cursor_pointer()
             .hover(move |style| style.border_color(theme.primary))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
+            .on_click(move |_, _, cx| {
+                view.update(cx, |this, cx| {
                     match action {
                         HighlightColorAction::Create => {
                             this.create_highlight_from_selection(color, cx);
@@ -462,21 +325,19 @@ impl PdfView {
                         }
                     }
                     this.close_context_menu(cx);
-                    cx.stop_propagation();
-                }),
-            )
+                });
+            })
     }
 
-    fn context_menu_separator(theme: ThemeColor) -> impl IntoElement {
-        div().h(px(1.0)).my_1().mx_1().bg(theme.border)
-    }
-
-    pub(super) fn render_context_menu(
+    fn build_context_menu_popup(
+        mut menu: PopupMenu,
         state: ContextMenuState,
         is_fullscreen: bool,
         document_theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+        view: Entity<Self>,
+        window: &mut Window,
+        cx: &mut Context<PopupMenu>,
+    ) -> PopupMenu {
         let theme = cx.theme().colors;
         let fullscreen_label = if is_fullscreen {
             crate::fl!("pdf-context-exit-full-screen")
@@ -484,188 +345,174 @@ impl PdfView {
             crate::fl!("pdf-context-enter-full-screen")
         };
 
-        div()
-            .occlude()
-            .flex()
-            .flex_col()
-            .w(px(190.0))
-            .py_1()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
-            .on_mouse_down(MouseButton::Middle, |_, _, cx| {
-                cx.stop_propagation();
-            })
-            .on_mouse_down(MouseButton::Right, |_, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-            })
-            .when(state.has_note, |menu| {
-                menu.child(Self::context_menu_entry(
+        menu = menu.min_w(px(190.0));
+
+        if state.has_note {
+            menu = menu
+                .item(Self::context_menu_item(
                     crate::fl!("pdf-context-edit-note"),
-                    theme,
+                    view.clone(),
                     |this, window, cx| this.begin_edit_context_note(window, cx),
-                    cx,
                 ))
-                .child(Self::context_menu_entry(
+                .item(Self::context_menu_item(
                     crate::fl!("pdf-context-remove-note"),
-                    theme,
+                    view.clone(),
                     |this, _, cx| this.remove_context_note(cx),
-                    cx,
                 ))
-                .child(Self::context_menu_separator(theme))
-            })
-            .when(!state.has_note && state.has_selection, |menu| {
-                menu.child(Self::context_menu_entry(
+                .separator();
+        } else if state.has_selection {
+            menu = menu
+                .item(Self::context_menu_item(
                     crate::fl!("pdf-context-add-note"),
-                    theme,
+                    view.clone(),
                     |this, window, cx| this.begin_add_note(window, cx),
-                    cx,
                 ))
-                .child(Self::context_menu_separator(theme))
-            })
-            .when_some(state.highlight_color, |menu, color| {
-                menu.child(Self::context_menu_label(
-                    crate::fl!("pdf-context-change-highlight-color"),
-                    theme,
-                ))
-                .child(Self::context_menu_highlight_color_row(
-                    HighlightColorAction::Change,
-                    Some(color),
-                    document_theme,
-                    theme,
-                    cx,
-                ))
-                .child(Self::context_menu_entry(
-                    crate::fl!("pdf-context-remove-highlight"),
-                    theme,
-                    |this, _, cx| this.remove_context_highlight(cx),
-                    cx,
-                ))
-                .child(Self::context_menu_separator(theme))
-            })
-            .when(
-                state.highlight_color.is_none() && state.has_selection,
-                |menu| {
-                    menu.child(Self::context_menu_label(
-                        crate::fl!("pdf-context-highlight"),
+                .separator();
+        }
+
+        if let Some(color) = state.highlight_color {
+            let color_view = view.clone();
+            menu = menu
+                .label(crate::fl!("pdf-context-change-highlight-color"))
+                .item(PopupMenuItem::element(move |_, _| {
+                    Self::context_menu_highlight_color_row(
+                        HighlightColorAction::Change,
+                        Some(color),
+                        document_theme,
                         theme,
-                    ))
-                    .child(Self::context_menu_highlight_color_row(
+                        color_view.clone(),
+                    )
+                }))
+                .item(Self::context_menu_item(
+                    crate::fl!("pdf-context-remove-highlight"),
+                    view.clone(),
+                    |this, _, cx| this.remove_context_highlight(cx),
+                ))
+                .separator();
+        } else if state.has_selection {
+            let color_view = view.clone();
+            menu = menu
+                .label(crate::fl!("pdf-context-highlight"))
+                .item(PopupMenuItem::element(move |_, _| {
+                    Self::context_menu_highlight_color_row(
                         HighlightColorAction::Create,
                         None,
                         document_theme,
                         theme,
-                        cx,
-                    ))
-                    .child(Self::context_menu_separator(theme))
-                },
-            )
-            .when(state.has_image, |menu| {
-                menu.child(Self::context_menu_entry(
+                        color_view.clone(),
+                    )
+                }))
+                .separator();
+        }
+
+        if state.has_image {
+            menu = menu
+                .item(Self::context_menu_item(
                     crate::fl!("pdf-context-copy-image"),
-                    theme,
+                    view.clone(),
                     |this, _, cx| this.copy_image(cx),
-                    cx,
                 ))
-                .child(Self::context_menu_entry(
+                .item(Self::context_menu_item(
                     crate::fl!("pdf-context-save-image"),
-                    theme,
+                    view.clone(),
                     |this, _, cx| this.save_image(cx),
-                    cx,
                 ))
-                .child(Self::context_menu_separator(theme))
-            })
-            .when(state.has_region, |menu| {
-                menu.child(Self::context_menu_entry(
+                .separator();
+        }
+
+        if state.has_region {
+            menu = menu
+                .item(Self::context_menu_item(
                     crate::fl!("pdf-context-copy-region"),
-                    theme,
+                    view.clone(),
                     |this, _, cx| this.copy_region(cx),
-                    cx,
                 ))
-                .child(Self::context_menu_entry(
+                .item(Self::context_menu_item(
                     crate::fl!("pdf-context-save-region"),
-                    theme,
+                    view.clone(),
                     |this, _, cx| this.save_region(cx),
-                    cx,
                 ))
-                .child(Self::context_menu_separator(theme))
-            })
-            .when(state.has_page, |menu| {
-                menu.child(Self::context_menu_entry(
+                .separator();
+        }
+
+        if state.has_page {
+            menu = menu
+                .item(Self::context_menu_item(
                     crate::fl!("pdf-context-save-page-as-image"),
-                    theme,
+                    view.clone(),
                     |this, _, cx| this.save_page_as_image(cx),
-                    cx,
                 ))
-                .child(Self::context_menu_separator(theme))
-            })
-            .when(
-                state.highlight_color.is_none() && state.has_selection,
-                |menu| {
-                    menu.child(Self::context_menu_entry(
-                        crate::fl!("pdf-context-translate-selection"),
-                        theme,
-                        |this, _, cx| {
-                            let position = this.context_menu_position;
-                            this.close_context_menu(cx);
-                            this.translate_selection(position, false, cx);
-                        },
-                        cx,
-                    ))
-                    .child(Self::context_menu_copy_entry(
-                        theme,
-                        state.copy_submenu_open,
-                        cx,
-                    ))
-                    .child(Self::context_menu_separator(theme))
+                .separator();
+        }
+
+        if state.highlight_color.is_none() && state.has_selection {
+            menu = menu.item(Self::context_menu_item(
+                crate::fl!("pdf-context-translate-selection"),
+                view.clone(),
+                |this, _, cx| {
+                    this.translate_selection(this.context_menu_position, false, cx);
                 },
-            )
-            .when(!state.grid_overview, |menu| {
-                menu.child(Self::context_menu_entry(
+            ));
+            let plain_view = view.clone();
+            let markdown_view = view.clone();
+            menu = menu
+                .submenu(crate::fl!("copy"), window, cx, move |submenu, _, _| {
+                    submenu
+                        .item(Self::context_menu_item(
+                            crate::fl!("pdf-context-copy-plain-text"),
+                            plain_view.clone(),
+                            |this, _, cx| this.copy_selection_as(CopyFormat::PlainText, cx),
+                        ))
+                        .item(Self::context_menu_item(
+                            crate::fl!("pdf-context-copy-markdown"),
+                            markdown_view.clone(),
+                            |this, _, cx| this.copy_selection_as(CopyFormat::Markdown, cx),
+                        ))
+                })
+                .separator();
+        }
+
+        if !state.grid_overview {
+            menu = menu
+                .item(Self::context_menu_item(
                     crate::fl!("select-all"),
-                    theme,
+                    view.clone(),
                     |this, _, cx| {
                         this.select_all();
                         cx.notify();
                     },
-                    cx,
                 ))
-                .child(Self::context_menu_separator(theme))
-            })
-            .child(Self::context_menu_entry(
+                .separator();
+        }
+
+        menu = menu
+            .item(Self::context_menu_item(
                 crate::fl!("zoom-in"),
-                theme,
+                view.clone(),
                 |this, _, cx| this.zoom_in(cx),
-                cx,
             ))
-            .child(Self::context_menu_entry(
+            .item(Self::context_menu_item(
                 crate::fl!("zoom-out"),
-                theme,
+                view.clone(),
                 |this, _, cx| this.zoom_out(cx),
-                cx,
             ))
-            .child(Self::context_menu_entry(
+            .item(Self::context_menu_item(
                 crate::fl!("reset-zoom"),
-                theme,
+                view.clone(),
                 |this, _, cx| this.reset_zoom(cx),
-                cx,
             ))
-            .child(Self::context_menu_separator(theme))
-            .child(Self::context_menu_entry(
+            .separator()
+            .item(Self::context_menu_item(
                 fullscreen_label,
-                theme,
+                view.clone(),
                 |_, window, _| window.toggle_fullscreen(),
-                cx,
             ))
-            .child(Self::context_menu_entry(
+            .item(Self::context_menu_item(
                 crate::fl!("settings-title"),
-                theme,
+                view,
                 |_, _, cx| cx.emit(PdfViewEvent::OpenSettings),
-                cx,
-            ))
+            ));
+
+        menu
     }
 }

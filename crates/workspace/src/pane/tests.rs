@@ -3,7 +3,7 @@ use std::fs;
 use gpui::{AppContext as _, TestAppContext};
 use gpui_component::Root;
 
-use super::{Pane, Tab, resize_axis_sizes};
+use super::{Pane, Tab};
 use crate::{library::LibraryStore, pdf_view::RenderCache, settings::SettingsStore};
 use glyphst_translation_ui::DocumentTranslationJobManager;
 
@@ -45,30 +45,6 @@ fn write_minimal_pdf(path: &std::path::Path) {
         .as_bytes(),
     );
     fs::write(path, bytes).unwrap();
-}
-
-#[test]
-fn resizing_a_divider_preserves_unrelated_panes() {
-    let mut sizes = [300.0, 300.0, 300.0];
-
-    assert_eq!(resize_axis_sizes(&mut sizes, 0, 80.0, 200.0), 80.0);
-    assert_eq!(sizes, [380.0, 220.0, 300.0]);
-}
-
-#[test]
-fn resizing_cascades_toward_the_constrained_side() {
-    let mut sizes = [300.0, 240.0, 240.0];
-
-    assert_eq!(resize_axis_sizes(&mut sizes, 0, 100.0, 200.0), 80.0);
-    assert_eq!(sizes, [380.0, 200.0, 200.0]);
-}
-
-#[test]
-fn resizing_cannot_shrink_the_dragged_pane_below_minimum() {
-    let mut sizes = [220.0, 300.0, 300.0];
-
-    assert_eq!(resize_axis_sizes(&mut sizes, 0, -80.0, 200.0), -20.0);
-    assert_eq!(sizes, [200.0, 320.0, 300.0]);
 }
 
 #[gpui::test]

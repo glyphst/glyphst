@@ -40,12 +40,14 @@ impl MarkdownStyle {
             + theme.background.to_rgb().g * 0.7152
             + theme.background.to_rgb().b * 0.0722
             < 0.5;
-        let mut text_view_style = TextViewStyle::default();
-        text_view_style.is_dark = is_dark;
-        text_view_style.highlight_theme = if is_dark {
-            HighlightTheme::default_dark()
-        } else {
-            HighlightTheme::default_light()
+        let text_view_style = TextViewStyle {
+            is_dark,
+            highlight_theme: if is_dark {
+                HighlightTheme::default_dark()
+            } else {
+                HighlightTheme::default_light()
+            },
+            ..Default::default()
         };
 
         Self {

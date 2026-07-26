@@ -28,75 +28,39 @@ impl PdfView {
         id: &'static str,
         icon: IconName,
         open: bool,
-        theme: ThemeColor,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id(id)
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
+    ) -> Button {
+        Button::new(id)
+            .xsmall()
+            .compact()
+            .ghost()
+            .selected(open)
+            .icon(icon)
             .h(ui_rems(FOOTBAR_BUTTON_HEIGHT))
             .px_2()
-            .rounded(px(4.0))
-            .text_color(if open {
-                theme.primary
-            } else {
-                theme.muted_foreground
-            })
-            .bg(if open {
-                theme.list_active
-            } else {
-                transparent_black()
-            })
-            .hover(move |style| style.bg(theme.list_hover))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.close_epub_style_panel(cx);
-                    handler(this, window, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(
-                Icon::new(icon)
-                    .size(ui_rems(FOOTBAR_ICON_SIZE))
-                    .text_color(if open {
-                        theme.primary
-                    } else {
-                        theme.muted_foreground
-                    }),
-            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.close_epub_style_panel(cx);
+                handler(this, window, cx);
+                cx.stop_propagation();
+            }))
     }
 
-    pub(super) fn render_toc_button(
-        &self,
-        theme: ThemeColor,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn render_toc_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         Self::render_footbar_icon_button(
             "footbar-toc",
             IconName::TableOfContents,
             self.toc_sidebar_open,
-            theme,
             |this, window, cx| this.toggle_toc_sidebar(window, cx),
             cx,
         )
     }
 
-    pub(super) fn render_notes_button(
-        &self,
-        theme: ThemeColor,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn render_notes_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         Self::render_footbar_icon_button(
             "footbar-notes",
             IconName::NotebookTabs,
             self.notes_sidebar_open,
-            theme,
             |this, window, cx| this.toggle_notes_sidebar(window, cx),
             cx,
         )
@@ -104,44 +68,32 @@ impl PdfView {
 
     pub(super) fn render_thumbnail_sidebar_button(
         &self,
-        theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         Self::render_footbar_icon_button(
             "footbar-thumbnails",
             IconName::PanelLeft,
             self.thumbnail_sidebar_open,
-            theme,
             |this, window, cx| this.toggle_thumbnail_sidebar(window, cx),
             cx,
         )
     }
 
-    pub(super) fn render_grid_overview_button(
-        &self,
-        theme: ThemeColor,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn render_grid_overview_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         Self::render_footbar_icon_button(
             "footbar-grid-overview",
             IconName::LayoutGrid,
             self.grid_overview_open,
-            theme,
             |this, _, cx| this.toggle_grid_overview(cx),
             cx,
         )
     }
 
-    pub(super) fn render_ai_button(
-        &self,
-        theme: ThemeColor,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn render_ai_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         Self::render_footbar_icon_button(
             "footbar-ai",
             IconName::Bot,
             self.ai_panel.is_some(),
-            theme,
             |this, window, cx| this.toggle_ai_panel(window, cx),
             cx,
         )
@@ -178,38 +130,25 @@ impl PdfView {
         }
     }
 
-    pub(super) fn render_region_button(
-        &self,
-        theme: ThemeColor,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id("footbar-region-selection-tooltip")
-            .child(Self::render_footbar_icon_button(
-                "footbar-region-selection",
-                IconName::Scan,
-                self.region_tool_active,
-                theme,
-                |this, _, cx| this.toggle_region_selection(cx),
-                cx,
-            ))
-            .tooltip(text_tooltip(crate::fl!("pdf-region-select-tooltip")))
+    pub(super) fn render_region_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Self::render_footbar_icon_button(
+            "footbar-region-selection",
+            IconName::Scan,
+            self.region_tool_active,
+            |this, _, cx| this.toggle_region_selection(cx),
+            cx,
+        )
+        .tooltip(crate::fl!("pdf-region-select-tooltip"))
     }
 
-    pub(super) fn render_region_popover(
-        theme: ThemeColor,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn render_region_popover(cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .occlude()
             .flex()
             .items_center()
             .gap_1()
             .p_1()
-            .border_1()
-            .border_color(theme.border)
-            .rounded(px(6.0))
-            .bg(theme.popover)
+            .popover_style(cx)
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
@@ -243,39 +182,22 @@ impl PdfView {
         id: &'static str,
         label: impl Into<SharedString>,
         active: bool,
-        theme: ThemeColor,
         handler: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .id(id)
+        Button::new(id)
+            .xsmall()
+            .compact()
+            .ghost()
+            .selected(active)
+            .label(label)
             .h(ui_rems(FOOTBAR_BUTTON_HEIGHT))
             .min_w(px(24.0))
             .px_2()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(4.0))
-            .bg(if active {
-                theme.list_active
-            } else {
-                transparent_black()
-            })
-            .text_color(if active {
-                theme.primary
-            } else {
-                theme.muted_foreground
-            })
-            .cursor_pointer()
-            .hover(move |style| style.bg(theme.list_hover))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    handler(this, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(label.into())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                handler(this, cx);
+                cx.stop_propagation();
+            }))
     }
 
     fn render_epub_stepper(
@@ -300,7 +222,6 @@ impl PdfView {
                         config.decrease_id,
                         "−",
                         false,
-                        theme,
                         decrease,
                         cx,
                     ))
@@ -315,7 +236,6 @@ impl PdfView {
                         config.increase_id,
                         "+",
                         false,
-                        theme,
                         increase,
                         cx,
                     )),
@@ -327,62 +247,31 @@ impl PdfView {
         label: SharedString,
         option: EpubTheme,
         selected: EpubTheme,
-        theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         Self::render_epub_control(
             id,
             label,
             option == selected,
-            theme,
             move |this, cx| this.set_epub_theme(option, cx),
             cx,
         )
     }
 
-    pub(super) fn render_epub_style_button(
-        &self,
-        theme: ThemeColor,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn render_epub_style_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let open = self.epub_style_panel_position.is_some();
-        div()
-            .id("footbar-epub-style")
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
+        Button::new("footbar-epub-style")
+            .xsmall()
+            .compact()
+            .ghost()
+            .selected(open)
+            .icon(IconName::Settings)
             .h(ui_rems(FOOTBAR_BUTTON_HEIGHT))
             .px_2()
-            .rounded(px(4.0))
-            .text_color(if open {
-                theme.primary
-            } else {
-                theme.muted_foreground
-            })
-            .bg(if open {
-                theme.list_active
-            } else {
-                transparent_black()
-            })
-            .hover(move |style| style.bg(theme.list_hover))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    this.toggle_epub_style_panel(event.position, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(
-                Icon::new(IconName::Settings)
-                    .size(ui_rems(FOOTBAR_ICON_SIZE))
-                    .text_color(if open {
-                        theme.primary
-                    } else {
-                        theme.muted_foreground
-                    }),
-            )
+            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                this.toggle_epub_style_panel(event.position(), cx);
+                cx.stop_propagation();
+            }))
     }
 
     pub(super) fn render_epub_style_panel(
@@ -399,10 +288,7 @@ impl PdfView {
             .gap_3()
             .w(px(340.0))
             .p_3()
-            .border_1()
-            .border_color(theme.border)
-            .rounded(px(6.0))
-            .bg(theme.popover)
+            .popover_style(cx)
             .text_size(ui_rems(12.0))
             .text_color(theme.foreground)
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -486,7 +372,6 @@ impl PdfView {
                                 crate::fl!("epub-theme-light").into(),
                                 EpubTheme::Light,
                                 preferences.theme,
-                                theme,
                                 cx,
                             ))
                             .child(Self::render_epub_theme_option(
@@ -494,7 +379,6 @@ impl PdfView {
                                 crate::fl!("epub-theme-sepia").into(),
                                 EpubTheme::Sepia,
                                 preferences.theme,
-                                theme,
                                 cx,
                             ))
                             .child(Self::render_epub_theme_option(
@@ -502,7 +386,6 @@ impl PdfView {
                                 crate::fl!("epub-theme-dark").into(),
                                 EpubTheme::Dark,
                                 preferences.theme,
-                                theme,
                                 cx,
                             )),
                     ),
@@ -526,7 +409,6 @@ impl PdfView {
                             crate::fl!("epub-disabled")
                         },
                         preferences.use_publisher_styles,
-                        theme,
                         |this, cx| this.toggle_epub_publisher_styles(cx),
                         cx,
                     )),
@@ -535,7 +417,6 @@ impl PdfView {
                 "epub-reset-defaults",
                 crate::fl!("epub-reset-global-defaults"),
                 false,
-                theme,
                 |this, cx| this.reset_epub_preferences(cx),
                 cx,
             ))

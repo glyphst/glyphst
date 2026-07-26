@@ -540,7 +540,7 @@ impl Workspace {
             .position(|candidate| candidate == pane)
             .unwrap_or(0);
         self.cancel_pending_translation_splits_for_pane(pane, cx);
-        if !self.pane_group.remove(pane) {
+        if !self.pane_group.remove(pane, cx) {
             return;
         }
 
@@ -603,7 +603,8 @@ impl Workspace {
             .map(|(path, position)| (Some(path), Some(position)))
             .unwrap_or((None, None));
         let new_pane = self.create_empty_pane(window, cx);
-        self.pane_group.split(&active_pane, &new_pane, direction);
+        self.pane_group
+            .split(&active_pane, &new_pane, direction, cx);
         self.active_pane = new_pane.clone();
         self.sync_tab_bar_visibility(cx);
         if let Some(path) = initial_path
@@ -686,7 +687,7 @@ impl Workspace {
     ) -> Result<()> {
         let translated_pane = self.create_empty_pane(window, cx);
         self.pane_group
-            .split(&source_pane, &translated_pane, SplitDirection::Right);
+            .split(&source_pane, &translated_pane, SplitDirection::Right, cx);
         self.active_pane = translated_pane.clone();
         self.sync_tab_bar_visibility(cx);
 
@@ -924,13 +925,22 @@ impl Workspace {
     }
 
     fn move_pane_to_border(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
-        if self.pane_group.move_to_border(&self.active_pane, direction) {
+        if self
+            .pane_group
+            .move_to_border(&self.active_pane, direction, cx)
+        {
             cx.notify();
         }
     }
 
-    fn resize_active_pane(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
-        self.pane_group.resize(&self.active_pane, direction);
+    fn resize_active_pane(
+        &mut self,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pane_group
+            .resize(&self.active_pane, direction, window, cx);
         cx.notify();
     }
 
@@ -949,7 +959,7 @@ impl Workspace {
     }
 
     fn reset_pane_sizes(&mut self, cx: &mut Context<Self>) {
-        self.pane_group.reset_pane_sizes();
+        self.pane_group.reset_pane_sizes(cx);
         cx.notify();
     }
 
@@ -1158,7 +1168,7 @@ impl Workspace {
                 new_pane.update(cx, |pane, cx| {
                     pane.insert_transferred_tab(transfer, to, window, cx)
                 });
-                self.pane_group.split(target_pane, &new_pane, direction);
+                self.pane_group.split(target_pane, &new_pane, direction, cx);
                 self.active_pane = new_pane;
             }
             PaneDropTarget::Tab(_) | PaneDropTarget::Append | PaneDropTarget::Content(None) => {
@@ -1627,17 +1637,17 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &MovePaneDown, _, cx| {
                 this.move_pane_to_border(SplitDirection::Down, cx);
             }))
-            .on_action(cx.listener(|this, _: &ResizePaneLeft, _, cx| {
-                this.resize_active_pane(SplitDirection::Left, cx);
+            .on_action(cx.listener(|this, _: &ResizePaneLeft, window, cx| {
+                this.resize_active_pane(SplitDirection::Left, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ResizePaneRight, _, cx| {
-                this.resize_active_pane(SplitDirection::Right, cx);
+            .on_action(cx.listener(|this, _: &ResizePaneRight, window, cx| {
+                this.resize_active_pane(SplitDirection::Right, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ResizePaneUp, _, cx| {
-                this.resize_active_pane(SplitDirection::Up, cx);
+            .on_action(cx.listener(|this, _: &ResizePaneUp, window, cx| {
+                this.resize_active_pane(SplitDirection::Up, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ResizePaneDown, _, cx| {
-                this.resize_active_pane(SplitDirection::Down, cx);
+            .on_action(cx.listener(|this, _: &ResizePaneDown, window, cx| {
+                this.resize_active_pane(SplitDirection::Down, window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseOtherPanes, window, cx| {
                 this.close_other_panes(window, cx);

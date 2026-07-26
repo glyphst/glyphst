@@ -119,8 +119,6 @@ impl PdfView {
     ) {
         if self.epub_style_panel_position.take().is_none() {
             self.close_context_menu(cx);
-            self.close_grid_overview_actions(cx);
-            self.close_thumbnail_sidebar_actions(cx);
             self.epub_style_panel_position = Some(point(
                 position.x,
                 position.y - px(FOOTBAR_BUTTON_HEIGHT / 2.0),

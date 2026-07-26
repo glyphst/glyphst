@@ -34,41 +34,19 @@ impl Render for PdfView {
             }
             self.step_scroll_animation(window, cx);
         }
-        let context_menu_highlight_color = if self.grid_overview_open {
-            None
-        } else {
-            self.context_menu_highlight
-                .and_then(|id| self.highlight_color_for_id(id))
-        };
-        let context_menu_has_selection = !self.grid_overview_open && self.selected_text().is_some();
-        let context_menu_has_note = !self.grid_overview_open && self.context_menu_note.is_some();
-        let context_menu = self.context_menu_position.map(|position| {
-            deferred(
-                anchored()
-                    .snap_to_window_with_margin(px(8.0))
-                    .position(position)
-                    .anchor(Anchor::TopLeft)
-                    .child(Self::render_context_menu(
-                        ContextMenuState {
-                            has_page: self.capabilities.page_export
-                                && !self.context_menu_region
-                                && self.context_menu_page.is_some(),
-                            has_image: !self.grid_overview_open
-                                && self.context_menu_image.is_some(),
-                            has_selection: context_menu_has_selection,
-                            highlight_color: context_menu_highlight_color,
-                            has_note: context_menu_has_note,
-                            has_region: self.context_menu_region,
-                            grid_overview: self.grid_overview_open,
-                            copy_submenu_open: self.context_menu_copy_submenu_open,
-                        },
-                        window.is_fullscreen(),
-                        theme,
-                        cx,
-                    )),
-            )
-            .with_priority(1)
-        });
+        let context_menu = self
+            .context_menu_position
+            .zip(self.context_menu_popup.clone())
+            .map(|(position, popup)| {
+                deferred(
+                    anchored()
+                        .snap_to_window_with_margin(px(8.0))
+                        .position(position)
+                        .anchor(Anchor::TopLeft)
+                        .child(popup),
+                )
+                .with_priority(1)
+            });
         let region_popover = (!self.grid_overview_open
             && self.context_menu_position.is_none()
             && self.region_drag.is_none())
@@ -80,7 +58,7 @@ impl Render for PdfView {
                     .snap_to_window_with_margin(px(8.0))
                     .position(position)
                     .anchor(Anchor::TopRight)
-                    .child(Self::render_region_popover(ui_theme, cx)),
+                    .child(Self::render_region_popover(cx)),
             )
             .with_priority(2)
         });
@@ -103,7 +81,7 @@ impl Render for PdfView {
                             .snap_to_window_with_margin(px(8.0))
                             .position(point(position.x + px(12.0), position.y + px(12.0)))
                             .anchor(Anchor::TopLeft)
-                            .child(Self::render_note_popup(body, ui_theme)),
+                            .child(Self::render_note_popup(body, ui_theme, cx)),
                     )
                     .with_priority(1)
                 })
@@ -368,7 +346,6 @@ impl Render for PdfView {
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     this.close_context_menu(cx);
-                    this.close_thumbnail_sidebar_actions(cx);
                     this.focus_handle.focus(window, cx);
                     this.dragging = false;
                     this.pending_link = None;
@@ -448,7 +425,6 @@ impl Render for PdfView {
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     this.close_context_menu(cx);
-                    this.close_thumbnail_sidebar_actions(cx);
                     this.focus_handle.focus(window, cx);
                     this.dragging = false;
                     this.pending_link = None;
@@ -628,6 +604,7 @@ impl Render for PdfView {
 
                                                 if let Some(image) = page.image {
                                                     let _ = window.paint_image(
+                                                        page.bounds,
                                                         page.bounds,
                                                         Corners::default(),
                                                         image,

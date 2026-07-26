@@ -68,9 +68,9 @@ impl AiPanel {
                 ) {
                     SubmitAction::Edit => self.submit_edited_message(window, cx),
                     SubmitAction::Retry(assistant_index) => {
-                        self.retry_assistant(assistant_index, cx)
+                        self.retry_assistant(assistant_index, window, cx)
                     }
-                    SubmitAction::Send => self.send_message(cx),
+                    SubmitAction::Send => self.send_message(window, cx),
                 }
                 self.sync_composer_input(window, cx);
             }
@@ -101,6 +101,28 @@ impl AiPanel {
             self.composer_input.update(cx, |input, cx| {
                 input.set_value(content, window, cx);
                 input.set_selected_range(selected_range, cx);
+            });
+        }
+        self.sync_composer_highlights(cx);
+    }
+
+    fn sync_composer_highlights(&self, cx: &mut Context<Self>) {
+        let theme = cx.theme().colors;
+        let style = HighlightStyle {
+            color: Some(theme.accent_foreground),
+            font_weight: Some(FontWeight::SEMIBOLD),
+            background_color: Some(theme.accent),
+            ..Default::default()
+        };
+        let highlights = self
+            .composer_mentions
+            .iter()
+            .map(|mention| (mention.range.clone(), style))
+            .collect::<Vec<_>>();
+
+        if self.composer_input.read(cx).text_highlights() != highlights {
+            self.composer_input.update(cx, |input, cx| {
+                input.set_text_highlights(highlights, cx);
             });
         }
     }
@@ -159,7 +181,7 @@ impl AiPanel {
 
         let content = message.display_text();
         let Ok(mentions) = composer_mentions_for_message(message) else {
-            self.show_validation_notice(tr("ai-edit-context-unavailable"), cx);
+            self.show_validation_notice(tr("ai-edit-context-unavailable"), window, cx);
             return;
         };
         self.editing_turn = Some(EditingTurn {

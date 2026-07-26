@@ -28,19 +28,24 @@ use glyphst_ui::{
     markdown::{Markdown, MarkdownContextMenuRequest, MarkdownElement, MarkdownStyle},
     picker::fuzzy_match,
     scrollbar::{ScrollbarHandle, WithScrollbar as _},
-    tooltip::text_tooltip,
 };
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, ElementId, Entity,
-    EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement,
-    MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta, ScrollHandle,
-    ScrollStrategy, ScrollWheelEvent, SharedString, StyledText, Subscription, Task, TextStyle,
-    UniformListScrollHandle, Window, anchored, deferred, div, point, prelude::*, px,
+    Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, DismissEvent,
+    ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla,
+    IntoElement, MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta,
+    ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, StyledText, Subscription, Task,
+    TextStyle, UniformListScrollHandle, Window, anchored, deferred, div, point, prelude::*, px,
     transparent_black, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, ThemeColor as Theme,
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, StyledExt as _,
+    ThemeColor as Theme, WindowExt as _,
+    alert::Alert,
+    button::{Button, ButtonGroup, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
+    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
+    notification::Notification,
+    popover::{Popover, PopoverState},
 };
 
 pub const AI_PANEL_WIDTH: f32 = 360.0;
@@ -48,8 +53,9 @@ const COMPLETION_MENU_MIN_WIDTH: f32 = 280.0;
 const COMPLETION_MENU_MAX_WIDTH: f32 = 540.0;
 const COMPLETION_MENU_ROW_HEIGHT: f32 = 40.0;
 const COMPLETION_MENU_VISIBLE_ROWS: usize = 8;
-const VALIDATION_NOTICE_DURATION: Duration = Duration::from_secs(4);
 const COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1500);
+
+struct AiValidationNotification;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AiPanelEvent {
@@ -64,6 +70,8 @@ struct ModelMenuRenderState {
     search_query: SharedString,
     search_input: Entity<InputState>,
     scroll_handle: ScrollHandle,
+    panel: Entity<AiPanel>,
+    popover: Entity<PopoverState>,
 }
 
 #[derive(Clone, Copy)]
@@ -213,7 +221,14 @@ struct PreparedComposerMessage {
 #[derive(Clone)]
 struct MessageContextMenu {
     position: GpuiPoint<Pixels>,
+    popup: Entity<PopupMenu>,
+}
+
+struct MessageContextMenuBuildState {
     message_index: usize,
+    is_user: bool,
+    can_mutate: bool,
+    has_later_messages: bool,
     selected_text: Option<SharedString>,
     link_url: Option<SharedString>,
 }
@@ -271,18 +286,10 @@ pub struct AiPanel {
     mention_completion: Option<MentionCompletion>,
     mention_completion_scroll: UniformListScrollHandle,
     composer_mentions: Vec<ComposerMention>,
-    attachment_menu_open: bool,
-    attachment_menu_anchor: Option<GpuiPoint<Pixels>>,
-    model_menu_open: bool,
-    model_menu_anchor: Option<GpuiPoint<Pixels>>,
     model_search_query: SharedString,
     model_menu_scroll: ScrollHandle,
-    thinking_menu_open: bool,
-    thinking_menu_anchor: Option<GpuiPoint<Pixels>>,
     markdown_views: Vec<Entity<Markdown>>,
     validation_notice: Option<String>,
-    validation_toast: Option<String>,
-    validation_notice_task: Option<Task<()>>,
     editing_turn: Option<EditingTurn>,
     edit_blur_subscription: Option<Subscription>,
     copied_target: Option<CopyFeedbackTarget>,
@@ -432,18 +439,10 @@ impl AiPanel {
             mention_completion: None,
             mention_completion_scroll: UniformListScrollHandle::new(),
             composer_mentions: Vec::new(),
-            attachment_menu_open: false,
-            attachment_menu_anchor: None,
-            model_menu_open: false,
-            model_menu_anchor: None,
             model_search_query: SharedString::default(),
             model_menu_scroll: ScrollHandle::new(),
-            thinking_menu_open: false,
-            thinking_menu_anchor: None,
             markdown_views: Vec::new(),
             validation_notice: None,
-            validation_toast: None,
-            validation_notice_task: None,
             editing_turn: None,
             edit_blur_subscription: None,
             copied_target: None,
@@ -475,12 +474,7 @@ impl AiPanel {
     }
 
     fn close(&mut self, _: &AiPanelClose, window: &mut Window, cx: &mut Context<Self>) {
-        if self.message_context_menu.take().is_some()
-            || self.attachment_menu_open
-            || self.model_menu_open
-            || self.thinking_menu_open
-            || self.mention_completion.is_some()
-        {
+        if self.message_context_menu.take().is_some() || self.mention_completion.is_some() {
             self.close_composer_menus();
             self.mention_completion = None;
             cx.notify();
@@ -505,8 +499,10 @@ impl AiPanel {
             self.generation_failure.as_ref(),
         ) {
             SubmitAction::Edit => self.submit_edited_message(window, cx),
-            SubmitAction::Retry(assistant_index) => self.retry_assistant(assistant_index, cx),
-            SubmitAction::Send => self.send_message(cx),
+            SubmitAction::Retry(assistant_index) => {
+                self.retry_assistant(assistant_index, window, cx)
+            }
+            SubmitAction::Send => self.send_message(window, cx),
         }
     }
 }

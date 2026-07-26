@@ -8,25 +8,10 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let content = if let Some(error) = &self.loading_error {
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_2()
-                .text_align(gpui::TextAlign::Center)
-                .child(
-                    div()
-                        .text_size(ui_rems(15.0))
-                        .text_color(theme.danger)
-                        .child(crate::fl!("pdf-failed-to-load")),
-                )
-                .child(
-                    div()
-                        .max_w(px(520.0))
-                        .text_size(ui_rems(12.0))
-                        .text_color(theme.muted_foreground)
-                        .child(error.clone()),
-                )
+            Alert::error("pdf-load-error", error.clone())
+                .title(crate::fl!("pdf-failed-to-load"))
+                .small()
+                .max_w(px(520.0))
                 .into_any_element()
         } else {
             const GRID_SQUARE_SIZE: f32 = 18.0;
@@ -127,6 +112,63 @@ impl PdfView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let resizable_state = self.sync_sidebar_resizable_state(cx);
+        let max_sidebar_width =
+            (window.bounds().size.width.as_f32() * SIDEBAR_MAX_WIDTH_RATIO).max(SIDEBAR_MIN_WIDTH);
+        let sidebar_size_range = px(SIDEBAR_MIN_WIDTH)..px(max_sidebar_width);
+        let mut panels = Vec::with_capacity(3);
+
+        if self.thumbnail_sidebar_open {
+            panels.push(
+                resizable_panel()
+                    .size(px(self.thumbnail_sidebar_width))
+                    .size_range(sidebar_size_range.clone())
+                    .flex_none()
+                    .child(self.render_thumbnail_sidebar(theme, window, cx)),
+            );
+        } else if self.toc_sidebar_open {
+            panels.push(
+                resizable_panel()
+                    .size(px(self.toc_sidebar_width))
+                    .size_range(sidebar_size_range.clone())
+                    .flex_none()
+                    .child(self.render_toc_sidebar(theme, window, cx)),
+            );
+        } else if self.notes_sidebar_open {
+            panels.push(
+                resizable_panel()
+                    .size(px(self.notes_sidebar_width))
+                    .size_range(sidebar_size_range.clone())
+                    .flex_none()
+                    .child(self.render_notes_sidebar(theme, window, cx)),
+            );
+        }
+
+        panels.push(
+            resizable_panel().size_range(px(100.0)..Pixels::MAX).child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(center),
+            ),
+        );
+
+        if let Some(panel) = self.ai_panel.clone() {
+            panels.push(
+                resizable_panel()
+                    .size(px(self.ai_panel_width))
+                    .size_range(sidebar_size_range)
+                    .flex_none()
+                    .child(div().size_full().min_w_0().child(panel)),
+            );
+        }
+
+        let resizable = ResizablePanelGroup::new("pdf-workspace-panels")
+            .with_state(&resizable_state)
+            .children(panels);
+
         div()
             .size_full()
             .flex_1()
@@ -134,112 +176,7 @@ impl PdfView {
             .flex()
             .flex_col()
             .bg(theme.tab_active)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_row()
-                    .on_drag_move(
-                        cx.listener(|this, e: &DragMoveEvent<DraggedSidebar>, _, cx| {
-                            let dragged_sidebar = *e.drag(cx);
-                            let max_width = (e.bounds.size.width.as_f32()
-                                * SIDEBAR_MAX_WIDTH_RATIO)
-                                .max(SIDEBAR_MIN_WIDTH);
-                            let new_width = match dragged_sidebar {
-                                DraggedSidebar::Thumbnails => {
-                                    (e.event.position.x - e.bounds.left()).as_f32()
-                                }
-                                DraggedSidebar::Toc => {
-                                    let thumbnail_offset = if this.thumbnail_sidebar_open {
-                                        this.thumbnail_sidebar_width
-                                    } else {
-                                        0.0
-                                    };
-                                    (e.event.position.x - e.bounds.left()).as_f32()
-                                        - thumbnail_offset
-                                }
-                                DraggedSidebar::Notes => {
-                                    let thumbnail_offset = if this.thumbnail_sidebar_open {
-                                        this.thumbnail_sidebar_width
-                                    } else {
-                                        0.0
-                                    };
-                                    let toc_offset = if this.toc_sidebar_open {
-                                        this.toc_sidebar_width
-                                    } else {
-                                        0.0
-                                    };
-                                    (e.event.position.x - e.bounds.left()).as_f32()
-                                        - thumbnail_offset
-                                        - toc_offset
-                                }
-                                DraggedSidebar::AiPanel => {
-                                    (e.bounds.right() - e.event.position.x).as_f32()
-                                }
-                            }
-                            .clamp(SIDEBAR_MIN_WIDTH, max_width);
-
-                            match dragged_sidebar {
-                                DraggedSidebar::Thumbnails => {
-                                    this.thumbnail_sidebar_width = new_width;
-                                }
-                                DraggedSidebar::Toc => {
-                                    this.toc_sidebar_width = new_width;
-                                }
-                                DraggedSidebar::Notes => {
-                                    this.notes_sidebar_width = new_width;
-                                }
-                                DraggedSidebar::AiPanel => {
-                                    this.ai_panel_width = new_width;
-                                    if let Some(panel) = &this.ai_panel {
-                                        panel.update(cx, |panel, cx| {
-                                            panel.set_width(new_width);
-                                            cx.notify();
-                                        });
-                                    }
-                                }
-                            }
-                            this.schedule_sidebar_width_save(cx);
-                            cx.notify();
-                        }),
-                    )
-                    .when(self.thumbnail_sidebar_open, |this| {
-                        this.child(self.render_thumbnail_sidebar(theme, window, cx))
-                    })
-                    .when(self.toc_sidebar_open, |this| {
-                        this.child(self.render_toc_sidebar(theme, window, cx))
-                    })
-                    .when(self.notes_sidebar_open, |this| {
-                        this.child(self.render_notes_sidebar(theme, window, cx))
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .overflow_hidden()
-                            .child(center),
-                    )
-                    .when_some(self.ai_panel.clone(), |this, panel| {
-                        this.child(
-                            div()
-                                .relative()
-                                .flex()
-                                .flex_none()
-                                .min_h_0()
-                                .h_full()
-                                .w(px(self.ai_panel_width))
-                                .child(panel)
-                                .child(Self::render_sidebar_resize_handle(
-                                    "ai-panel-resize-handle",
-                                    DraggedSidebar::AiPanel,
-                                    true,
-                                    cx,
-                                )),
-                        )
-                    }),
-            )
+            .child(div().flex_1().min_h_0().child(resizable))
             .child(self.render_workspace_footbar(theme, cx))
             .into_any_element()
     }
@@ -272,18 +209,18 @@ impl PdfView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(self.render_toc_button(theme, cx))
-                    .child(self.render_notes_button(theme, cx))
+                    .child(self.render_toc_button(cx))
+                    .child(self.render_notes_button(cx))
                     .when(self.capabilities.page_overview, |this| {
-                        this.child(self.render_thumbnail_sidebar_button(theme, cx))
-                            .child(self.render_grid_overview_button(theme, cx))
+                        this.child(self.render_thumbnail_sidebar_button(cx))
+                            .child(self.render_grid_overview_button(cx))
                     })
                     .when(
                         self.capabilities.page_export && !self.grid_overview_open,
-                        |this| this.child(self.render_region_button(theme, cx)),
+                        |this| this.child(self.render_region_button(cx)),
                     )
                     .when(self.capabilities.reflow, |this| {
-                        this.child(self.render_epub_style_button(theme, cx))
+                        this.child(self.render_epub_style_button(cx))
                     }),
             )
             .child(
@@ -297,7 +234,7 @@ impl PdfView {
                         self.current_page(),
                         self.pages.len(),
                     ))
-                    .child(self.render_ai_button(theme, cx)),
+                    .child(self.render_ai_button(cx)),
             )
             .into_any_element()
     }

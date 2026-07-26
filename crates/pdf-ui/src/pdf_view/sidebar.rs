@@ -1,6 +1,131 @@
 use super::*;
 
 impl PdfView {
+    pub(super) fn active_left_sidebar(&self) -> Option<LeftSidebar> {
+        if self.thumbnail_sidebar_open {
+            Some(LeftSidebar::Thumbnails)
+        } else if self.toc_sidebar_open {
+            Some(LeftSidebar::Toc)
+        } else if self.notes_sidebar_open {
+            Some(LeftSidebar::Notes)
+        } else {
+            None
+        }
+    }
+
+    fn left_sidebar_width(&self, sidebar: LeftSidebar) -> f32 {
+        match sidebar {
+            LeftSidebar::Thumbnails => self.thumbnail_sidebar_width,
+            LeftSidebar::Toc => self.toc_sidebar_width,
+            LeftSidebar::Notes => self.notes_sidebar_width,
+        }
+    }
+
+    pub(super) fn sync_sidebar_resizable_state(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<ResizableState> {
+        let left_sidebar = self.active_left_sidebar();
+        let ai_panel_open = self.ai_panel.is_some();
+
+        let Some(state) = self.sidebar_resizable_state.clone() else {
+            let state = cx.new(|_| ResizableState::default());
+            cx.subscribe(&state, |this, state, _: &ResizablePanelEvent, cx| {
+                let sizes = state.read(cx).sizes().clone();
+                this.apply_resized_sidebar_widths(
+                    this.active_left_sidebar(),
+                    this.ai_panel.is_some(),
+                    &sizes,
+                    cx,
+                );
+            })
+            .detach();
+            state.update(cx, |state, cx| {
+                state.insert_panel(None, None, cx);
+                if let Some(sidebar) = left_sidebar {
+                    state.insert_panel(Some(px(self.left_sidebar_width(sidebar))), Some(0), cx);
+                }
+                if ai_panel_open {
+                    state.insert_panel(Some(px(self.ai_panel_width)), None, cx);
+                }
+            });
+            self.resizable_left_sidebar = left_sidebar;
+            self.resizable_ai_panel_open = ai_panel_open;
+            self.sidebar_resizable_state = Some(state.clone());
+            return state;
+        };
+
+        if self.resizable_left_sidebar != left_sidebar {
+            let replacement_width =
+                left_sidebar.map(|sidebar| px(self.left_sidebar_width(sidebar)));
+            state.update(cx, |state, cx| {
+                match (self.resizable_left_sidebar, replacement_width) {
+                    (None, Some(width)) => state.insert_panel(Some(width), Some(0), cx),
+                    (Some(_), None) => state.remove_panel(0, cx),
+                    (Some(_), Some(width)) => {
+                        state.remove_panel(0, cx);
+                        state.insert_panel(Some(width), Some(0), cx);
+                    }
+                    (None, None) => {}
+                }
+            });
+            self.resizable_left_sidebar = left_sidebar;
+        }
+
+        if self.resizable_ai_panel_open != ai_panel_open {
+            state.update(cx, |state, cx| {
+                if ai_panel_open {
+                    state.insert_panel(Some(px(self.ai_panel_width)), None, cx);
+                } else if let Some(last_ix) = state.sizes().len().checked_sub(1) {
+                    state.remove_panel(last_ix, cx);
+                }
+            });
+            self.resizable_ai_panel_open = ai_panel_open;
+        }
+
+        state
+    }
+
+    pub(super) fn apply_resized_sidebar_widths(
+        &mut self,
+        left_sidebar: Option<LeftSidebar>,
+        ai_panel_open: bool,
+        sizes: &[Pixels],
+        cx: &mut Context<Self>,
+    ) {
+        let mut panel_ix = 0;
+        let mut changed = false;
+        if let Some(sidebar) = left_sidebar {
+            if let Some(width) = sizes.get(panel_ix).map(|size| size.as_f32()) {
+                let target = match sidebar {
+                    LeftSidebar::Thumbnails => &mut self.thumbnail_sidebar_width,
+                    LeftSidebar::Toc => &mut self.toc_sidebar_width,
+                    LeftSidebar::Notes => &mut self.notes_sidebar_width,
+                };
+                changed |= (*target - width).abs() > f32::EPSILON;
+                *target = width;
+            }
+            panel_ix += 1;
+        }
+
+        panel_ix += 1;
+        if ai_panel_open && let Some(width) = sizes.get(panel_ix).map(|size| size.as_f32()) {
+            changed |= (self.ai_panel_width - width).abs() > f32::EPSILON;
+            self.ai_panel_width = width;
+            if let Some(panel) = &self.ai_panel {
+                panel.update(cx, |panel, cx| {
+                    panel.set_width(width);
+                    cx.notify();
+                });
+            }
+        }
+
+        if changed {
+            self.schedule_sidebar_width_save(cx);
+            cx.notify();
+        }
+    }
+
     pub(super) fn default_sidebar_widths() -> SidebarWidths {
         SidebarWidths {
             thumbnails: THUMBNAIL_SIDEBAR_WIDTH,
@@ -65,7 +190,6 @@ impl PdfView {
             self.thumbnail_sidebar_open = false;
             self.thumbnail_sidebar_selecting = false;
             self.thumbnail_sidebar_selection.clear();
-            self.thumbnail_sidebar_actions_position = None;
         }
         if keep_open != LeftSidebar::Toc {
             self.toc_sidebar_open = false;
@@ -239,15 +363,8 @@ impl PdfView {
         let pdf_view = cx.entity().downgrade();
         Self::render_sidebar_shell(
             crate::fl!("table-of-contents-title"),
-            self.toc_sidebar_width,
             Self::render_sidebar_count(self.toc.len(), theme),
             content,
-            Self::render_sidebar_resize_handle(
-                "toc-sidebar-resize-handle",
-                DraggedSidebar::Toc,
-                false,
-                cx,
-            ),
             theme,
             pdf_view,
         )
@@ -376,15 +493,8 @@ impl PdfView {
         let pdf_view = cx.entity().downgrade();
         Self::render_sidebar_shell(
             crate::fl!("notes-title"),
-            self.notes_sidebar_width,
             Self::render_sidebar_count(visible_len, theme),
             content,
-            Self::render_sidebar_resize_handle(
-                "notes-sidebar-resize-handle",
-                DraggedSidebar::Notes,
-                false,
-                cx,
-            ),
             theme,
             pdf_view,
         )

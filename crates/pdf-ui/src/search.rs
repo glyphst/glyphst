@@ -4,7 +4,7 @@ use crate::{
     icons::{Icon, IconName, toolbar_icon_button},
     pdf_view::{NextSearchResult, PrevSearchResult},
     settings::ui_rems,
-    style::{CONTROL_ICON_SIZE, RADIUS_MD, SEARCH_BAR_HEIGHT, TextSize},
+    style::{CONTROL_ICON_SIZE, SEARCH_BAR_HEIGHT, TextSize},
 };
 pub use glyphst_actions::search::{SearchInputCancel, SearchInputConfirm, SearchInputPrevious};
 use gpui::{
@@ -12,7 +12,7 @@ use gpui::{
     SharedString, Task, Window, div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Selectable as _, Sizable as _,
+    ActiveTheme as _, Selectable as _, Sizable as _, StyledExt as _,
     input::{
         Escape as ComponentInputEscape, Input, InputEvent, InputState,
         SelectAll as ComponentSelectAll,
@@ -235,7 +235,7 @@ impl Focusable for SearchBar {
 
 impl Render for SearchBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        let theme = cx.theme().colors;
         let counter = self.counter_text();
         let counter_color = if self.indexing {
             theme.muted_foreground
@@ -257,12 +257,8 @@ impl Render for SearchBar {
             .h(px(SEARCH_BAR_HEIGHT))
             .pl_2()
             .pr_1()
-            .rounded(px(RADIUS_MD))
-            .border_1()
-            .border_color(theme.input)
-            .shadow_xs()
+            .popover_style(cx)
             .overflow_hidden()
-            .bg(theme.popover)
             .text_size(TextSize::Default.rems())
             .text_color(theme.foreground)
             .on_mouse_down(MouseButton::Left, |_, _, cx| {

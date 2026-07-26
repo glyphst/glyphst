@@ -605,11 +605,16 @@ impl PdfView {
                     MarkdownStyle::from_theme(theme, base_text_style),
                 ))
                 .into_any_element(),
-            TranslationStatus::Error(error) => div()
-                .py_2()
-                .text_color(theme.danger)
-                .child(error.clone())
-                .into_any_element(),
+            TranslationStatus::Error(error) => Alert::error(
+                if pinned {
+                    "pinned-translation-error"
+                } else {
+                    "translation-popup-error"
+                },
+                error.clone(),
+            )
+            .xsmall()
+            .into_any_element(),
         };
         let copy_text = match &state.status {
             TranslationStatus::Ready { text, .. } => Some(text.clone()),
@@ -641,10 +646,7 @@ impl PdfView {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
+            .popover_style(cx)
             .text_size(ui_rems(13.0))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();

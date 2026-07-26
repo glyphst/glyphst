@@ -47,6 +47,7 @@ impl PdfView {
         self.translated_text_layouts.clear();
         self.region_drag = None;
         self.context_menu_position = None;
+        self.context_menu_popup = None;
         self.jump_back.clear();
         self.jump_forward.clear();
         let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;

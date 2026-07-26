@@ -10,12 +10,41 @@ impl AiPanel {
         cx: &mut Context<Self>,
     ) {
         self.close_composer_menus();
-        self.message_context_menu = Some(MessageContextMenu {
-            position: request.position,
+        let Some(message) = self.messages.get(message_index) else {
+            return;
+        };
+        let state = MessageContextMenuBuildState {
             message_index,
+            is_user: message.role == Role::User,
+            can_mutate: !self.loading && self.editing_turn.is_none(),
+            has_later_messages: message_index + 1 < self.messages.len(),
             selected_text: request.selected_text,
             link_url: request.link_url,
+        };
+        let panel = cx.entity();
+        let action_context = self.focus_handle.clone();
+        let popup = PopupMenu::build(window, cx, move |menu, _, _| {
+            Self::build_message_context_popup(
+                menu.action_context(action_context.clone()),
+                state,
+                panel.clone(),
+            )
         });
+        cx.subscribe_in(&popup, window, |this, popup, _: &DismissEvent, _, cx| {
+            if this
+                .message_context_menu
+                .as_ref()
+                .is_some_and(|menu| &menu.popup == popup)
+            {
+                this.close_message_context_menu(cx);
+            }
+        })
+        .detach();
+        self.message_context_menu = Some(MessageContextMenu {
+            position: request.position,
+            popup: popup.clone(),
+        });
+        popup.focus_handle(cx).focus(window, cx);
         window.prevent_default();
         cx.stop_propagation();
         cx.notify();
@@ -28,250 +57,115 @@ impl AiPanel {
         }
         was_open
     }
-    fn context_menu_entry(
-        id: impl Into<ElementId>,
+
+    fn message_context_item(
         label: String,
         icon: IconName,
-        theme: Theme,
+        panel: Entity<Self>,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap_2()
-            .h(px(30.0))
-            .px_3()
-            .text_size(ui_rems(13.0))
-            .text_color(theme.foreground)
-            .cursor_pointer()
-            .hover(move |style| style.bg(theme.list_hover))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
+    ) -> PopupMenuItem {
+        PopupMenuItem::new(label)
+            .icon(icon)
+            .on_click(move |_, window, cx| {
+                panel.update(cx, |this, cx| {
                     handler(this, window, cx);
                     this.close_message_context_menu(cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(
-                Icon::new(icon)
-                    .size(ui_rems(14.0))
-                    .text_color(theme.muted_foreground),
-            )
-            .child(label)
-            .into_any_element()
+                });
+            })
     }
 
-    pub(super) fn render_message_context_menu(
-        &self,
-        menu: MessageContextMenu,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(message) = self.messages.get(menu.message_index) else {
-            return div().into_any_element();
-        };
-        let is_user = message.role == Role::User;
-        let can_mutate = !self.loading && self.editing_turn.is_none();
-        let has_later_messages = menu.message_index + 1 < self.messages.len();
-        let copy_index = menu.message_index;
-        let edit_index = menu.message_index;
-        let regenerate_index = menu.message_index;
-        let retry_index = menu.message_index;
-
-        div()
-            .occlude()
-            .flex()
-            .flex_col()
-            .w(px(220.0))
-            .py_1()
-            .border_1()
-            .border_color(theme.border)
-            .overflow_hidden()
-            .bg(theme.popover)
-            .shadow_lg()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
-            .on_mouse_down(MouseButton::Right, |_, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-            })
-            .when_some(menu.selected_text, |this, selected_text| {
-                this.child(Self::context_menu_entry(
-                    ("ai-copy-selection", copy_index),
-                    tr("ai-copy-selection"),
-                    IconName::Copy,
-                    theme,
-                    move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(selected_text.to_string()));
-                    },
-                    cx,
-                ))
-            })
-            .when_some(menu.link_url, |this, link_url| {
-                this.child(Self::context_menu_entry(
-                    ("ai-copy-link", copy_index),
-                    tr("ai-copy-link"),
-                    IconName::Copy,
-                    theme,
-                    move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(link_url.to_string()));
-                    },
-                    cx,
-                ))
-            })
-            .child(Self::context_menu_entry(
-                ("ai-copy-message", copy_index),
-                if is_user {
-                    tr("ai-copy-message")
-                } else {
-                    tr("ai-copy-response")
-                },
+    fn build_message_context_popup(
+        mut menu: PopupMenu,
+        state: MessageContextMenuBuildState,
+        panel: Entity<Self>,
+    ) -> PopupMenu {
+        let MessageContextMenuBuildState {
+            message_index,
+            is_user,
+            can_mutate,
+            has_later_messages,
+            selected_text,
+            link_url,
+        } = state;
+        menu = menu.min_w(px(220.0));
+        if let Some(selected_text) = selected_text {
+            menu = menu.item(Self::message_context_item(
+                tr("ai-copy-selection"),
                 IconName::Copy,
-                theme,
-                move |this, _, cx| this.copy_message(copy_index, cx),
-                cx,
-            ))
-            .when(is_user && can_mutate, |this| {
-                this.child(Self::context_menu_entry(
-                    ("ai-edit-message", edit_index),
+                panel.clone(),
+                move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(selected_text.to_string()));
+                },
+            ));
+        }
+        if let Some(link_url) = link_url {
+            menu = menu.item(Self::message_context_item(
+                tr("ai-copy-link"),
+                IconName::Copy,
+                panel.clone(),
+                move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(link_url.to_string()));
+                },
+            ));
+        }
+        menu = menu.item(Self::message_context_item(
+            if is_user {
+                tr("ai-copy-message")
+            } else {
+                tr("ai-copy-response")
+            },
+            IconName::Copy,
+            panel.clone(),
+            move |this, _, cx| this.copy_message(message_index, cx),
+        ));
+
+        if is_user && can_mutate {
+            menu = menu
+                .item(Self::message_context_item(
                     tr("edit"),
                     IconName::Pencil,
-                    theme,
-                    move |this, window, cx| this.start_editing_message(edit_index, window, cx),
-                    cx,
+                    panel.clone(),
+                    move |this, window, cx| this.start_editing_message(message_index, window, cx),
                 ))
-                .child(Self::context_menu_entry(
-                    ("ai-regenerate-message", regenerate_index),
+                .item(Self::message_context_item(
                     if has_later_messages {
                         tr("ai-regenerate-from-message-warning")
                     } else {
                         tr("ai-regenerate-from-message")
                     },
                     IconName::RotateCcw,
-                    theme,
-                    move |this, _, cx| this.regenerate_from_user(regenerate_index, cx),
-                    cx,
-                ))
-            })
-            .when(!is_user && can_mutate, |this| {
-                this.child(Self::context_menu_entry(
-                    ("ai-retry-response", retry_index),
-                    if has_later_messages {
-                        tr("ai-retry-response-warning")
-                    } else {
-                        tr("ai-retry-response")
-                    },
-                    IconName::RotateCcw,
-                    theme,
-                    move |this, _, cx| this.retry_assistant(retry_index, cx),
-                    cx,
-                ))
-            })
-            .child(div().h(px(1.0)).my_1().mx_1().bg(theme.border))
-            .child(Self::context_menu_entry(
-                "ai-scroll-top",
+                    panel.clone(),
+                    move |this, window, cx| this.regenerate_from_user(message_index, window, cx),
+                ));
+        } else if !is_user && can_mutate {
+            menu = menu.item(Self::message_context_item(
+                if has_later_messages {
+                    tr("ai-retry-response-warning")
+                } else {
+                    tr("ai-retry-response")
+                },
+                IconName::RotateCcw,
+                panel.clone(),
+                move |this, window, cx| this.retry_assistant(message_index, window, cx),
+            ));
+        }
+
+        menu.separator()
+            .item(Self::message_context_item(
                 tr("ai-scroll-top"),
                 IconName::ArrowUp,
-                theme,
+                panel.clone(),
                 |this, _, cx| this.scroll_to_top(cx),
-                cx,
             ))
-            .child(Self::context_menu_entry(
-                "ai-scroll-bottom",
+            .item(Self::message_context_item(
                 tr("ai-scroll-bottom"),
                 IconName::ChevronDown,
-                theme,
+                panel,
                 |this, _, cx| this.scroll_to_bottom(cx),
-                cx,
             ))
-            .into_any_element()
     }
     pub(super) fn close_composer_menus(&mut self) {
-        self.attachment_menu_open = false;
-        self.attachment_menu_anchor = None;
-        self.model_menu_open = false;
-        self.model_menu_anchor = None;
         self.model_search_query = SharedString::default();
-        self.thinking_menu_open = false;
-        self.thinking_menu_anchor = None;
-    }
-
-    fn menu_anchor_for_button(position: GpuiPoint<Pixels>) -> GpuiPoint<Pixels> {
-        point(position.x, position.y + px(18.0))
-    }
-
-    pub(super) fn toggle_attachment_menu(
-        &mut self,
-        position: GpuiPoint<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.loading {
-            return;
-        }
-        self.message_context_menu = None;
-        self.attachment_menu_open = !self.attachment_menu_open;
-        self.attachment_menu_anchor = self
-            .attachment_menu_open
-            .then_some(Self::menu_anchor_for_button(position));
-        self.model_menu_open = false;
-        self.model_menu_anchor = None;
-        self.model_search_query = SharedString::default();
-        self.thinking_menu_open = false;
-        self.thinking_menu_anchor = None;
-        cx.notify();
-    }
-
-    pub(super) fn toggle_model_menu(
-        &mut self,
-        position: GpuiPoint<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.loading {
-            return;
-        }
-        self.message_context_menu = None;
-        self.model_menu_open = !self.model_menu_open;
-        self.model_menu_anchor = self
-            .model_menu_open
-            .then_some(Self::menu_anchor_for_button(position));
-        self.attachment_menu_open = false;
-        self.attachment_menu_anchor = None;
-        self.thinking_menu_open = false;
-        self.thinking_menu_anchor = None;
-        self.model_search_query = SharedString::default();
-        self.sync_model_search_input(window, cx);
-        if self.model_menu_open {
-            self.model_search_input.focus_handle(cx).focus(window, cx);
-        } else {
-            self.composer_input.focus_handle(cx).focus(window, cx);
-        }
-        cx.notify();
-    }
-
-    pub(super) fn toggle_thinking_menu(
-        &mut self,
-        position: GpuiPoint<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.loading {
-            return;
-        }
-        self.message_context_menu = None;
-        self.thinking_menu_open = !self.thinking_menu_open;
-        self.thinking_menu_anchor = self
-            .thinking_menu_open
-            .then_some(Self::menu_anchor_for_button(position));
-        self.attachment_menu_open = false;
-        self.attachment_menu_anchor = None;
-        self.model_menu_open = false;
-        self.model_menu_anchor = None;
-        self.model_search_query = SharedString::default();
-        cx.notify();
     }
 
     fn select_model(&mut self, provider: AiProvider, model: String, cx: &mut Context<Self>) {
@@ -304,71 +198,87 @@ impl AiPanel {
         self.close_composer_menus();
         cx.notify();
     }
-    pub(super) fn render_attachment_menu(
+    pub(super) fn build_attachment_menu(
+        mut menu: PopupMenu,
         page_count: usize,
         has_selection: bool,
         has_region: bool,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut menu = div()
-            .w(px(260.0))
-            .flex()
-            .flex_col()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .shadow_sm()
-            .overflow_hidden()
-            .text_size(ui_rems(12.0))
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            });
+        panel: Entity<Self>,
+    ) -> PopupMenu {
+        menu = menu.min_w(px(260.0)).max_w(px(320.0));
 
-        for (mention_ix, mention) in MentionKind::ALL
+        for mention in MentionKind::ALL
             .into_iter()
             .filter(|mention| mention_is_available(*mention, page_count, has_selection, has_region))
-            .enumerate()
         {
-            menu = menu.child(
-                div()
-                    .id(("ai-attachment-menu-entry", mention_ix))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_2()
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(theme.list_hover))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
+            menu = menu.item(
+                PopupMenuItem::element(move |_, cx| {
+                    let theme = cx.theme().colors;
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().text_color(theme.foreground).child(mention.label()))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(ui_rems(11.0))
+                                .text_color(theme.muted_foreground)
+                                .child(mention.description()),
+                        )
+                })
+                .icon(Self::mention_icon(mention))
+                .on_click({
+                    let panel = panel.clone();
+                    move |_, window, cx| {
+                        panel.update(cx, |this, cx| {
                             this.add_attachment(mention, window, cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(
-                        Icon::new(Self::mention_icon(mention))
-                            .size(ui_rems(14.0))
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .gap_1()
-                            .child(div().text_color(theme.foreground).child(mention.label()))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(ui_rems(11.0))
-                                    .text_color(theme.muted_foreground)
-                                    .child(mention.description()),
-                            ),
-                    ),
+                        });
+                    }
+                }),
+            );
+        }
+
+        menu
+    }
+
+    pub(super) fn build_thinking_menu(
+        mut menu: PopupMenu,
+        selected_provider: AiProvider,
+        selected_model: String,
+        selected_level: AiThinkingLevel,
+        panel: Entity<Self>,
+    ) -> PopupMenu {
+        menu = menu.min_w(px(280.0));
+        for level in AiThinkingLevel::supported_for(selected_provider, &selected_model) {
+            let level = *level;
+            menu = menu.item(
+                PopupMenuItem::element(move |_, cx| {
+                    let theme = cx.theme().colors;
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(level.label())
+                        .child(
+                            div()
+                                .text_size(ui_rems(11.0))
+                                .text_color(theme.muted_foreground)
+                                .child(thinking_level_description(level)),
+                        )
+                })
+                .checked(level == selected_level)
+                .on_click({
+                    let panel = panel.clone();
+                    move |_, _, cx| {
+                        panel.update(cx, |this, cx| {
+                            this.select_thinking_level(level, cx);
+                        });
+                    }
+                }),
             );
         }
 
@@ -379,8 +289,8 @@ impl AiPanel {
         state: ModelMenuRenderState,
         theme: Theme,
         window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+        cx: &mut App,
+    ) -> AnyElement {
         let query = state.search_query.to_string();
         let query_lower = query.to_ascii_lowercase();
         let mut entries = Vec::new();
@@ -409,17 +319,8 @@ impl AiPanel {
             .w(px(340.0))
             .flex()
             .flex_col()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .shadow_sm()
             .overflow_hidden()
-            .text_size(ui_rems(12.0))
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            });
+            .text_size(ui_rems(12.0));
 
         menu = menu
             .child(Input::new(&search_input).w_full().mx_2().mt_2().mb_2())
@@ -467,6 +368,8 @@ impl AiPanel {
                     ModelMenuEntry::Model(provider, model) => {
                         let selected = provider == selected_provider && model.id == selected_model;
                         let model_for_click = model.id.clone();
+                        let panel = state.panel.clone();
+                        let popover = state.popover.clone();
                         div()
                             .id(format!("ai-model-{provider:?}-{}", model.id))
                             .h(px(30.0))
@@ -489,13 +392,15 @@ impl AiPanel {
                             })
                             .cursor_pointer()
                             .hover(move |style| style.bg(theme.list_hover))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                panel.update(cx, |this, cx| {
                                     this.select_model(provider, model_for_click.clone(), cx);
-                                    cx.stop_propagation();
-                                }),
-                            )
+                                });
+                                popover.update(cx, |popover, cx| {
+                                    popover.dismiss(window, cx);
+                                });
+                                cx.stop_propagation();
+                            })
                             .child(div().truncate().min_w_0().child(model.name))
                             .child(
                                 div()
@@ -525,76 +430,6 @@ impl AiPanel {
             );
         }
 
-        menu
-    }
-
-    pub(super) fn render_thinking_menu(
-        selected_provider: AiProvider,
-        selected_model: String,
-        selected_level: AiThinkingLevel,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut menu = div()
-            .w(px(280.0))
-            .flex()
-            .flex_col()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .shadow_sm()
-            .overflow_hidden()
-            .text_size(ui_rems(12.0))
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            });
-
-        for (level_ix, level) in AiThinkingLevel::supported_for(selected_provider, &selected_model)
-            .iter()
-            .enumerate()
-        {
-            let level = *level;
-            let selected = level == selected_level;
-            menu = menu.child(
-                div()
-                    .id(("ai-thinking-level", level_ix))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .px_2()
-                    .py_2()
-                    .bg(if selected {
-                        theme.list_active
-                    } else {
-                        transparent_black()
-                    })
-                    .text_color(if selected {
-                        theme.primary
-                    } else {
-                        theme.foreground
-                    })
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(theme.list_hover))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.select_thinking_level(level, cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(level.label())
-                    .child(
-                        div()
-                            .text_size(ui_rems(11.0))
-                            .text_color(theme.muted_foreground)
-                            .child(thinking_level_description(level)),
-                    ),
-            );
-        }
-
-        menu
+        menu.into_any_element()
     }
 }

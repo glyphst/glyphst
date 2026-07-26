@@ -1,31 +1,59 @@
 use std::{cmp::Ordering, ops::Range};
 
 use gpui::{
-    Anchor, AnyElement, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString, Styled,
-    UniformListScrollHandle, Window, anchored, deferred, div, prelude::*, px, rems,
-    transparent_black, uniform_list,
+    AnyElement, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement,
+    Keystroke, MouseButton, MouseDownEvent, ParentElement, Render, SharedString, Styled,
+    UniformListScrollHandle, Window, div, prelude::*, px, transparent_black, uniform_list,
 };
 
 use crate::{
     icons::{Icon, IconName},
     keybindings::{self, EditableKeyBinding, KeyBindingCategory},
-    keystroke_input::{
-        KeystrokeInput, KeystrokeInputEvent, format_keystroke, render_keybinding_keystroke,
-    },
     scrollbar::Scrollbar,
     settings::{Settings, SettingsStore, ui_rems},
 };
 use glyphst_ui::tooltip::text_tooltip;
 use gpui_component::{
-    ActiveTheme as _, Sizable as _, ThemeColor as Theme,
+    ActiveTheme as _, Sizable as _, ThemeColor as Theme, WindowExt as _,
+    alert::Alert,
+    button::Button,
+    dialog::DialogButtonProps,
     input::{Input, InputEvent, InputState},
+    kbd::{Kbd, KeystrokeRecorder, KeystrokeRecorderEvent},
+    menu::{ContextMenuExt as _, PopupMenuItem},
 };
 
 const ROW_HEIGHT: f32 = 36.0;
 const ICON_COL: f32 = 36.0;
 const CONTEXT_COL: f32 = 170.0;
 const SOURCE_COL: f32 = 90.0;
+
+fn format_keybinding_sequence(sequence: impl AsRef<str>) -> String {
+    sequence
+        .as_ref()
+        .split_whitespace()
+        .map(|stroke| {
+            Keystroke::parse(stroke)
+                .map(|stroke| Kbd::format(&stroke))
+                .unwrap_or_else(|_| stroke.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn render_keybinding_sequence(sequence: impl AsRef<str>) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .children(sequence.as_ref().split_whitespace().map(|stroke| {
+            Keystroke::parse(stroke)
+                .map(|stroke| Kbd::new(stroke).outline().into_any_element())
+                .unwrap_or_else(|_| div().child(stroke.to_string()).into_any_element())
+        }))
+        .into_any_element()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SortColumn {
@@ -51,18 +79,8 @@ struct EditModal {
     label: String,
     category: KeyBindingCategory,
     append: bool,
-    input: Entity<KeystrokeInput>,
+    input: Entity<KeystrokeRecorder>,
     error: Option<InputError>,
-}
-
-#[derive(Clone)]
-struct ContextMenu {
-    position: Point<Pixels>,
-    action: String,
-    label: String,
-    category: KeyBindingCategory,
-    is_overridden: bool,
-    is_unbound: bool,
 }
 
 pub struct KeymapEditor {
@@ -73,7 +91,6 @@ pub struct KeymapEditor {
     sort_column: SortColumn,
     sort_ascending: bool,
     selected_index: Option<usize>,
-    context_menu: Option<ContextMenu>,
     editing: Option<EditModal>,
     save_error: Option<SharedString>,
 }
@@ -103,7 +120,6 @@ impl KeymapEditor {
             sort_column: SortColumn::Category,
             sort_ascending: true,
             selected_index: None,
-            context_menu: None,
             editing: None,
             save_error: None,
         }
@@ -181,17 +197,6 @@ impl KeymapEditor {
         cx.notify();
     }
 
-    fn open_context_menu(&mut self, menu: ContextMenu, cx: &mut Context<Self>) {
-        self.context_menu = Some(menu);
-        cx.notify();
-    }
-
-    fn close_context_menu(&mut self, cx: &mut Context<Self>) {
-        if self.context_menu.take().is_some() {
-            cx.notify();
-        }
-    }
-
     fn copy_to_clipboard(&mut self, value: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(value));
     }
@@ -230,23 +235,68 @@ impl KeymapEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input = cx.new(KeystrokeInput::new);
-        cx.subscribe(&input, |this, _, event, cx| match event {
-            KeystrokeInputEvent::Changed(keys) => {
+        let input = cx.new(KeystrokeRecorder::new);
+        cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+            KeystrokeRecorderEvent::Changed(keys) => {
                 let _ = keys.len();
                 cx.notify();
             }
-            KeystrokeInputEvent::Cancel => this.cancel_editing(cx),
+            KeystrokeRecorderEvent::Cancel => {
+                this.cancel_editing(cx);
+                window.close_dialog(cx);
+            }
         })
         .detach();
-        input.update(cx, |input, cx| input.focus(window, cx));
+        let title = if append {
+            crate::fl!("keymap-add-keybinding")
+        } else {
+            crate::fl!("keymap-edit-keystroke")
+        };
         self.editing = Some(EditModal {
             action,
             label,
             category,
             append,
-            input,
+            input: input.clone(),
             error: None,
+        });
+
+        let editor = cx.entity();
+        let content_editor = editor.clone();
+        let save_editor = editor.clone();
+        let close_editor = editor;
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .width(px(544.0))
+                .title(title.clone())
+                .content({
+                    let editor = content_editor.clone();
+                    move |content, window, cx| {
+                        let body =
+                            editor.update(cx, |this, cx| this.render_editing_content(window, cx));
+                        content.child(body)
+                    }
+                })
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(crate::fl!("save"))
+                        .cancel_text(crate::fl!("cancel"))
+                        .show_cancel(true)
+                        .on_ok({
+                            let editor = save_editor.clone();
+                            move |_, _, cx| editor.update(cx, |this, cx| this.save_editing(cx))
+                        }),
+                )
+                .on_close({
+                    let editor = close_editor.clone();
+                    move |_, _, cx| {
+                        editor.update(cx, |this, cx| this.cancel_editing(cx));
+                    }
+                })
+        });
+        let input_to_focus = input;
+        window.defer(cx, move |window, cx| {
+            input_to_focus.update(cx, |input, cx| input.focus(window, cx));
         });
         cx.notify();
     }
@@ -256,14 +306,20 @@ impl KeymapEditor {
         cx.notify();
     }
 
-    fn save_editing(&mut self, cx: &mut Context<Self>) {
+    fn save_editing(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(editing) = &self.editing else {
-            return;
+            return true;
         };
         let action = editing.action.clone();
         let category = editing.category;
         let append = editing.append;
-        let keys = editing.input.read(cx).keystrokes().to_vec();
+        let keys = editing
+            .input
+            .read(cx)
+            .keystrokes()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
 
         if keys.is_empty() {
             self.set_input_error(
@@ -271,13 +327,13 @@ impl KeymapEditor {
                 crate::fl!("keymap-error-press-shortcut").into(),
                 cx,
             );
-            return;
+            return false;
         }
 
         let keystroke = keys.join(" ");
         if let Err(error) = keybindings::validate_keybinding(cx, &action, category, &keystroke) {
             self.set_input_error(InputSeverity::Error, error.into(), cx);
-            return;
+            return false;
         }
 
         let mut settings = cx.global::<SettingsStore>().settings.clone();
@@ -297,6 +353,7 @@ impl KeymapEditor {
         keybindings::set_keybinding_overrides(&mut settings, action, category, keystrokes);
         self.editing = None;
         self.persist_settings(settings, cx);
+        true
     }
 
     fn set_input_error(
@@ -424,7 +481,7 @@ impl KeymapEditor {
             let defaults = binding
                 .default_keystrokes
                 .iter()
-                .map(|key| format_keystroke(key).to_string())
+                .map(format_keybinding_sequence)
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
@@ -444,6 +501,18 @@ impl KeymapEditor {
         let row_action = action.clone();
         let row_label = label.clone();
         let cell_label = label.clone();
+        let editor = cx.entity();
+        let edit_editor = editor.clone();
+        let reset_editor = editor.clone();
+        let delete_editor = editor.clone();
+        let copy_action_editor = editor.clone();
+        let copy_context_editor = editor;
+        let edit_action = action.clone();
+        let edit_label = label.clone();
+        let reset_action = action.clone();
+        let delete_action = action.clone();
+        let copy_action = action;
+        let context_label = category.label().to_string();
 
         div()
             .id(("keymap-row", index))
@@ -478,20 +547,8 @@ impl KeymapEditor {
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                     this.select_row(index, cx);
-                    this.open_context_menu(
-                        ContextMenu {
-                            position: event.position,
-                            action: action.clone(),
-                            label: label.clone(),
-                            category,
-                            is_overridden,
-                            is_unbound,
-                        },
-                        cx,
-                    );
-                    cx.stop_propagation();
                 }),
             )
             .child(
@@ -545,7 +602,7 @@ impl KeymapEditor {
                     } else {
                         keystrokes
                             .into_iter()
-                            .map(|key| render_keybinding_keystroke(theme, key))
+                            .map(render_keybinding_sequence)
                             .collect::<Vec<_>>()
                     }),
             )
@@ -568,401 +625,183 @@ impl KeymapEditor {
                     .text_color(theme.muted_foreground)
                     .child(source_label),
             )
-            .into_any_element()
-    }
-
-    fn modal_button(
-        &self,
-        label: String,
-        primary: bool,
-        theme: Theme,
-        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .id(label.clone())
-            .h(px(28.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.input)
-            .bg(if primary {
-                theme.primary
-            } else {
-                theme.popover
-            })
-            .text_size(ui_rems(12.0))
-            .text_color(if primary {
-                theme.primary_foreground
-            } else {
-                theme.foreground
-            })
-            .hover(move |style| {
-                style.bg(if primary {
-                    theme.primary
-                } else {
-                    theme.list_hover
+            .context_menu(move |menu, _, _| {
+                menu.item(
+                    PopupMenuItem::new(crate::fl!("edit"))
+                        .icon(IconName::Pencil)
+                        .on_click({
+                            let editor = edit_editor.clone();
+                            let action = edit_action.clone();
+                            let label = edit_label.clone();
+                            move |_, window, cx| {
+                                editor.update(cx, |this, cx| {
+                                    this.start_editing(
+                                        action.clone(),
+                                        label.clone(),
+                                        category,
+                                        false,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                )
+                .when(is_overridden, |menu| {
+                    menu.item(
+                        PopupMenuItem::new(crate::fl!("keymap-reset-to-default"))
+                            .icon(IconName::RotateCcw)
+                            .on_click({
+                                let editor = reset_editor.clone();
+                                let action = reset_action.clone();
+                                move |_, _, cx| {
+                                    editor.update(cx, |this, cx| {
+                                        this.reset_binding(action.clone(), category, cx);
+                                    });
+                                }
+                            }),
+                    )
                 })
+                .when(!is_unbound, |menu| {
+                    menu.item(
+                        PopupMenuItem::new(crate::fl!("delete"))
+                            .icon(IconName::Delete)
+                            .on_click({
+                                let editor = delete_editor.clone();
+                                let action = delete_action.clone();
+                                move |_, _, cx| {
+                                    editor.update(cx, |this, cx| {
+                                        this.clear_binding(action.clone(), category, cx);
+                                    });
+                                }
+                            }),
+                    )
+                })
+                .separator()
+                .item(
+                    PopupMenuItem::new(crate::fl!("keymap-copy-action"))
+                        .icon(IconName::Copy)
+                        .on_click({
+                            let editor = copy_action_editor.clone();
+                            let action = copy_action.clone();
+                            move |_, _, cx| {
+                                editor.update(cx, |this, cx| {
+                                    this.copy_to_clipboard(action.clone(), cx);
+                                });
+                            }
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new(crate::fl!("keymap-copy-context"))
+                        .icon(IconName::Copy)
+                        .on_click({
+                            let editor = copy_context_editor.clone();
+                            let label = context_label.clone();
+                            move |_, _, cx| {
+                                editor.update(cx, |this, cx| {
+                                    this.copy_to_clipboard(label.clone(), cx);
+                                });
+                            }
+                        }),
+                )
             })
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    on_click(this, window, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(label)
             .into_any_element()
     }
 
-    fn menu_entry(
-        label: String,
-        icon: IconName,
-        theme: Theme,
-        handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .id(label.clone())
-            .flex()
-            .items_center()
-            .gap_2()
-            .h(px(30.0))
-            .px_3()
-            .text_size(ui_rems(13.0))
-            .text_color(theme.foreground)
-            .cursor_pointer()
-            .hover(move |style| style.bg(theme.list_hover))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    handler(this, window, cx);
-                    this.close_context_menu(cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(
-                Icon::new(icon)
-                    .size(ui_rems(14.0))
-                    .text_color(theme.muted_foreground),
-            )
-            .child(label)
-            .into_any_element()
-    }
-
-    fn menu_separator(theme: Theme) -> AnyElement {
-        div()
-            .h(px(1.0))
-            .my_1()
-            .mx_1()
-            .bg(theme.border)
-            .into_any_element()
-    }
-
-    fn render_context_menu(menu: &ContextMenu, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
-        let action = menu.action.clone();
-        let label = menu.label.clone();
-        let category = menu.category;
-        let is_overridden = menu.is_overridden;
-        let is_unbound = menu.is_unbound;
-        let edit_action = action.clone();
-        let reset_action = action.clone();
-        let delete_action = action.clone();
-        let copy_action = action;
-
-        div()
-            .occlude()
-            .flex()
-            .flex_col()
-            .w(px(220.0))
-            .py_1()
-            .border_1()
-            .border_color(theme.border)
-            .overflow_hidden()
-            .bg(theme.popover)
-            .shadow_lg()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
-            .on_mouse_down(MouseButton::Right, |_, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-            })
-            .child(Self::menu_entry(
-                crate::fl!("edit"),
-                IconName::Pencil,
-                theme,
-                move |this, window, cx| {
-                    this.start_editing(
-                        edit_action.clone(),
-                        label.clone(),
-                        category,
-                        false,
-                        window,
-                        cx,
-                    );
-                },
-                cx,
-            ))
-            .when(is_overridden, |menu| {
-                menu.child(Self::menu_entry(
-                    crate::fl!("keymap-reset-to-default"),
-                    IconName::RotateCcw,
-                    theme,
-                    move |this, _, cx| {
-                        this.reset_binding(reset_action.clone(), category, cx);
-                    },
-                    cx,
-                ))
-            })
-            .when(!is_unbound, |menu| {
-                menu.child(Self::menu_entry(
-                    crate::fl!("delete"),
-                    IconName::Delete,
-                    theme,
-                    move |this, _, cx| {
-                        this.clear_binding(delete_action.clone(), category, cx);
-                    },
-                    cx,
-                ))
-            })
-            .child(Self::menu_separator(theme))
-            .child(Self::menu_entry(
-                crate::fl!("keymap-copy-action"),
-                IconName::Copy,
-                theme,
-                move |this, _, cx| {
-                    this.copy_to_clipboard(copy_action.clone(), cx);
-                },
-                cx,
-            ))
-            .child(Self::menu_entry(
-                crate::fl!("keymap-copy-context"),
-                IconName::Copy,
-                theme,
-                move |this, _, cx| {
-                    this.copy_to_clipboard(category.label().to_string(), cx);
-                },
-                cx,
-            ))
-            .into_any_element()
-    }
-
-    // __KM_MENU_RENDER__
-
-    fn render_modal(
-        &self,
-        editing: &EditModal,
-        settings: &Settings,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let keys = editing.input.read(cx).keystrokes().to_vec();
+    fn render_editing_content(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(editing) = self.editing.as_ref() else {
+            return div().into_any_element();
+        };
+        let settings = &cx.global::<SettingsStore>().settings;
+        let theme = cx.theme().colors;
+        let keys = editing
+            .input
+            .read(cx)
+            .keystrokes()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
         let keystroke = keys.join(" ");
         let matching_count =
             self.matching_bindings_count(settings, editing.category, &editing.action, &keystroke);
-        let title = if editing.append {
-            crate::fl!("keymap-add-keybinding")
-        } else {
-            crate::fl!("keymap-edit-keystroke")
-        };
-
         let view_keystroke = keystroke.clone();
 
         div()
-            .absolute()
-            .top_0()
-            .right_0()
-            .bottom_0()
-            .left_0()
             .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.overlay)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.cancel_editing(cx);
-                }),
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(ui_rems(12.0))
+                    .text_color(theme.muted_foreground)
+                    .child(crate::fl!(
+                        "keymap-modal-subtitle",
+                        action = editing.label.as_str(),
+                        context = editing.category.label()
+                    )),
             )
             .child(
                 div()
-                    .w(rems(34.0))
-                    .p_4()
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(theme.input)
-                    .bg(theme.popover)
-                    .shadow_lg()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .pb_3()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .child(
-                                div()
-                                    .text_size(ui_rems(16.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .text_size(ui_rems(12.0))
-                                    .text_color(theme.muted_foreground)
-                                    .child(crate::fl!(
-                                        "keymap-modal-subtitle",
-                                        action = editing.label.as_str(),
-                                        context = editing.category.label()
-                                    )),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(ui_rems(12.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child(crate::fl!("keymap-edit-keystroke")),
-                            )
-                            .child(editing.input.clone()),
-                    )
-                    .when(matching_count > 0 && !keystroke.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_size(ui_rems(12.0))
-                                        .text_color(theme.muted_foreground)
-                                        .child(crate::fl!(
-                                            "keymap-conflicting-bindings",
-                                            count = matching_count as i64
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .id("keymap-view-conflicts")
-                                        .px_2()
-                                        .py_1()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_1()
-                                        .rounded(px(4.0))
-                                        .border_1()
-                                        .border_color(theme.input)
-                                        .text_size(ui_rems(11.0))
-                                        .text_color(theme.muted_foreground)
-                                        .hover(|style| style.bg(theme.list_hover))
-                                        .cursor_pointer()
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.view_matching(
-                                                    view_keystroke.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                                cx.stop_propagation();
-                                            }),
-                                        )
-                                        .child(crate::fl!("view"))
-                                        .child(
-                                            Icon::new(IconName::ArrowUpRight)
-                                                .size(ui_rems(11.0))
-                                                .text_color(theme.muted_foreground),
-                                        ),
-                                ),
-                        )
-                    })
+                    .gap_2()
                     .child(
                         div()
                             .text_size(ui_rems(12.0))
-                            .text_color(theme.muted_foreground)
-                            .child(crate::fl!(
-                                "keymap-context",
-                                context = editing.category.label()
-                            )),
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(crate::fl!("keymap-edit-keystroke")),
                     )
-                    .when_some(editing.error.clone(), |this, error| {
-                        let (bg_color, border_color, text_color) = match error.severity {
-                            InputSeverity::Warning => {
-                                let warn = theme.danger.opacity(0.7);
-                                (warn.opacity(0.1), warn, warn)
-                            }
-                            InputSeverity::Error => {
-                                let err = theme.danger;
-                                (err.opacity(0.1), err, err)
-                            }
-                        };
-                        this.child(
-                            div()
-                                .px_3()
-                                .py_2()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(border_color)
-                                .bg(bg_color)
-                                .text_color(text_color)
-                                .text_size(ui_rems(12.0))
-                                .child(
-                                    Icon::new(IconName::TriangleAlert)
-                                        .size(ui_rems(14.0))
-                                        .text_color(text_color),
-                                )
-                                .child(error.message),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .gap_2()
-                            .child(self.modal_button(
-                                crate::fl!("cancel"),
-                                false,
-                                theme,
-                                |this, _, cx| {
-                                    this.cancel_editing(cx);
-                                },
-                                cx,
-                            ))
-                            .child(self.modal_button(
-                                crate::fl!("save"),
-                                true,
-                                theme,
-                                |this, _, cx| {
-                                    this.save_editing(cx);
-                                },
-                                cx,
-                            )),
-                    ),
+                    .child(editing.input.clone()),
             )
+            .when(matching_count > 0 && !keystroke.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(ui_rems(12.0))
+                                .text_color(theme.muted_foreground)
+                                .child(crate::fl!(
+                                    "keymap-conflicting-bindings",
+                                    count = matching_count as i64
+                                )),
+                        )
+                        .child(
+                            Button::new("keymap-view-conflicts")
+                                .small()
+                                .outline()
+                                .label(crate::fl!("view"))
+                                .icon(IconName::ArrowUpRight)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.view_matching(view_keystroke.clone(), window, cx);
+                                    window.close_dialog(cx);
+                                })),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .text_size(ui_rems(12.0))
+                    .text_color(theme.muted_foreground)
+                    .child(crate::fl!(
+                        "keymap-context",
+                        context = editing.category.label()
+                    )),
+            )
+            .when_some(editing.error.clone(), |this, error| {
+                this.child(match error.severity {
+                    InputSeverity::Warning => {
+                        Alert::warning("keymap-input-warning", error.message).small()
+                    }
+                    InputSeverity::Error => {
+                        Alert::error("keymap-input-error", error.message).small()
+                    }
+                })
+            })
             .into_any_element()
     }
 }
@@ -980,8 +819,6 @@ impl Render for KeymapEditor {
         let rows = self.filtered_bindings(&settings);
         let row_count = rows.len();
         let scroll_handle = self.scroll.clone();
-        let editing = self.editing.as_ref();
-        let context_menu = self.context_menu.as_ref();
 
         div()
             .id("keymap-editor")
@@ -994,15 +831,6 @@ impl Render for KeymapEditor {
             .bg(theme.tab_active)
             .text_color(theme.foreground)
             .text_size(ui_rems(13.0))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.close_context_menu(cx);
-                }),
-            )
-            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                this.close_context_menu(cx);
-            }))
             .child(
                 div()
                     .flex_none()
@@ -1120,36 +948,15 @@ impl Render for KeymapEditor {
                         .child(crate::fl!("keymap-empty")),
                 )
             })
-            .when_some(context_menu, |this, menu| {
-                this.child(
-                    deferred(
-                        anchored()
-                            .snap_to_window_with_margin(px(8.0))
-                            .position(menu.position)
-                            .anchor(Anchor::TopLeft)
-                            .child(Self::render_context_menu(menu, theme, cx)),
-                    )
-                    .with_priority(1),
-                )
-            })
             .when_some(self.save_error.clone(), |this, error| {
                 this.child(
-                    div()
+                    Alert::error("keymap-save-error", error)
+                        .small()
                         .absolute()
                         .left(px(16.0))
                         .bottom(px(16.0))
-                        .px_3()
-                        .py_2()
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(theme.danger)
-                        .bg(theme.popover)
-                        .text_color(theme.danger)
-                        .child(error),
+                        .w(px(420.0)),
                 )
-            })
-            .when_some(editing, |this, editing| {
-                this.child(self.render_modal(editing, &settings, theme, cx))
             })
     }
 }

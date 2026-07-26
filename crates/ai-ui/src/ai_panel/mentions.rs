@@ -283,11 +283,7 @@ impl AiPanel {
             .flex()
             .flex_col()
             .py_1()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .shadow_sm()
+            .popover_style(cx)
             .overflow_hidden()
             .text_size(ui_rems(12.0))
             .child(
@@ -308,7 +304,7 @@ impl AiPanel {
                                         (
                                             range,
                                             HighlightStyle {
-                                                color: Some(theme.warning.into()),
+                                                color: Some(theme.warning),
                                                 font_weight: Some(FontWeight::BOLD),
                                                 ..Default::default()
                                             },

@@ -70,7 +70,7 @@ impl AiPanel {
             self.page_count,
             ai_settings.page_image_limit,
         ) {
-            self.show_validation_notice(error.to_string(), cx);
+            self.show_validation_notice(error.to_string(), window, cx);
             return;
         }
 
@@ -90,7 +90,12 @@ impl AiPanel {
         self.start_generation(document, cx);
     }
 
-    pub(super) fn regenerate_from_user(&mut self, message_index: usize, cx: &mut Context<Self>) {
+    pub(super) fn regenerate_from_user(
+        &mut self,
+        message_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.loading || self.editing_turn.is_some() {
             return;
         }
@@ -110,7 +115,7 @@ impl AiPanel {
             self.page_count,
             page_image_limit,
         ) {
-            self.show_validation_notice(error.to_string(), cx);
+            self.show_validation_notice(error.to_string(), window, cx);
             return;
         }
 
@@ -125,7 +130,12 @@ impl AiPanel {
         self.start_generation(document, cx);
     }
 
-    pub(super) fn retry_assistant(&mut self, assistant_index: usize, cx: &mut Context<Self>) {
+    pub(super) fn retry_assistant(
+        &mut self,
+        assistant_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.loading || self.editing_turn.is_some() {
             return;
         }
@@ -145,7 +155,7 @@ impl AiPanel {
         }
 
         self.generation_failure = None;
-        self.regenerate_from_user(user_index, cx);
+        self.regenerate_from_user(user_index, window, cx);
     }
 
     fn push_message(&mut self, message: ChatMessage, cx: &mut Context<Self>) {
@@ -306,7 +316,7 @@ impl AiPanel {
         }));
     }
 
-    pub(super) fn send_message(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading || self.editing_turn.is_some() || self.generation_failure.is_some() {
             return;
         }
@@ -328,7 +338,7 @@ impl AiPanel {
             self.page_count,
             ai_settings.page_image_limit,
         ) {
-            self.show_validation_notice(error.to_string(), cx);
+            self.show_validation_notice(error.to_string(), window, cx);
             return;
         }
 
@@ -622,25 +632,19 @@ impl AiPanel {
     }
     pub(super) fn clear_validation_notice(&mut self) {
         self.validation_notice = None;
-        self.validation_toast = None;
-        self.validation_notice_task = None;
     }
 
-    pub(super) fn show_validation_notice(&mut self, message: String, cx: &mut Context<Self>) {
+    pub(super) fn show_validation_notice(
+        &mut self,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.validation_notice = Some(message.clone());
-        self.validation_toast = Some(message.clone());
-        self.validation_notice_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(VALIDATION_NOTICE_DURATION)
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.validation_toast.as_deref() == Some(message.as_str()) {
-                    this.validation_toast = None;
-                    this.validation_notice_task = None;
-                    cx.notify();
-                }
-            });
-        }));
+        window.push_notification(
+            Notification::error(message).id::<AiValidationNotification>(),
+            cx,
+        );
         cx.notify();
     }
 }

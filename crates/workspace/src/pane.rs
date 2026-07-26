@@ -10,18 +10,16 @@ use anyhow::{Result, bail};
 use glyphst_core::DocumentFormat;
 use glyphst_translation_ui::{DocumentTranslationJobId, DocumentTranslationJobManager};
 use gpui::{
-    Along, AnyElement, App, AppContext, Axis, BorderStyle, Bounds, Context, CursorStyle,
-    DispatchPhase, DragMoveEvent, Element, ElementId, Entity, EntityId, EventEmitter, FocusHandle,
-    GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, SharedString, Style, Styled, Task, Window,
-    WindowHandle, div, fill, point, prelude::*, px, quad, relative, size, transparent_black,
+    AnyElement, App, AppContext, Axis, Bounds, Context, DragMoveEvent, Entity, EntityId,
+    EventEmitter, FocusHandle, IntoElement, MouseDownEvent, ParentElement, Pixels, Point, Render,
+    SharedString, Styled, Task, Window, WindowHandle, div, point, prelude::*, px, relative,
 };
 use gpui_component::{
-    ActiveTheme as _, Root, Selectable as _, Sizable as _, ThemeColor as Theme,
+    ActiveTheme as _, ElementExt as _, Root, Selectable as _, Sizable as _, ThemeColor as Theme,
     button::{Button, ButtonVariants as _},
+    resizable::{ResizablePanelGroup, ResizableState, resizable_panel},
     tab::{Tab as ComponentTab, TabBar as ComponentTabBar},
 };
-use smallvec::SmallVec;
 
 pub use glyphst_actions::pane::{
     SplitDown, SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical,
@@ -40,7 +38,6 @@ pub(crate) const PANE_TAB_BAR_HEIGHT: f32 = 32.0;
 const PANE_TAB_MAX_WIDTH: f32 = 220.0;
 const PANE_TAB_MIN_WIDTH: f32 = 120.0;
 const HANDLE_HITBOX_SIZE: f32 = 4.0;
-const DIVIDER_SIZE: f32 = 1.0;
 const HORIZONTAL_MIN_SIZE: f32 = 120.0;
 const VERTICAL_MIN_SIZE: f32 = 140.0;
 const DROP_TARGET_SIZE: f32 = 0.25;
@@ -1237,36 +1234,37 @@ impl PaneGroup {
         old_pane: &Entity<Pane>,
         new_pane: &Entity<Pane>,
         direction: SplitDirection,
+        cx: &mut App,
     ) {
         let found = match &mut self.root {
             Member::Pane(pane) => {
                 if pane == old_pane {
-                    self.root = Member::new_axis(old_pane.clone(), new_pane.clone(), direction);
+                    self.root = Member::new_axis(old_pane.clone(), new_pane.clone(), direction, cx);
                     true
                 } else {
                     false
                 }
             }
-            Member::Axis(axis) => axis.split(old_pane, new_pane, direction),
+            Member::Axis(axis) => axis.split(old_pane, new_pane, direction, cx),
         };
 
         if !found {
             let first_pane = self.root.first_pane();
             match &mut self.root {
                 Member::Pane(_) => {
-                    self.root = Member::new_axis(first_pane, new_pane.clone(), direction);
+                    self.root = Member::new_axis(first_pane, new_pane.clone(), direction, cx);
                 }
                 Member::Axis(axis) => {
-                    let _ = axis.split(&first_pane, new_pane, direction);
+                    let _ = axis.split(&first_pane, new_pane, direction, cx);
                 }
             }
         }
     }
 
-    pub(crate) fn remove(&mut self, pane: &Entity<Pane>) -> bool {
+    pub(crate) fn remove(&mut self, pane: &Entity<Pane>, cx: &mut App) -> bool {
         match &mut self.root {
             Member::Pane(_) => false,
-            Member::Axis(axis) => match axis.remove(pane) {
+            Member::Axis(axis) => match axis.remove(pane, cx) {
                 Ok(Some(last_member)) => {
                     self.root = last_member;
                     true
@@ -1325,6 +1323,7 @@ impl PaneGroup {
         &mut self,
         active_pane: &Entity<Pane>,
         direction: SplitDirection,
+        cx: &mut App,
     ) -> bool {
         if let Some(pane) = self.find_pane_at_border(direction)
             && pane == *active_pane
@@ -1332,7 +1331,7 @@ impl PaneGroup {
             return false;
         }
 
-        if !self.remove(active_pane) {
+        if !self.remove(active_pane, cx) {
             return false;
         }
 
@@ -1344,7 +1343,7 @@ impl PaneGroup {
             } else {
                 0
             };
-            root.insert_pane(idx, active_pane);
+            root.insert_pane(idx, active_pane, cx);
             return true;
         }
 
@@ -1353,11 +1352,17 @@ impl PaneGroup {
         } else {
             vec![Member::Pane(active_pane.clone()), self.root.clone()]
         };
-        self.root = Member::Axis(PaneAxis::new(direction.axis(), members));
+        self.root = Member::Axis(PaneAxis::new(direction.axis(), members, cx));
         true
     }
 
-    pub(crate) fn resize(&mut self, pane: &Entity<Pane>, direction: SplitDirection) {
+    pub(crate) fn resize(
+        &mut self,
+        pane: &Entity<Pane>,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let axis = direction.axis();
         let amount = if direction.increasing() {
             px(RESIZE_STEP)
@@ -1365,12 +1370,12 @@ impl PaneGroup {
             px(-RESIZE_STEP)
         };
         if let Member::Axis(axis_group) = &mut self.root {
-            let _ = axis_group.resize(pane, axis, amount);
+            let _ = axis_group.resize(pane, axis, amount, window, cx);
         }
     }
 
-    pub(crate) fn reset_pane_sizes(&mut self) {
-        self.root.reset_pane_sizes();
+    pub(crate) fn reset_pane_sizes(&mut self, cx: &mut App) {
+        self.root.reset_pane_sizes(cx);
     }
 
     pub(crate) fn retain_only(&mut self, pane: Entity<Pane>) {
@@ -1410,7 +1415,12 @@ struct PaneRenderResult {
 }
 
 impl Member {
-    fn new_axis(old_pane: Entity<Pane>, new_pane: Entity<Pane>, direction: SplitDirection) -> Self {
+    fn new_axis(
+        old_pane: Entity<Pane>,
+        new_pane: Entity<Pane>,
+        direction: SplitDirection,
+        cx: &mut App,
+    ) -> Self {
         let axis = direction.axis();
         let members = match direction {
             SplitDirection::Up | SplitDirection::Left => {
@@ -1421,7 +1431,7 @@ impl Member {
             }
         };
 
-        Member::Axis(PaneAxis::new(axis, members))
+        Member::Axis(PaneAxis::new(axis, members, cx))
     }
 
     fn first_pane(&self) -> Entity<Pane> {
@@ -1442,9 +1452,9 @@ impl Member {
         }
     }
 
-    fn reset_pane_sizes(&self) {
+    fn reset_pane_sizes(&self, cx: &mut App) {
         match self {
-            Member::Axis(axis) => axis.reset_pane_sizes(),
+            Member::Axis(axis) => axis.reset_pane_sizes(cx),
             Member::Pane(_) => {}
         }
     }
@@ -1484,17 +1494,17 @@ impl Member {
 pub(crate) struct PaneAxis {
     axis: Axis,
     members: Vec<Member>,
-    flexes: Rc<RefCell<Vec<f32>>>,
+    state: Entity<ResizableState>,
     bounding_boxes: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
 }
 
 impl PaneAxis {
-    fn new(axis: Axis, members: Vec<Member>) -> Self {
+    fn new(axis: Axis, members: Vec<Member>, cx: &mut App) -> Self {
         let len = members.len();
         Self {
             axis,
             members,
-            flexes: Rc::new(RefCell::new(vec![1.0; len])),
+            state: cx.new(|_| ResizableState::default()),
             bounding_boxes: Rc::new(RefCell::new(vec![None; len])),
         }
     }
@@ -1504,11 +1514,12 @@ impl PaneAxis {
         old_pane: &Entity<Pane>,
         new_pane: &Entity<Pane>,
         direction: SplitDirection,
+        cx: &mut App,
     ) -> bool {
         for (mut idx, member) in self.members.iter_mut().enumerate() {
             match member {
                 Member::Axis(axis) => {
-                    if axis.split(old_pane, new_pane, direction) {
+                    if axis.split(old_pane, new_pane, direction, cx) {
                         return true;
                     }
                 }
@@ -1518,10 +1529,10 @@ impl PaneAxis {
                             if direction.increasing() {
                                 idx += 1;
                             }
-                            self.insert_pane(idx, new_pane);
+                            self.insert_pane(idx, new_pane, cx);
                         } else {
                             *member =
-                                Member::new_axis(old_pane.clone(), new_pane.clone(), direction);
+                                Member::new_axis(old_pane.clone(), new_pane.clone(), direction, cx);
                         }
                         return true;
                     }
@@ -1531,20 +1542,21 @@ impl PaneAxis {
         false
     }
 
-    fn insert_pane(&mut self, idx: usize, new_pane: &Entity<Pane>) {
+    fn insert_pane(&mut self, idx: usize, new_pane: &Entity<Pane>, cx: &mut App) {
         self.members.insert(idx, Member::Pane(new_pane.clone()));
-        *self.flexes.borrow_mut() = vec![1.0; self.members.len()];
+        self.state
+            .update(cx, |state, cx| state.insert_panel(None, Some(idx), cx));
         *self.bounding_boxes.borrow_mut() = vec![None; self.members.len()];
     }
 
-    fn remove(&mut self, pane_to_remove: &Entity<Pane>) -> Result<Option<Member>> {
+    fn remove(&mut self, pane_to_remove: &Entity<Pane>, cx: &mut App) -> Result<Option<Member>> {
         let mut remove_member = None;
         let mut found = false;
 
         for (idx, member) in self.members.iter_mut().enumerate() {
             match member {
                 Member::Axis(axis) => {
-                    if let Ok(last_member) = axis.remove(pane_to_remove) {
+                    if let Ok(last_member) = axis.remove(pane_to_remove, cx) {
                         if let Some(last_member) = last_member {
                             *member = last_member;
                         }
@@ -1568,8 +1580,9 @@ impl PaneAxis {
 
         if let Some(idx) = remove_member {
             self.members.remove(idx);
+            self.state
+                .update(cx, |state, cx| state.remove_panel(idx, cx));
         }
-        *self.flexes.borrow_mut() = vec![1.0; self.members.len()];
         *self.bounding_boxes.borrow_mut() = vec![None; self.members.len()];
 
         if self.members.len() == 1 {
@@ -1594,14 +1607,22 @@ impl PaneAxis {
         })
     }
 
-    fn reset_pane_sizes(&self) {
-        *self.flexes.borrow_mut() = vec![1.0; self.members.len()];
+    fn reset_pane_sizes(&self, cx: &mut App) {
+        self.state
+            .update(cx, |state, cx| state.reset_panel_sizes(cx));
         for member in &self.members {
-            member.reset_pane_sizes();
+            member.reset_pane_sizes(cx);
         }
     }
 
-    fn resize(&mut self, pane: &Entity<Pane>, axis: Axis, amount: Pixels) -> Option<bool> {
+    fn resize(
+        &mut self,
+        pane: &Entity<Pane>,
+        axis: Axis,
+        amount: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<bool> {
         let found_pane = self
             .members
             .iter()
@@ -1615,7 +1636,7 @@ impl PaneAxis {
         if !found_pane {
             for (idx, member) in self.members.iter_mut().enumerate() {
                 if let Member::Axis(child_axis) = member
-                    && let Some(done) = child_axis.resize(pane, axis, amount)
+                    && let Some(done) = child_axis.resize(pane, axis, amount, window, cx)
                 {
                     if done {
                         return Some(true);
@@ -1627,27 +1648,6 @@ impl PaneAxis {
                 }
             }
             found_axis_index?;
-        }
-
-        let bounds = self
-            .bounding_boxes
-            .borrow()
-            .iter()
-            .filter_map(|bounds| *bounds)
-            .reduce(|acc, bounds| acc.union(&bounds))?;
-        let container_size = bounds.size;
-        let container_along = container_size.along(axis);
-        if container_along <= px(0.0) {
-            return Some(true);
-        }
-
-        let min_size = match axis {
-            Axis::Horizontal => px(HORIZONTAL_MIN_SIZE),
-            Axis::Vertical => px(VERTICAL_MIN_SIZE),
-        };
-        let mut flexes = self.flexes.borrow_mut();
-        if flexes.len() < 2 {
-            return Some(true);
         }
 
         let ix = if found_pane {
@@ -1663,27 +1663,11 @@ impl PaneAxis {
         }
         .unwrap_or(0);
 
-        let size = |ix: usize, flexes: &[f32]| container_along * (flexes[ix] / flexes.len() as f32);
-        if min_size - px(1.0) > size(ix, flexes.as_slice()) {
-            return Some(true);
-        }
-
-        let apply_changes = |current_ix: usize, amount: Pixels, flexes: &mut [f32]| {
-            let total = size(current_ix, flexes) + size(current_ix + 1, flexes);
-            let next_size = Pixels::max(size(current_ix + 1, flexes) - amount, min_size);
-            let current_size = Pixels::max(total - next_size, min_size);
-            let current_delta = current_size - size(current_ix, flexes);
-            let flex_delta = flexes.len() as f32 * current_delta / container_along;
-            flexes[current_ix] += flex_delta;
-            flexes[current_ix + 1] -= flex_delta;
-        };
-
-        if ix + 1 == flexes.len() {
-            if ix > 0 {
-                apply_changes(ix - 1, -amount, flexes.as_mut_slice());
-            }
-        } else {
-            apply_changes(ix, amount, flexes.as_mut_slice());
+        let current_size = self.state.read(cx).sizes().get(ix).copied();
+        if let Some(current_size) = current_size {
+            self.state.update(cx, |state, cx| {
+                state.resize_panel(ix, current_size + amount, window, cx);
+            });
         }
         Some(true)
     }
@@ -1742,20 +1726,18 @@ impl PaneAxis {
         window: &mut Window,
         cx: &mut App,
     ) -> PaneRenderResult {
-        let mut active_pane_ix = None;
         let mut contains_active_pane = false;
-        let mut is_leaf_pane = vec![false; self.members.len()];
-        let rendered_children = self
+        let min_size = match self.axis {
+            Axis::Horizontal => px(HORIZONTAL_MIN_SIZE),
+            Axis::Vertical => px(VERTICAL_MIN_SIZE),
+        };
+        let panels = self
             .members
             .iter()
             .enumerate()
             .map(|(ix, member)| {
-                if let Member::Pane(pane) = member {
-                    is_leaf_pane[ix] = true;
-                    if pane == active_pane {
-                        active_pane_ix = Some(ix);
-                    }
-                }
+                let is_leaf_pane = matches!(member, Member::Pane(_));
+                let is_active_pane = matches!(member, Member::Pane(pane) if pane == active_pane);
                 let result = member.render(
                     (basis + ix) * 10,
                     active_pane,
@@ -1767,22 +1749,55 @@ impl PaneAxis {
                 if result.contains_active_pane {
                     contains_active_pane = true;
                 }
-                result.element
+                let bounding_boxes = self.bounding_boxes.clone();
+                let child = div()
+                    .relative()
+                    .size_full()
+                    .overflow_hidden()
+                    .on_prepaint(move |bounds, _, _| {
+                        if let Some(slot) = bounding_boxes.borrow_mut().get_mut(ix) {
+                            *slot = Some(bounds);
+                        }
+                    })
+                    .child(result.element)
+                    .when(
+                        dim_inactive_panes && is_leaf_pane && !is_active_pane,
+                        |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .bottom_0()
+                                    .left_0()
+                                    .bg(theme.overlay),
+                            )
+                        },
+                    )
+                    .when(is_active_pane, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .bottom_0()
+                                .left_0()
+                                .border_1()
+                                .border_color(theme.primary),
+                        )
+                    });
+
+                resizable_panel()
+                    .size_range(min_size..Pixels::MAX)
+                    .child(child)
             })
             .collect::<Vec<_>>();
 
-        let element = pane_axis(
-            self.axis,
-            basis,
-            self.flexes.clone(),
-            self.bounding_boxes.clone(),
-            theme,
-            dim_inactive_panes,
-        )
-        .with_active_pane(active_pane_ix)
-        .with_is_leaf_pane_mask(is_leaf_pane)
-        .children(rendered_children)
-        .into_any_element();
+        let element = ResizablePanelGroup::new(("pane-axis", basis))
+            .with_state(&self.state)
+            .axis(self.axis)
+            .children(panels)
+            .into_any_element();
 
         PaneRenderResult {
             element,
@@ -1790,12 +1805,6 @@ impl PaneAxis {
         }
     }
 }
-
-mod axis_element;
-
-use axis_element::pane_axis;
-#[cfg(test)]
-use axis_element::resize_axis_sizes;
 
 #[cfg(test)]
 mod tests;

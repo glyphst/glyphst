@@ -1,24 +1,6 @@
 use super::*;
 
 impl AiPanel {
-    pub(super) fn render_validation_toast(message: String, theme: Theme) -> impl IntoElement {
-        div()
-            .absolute()
-            .top_2()
-            .right_2()
-            .max_w(px(420.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.danger)
-            .bg(theme.popover)
-            .px_3()
-            .py_2()
-            .shadow_sm()
-            .text_size(ui_rems(12.0))
-            .text_color(theme.danger)
-            .child(message)
-    }
-
     pub(super) fn render_quick_ask(
         &mut self,
         window: &mut Window,
@@ -38,7 +20,6 @@ impl AiPanel {
             (store.settings.ai.quick_ask, base_text_style)
         };
         let loading = self.loading;
-        let validation_toast = self.validation_toast.clone();
         let completion_matches = self.mention_completion_matches(cx);
         let completion_selected = self
             .mention_completion
@@ -105,23 +86,21 @@ impl AiPanel {
             )
             .when(loading, |this| {
                 this.child(
-                    div()
-                        .absolute()
-                        .top_1()
-                        .right_2()
-                        .rounded(px(4.0))
-                        .bg(theme.popover)
-                        .child(Self::message_action_button(
-                            "quick-ask-stop",
-                            IconName::Stop,
-                            tr("ai-stop-generation"),
-                            theme.danger,
-                            theme,
-                            |this, _, cx| {
-                                this.stop_generation(cx);
-                            },
-                            cx,
-                        )),
+                    Self::message_action_button(
+                        "quick-ask-stop",
+                        IconName::Stop,
+                        tr("ai-stop-generation"),
+                        theme.danger,
+                        theme,
+                        |this, _, cx| {
+                            this.stop_generation(cx);
+                        },
+                        cx,
+                    )
+                    .outline()
+                    .absolute()
+                    .top_1()
+                    .right_2(),
                 )
             })
             .when(show_answer, |this| {
@@ -173,35 +152,33 @@ impl AiPanel {
                             answer_index.filter(|_| !answer.is_empty()),
                             |this, index| {
                                 this.child(
-                                    div()
-                                        .invisible()
-                                        .group_hover("quick-ask-answer", |style| style.visible())
-                                        .absolute()
-                                        .top_2()
-                                        .right_3()
-                                        .rounded(px(4.0))
-                                        .bg(theme.popover)
-                                        .child(Self::message_action_button(
-                                            "quick-ask-copy-response",
-                                            if copied_answer {
-                                                IconName::Check
-                                            } else {
-                                                IconName::Copy
-                                            },
-                                            if copied_answer {
-                                                tr("ai-copied")
-                                            } else {
-                                                tr("ai-copy-response")
-                                            },
-                                            if copied_answer {
-                                                theme.success
-                                            } else {
-                                                theme.muted_foreground
-                                            },
-                                            theme,
-                                            move |this, _, cx| this.copy_message(index, cx),
-                                            cx,
-                                        )),
+                                    Self::message_action_button(
+                                        "quick-ask-copy-response",
+                                        if copied_answer {
+                                            IconName::Check
+                                        } else {
+                                            IconName::Copy
+                                        },
+                                        if copied_answer {
+                                            tr("ai-copied")
+                                        } else {
+                                            tr("ai-copy-response")
+                                        },
+                                        if copied_answer {
+                                            theme.success
+                                        } else {
+                                            theme.muted_foreground
+                                        },
+                                        theme,
+                                        move |this, _, cx| this.copy_message(index, cx),
+                                        cx,
+                                    )
+                                    .outline()
+                                    .invisible()
+                                    .group_hover("quick-ask-answer", |style| style.visible())
+                                    .absolute()
+                                    .top_2()
+                                    .right_3(),
                                 )
                             },
                         )
@@ -227,9 +204,6 @@ impl AiPanel {
                     .with_priority(1),
                 )
             })
-            .when_some(validation_toast, |this, notice| {
-                this.child(deferred(Self::render_validation_toast(notice, theme)).with_priority(3))
-            })
     }
     pub(super) fn message_action_button(
         id: impl Into<ElementId>,
@@ -239,7 +213,7 @@ impl AiPanel {
         theme: Theme,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Button {
         toolbar_icon_button(id, icon)
             .text_color(icon_color)
             .hover(move |style| style.bg(theme.list_hover))
@@ -248,7 +222,6 @@ impl AiPanel {
                 handler(this, window, cx);
                 cx.stop_propagation();
             }))
-            .into_any_element()
     }
 
     pub(super) fn render_message(
@@ -326,10 +299,10 @@ impl AiPanel {
         );
 
         let actions = if is_editing {
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
+            ButtonGroup::new(("ai-message-edit-actions", message_index))
+                .outline()
+                .compact()
+                .small()
                 .child(Self::message_action_button(
                     ("ai-message-cancel-edit", message_index),
                     IconName::X,
@@ -350,9 +323,12 @@ impl AiPanel {
                     |this, window, cx| this.submit_edited_message(window, cx),
                     cx,
                 ))
-                .into_any_element()
         } else {
-            let mut actions = div().flex().items_center().gap_1().child(copy_button);
+            let mut actions = ButtonGroup::new(("ai-message-actions", message_index))
+                .outline()
+                .compact()
+                .small()
+                .child(copy_button);
             if is_user && can_mutate {
                 actions = actions
                     .child(Self::message_action_button(
@@ -376,7 +352,9 @@ impl AiPanel {
                         },
                         theme.muted_foreground,
                         theme,
-                        move |this, _, cx| this.regenerate_from_user(message_index, cx),
+                        move |this, window, cx| {
+                            this.regenerate_from_user(message_index, window, cx)
+                        },
                         cx,
                     ));
             } else if !is_user && can_mutate {
@@ -390,11 +368,11 @@ impl AiPanel {
                     },
                     theme.muted_foreground,
                     theme,
-                    move |this, _, cx| this.retry_assistant(message_index, cx),
+                    move |this, window, cx| this.retry_assistant(message_index, window, cx),
                     cx,
                 ));
             }
-            actions.into_any_element()
+            actions
         };
 
         div()
@@ -465,10 +443,6 @@ impl AiPanel {
                     .absolute()
                     .top(if is_user { px(-6.0) } else { px(0.0) })
                     .right_3()
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(theme.input)
-                    .bg(theme.popover)
                     .when(!is_editing, |this| {
                         this.opacity(0.0)
                             .group_hover("ai-message-row", |style| style.opacity(1.0))
@@ -512,31 +486,13 @@ impl AiPanel {
         div()
             .flex()
             .flex_col()
-            .gap_2()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.danger.opacity(0x88 as f32 / 255.0))
-            .bg(theme.danger.opacity(0x16 as f32 / 255.0))
-            .p_2()
-            .text_size(ui_rems(12.0))
+            .gap_1()
             .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_2()
-                    .text_color(theme.danger)
-                    .child(
-                        Icon::new(IconName::TriangleAlert)
-                            .size(ui_rems(14.0))
-                            .text_color(theme.danger),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_color(theme.foreground)
-                            .child(failure.message),
-                    ),
+                Alert::error(
+                    format!("{id_prefix}-alert-{assistant_index}"),
+                    failure.message,
+                )
+                .xsmall(),
             )
             .child(
                 div()
@@ -544,6 +500,7 @@ impl AiPanel {
                     .items_center()
                     .justify_end()
                     .gap_1()
+                    .px_1()
                     .child(Self::message_action_button(
                         format!("{id_prefix}-copy-{assistant_index}"),
                         if copied_error {
@@ -571,7 +528,7 @@ impl AiPanel {
                         tr("ai-retry-response"),
                         theme.muted_foreground,
                         theme,
-                        move |this, _, cx| this.retry_assistant(assistant_index, cx),
+                        move |this, window, cx| this.retry_assistant(assistant_index, window, cx),
                         cx,
                     ))
                     .child(Self::message_action_button(

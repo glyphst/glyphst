@@ -27,18 +27,14 @@ impl PdfView {
 
     fn enter_grid_overview_selection(&mut self, cx: &mut Context<Self>) {
         self.grid_overview_selecting = true;
-        self.grid_overview_actions_position = None;
         self.close_context_menu(cx);
         cx.notify();
     }
 
     fn cancel_grid_overview_selection(&mut self, cx: &mut Context<Self>) {
-        let changed = self.grid_overview_selecting
-            || !self.grid_overview_selection.is_empty()
-            || self.grid_overview_actions_position.is_some();
+        let changed = self.grid_overview_selecting || !self.grid_overview_selection.is_empty();
         self.grid_overview_selecting = false;
         self.grid_overview_selection.clear();
-        self.grid_overview_actions_position = None;
         if changed {
             cx.notify();
         }
@@ -49,46 +45,20 @@ impl PdfView {
         if !self.grid_overview_selection.insert(page_idx) {
             self.grid_overview_selection.remove(&page_idx);
         }
-        self.grid_overview_actions_position = None;
         cx.notify();
-    }
-
-    fn toggle_grid_overview_actions(
-        &mut self,
-        position: GpuiPoint<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_context_menu(cx);
-        self.grid_overview_actions_position = if self.grid_overview_actions_position.is_some() {
-            None
-        } else {
-            Some(position)
-        };
-        cx.notify();
-    }
-
-    pub(super) fn close_grid_overview_actions(&mut self, cx: &mut Context<Self>) -> bool {
-        let was_open = self.grid_overview_actions_position.take().is_some();
-        if was_open {
-            cx.notify();
-        }
-        was_open
     }
 
     fn enter_thumbnail_sidebar_selection(&mut self, cx: &mut Context<Self>) {
         self.thumbnail_sidebar_selecting = true;
-        self.thumbnail_sidebar_actions_position = None;
         self.close_context_menu(cx);
         cx.notify();
     }
 
     fn cancel_thumbnail_sidebar_selection(&mut self, cx: &mut Context<Self>) {
-        let changed = self.thumbnail_sidebar_selecting
-            || !self.thumbnail_sidebar_selection.is_empty()
-            || self.thumbnail_sidebar_actions_position.is_some();
+        let changed =
+            self.thumbnail_sidebar_selecting || !self.thumbnail_sidebar_selection.is_empty();
         self.thumbnail_sidebar_selecting = false;
         self.thumbnail_sidebar_selection.clear();
-        self.thumbnail_sidebar_actions_position = None;
         if changed {
             cx.notify();
         }
@@ -98,31 +68,7 @@ impl PdfView {
         if !self.thumbnail_sidebar_selection.insert(page_idx) {
             self.thumbnail_sidebar_selection.remove(&page_idx);
         }
-        self.thumbnail_sidebar_actions_position = None;
         cx.notify();
-    }
-
-    fn toggle_thumbnail_sidebar_actions(
-        &mut self,
-        position: GpuiPoint<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_context_menu(cx);
-        self.thumbnail_sidebar_actions_position =
-            if self.thumbnail_sidebar_actions_position.is_some() {
-                None
-            } else {
-                Some(position)
-            };
-        cx.notify();
-    }
-
-    pub(super) fn close_thumbnail_sidebar_actions(&mut self, cx: &mut Context<Self>) -> bool {
-        let was_open = self.thumbnail_sidebar_actions_position.take().is_some();
-        if was_open {
-            cx.notify();
-        }
-        was_open
     }
 
     pub(super) fn set_thumbnail_sidebar_open(
@@ -156,7 +102,6 @@ impl PdfView {
         } else {
             self.thumbnail_sidebar_selecting = false;
             self.thumbnail_sidebar_selection.clear();
-            self.thumbnail_sidebar_actions_position = None;
         }
         cx.notify();
     }
@@ -200,7 +145,6 @@ impl PdfView {
         } else {
             self.grid_overview_selecting = false;
             self.grid_overview_selection.clear();
-            self.grid_overview_actions_position = None;
         }
         cx.notify();
     }
@@ -347,7 +291,6 @@ impl PdfView {
         let thumbnail_box_width = thumbnail_max_width + THUMBNAIL_SIDEBAR_THUMBNAIL_PADDING;
         let thumbnail_box_height = thumbnail_max_height + THUMBNAIL_SIDEBAR_THUMBNAIL_PADDING;
         let scroll_handle = self.thumbnail_sidebar_scroll.clone();
-        let actions_position = self.thumbnail_sidebar_actions_position;
         let compact_header =
             selecting && self.thumbnail_sidebar_width < THUMBNAIL_SIDEBAR_COMPACT_HEADER_WIDTH;
         let title = if compact_header {
@@ -376,22 +319,15 @@ impl PdfView {
         if page_export {
             if selecting && selected_count > 0 {
                 toolbar_actions = toolbar_actions
-                    .child(Self::grid_overview_toolbar_button(
+                    .child(Self::page_selection_actions_button(
                         "thumbnail-sidebar-actions",
                         actions_label,
-                        theme,
-                        |this, event, _, cx| {
-                            this.toggle_thumbnail_sidebar_actions(
-                                point(event.position.x, event.position.y),
-                                cx,
-                            );
-                        },
+                        PageSelectionSource::ThumbnailSidebar,
                         cx,
                     ))
                     .child(Self::grid_overview_toolbar_button(
                         "thumbnail-sidebar-cancel",
                         cancel_label,
-                        theme,
                         |this, _, _, cx| this.cancel_thumbnail_sidebar_selection(cx),
                         cx,
                     ));
@@ -399,7 +335,6 @@ impl PdfView {
                 toolbar_actions = toolbar_actions.child(Self::grid_overview_toolbar_button(
                     "thumbnail-sidebar-cancel",
                     cancel_label,
-                    theme,
                     |this, _, _, cx| this.cancel_thumbnail_sidebar_selection(cx),
                     cx,
                 ));
@@ -407,7 +342,6 @@ impl PdfView {
                 toolbar_actions = toolbar_actions.child(Self::grid_overview_toolbar_button(
                     "thumbnail-sidebar-select",
                     crate::fl!("select"),
-                    theme,
                     |this, _, _, cx| this.enter_thumbnail_sidebar_selection(cx),
                     cx,
                 ));
@@ -437,8 +371,7 @@ impl PdfView {
             .flex_col()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.close_thumbnail_sidebar_actions(cx);
+                cx.listener(|_, _, _, cx| {
                     cx.stop_propagation();
                 }),
             )
@@ -512,6 +445,7 @@ impl PdfView {
                                                         if let Some(image) = image {
                                                             let _ = window.paint_image(
                                                                 bounds,
+                                                                bounds,
                                                                 Corners::default(),
                                                                 image,
                                                                 0,
@@ -540,7 +474,6 @@ impl PdfView {
                                                         .on_mouse_down(
                                                             MouseButton::Left,
                                                             cx.listener(move |this, _, _, cx| {
-                                                                this.close_thumbnail_sidebar_actions(cx);
                                                                 if this.thumbnail_sidebar_selecting {
                                                                     this.toggle_thumbnail_sidebar_page_selection(
                                                                         page_idx, cx,
@@ -560,7 +493,6 @@ impl PdfView {
                                                                       event: &MouseDownEvent,
                                                                       window,
                                                                       cx| {
-                                                                    this.close_thumbnail_sidebar_actions(cx);
                                                                     this.context_menu_page =
                                                                         Some(page_idx);
                                                                     this.context_menu_highlight =
@@ -600,23 +532,17 @@ impl PdfView {
                                                                 .child(thumbnail)
                                                                 .when(selecting, |this| {
                                                                     this.child(
-                                                                        div()
+                                                                        Checkbox::new((
+                                                                            "thumbnail-sidebar-selection",
+                                                                            page_idx,
+                                                                        ))
+                                                                            .xsmall()
+                                                                            .checked(selected)
+                                                                            .tab_stop(false)
                                                                             .absolute()
                                                                             .top(px(6.0))
                                                                             .right(px(6.0))
-                                                                            .flex()
-                                                                            .items_center()
-                                                                            .justify_center()
-                                                                            .w(px(22.0))
-                                                                            .h(px(22.0))
-                                                                            .border_1()
-                                                                            .border_color(
-                                                                                if selected {
-                                                                                    theme.primary
-                                                                                } else {
-                                                                                    theme.border
-                                                                                },
-                                                                            )
+                                                                            .p_1()
                                                                             .bg(
                                                                                 theme
                                                                                     .popover
@@ -625,19 +551,9 @@ impl PdfView {
                                                                                             / 255.0,
                                                                                     ),
                                                                             )
-                                                                            .text_size(ui_rems(13.0))
-                                                                            .text_color(
-                                                                                if selected {
-                                                                                    theme.primary
-                                                                                } else {
-                                                                                    theme.muted_foreground
-                                                                                },
-                                                                            )
-                                                                            .child(if selected {
-                                                                                "☑"
-                                                                            } else {
-                                                                                "☐"
-                                                                            }),
+                                                                            .rounded(
+                                                                                cx.theme().radius,
+                                                                            ),
                                                                     )
                                                                 }),
                                                         )
@@ -665,35 +581,10 @@ impl PdfView {
                             .size_full(),
                         )
                     }),
-            )
-            .when_some(actions_position, |this, position| {
-                this.child(
-                    deferred(
-                        anchored()
-                            .snap_to_window_with_margin(px(8.0))
-                            .position(position)
-                            .anchor(Anchor::TopLeft)
-                            .child(Self::render_thumbnail_sidebar_actions_menu(theme, cx)),
-                    )
-                    .with_priority(2),
-                )
-            });
+            );
 
         let pdf_view = cx.entity().downgrade();
-        Self::render_sidebar_shell(
-            title,
-            self.thumbnail_sidebar_width,
-            header_end,
-            content,
-            Self::render_sidebar_resize_handle(
-                "thumbnail-sidebar-resize-handle",
-                DraggedSidebar::Thumbnails,
-                false,
-                cx,
-            ),
-            theme,
-            pdf_view,
-        )
+        Self::render_sidebar_shell(title, header_end, content, theme, pdf_view)
     }
 
     pub(super) fn render_grid_overview(
@@ -726,7 +617,6 @@ impl PdfView {
         let thumbnail_box_height = thumbnail_max_height + GRID_OVERVIEW_CELL_PADDING;
         let horizontal_gap =
             Self::grid_overview_horizontal_gap(self.grid_overview_viewport_width, cols, zoom);
-        let actions_position = self.grid_overview_actions_position;
         let scroll_handle = self.grid_overview_scroll.clone();
         let measure_view = cx.entity();
         let page_export = self.capabilities.page_export;
@@ -764,14 +654,12 @@ impl PdfView {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.close_context_menu(cx);
-                    this.close_grid_overview_actions(cx);
                     cx.stop_propagation();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.close_grid_overview_actions(cx);
                     let page_idx = this.grid_overview_cursor.min(this.last_page_index());
                     this.context_menu_page = Some(page_idx);
                     this.context_menu_highlight = None;
@@ -810,22 +698,15 @@ impl PdfView {
                                     && !self.grid_overview_selection.is_empty()
                                 {
                                     toolbar = toolbar
-                                        .child(Self::grid_overview_toolbar_button(
+                                        .child(Self::page_selection_actions_button(
                                             "grid-overview-actions",
                                             crate::fl!("actions-menu"),
-                                            theme,
-                                            |this, event, _, cx| {
-                                                this.toggle_grid_overview_actions(
-                                                    point(event.position.x, event.position.y),
-                                                    cx,
-                                                );
-                                            },
+                                            PageSelectionSource::GridOverview,
                                             cx,
                                         ))
                                         .child(Self::grid_overview_toolbar_button(
                                             "grid-overview-cancel",
                                             crate::fl!("cancel-selection"),
-                                            theme,
                                             |this, _, _, cx| {
                                                 this.cancel_grid_overview_selection(cx)
                                             },
@@ -835,7 +716,6 @@ impl PdfView {
                                     toolbar = toolbar.child(Self::grid_overview_toolbar_button(
                                         "grid-overview-cancel",
                                         crate::fl!("cancel"),
-                                        theme,
                                         |this, _, _, cx| {
                                             this.cancel_grid_overview_selection(cx)
                                         },
@@ -845,7 +725,6 @@ impl PdfView {
                                     toolbar = toolbar.child(Self::grid_overview_toolbar_button(
                                         "grid-overview-select",
                                         crate::fl!("select"),
-                                        theme,
                                         |this, _, _, cx| {
                                             this.enter_grid_overview_selection(cx)
                                         },
@@ -952,6 +831,7 @@ impl PdfView {
                                                         if let Some(image) = image {
                                                             let _ = window.paint_image(
                                                                 bounds,
+                                                                bounds,
                                                                 Corners::default(),
                                                                 image,
                                                                 0,
@@ -980,7 +860,6 @@ impl PdfView {
                                                             MouseButton::Left,
                                                             cx.listener(move |this, _, _, cx| {
                                                                 this.close_context_menu(cx);
-                                                                this.close_grid_overview_actions(cx);
                                                                 if this.grid_overview_selecting {
                                                                     this.toggle_grid_overview_page_selection(
                                                                         page_idx, cx,
@@ -1003,7 +882,6 @@ impl PdfView {
                                                                       event: &MouseDownEvent,
                                                                       window,
                                                                       cx| {
-                                                                    this.close_grid_overview_actions(cx);
                                                                     this.grid_overview_cursor =
                                                                         page_idx;
                                                                     this.context_menu_page =
@@ -1044,23 +922,17 @@ impl PdfView {
                                                                 .child(thumbnail)
                                                                 .when(selecting, |this| {
                                                                     this.child(
-                                                                        div()
+                                                                        Checkbox::new((
+                                                                            "grid-overview-selection",
+                                                                            page_idx,
+                                                                        ))
+                                                                            .xsmall()
+                                                                            .checked(selected)
+                                                                            .tab_stop(false)
                                                                             .absolute()
                                                                             .top(px(6.0))
                                                                             .right(px(6.0))
-                                                                            .flex()
-                                                                            .items_center()
-                                                                            .justify_center()
-                                                                            .w(px(22.0))
-                                                                            .h(px(22.0))
-                                                                            .border_1()
-                                                                            .border_color(
-                                                                                if selected {
-                                                                                    theme.primary
-                                                                                } else {
-                                                                                    theme.border
-                                                                                },
-                                                                            )
+                                                                            .p_1()
                                                                             .bg(
                                                                                 theme
                                                                                     .popover
@@ -1069,19 +941,9 @@ impl PdfView {
                                                                                             / 255.0,
                                                                                     ),
                                                                             )
-                                                                            .text_size(ui_rems(13.0))
-                                                                            .text_color(
-                                                                                if selected {
-                                                                                    theme.primary
-                                                                                } else {
-                                                                                    theme.muted_foreground
-                                                                                },
-                                                                            )
-                                                                            .child(if selected {
-                                                                                "☑"
-                                                                            } else {
-                                                                                "☐"
-                                                                            }),
+                                                                            .rounded(
+                                                                                cx.theme().radius,
+                                                                            ),
                                                                     )
                                                                 }),
                                                         )
@@ -1115,17 +977,5 @@ impl PdfView {
                         .size_full(),
                     ),
             )
-            .when_some(actions_position, |this, position| {
-                this.child(
-                    deferred(
-                        anchored()
-                            .snap_to_window_with_margin(px(8.0))
-                            .position(position)
-                            .anchor(Anchor::TopLeft)
-                            .child(Self::render_grid_overview_actions_menu(theme, cx)),
-                    )
-                    .with_priority(2),
-                )
-            })
     }
 }

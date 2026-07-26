@@ -12,9 +12,11 @@ use anyhow::{Context as _, Result, bail};
 use gpui::{
     AnyElement, Context, Corners, EventEmitter, FocusHandle, IntoElement, MouseButton, Pixels,
     Render, RenderImage, SharedString, UniformListScrollHandle, Window, canvas, div, fill, point,
-    prelude::*, px, rgb, transparent_black, uniform_list,
+    prelude::*, px, rgb, uniform_list,
 };
-use gpui_component::{ActiveTheme as _, ThemeColor};
+use gpui_component::{
+    ActiveTheme as _, Sizable as _, ThemeColor, alert::Alert, button::Button, checkbox::Checkbox,
+};
 use image::{Frame, ImageFormat, RgbaImage};
 use mupdf::{Colorspace, Device, DisplayList, Matrix, Pixmap, Rect};
 use smallvec::smallvec;
@@ -131,6 +133,13 @@ enum ThumbnailState {
     Loading,
     Ready(ThumbnailImage),
     Failed,
+}
+
+struct NewTabCardState {
+    thumbnail: ThumbnailState,
+    selecting: bool,
+    selected: bool,
+    entry_ix: usize,
 }
 
 #[derive(Clone)]
@@ -359,44 +368,32 @@ impl NewTab {
 
     fn render_toolbar_button(
         label: String,
-        theme: ThemeColor,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .id(label.clone())
-            .flex()
-            .items_center()
-            .justify_center()
-            .h(px(24.0))
-            .px_2()
-            .border_1()
-            .border_color(theme.border)
-            .bg(transparent_black())
-            .text_size(ui_rems(12.0))
-            .text_color(theme.foreground)
-            .cursor_pointer()
-            .hover(move |style| style.bg(theme.list_hover))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    handler(this, window, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(label)
+        Button::new(label.clone())
+            .small()
+            .outline()
+            .label(label)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                handler(this, window, cx);
+                cx.stop_propagation();
+            }))
     }
 
     fn render_card(
         entry: &NewTabEntry,
-        thumbnail: ThumbnailState,
-        selecting: bool,
-        selected: bool,
-        entry_ix: usize,
+        state: NewTabCardState,
         theme: ThemeColor,
         page_color: u32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let NewTabCardState {
+            thumbnail,
+            selecting,
+            selected,
+            entry_ix,
+        } = state;
         let path = entry.path.clone();
         let file_name = entry.file_name.clone();
         let directory = entry.directory.clone();
@@ -440,29 +437,16 @@ impl NewTab {
             )
             .when(selecting, |card| {
                 card.child(
-                    div()
+                    Checkbox::new(("new-tab-card-selection", entry_ix))
+                        .xsmall()
+                        .checked(selected)
+                        .tab_stop(false)
                         .absolute()
                         .top(px(6.0))
                         .right(px(6.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(22.0))
-                        .h(px(22.0))
-                        .border_1()
-                        .border_color(if selected {
-                            theme.primary
-                        } else {
-                            theme.border
-                        })
+                        .p_1()
                         .bg(theme.popover.opacity(0xe8 as f32 / 255.0))
-                        .text_size(ui_rems(13.0))
-                        .text_color(if selected {
-                            theme.primary
-                        } else {
-                            theme.muted_foreground
-                        })
-                        .child(if selected { "☑" } else { "☐" }),
+                        .rounded(cx.theme().radius),
                 )
             })
             .child(
@@ -515,7 +499,7 @@ impl NewTab {
                     move |bounds, image, window, _| {
                         window.paint_quad(fill(bounds, rgb(page_color)));
                         if let Err(error) =
-                            window.paint_image(bounds, Corners::default(), image, 0, false)
+                            window.paint_image(bounds, bounds, Corners::default(), image, 0, false)
                         {
                             eprintln!("failed to paint new tab preview: {error:#}");
                         }
@@ -541,17 +525,15 @@ impl NewTab {
                 .child(crate::fl!("new-tab-rendering-preview"))
                 .into_any_element(),
             ThumbnailState::Failed => div()
-                .flex()
-                .items_center()
-                .justify_center()
                 .w(px(THUMBNAIL_MAX_WIDTH))
                 .h(px(THUMBNAIL_MAX_HEIGHT))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.danger.opacity(0x18 as f32 / 255.0))
-                .text_size(ui_rems(11.0))
-                .text_color(theme.muted_foreground)
-                .child(crate::fl!("new-tab-preview-unavailable"))
+                .child(
+                    Alert::error(
+                        "new-tab-preview-unavailable",
+                        crate::fl!("new-tab-preview-unavailable"),
+                    )
+                    .xsmall(),
+                )
                 .into_any_element(),
         }
     }
@@ -710,10 +692,12 @@ impl Render for NewTab {
 
                                                         row = row.child(Self::render_card(
                                                             entry,
-                                                            thumbnail,
-                                                            selecting,
-                                                            selected,
-                                                            entry_ix,
+                                                            NewTabCardState {
+                                                                thumbnail,
+                                                                selecting,
+                                                                selected,
+                                                                entry_ix,
+                                                            },
                                                             theme,
                                                             document_theme.page,
                                                             cx,
@@ -769,27 +753,23 @@ impl Render for NewTab {
                     toolbar = toolbar
                         .child(Self::render_toolbar_button(
                             crate::fl!("delete"),
-                            theme,
                             |this, _, cx| this.delete_selected(cx),
                             cx,
                         ))
                         .child(Self::render_toolbar_button(
                             crate::fl!("cancel-selection"),
-                            theme,
                             |this, _, cx| this.cancel_select(cx),
                             cx,
                         ));
                 } else if selecting {
                     toolbar = toolbar.child(Self::render_toolbar_button(
                         crate::fl!("cancel"),
-                        theme,
                         |this, _, cx| this.cancel_select(cx),
                         cx,
                     ));
                 } else {
                     toolbar = toolbar.child(Self::render_toolbar_button(
                         crate::fl!("select"),
-                        theme,
                         |this, _, cx| this.enter_select(cx),
                         cx,
                     ));
