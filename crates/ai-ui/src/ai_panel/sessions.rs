@@ -141,6 +141,7 @@ impl AiPanel {
         self.session_title = DEFAULT_SESSION_TITLE.to_string();
         self.session_created = 0;
         self.session_updated = 0;
+        self.invalidate_mention_preview();
         self.messages.clear();
         self.markdown_views.clear();
         self.content = SharedString::default();
@@ -219,6 +220,7 @@ impl AiPanel {
                 cx.new(|cx| Markdown::new(source.into(), cx))
             })
             .collect();
+        self.invalidate_mention_preview();
         self.content = SharedString::default();
         self.selected_range = 0..0;
         self.selection_reversed = false;

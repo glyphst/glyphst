@@ -341,6 +341,142 @@ fn missing_context_block(mention: MentionKind) -> ContextBlock {
     ContextBlock::new(mention, None, mention.empty_context_message())
 }
 
+pub(super) fn mention_preview_text(
+    mention: &ComposerMention,
+    context: Option<&AiContext>,
+) -> Option<String> {
+    match mention.reference.kind {
+        MentionKind::Selection => Some(mention.captured_text().map_or_else(
+            || resolve_mention_context(MentionKind::Selection, context).text,
+            |text| ContextBlock::new(MentionKind::Selection, None, text.to_string()).text,
+        )),
+        MentionKind::DocumentText => Some(mention.captured_text().map_or_else(
+            || resolve_mention_context(MentionKind::DocumentText, context).text,
+            str::to_string,
+        )),
+        MentionKind::Page
+        | MentionKind::PageImage
+        | MentionKind::DocumentImage
+        | MentionKind::RegionImage => None,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct LimitedMentionPreviewText {
+    pub(super) text: String,
+    pub(super) truncated: bool,
+}
+
+pub(super) fn limit_mention_preview_text(
+    kind: MentionKind,
+    text: String,
+) -> LimitedMentionPreviewText {
+    if kind != MentionKind::DocumentText {
+        return LimitedMentionPreviewText {
+            text,
+            truncated: false,
+        };
+    }
+
+    let truncated = text.chars().nth(MENTION_PREVIEW_MAX_CHARS).is_some();
+    LimitedMentionPreviewText {
+        text: if truncated {
+            text.chars().take(MENTION_PREVIEW_MAX_CHARS).collect()
+        } else {
+            text
+        },
+        truncated,
+    }
+}
+
+pub(super) fn preview_content_from_resolved(
+    reference: MentionReference,
+    resolved: &[ResolvedPageContext],
+) -> Result<MentionPreviewPayload, String> {
+    for context in resolved {
+        match context {
+            ResolvedPageContext::Text(context)
+                if context.kind == reference.kind && context.page == reference.page =>
+            {
+                return Ok(MentionPreviewPayload::Text(context.text.clone()));
+            }
+            ResolvedPageContext::Image(image)
+                if image.kind == reference.kind && image.page == reference.page =>
+            {
+                return preview_payload_from_image(image);
+            }
+            ResolvedPageContext::Text(_) | ResolvedPageContext::Image(_) => {}
+        }
+    }
+
+    Err(format!(
+        "No preview is available for {}.",
+        reference.display_text()
+    ))
+}
+
+pub(super) fn preview_content_from_resolved_region(
+    reference: &RegionImageReference,
+    resolved: &[ResolvedRegionContext],
+) -> Result<MentionPreviewPayload, String> {
+    let image = resolved
+        .iter()
+        .find(|context| &context.reference == reference)
+        .map(|context| &context.image)
+        .ok_or_else(|| "No preview is available for @region-image.".to_string())?;
+    preview_payload_from_image(image)
+}
+
+fn preview_payload_from_image(
+    image: &glyphst_ai::ai_chat::ImageContext,
+) -> Result<MentionPreviewPayload, String> {
+    let format = ImageFormat::from_mime_type(&image.media_type)
+        .ok_or_else(|| format!("Unsupported preview image type: {}", image.media_type))?;
+    let (width, height) = preview_image_dimensions(format, &image.bytes)?;
+    Ok(MentionPreviewPayload::Image(MentionPreviewImage {
+        image: Arc::new(Image::from_bytes(format, image.bytes.to_vec())),
+        width,
+        height,
+    }))
+}
+
+fn preview_image_dimensions(format: ImageFormat, bytes: &[u8]) -> Result<(u32, u32), String> {
+    let format = match format {
+        ImageFormat::Png => image::ImageFormat::Png,
+        ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+        ImageFormat::Webp => image::ImageFormat::WebP,
+        ImageFormat::Gif => image::ImageFormat::Gif,
+        ImageFormat::Svg => return Err("SVG preview dimensions are unavailable".to_string()),
+        ImageFormat::Bmp => image::ImageFormat::Bmp,
+        ImageFormat::Tiff => image::ImageFormat::Tiff,
+        ImageFormat::Ico => image::ImageFormat::Ico,
+        ImageFormat::Pnm => image::ImageFormat::Pnm,
+    };
+    image::ImageReader::with_format(Cursor::new(bytes), format)
+        .into_dimensions()
+        .map_err(|error| format!("Failed to read preview image dimensions: {error}"))
+}
+
+pub(super) fn mention_preview_matches(
+    preview: &MentionPreview,
+    generation: u64,
+    reference: MentionReference,
+    source_range: &Range<usize>,
+) -> bool {
+    preview.generation == generation
+        && preview.reference == reference
+        && preview.source_range == *source_range
+}
+
+pub(super) fn mention_preview_region_contains(
+    position: GpuiPoint<Pixels>,
+    trigger_bounds: Option<Bounds<Pixels>>,
+    preview_bounds: Option<Bounds<Pixels>>,
+) -> bool {
+    preview_bounds.is_some_and(|bounds| bounds.contains(&position))
+        || trigger_bounds.is_some_and(|bounds| bounds.contains(&position))
+}
+
 pub(super) fn mention_insertion_text(
     source: &str,
     range: &Range<usize>,
@@ -376,6 +512,72 @@ pub(super) fn adjust_composer_mentions(
             edited_range.start >= mention.range.end
         }
     });
+}
+
+pub(super) fn composer_page_digits_range(mention: &ComposerMention) -> Option<Range<usize>> {
+    if !mention.reference.kind.requires_page_number() {
+        return None;
+    }
+    let start = mention
+        .range
+        .start
+        .checked_add(mention.reference.kind.token().len() + 1)?;
+    let end = mention.range.end.checked_sub(1)?;
+    (start <= end).then_some(start..end)
+}
+
+/// Rebase explicit composer mentions after an input edit while preserving a
+/// page mention whose editable numeric subrange is being changed.
+///
+/// Ordinary text that happens to parse as a mention is intentionally not
+/// promoted here: only a previously explicit page mention can be restored.
+pub(super) fn adjust_composer_mentions_for_input_change(
+    mentions: &mut Vec<ComposerMention>,
+    edited_range: &Range<usize>,
+    inserted_len: usize,
+    new_content: &str,
+) {
+    let delta = inserted_len as isize - edited_range.len() as isize;
+    let page_mentions = mentions
+        .iter()
+        .filter_map(|mention| {
+            let digits = composer_page_digits_range(mention)?;
+            (digits.start <= edited_range.start && edited_range.end <= digits.end)
+                .then(|| (mention.clone(), digits))
+        })
+        .collect::<Vec<_>>();
+
+    adjust_composer_mentions(mentions, edited_range, inserted_len);
+
+    for (mut mention, old_digits) in page_mentions {
+        let Some(new_end) = mention.range.end.checked_add_signed(delta) else {
+            continue;
+        };
+        let new_range = mention.range.start..new_end;
+        let new_digits = old_digits.start..new_end.saturating_sub(1);
+        let prefix = format!("{}(", mention.reference.kind.token());
+        if new_range.end > new_content.len()
+            || new_digits.start > new_digits.end
+            || new_content.get(new_range.start..new_digits.start) != Some(prefix.as_str())
+            || new_content.get(new_digits.end..new_range.end) != Some(")")
+        {
+            continue;
+        }
+
+        let Some(digits) = new_content.get(new_digits.clone()) else {
+            continue;
+        };
+        if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(page) = digits.parse::<usize>() {
+            mention.reference = MentionReference::new(mention.reference.kind, Some(page));
+        }
+        mention.range = new_range;
+        mentions.push(mention);
+    }
+
+    mentions.sort_by_key(|mention| mention.range.start);
 }
 
 pub(super) fn request_prompt_without_mentions(text: &str, mentions: &[ComposerMention]) -> String {

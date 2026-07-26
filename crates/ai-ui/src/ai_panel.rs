@@ -1,5 +1,6 @@
 use std::{
-    cell::Cell, collections::HashSet, ops::Range, path::PathBuf, rc::Rc, thread, time::Duration,
+    cell::Cell, collections::HashSet, io::Cursor, ops::Range, path::PathBuf, rc::Rc, sync::Arc,
+    thread, time::Duration,
 };
 
 use crate::{
@@ -29,11 +30,12 @@ use glyphst_ui::{
     scrollbar::{ScrollbarHandle, WithScrollbar as _},
 };
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, DismissEvent,
-    ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla,
-    IntoElement, MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta,
-    ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, TextStyle, WeakEntity,
-    Window, anchored, deferred, div, prelude::*, px, transparent_black,
+    Anchor, Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, DismissEvent,
+    ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, Image, ImageFormat,
+    IntoElement, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point as GpuiPoint, Render,
+    ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, TextStyle,
+    WeakEntity, Window, anchored, canvas, deferred, div, img, point, prelude::*, px,
+    transparent_black,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, InteractiveElementExt as _, Selectable as _, Sizable as _,
@@ -41,7 +43,8 @@ use gpui_component::{
     alert::Alert,
     button::{Button, ButtonGroup, ButtonVariants as _},
     input::{
-        CompletionProvider, Escape as InputEscape, Input, InputEvent, InputState, Rope, RopeExt,
+        CompletionProvider, Escape as InputEscape, Input, InputEvent, InputSpan, InputState, Rope,
+        RopeExt,
     },
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
@@ -53,6 +56,13 @@ use lsp_types::{
 };
 
 pub const AI_PANEL_WIDTH: f32 = 360.0;
+const MENTION_PREVIEW_HIDE_DELAY: Duration = Duration::from_millis(150);
+const MENTION_PREVIEW_MAX_CHARS: usize = 4_000;
+const MENTION_PREVIEW_WIDTH: f32 = 320.0;
+const MENTION_PREVIEW_TEXT_MAX_HEIGHT: f32 = 240.0;
+const MENTION_PREVIEW_WINDOW_MARGIN: f32 = 8.0;
+const MENTION_PREVIEW_BRIDGE_HEIGHT: f32 = 6.0;
+const MENTION_PREVIEW_HEADER_HEIGHT: f32 = 34.0;
 
 struct AiValidationNotification;
 
@@ -126,6 +136,55 @@ enum AiPanelView {
 enum AiPanelMode {
     Sidebar,
     QuickAsk,
+}
+
+#[derive(Clone)]
+enum MentionPreviewContent {
+    Text {
+        markdown: Entity<Markdown>,
+        truncated: bool,
+    },
+    Image(MentionPreviewImage),
+}
+
+enum MentionPreviewPayload {
+    Text(String),
+    Image(MentionPreviewImage),
+}
+
+#[derive(Clone)]
+struct MentionPreviewImage {
+    image: Arc<Image>,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone)]
+enum MentionPreviewStatus {
+    Loading,
+    Ready(MentionPreviewContent),
+    Error(String),
+}
+
+#[derive(Clone)]
+struct MentionPreview {
+    reference: MentionReference,
+    source_range: Range<usize>,
+    trigger_bounds: Bounds<Pixels>,
+    position: GpuiPoint<Pixels>,
+    anchor: Anchor,
+    generation: u64,
+    status: MentionPreviewStatus,
+}
+
+#[derive(Clone)]
+struct MentionPreviewRenderOptions {
+    width: f32,
+    image_height: f32,
+    scroll_handle: ScrollHandle,
+    bounds_cell: Rc<Cell<Option<Bounds<Pixels>>>>,
+    theme: Theme,
+    base_text_style: TextStyle,
 }
 
 #[derive(Clone)]
@@ -290,6 +349,12 @@ pub struct AiPanel {
     message_scroll_interacted: Rc<Cell<bool>>,
     message_scroll_task: Option<Task<()>>,
     message_context_menu: Option<MessageContextMenu>,
+    mention_preview: Option<MentionPreview>,
+    mention_preview_generation: u64,
+    pending_mention_preview: Option<Task<()>>,
+    mention_preview_hide_task: Option<Task<()>>,
+    mention_preview_scroll: ScrollHandle,
+    mention_preview_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
 fn loading_dot_opacity(delta: f32, phase: f32) -> f32 {
@@ -463,10 +528,19 @@ impl AiPanel {
             message_scroll_interacted: Rc::new(Cell::new(false)),
             message_scroll_task: None,
             message_context_menu: None,
+            mention_preview: None,
+            mention_preview_generation: 0,
+            pending_mention_preview: None,
+            mention_preview_hide_task: None,
+            mention_preview_scroll: ScrollHandle::new(),
+            mention_preview_bounds: Rc::new(Cell::new(None)),
         }
     }
 
     pub fn set_width(&mut self, width: f32) {
+        if (self.width - width).abs() > f32::EPSILON {
+            self.invalidate_mention_preview();
+        }
         self.width = width;
     }
 
@@ -476,6 +550,7 @@ impl AiPanel {
         }
         let stopped_generation = self.stop_generation(cx);
         self.update_current_page(cx);
+        self.invalidate_mention_preview();
         if self.mode == AiPanelMode::Sidebar && !stopped_generation {
             self.save_current_session(cx);
         }

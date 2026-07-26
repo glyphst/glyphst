@@ -400,6 +400,51 @@ fn ordinary_edits_preserve_only_existing_explicit_mentions() {
 }
 
 #[test]
+fn page_digit_edits_preserve_explicit_mention_metadata() {
+    let mut mentions = parse_composer_mentions("@page(12)");
+
+    adjust_composer_mentions_for_input_change(&mut mentions, &(6..8), 1, "@page(3)");
+
+    assert_eq!(mentions.len(), 1);
+    assert_eq!(mentions[0].range, 0..8);
+    assert_eq!(
+        mentions[0].reference,
+        MentionReference::new(MentionKind::Page, Some(3))
+    );
+    assert_eq!(composer_page_digits_range(&mentions[0]), Some(6..7));
+}
+
+#[test]
+fn empty_page_digit_edit_keeps_span_until_input_clamps_it() {
+    let mut mentions = parse_composer_mentions("@page(12)");
+
+    adjust_composer_mentions_for_input_change(&mut mentions, &(6..8), 0, "@page()");
+
+    assert_eq!(mentions.len(), 1);
+    assert_eq!(mentions[0].range, 0..7);
+    assert_eq!(
+        mentions[0].reference,
+        MentionReference::new(MentionKind::Page, Some(12))
+    );
+    assert_eq!(composer_page_digits_range(&mentions[0]), Some(6..6));
+
+    adjust_composer_mentions_for_input_change(&mut mentions, &(6..6), 1, "@page(1)");
+    assert_eq!(
+        mentions[0].reference,
+        MentionReference::new(MentionKind::Page, Some(1))
+    );
+}
+
+#[test]
+fn edits_outside_page_digits_remove_the_explicit_mention() {
+    let mut mentions = parse_composer_mentions("@page(12)");
+
+    adjust_composer_mentions_for_input_change(&mut mentions, &(2..3), 1, "@pxge(12)");
+
+    assert!(mentions.is_empty());
+}
+
+#[test]
 fn trimmed_composer_content_rebases_explicit_mentions() {
     let source = "  Ask @selection  ";
     let mut mentions = parse_composer_mentions(source);
@@ -410,6 +455,98 @@ fn trimmed_composer_content_rebases_explicit_mentions() {
     assert_eq!(trimmed, "Ask @selection");
     assert_eq!(trimmed_mentions[0].range, 4..14);
     assert_eq!(trimmed_mentions[0].captured_text(), Some("Selected text"));
+}
+
+#[test]
+fn document_preview_is_limited_at_a_unicode_boundary() {
+    let source = "文".repeat(MENTION_PREVIEW_MAX_CHARS + 1);
+    let limited = limit_mention_preview_text(MentionKind::DocumentText, source.clone());
+
+    assert!(limited.truncated);
+    assert_eq!(limited.text.chars().count(), MENTION_PREVIEW_MAX_CHARS);
+    assert_eq!(source.chars().count(), MENTION_PREVIEW_MAX_CHARS + 1);
+    assert_eq!(
+        limit_mention_preview_text(MentionKind::Page, source.clone()),
+        LimitedMentionPreviewText {
+            text: source,
+            truncated: false,
+        }
+    );
+}
+
+#[test]
+fn async_preview_results_require_matching_identity() {
+    let reference = MentionReference::new(MentionKind::Page, Some(2));
+    let preview = MentionPreview {
+        reference,
+        source_range: 4..12,
+        trigger_bounds: Bounds {
+            origin: point(px(10.0), px(10.0)),
+            size: gpui::size(px(80.0), px(20.0)),
+        },
+        position: point(px(0.0), px(0.0)),
+        anchor: Anchor::TopLeft,
+        generation: 7,
+        status: MentionPreviewStatus::Loading,
+    };
+
+    assert!(mention_preview_matches(&preview, 7, reference, &(4..12)));
+    assert!(!mention_preview_matches(&preview, 8, reference, &(4..12)));
+    assert!(!mention_preview_matches(
+        &preview,
+        7,
+        MentionReference::new(MentionKind::Page, Some(3)),
+        &(4..12)
+    ));
+    assert!(!mention_preview_matches(&preview, 7, reference, &(5..13)));
+}
+
+#[test]
+fn preview_hover_region_includes_trigger_and_panel() {
+    let trigger_bounds = Bounds {
+        origin: point(px(10.0), px(10.0)),
+        size: gpui::size(px(80.0), px(20.0)),
+    };
+    let preview_bounds = Bounds {
+        origin: point(px(10.0), px(30.0)),
+        size: gpui::size(px(320.0), px(126.0)),
+    };
+
+    assert!(mention_preview_region_contains(
+        point(px(20.0), px(20.0)),
+        Some(trigger_bounds),
+        Some(preview_bounds),
+    ));
+    assert!(mention_preview_region_contains(
+        point(px(20.0), px(33.0)),
+        Some(trigger_bounds),
+        Some(preview_bounds),
+    ));
+    assert!(!mention_preview_region_contains(
+        point(px(340.0), px(160.0)),
+        Some(trigger_bounds),
+        Some(preview_bounds),
+    ));
+}
+
+#[test]
+fn mention_preview_sizes_clamp_and_preserve_image_aspect_ratio() {
+    assert_eq!(AiPanel::mention_preview_width(400.0, 800.0), 320.0);
+    assert_eq!(AiPanel::mention_preview_width(240.0, 800.0), 240.0);
+    assert_eq!(AiPanel::mention_preview_width(400.0, 300.0), 284.0);
+    assert_eq!(AiPanel::mention_preview_width(0.0, 10.0), 0.0);
+    assert_eq!(
+        AiPanel::mention_preview_image_size(320.0, 640.0, 1_000, 2_000),
+        (320.0, 640.0)
+    );
+    assert_eq!(
+        AiPanel::mention_preview_image_size(320.0, 640.0, 2_000, 1_000),
+        (320.0, 160.0)
+    );
+    assert_eq!(
+        AiPanel::mention_preview_image_size(320.0, 220.0, 1_000, 2_000),
+        (110.0, 220.0)
+    );
 }
 
 #[test]

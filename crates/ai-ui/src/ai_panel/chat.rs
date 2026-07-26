@@ -62,6 +62,7 @@ impl AiPanel {
         else {
             return;
         };
+        self.invalidate_mention_preview();
         let ai_settings = cx.global::<SettingsStore>().settings.ai.clone();
         if let Err(error) = validate_composer_page_image_preflight(
             self.mode,

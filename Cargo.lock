@@ -2655,6 +2655,7 @@ dependencies = [
  "glyphst-ui",
  "gpui",
  "gpui-component",
+ "image",
  "lsp-types",
  "serde_json",
 ]
@@ -2982,7 +2983,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/Ziqi-Yang/gpui-component?rev=ec892a06116ab51a33cf99d052f83c9914ae44fc#ec892a06116ab51a33cf99d052f83c9914ae44fc"
+source = "git+https://github.com/Ziqi-Yang/gpui-component?rev=9a918bf819ecfa44c2336b5df60b418eef80d659#9a918bf819ecfa44c2336b5df60b418eef80d659"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3030,7 +3031,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/Ziqi-Yang/gpui-component?rev=ec892a06116ab51a33cf99d052f83c9914ae44fc#ec892a06116ab51a33cf99d052f83c9914ae44fc"
+source = "git+https://github.com/Ziqi-Yang/gpui-component?rev=9a918bf819ecfa44c2336b5df60b418eef80d659#9a918bf819ecfa44c2336b5df60b418eef80d659"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3044,7 +3045,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/Ziqi-Yang/gpui-component?rev=ec892a06116ab51a33cf99d052f83c9914ae44fc#ec892a06116ab51a33cf99d052f83c9914ae44fc"
+source = "git+https://github.com/Ziqi-Yang/gpui-component?rev=9a918bf819ecfa44c2336b5df60b418eef80d659#9a918bf819ecfa44c2336b5df60b418eef80d659"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -192,7 +192,10 @@ impl<D: PickerDelegate> Picker<D> {
                 cx.notify();
             }
             InputEvent::PressEnter { .. } => self.confirm_selected(window, cx),
-            InputEvent::CompletionAccepted { .. } | InputEvent::Focus | InputEvent::Blur => {}
+            InputEvent::CompletionAccepted { .. }
+            | InputEvent::SpanHoverChanged { .. }
+            | InputEvent::Focus
+            | InputEvent::Blur => {}
         }
     }
 

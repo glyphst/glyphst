@@ -703,36 +703,7 @@ impl DocumentTranslationJobManager {
         let Some(snapshot) = self.job(id).map(|job| job.snapshot.clone()) else {
             return;
         };
-        let autohide = matches!(
-            snapshot.status,
-            DocumentTranslationJobStatus::Succeeded {
-                open_error: None,
-                ..
-            }
-        );
         cx.emit(DocumentTranslationJobEvent::ShowNotification { snapshot });
-        if autohide {
-            cx.spawn(async move |this: WeakEntity<Self>, cx| {
-                cx.background_executor()
-                    .timer(glyphst_ui::TRANSIENT_FEEDBACK_DURATION)
-                    .await;
-                _ = this.update(cx, |this, cx| {
-                    let should_close = this.job(id).is_some_and(|job| {
-                        matches!(
-                            job.snapshot.status,
-                            DocumentTranslationJobStatus::Succeeded {
-                                open_error: None,
-                                ..
-                            }
-                        )
-                    });
-                    if should_close {
-                        this.remove_job_notification(id, cx);
-                    }
-                });
-            })
-            .detach();
-        }
     }
 
     fn notification_closed(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
@@ -768,15 +739,21 @@ pub fn document_translation_notification(
     };
     let title = snapshot.title();
     let (status, detail, _, _) = job_status_content(&snapshot);
+    let autohide = matches!(
+        &snapshot.status,
+        DocumentTranslationJobStatus::Succeeded {
+            open_error: None,
+            ..
+        }
+    );
     let content_snapshot = snapshot.clone();
     let close_manager = manager.clone();
 
-    Notification::new()
+    let notification = Notification::new()
         .id1::<DocumentTranslationNotification>(id.to_string())
         .with_type(type_)
         .title(title)
         .message(status)
-        .autohide(false)
         .content(move |_, _, cx| {
             let open_error = matches!(
                 content_snapshot.status,
@@ -823,7 +800,13 @@ pub fn document_translation_notification(
             _ = close_manager.update(cx, |manager, cx| {
                 manager.notification_closed(id, cx);
             });
-        })
+        });
+
+    if autohide {
+        notification.autohide_after(glyphst_ui::LONG_FEEDBACK_DURATION)
+    } else {
+        notification.autohide(false)
+    }
 }
 
 fn document_translation_action_button(
@@ -1209,9 +1192,9 @@ mod tests {
 
         cx.run_until_parked();
         cx.executor()
-            .advance_clock(glyphst_ui::TRANSIENT_FEEDBACK_DURATION);
+            .advance_clock(glyphst_ui::LONG_FEEDBACK_DURATION);
         cx.run_until_parked();
-        assert_eq!(remove_notification_count(&events.borrow()), 1);
+        assert_eq!(remove_notification_count(&events.borrow()), 0);
     }
 
     #[gpui::test]

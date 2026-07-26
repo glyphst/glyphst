@@ -443,7 +443,6 @@ impl Render for PdfView {
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     if this.search_bar.is_some()
-                        || this.quick_ask.is_some()
                         || this.toc_palette.is_some()
                         || this.history_palette.is_some()
                         || this.bookmark_palette.is_some()

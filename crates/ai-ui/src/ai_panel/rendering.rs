@@ -1,6 +1,150 @@
 use super::*;
 
 impl AiPanel {
+    pub(super) fn render_mention_preview(
+        preview: MentionPreview,
+        options: MentionPreviewRenderOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let MentionPreviewRenderOptions {
+            width,
+            image_height,
+            scroll_handle,
+            bounds_cell,
+            theme,
+            base_text_style,
+        } = options;
+        let generation = preview.generation;
+        let preview_anchor = preview.anchor;
+        let body = match preview.status {
+            MentionPreviewStatus::Loading => div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(px(72.0))
+                .p_3()
+                .child(Self::render_loading_indicator(
+                    "ai-mention-preview-loading",
+                    theme,
+                ))
+                .into_any_element(),
+            MentionPreviewStatus::Ready(MentionPreviewContent::Text {
+                markdown,
+                truncated,
+            }) => div()
+                .w_full()
+                .min_w_0()
+                .child(
+                    div()
+                        .id(("ai-mention-preview-text", generation))
+                        .track_scroll(&scroll_handle)
+                        .w_full()
+                        .min_w_0()
+                        .max_h(px(MENTION_PREVIEW_TEXT_MAX_HEIGHT))
+                        .flex()
+                        .flex_col()
+                        .overflow_y_scroll()
+                        .p_3()
+                        .cursor_text()
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        .child(MarkdownElement::new(
+                            markdown,
+                            MarkdownStyle::from_theme(theme, base_text_style),
+                        ))
+                        .when(truncated, |this| {
+                            this.child(
+                                div()
+                                    .flex_none()
+                                    .mt_3()
+                                    .pt_2()
+                                    .border_t(px(1.0))
+                                    .border_color(theme.border)
+                                    .text_size(ui_rems(10.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(tr("ai-mention-preview-truncated")),
+                            )
+                        }),
+                )
+                .vertical_scrollbar_for_with_id(
+                    &scroll_handle,
+                    ("ai-mention-preview-scrollbar", generation),
+                    window,
+                    cx,
+                )
+                .into_any_element(),
+            MentionPreviewStatus::Ready(MentionPreviewContent::Image(image)) => div()
+                .w_full()
+                .min_w_0()
+                .h(px(image_height))
+                .overflow_hidden()
+                .bg(theme.tab_active)
+                .child(img(image.image).size_full().object_fit(ObjectFit::Contain))
+                .into_any_element(),
+            MentionPreviewStatus::Error(error) => div()
+                .p_3()
+                .text_size(ui_rems(12.0))
+                .text_color(theme.danger)
+                .child(error)
+                .into_any_element(),
+        };
+
+        let card = div()
+            .id(("ai-mention-preview", generation))
+            .occlude()
+            .w_full()
+            .flex()
+            .flex_col()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow_sm()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b(px(1.0))
+                    .border_color(theme.border)
+                    .text_size(ui_rems(11.0))
+                    .text_color(theme.muted_foreground)
+                    .child(preview.reference.display_text()),
+            )
+            .child(body);
+        let measure = canvas(
+            move |measured_bounds, _window, _cx| {
+                bounds_cell.set(Some(measured_bounds));
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+        .top_0()
+        .left_0();
+
+        div()
+            .id(("ai-mention-preview-hover-region", generation))
+            .relative()
+            .w(px(width))
+            .when(preview_anchor == Anchor::TopLeft, |this| {
+                this.pt(px(MENTION_PREVIEW_BRIDGE_HEIGHT))
+            })
+            .when(preview_anchor == Anchor::BottomLeft, |this| {
+                this.pb(px(MENTION_PREVIEW_BRIDGE_HEIGHT))
+            })
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                if *hovered {
+                    this.cancel_mention_preview_hide();
+                } else {
+                    this.schedule_mention_preview_hide(window, cx);
+                }
+            }))
+            .child(measure)
+            .child(card)
+            .into_any_element()
+    }
+
     pub(super) fn render_quick_ask(
         &mut self,
         window: &mut Window,
@@ -34,6 +178,15 @@ impl AiPanel {
             .is_some_and(|index| self.copied_target == Some(CopyFeedbackTarget::Message(index)));
         let copied_error = self.copied_target == Some(CopyFeedbackTarget::Error);
         let show_answer = loading || !answer.is_empty() || generation_failure.is_some();
+        let mention_preview = self.mention_preview.clone();
+        let mention_preview_scroll = self.mention_preview_scroll.clone();
+        let mention_preview_bounds = self.mention_preview_bounds.clone();
+        let (mention_preview_width, mention_preview_image_height) = Self::mention_preview_size(
+            mention_preview.as_ref(),
+            self.width,
+            window.viewport_size().width.as_f32(),
+            window.viewport_size().height.as_f32(),
+        );
 
         div()
             .key_context("QuickAsk")
@@ -50,6 +203,9 @@ impl AiPanel {
             .text_size(px(quick_ask.text_size))
             .text_color(theme.foreground)
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_mouse_down(MouseButton::Right, |_, _, cx| {
                 cx.stop_propagation();
             })
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
@@ -170,6 +326,30 @@ impl AiPanel {
                             },
                         )
                         .vertical_scrollbar_for(&self.scroll_handle, window, cx),
+                )
+            })
+            .when_some(mention_preview, |this, preview| {
+                this.child(
+                    deferred(
+                        anchored()
+                            .position(preview.position)
+                            .anchor(preview.anchor)
+                            .snap_to_window_with_margin(px(MENTION_PREVIEW_WINDOW_MARGIN))
+                            .child(Self::render_mention_preview(
+                                preview,
+                                MentionPreviewRenderOptions {
+                                    width: mention_preview_width,
+                                    image_height: mention_preview_image_height,
+                                    scroll_handle: mention_preview_scroll,
+                                    bounds_cell: mention_preview_bounds,
+                                    theme,
+                                    base_text_style,
+                                },
+                                window,
+                                cx,
+                            )),
+                    )
+                    .with_priority(2),
                 )
             })
     }

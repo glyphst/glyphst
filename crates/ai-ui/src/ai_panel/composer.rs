@@ -58,13 +58,20 @@ impl AiPanel {
 
                 let (range, inserted_len) = changed_range(&self.content, &new_content);
                 if range.start != range.end || inserted_len != 0 {
-                    adjust_composer_mentions(&mut self.composer_mentions, &range, inserted_len);
+                    self.invalidate_mention_preview();
+                    adjust_composer_mentions_for_input_change(
+                        &mut self.composer_mentions,
+                        &range,
+                        inserted_len,
+                        &new_content,
+                    );
                 }
                 self.content = new_content;
                 self.selected_range = selected_range;
                 self.selection_reversed = false;
                 self.marked_range = None;
                 self.clear_validation_notice();
+                self.sync_composer_spans(cx);
                 cx.notify();
             }
             InputEvent::CompletionAccepted {
@@ -72,8 +79,38 @@ impl AiPanel {
                 inserted_range,
                 ..
             } => {
-                self.record_accepted_mention(item, inserted_range, cx);
-                self.sync_composer_highlights(cx);
+                let new_content = input.read(cx).value();
+                if new_content != self.content {
+                    let (range, inserted_len) = changed_range(&self.content, &new_content);
+                    adjust_composer_mentions_for_input_change(
+                        &mut self.composer_mentions,
+                        &range,
+                        inserted_len,
+                        &new_content,
+                    );
+                    self.content = new_content;
+                }
+                let editable_span = self.record_accepted_mention(item, inserted_range, cx);
+                self.sync_composer_spans(cx);
+                if let Some(span_range) = editable_span {
+                    input.update(cx, |input, cx| {
+                        input.activate_span_edit(span_range, window, cx);
+                    });
+                }
+            }
+            InputEvent::SpanHoverChanged { span_range, bounds } => {
+                let hovered =
+                    span_range
+                        .as_ref()
+                        .zip(bounds.as_ref())
+                        .and_then(|(range, bounds)| {
+                            self.composer_mentions
+                                .iter()
+                                .find(|mention| mention.range == *range)
+                                .cloned()
+                                .map(|mention| (bounds.clone(), mention))
+                        });
+                self.update_mention_preview(hovered, window, cx);
             }
             InputEvent::PressEnter { shift, .. } if !shift => {
                 match submit_action(
@@ -118,27 +155,15 @@ impl AiPanel {
                 input.set_selected_range(selected_range, cx);
             });
         }
-        self.sync_composer_highlights(cx);
+        self.sync_composer_spans(cx);
     }
 
-    pub(super) fn sync_composer_highlights(&self, cx: &mut Context<Self>) {
-        let theme = cx.theme().colors;
-        let style = HighlightStyle {
-            color: Some(theme.accent_foreground),
-            font_weight: Some(FontWeight::SEMIBOLD),
-            background_color: Some(theme.accent),
-            ..Default::default()
-        };
-        let highlights = self
-            .composer_mentions
-            .iter()
-            .map(|mention| (mention.range.clone(), style))
-            .collect::<Vec<_>>();
-
+    pub(super) fn sync_composer_spans(&self, cx: &mut Context<Self>) {
+        let spans = self.composer_input_spans();
         let active_input = self.active_composer_input();
-        if active_input.read(cx).text_highlights() != highlights {
+        if active_input.read(cx).spans() != spans {
             active_input.update(cx, |input, cx| {
-                input.set_text_highlights(highlights, cx);
+                input.set_spans(spans, cx);
             });
         }
     }
@@ -202,6 +227,7 @@ impl AiPanel {
             message_index,
             saved_composer: self.composer_snapshot(cx),
         });
+        self.invalidate_mention_preview();
         self.content = content.clone().into();
         self.selected_range = content.len()..content.len();
         self.selection_reversed = false;
@@ -218,6 +244,7 @@ impl AiPanel {
         let Some(editing) = self.editing_turn.take() else {
             return false;
         };
+        self.invalidate_mention_preview();
         self.restore_composer_snapshot(editing.saved_composer, cx);
         self.close_composer_menus();
         self.clear_validation_notice();

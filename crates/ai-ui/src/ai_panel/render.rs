@@ -61,6 +61,15 @@ impl Render for AiPanel {
         let panel_width = self.width;
         let validation_notice = self.validation_notice.clone();
         let message_context_menu = self.message_context_menu.clone();
+        let mention_preview = self.mention_preview.clone();
+        let mention_preview_scroll = self.mention_preview_scroll.clone();
+        let mention_preview_bounds = self.mention_preview_bounds.clone();
+        let (mention_preview_width, mention_preview_image_height) = Self::mention_preview_size(
+            mention_preview.as_ref(),
+            self.width,
+            window.viewport_size().width.as_f32(),
+            window.viewport_size().height.as_f32(),
+        );
         let show_scroll_to_bottom =
             !self.follow_output && self.scroll_handle.max_offset().y > px(0.0) && !empty_chat;
         let mut message_rows = Vec::with_capacity(self.messages.len() + 1);
@@ -244,6 +253,9 @@ impl Render for AiPanel {
                 this.close_message_context_menu(cx);
             }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_mouse_down(MouseButton::Right, |_, _, cx| {
                 cx.stop_propagation();
             })
             .on_action(cx.listener(Self::close))
@@ -461,6 +473,30 @@ impl Render for AiPanel {
                             ),
                     )
                 })
+            })
+            .when_some(mention_preview, |this, preview| {
+                this.child(
+                    deferred(
+                        anchored()
+                            .position(preview.position)
+                            .anchor(preview.anchor)
+                            .snap_to_window_with_margin(px(MENTION_PREVIEW_WINDOW_MARGIN))
+                            .child(Self::render_mention_preview(
+                                preview,
+                                MentionPreviewRenderOptions {
+                                    width: mention_preview_width,
+                                    image_height: mention_preview_image_height,
+                                    scroll_handle: mention_preview_scroll,
+                                    bounds_cell: mention_preview_bounds,
+                                    theme,
+                                    base_text_style,
+                                },
+                                window,
+                                cx,
+                            )),
+                    )
+                    .with_priority(2),
+                )
             })
             .when_some(message_context_menu, |this, menu| {
                 this.child(

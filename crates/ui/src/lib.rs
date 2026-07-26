@@ -19,3 +19,7 @@ pub use glyphst_settings::theme;
 
 /// Shared lifetime for brief, non-blocking UI feedback.
 pub const TRANSIENT_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
+
+/// Shared lifetime for actionable feedback that users need time to read or
+/// interact with.
+pub const LONG_FEEDBACK_DURATION: Duration = Duration::from_secs(10);
