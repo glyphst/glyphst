@@ -6,10 +6,14 @@ use serde_json::json;
 
 use crate::{
     Block, BlockContent, BlockKind, BlockRole, BoundingBox, DocumentV1, Line, Page,
-    PolicyDecisionSource, ProtectedRegion, ProtectedRegionKind, Segment, TranslationPolicy,
+    PolicyDecisionSource, ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind,
+    TranslationPolicy,
 };
 
 pub const POLICY_REVIEW_CONFIDENCE_THRESHOLD: f32 = 0.80;
+const UNMAPPED_GLYPH_TAG: &str = "unmapped_glyph_preserved";
+const UNMAPPED_REGION_MARGIN_EM: f32 = 0.5;
+const MAX_UNMAPPED_REGION_MARGIN_PT: f32 = 24.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PolicyReviewRequest {
@@ -76,6 +80,24 @@ pub fn enforce_protected_regions(document: &mut DocumentV1) {
     for page in &mut document.pages {
         enforce_page_protected_regions(page);
     }
+}
+
+pub(crate) fn enforce_unmapped_glyph_policy(document: &mut DocumentV1) {
+    for page in &mut document.pages {
+        enforce_page_unmapped_glyph_policy(page);
+    }
+}
+
+pub(crate) fn is_unmapped_glyph_character(character: char) -> bool {
+    character == '\u{fffd}'
+        || matches!(
+            character,
+            '\u{e000}'..='\u{f8ff}'
+                | '\u{f0000}'..='\u{ffffd}'
+                | '\u{100000}'..='\u{10fffd}'
+                | '\u{fe00}'..='\u{fe0f}'
+                | '\u{e0100}'..='\u{e01ef}'
+        )
 }
 
 pub fn review_translation_policies(
@@ -172,6 +194,7 @@ pub(crate) fn derive_protected_regions_from_blocks(page: &mut Page) {
 }
 
 pub(crate) fn enforce_page_protected_regions(page: &mut Page) {
+    enforce_page_unmapped_glyph_policy(page);
     page.protected_regions =
         normalized_regions(page.page_index, std::mem::take(&mut page.protected_regions));
     if page.protected_regions.is_empty() {
@@ -183,6 +206,52 @@ pub(crate) fn enforce_page_protected_regions(page: &mut Page) {
     }
     page.blocks = enforced;
     reorder_page_blocks(page);
+}
+
+fn enforce_page_unmapped_glyph_policy(page: &mut Page) {
+    for block in &mut page.blocks {
+        if !block.policy.translate || !block_has_unmappable_source(block) {
+            continue;
+        }
+        block.policy = TranslationPolicy::locked_preserve(
+            "unmapped_glyph_source",
+            PolicyDecisionSource::DeterministicRule,
+            1.0,
+        );
+        if !block.tags.iter().any(|tag| tag == UNMAPPED_GLYPH_TAG) {
+            block.tags.push(UNMAPPED_GLYPH_TAG.to_string());
+        }
+    }
+}
+
+fn block_has_unmappable_source(block: &Block) -> bool {
+    if block.content.text.contains('\u{fffd}') {
+        return true;
+    }
+
+    let mut characters = block
+        .content
+        .text
+        .chars()
+        .filter(|character| !character.is_whitespace());
+    let first = characters.next();
+    if first.is_some_and(is_unmapped_glyph_character) && characters.all(is_unmapped_glyph_character)
+    {
+        return true;
+    }
+
+    block
+        .content
+        .segments
+        .iter()
+        .chain(
+            block
+                .content
+                .lines
+                .iter()
+                .flat_map(|line| line.segments.iter()),
+        )
+        .any(|segment| segment.kind == SegmentKind::Literal && !segment.text.trim().is_empty())
 }
 
 fn policy_needs_review(policy: &TranslationPolicy) -> bool {
@@ -276,7 +345,9 @@ fn protected_kind_for_block(block: &Block) -> Option<ProtectedRegionKind> {
     match (block.kind, block.role) {
         (BlockKind::Table, _) | (_, BlockRole::Table) => Some(ProtectedRegionKind::Table),
         (BlockKind::Image, _) | (_, BlockRole::Image) => Some(ProtectedRegionKind::Image),
-        (BlockKind::Formula, _) | (_, BlockRole::Formula) => Some(ProtectedRegionKind::Formula),
+        (BlockKind::Formula, _) | (_, BlockRole::Formula) | (_, BlockRole::FormulaNumber) => {
+            Some(ProtectedRegionKind::Formula)
+        }
         (BlockKind::Code, _) | (_, BlockRole::Code) => Some(ProtectedRegionKind::Code),
         _ => None,
     }
@@ -293,8 +364,9 @@ fn split_block_by_protection(block: Block, regions: &[ProtectedRegion]) -> Vec<B
         let region = region_for_bbox(block.bbox, regions);
         return vec![protect_block(block, region)];
     }
+    let region_margin = unmapped_protection_margin(&block);
     if block.content.lines.is_empty() {
-        return match region_for_bbox(block.bbox, regions) {
+        return match region_for_bbox_with_margin(block.bbox, regions, region_margin) {
             Some(region) => vec![protect_block(block, Some(region))],
             None => vec![block],
         };
@@ -304,7 +376,7 @@ fn split_block_by_protection(block: Block, regions: &[ProtectedRegion]) -> Vec<B
         .content
         .lines
         .iter()
-        .map(|line| region_for_bbox(line.bbox, regions))
+        .map(|line| region_for_bbox_with_margin(line.bbox, regions, region_margin))
         .collect::<Vec<_>>();
     if assignments.iter().all(Option::is_none) {
         return vec![block];
@@ -407,15 +479,44 @@ fn set_block_lines(block: &mut Block, lines: &[Line]) {
 }
 
 fn region_for_bbox(bbox: BoundingBox, regions: &[ProtectedRegion]) -> Option<&ProtectedRegion> {
+    region_for_bbox_with_margin(bbox, regions, 0.0)
+}
+
+fn region_for_bbox_with_margin(
+    bbox: BoundingBox,
+    regions: &[ProtectedRegion],
+    margin: f32,
+) -> Option<&ProtectedRegion> {
     regions
         .iter()
         .filter_map(|region| {
-            let intersection = bbox.intersection(region.bbox)?;
+            let candidate_bbox = BoundingBox::new(
+                region.bbox.x0 - margin,
+                region.bbox.y0 - margin,
+                region.bbox.x1 + margin,
+                region.bbox.y1 + margin,
+            );
+            let intersection = bbox.intersection(candidate_bbox)?;
             let ratio = intersection.area() / bbox.area().max(1.0);
-            (bbox_center_inside(bbox, region.bbox) || ratio >= 0.45).then_some((region, ratio))
+            (bbox_center_inside(bbox, candidate_bbox) || ratio >= 0.45).then_some((region, ratio))
         })
         .max_by(|left, right| left.1.total_cmp(&right.1))
         .map(|(region, _)| region)
+}
+
+fn unmapped_protection_margin(block: &Block) -> f32 {
+    if !block_has_unmappable_source(block) {
+        return 0.0;
+    }
+    let font_size = block
+        .content
+        .segments
+        .iter()
+        .filter_map(|segment| segment.style.font_size)
+        .filter(|size| size.is_finite() && *size > 0.0)
+        .max_by(f32::total_cmp)
+        .unwrap_or_else(|| block.bbox.height());
+    (font_size * UNMAPPED_REGION_MARGIN_EM).clamp(1.0, MAX_UNMAPPED_REGION_MARGIN_PT)
 }
 
 fn bbox_center_inside(inner: BoundingBox, outer: BoundingBox) -> bool {
@@ -540,6 +641,175 @@ mod tests {
             tags: Vec::new(),
             metadata: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn unmapped_glyph_candidates_fail_closed_without_protected_regions() {
+        let mut literal = text_block(
+            "literal",
+            &[("glyph", BoundingBox::new(10.0, 30.0, 40.0, 40.0))],
+        );
+        literal.content.segments[0].kind = SegmentKind::Literal;
+        literal.content.lines[0].segments[0].kind = SegmentKind::Literal;
+        let mut mixed_literal = text_block(
+            "mixed-literal",
+            &[("prose", BoundingBox::new(10.0, 50.0, 50.0, 60.0))],
+        );
+        mixed_literal.content.text.push('\u{e000}');
+        mixed_literal.content.segments.push(Segment {
+            kind: SegmentKind::Literal,
+            text: "\u{e000}".to_string(),
+            bbox: BoundingBox::new(50.0, 50.0, 55.0, 60.0),
+            style: TextStyle::default(),
+        });
+        let mut document = DocumentV1::new(
+            DocumentMetadata {
+                document_id: "unmapped".to_string(),
+                source_path: "fixture.pdf".into(),
+                provider: "fixture".to_string(),
+                provider_version: "1".to_string(),
+                extra: BTreeMap::new(),
+            },
+            vec![Page {
+                page_index: 0,
+                geometry: PageGeometry::new(200.0, 200.0),
+                blocks: vec![
+                    text_block(
+                        "replacement",
+                        &[("\u{fffd}", BoundingBox::new(10.0, 10.0, 20.0, 20.0))],
+                    ),
+                    literal,
+                    mixed_literal,
+                    text_block(
+                        "equation-number",
+                        &[("(3)", BoundingBox::new(170.0, 50.0, 190.0, 60.0))],
+                    ),
+                ],
+                protected_regions: Vec::new(),
+                metadata: BTreeMap::new(),
+            }],
+        );
+
+        enforce_protected_regions(&mut document);
+
+        for block in &document.pages[0].blocks[..3] {
+            assert!(!block.policy.translate);
+            assert!(block.policy.locked);
+            assert_eq!(block.policy.reason, "unmapped_glyph_source");
+            assert!(block.tags.iter().any(|tag| tag == UNMAPPED_GLYPH_TAG));
+        }
+        assert!(document.pages[0].blocks[3].policy.translate);
+        assert!(!document.pages[0].blocks[3].policy.locked);
+    }
+
+    #[test]
+    fn formula_numbers_derive_formula_protection() {
+        let bbox = BoundingBox::new(170.0, 50.0, 190.0, 62.0);
+        let mut formula_number = text_block("equation-number", &[("(4)", bbox)]);
+        formula_number.role = BlockRole::FormulaNumber;
+        formula_number.source.provider = "paddle".to_string();
+        formula_number.source.raw_label = "formula_number".to_string();
+        let mut page = Page {
+            page_index: 0,
+            geometry: PageGeometry::new(200.0, 200.0),
+            blocks: vec![formula_number],
+            protected_regions: Vec::new(),
+            metadata: BTreeMap::new(),
+        };
+
+        derive_protected_regions_from_blocks(&mut page);
+        enforce_page_protected_regions(&mut page);
+
+        assert_eq!(page.protected_regions.len(), 1);
+        assert_eq!(page.protected_regions[0].kind, ProtectedRegionKind::Formula);
+        assert_eq!(page.protected_regions[0].bbox, bbox);
+        assert!(!page.blocks[0].policy.translate);
+        assert!(page.blocks[0].policy.locked);
+        assert_eq!(
+            page.blocks[0].policy.source,
+            PolicyDecisionSource::ProtectedRegion
+        );
+    }
+
+    #[test]
+    fn raw_tall_glyph_geometry_joins_an_overlapping_formula_region() {
+        let glyph_bbox = BoundingBox::new(301.0, 564.5, 305.0, 584.1);
+        let mut document = DocumentV1::new(
+            DocumentMetadata {
+                document_id: "formula-glyph".to_string(),
+                source_path: "fixture.pdf".into(),
+                provider: "fixture".to_string(),
+                provider_version: "1".to_string(),
+                extra: BTreeMap::new(),
+            },
+            vec![Page {
+                page_index: 0,
+                geometry: PageGeometry::new(595.0, 842.0),
+                blocks: vec![text_block("delimiter", &[("\u{fffd}", glyph_bbox)])],
+                protected_regions: vec![ProtectedRegion {
+                    id: "formula".to_string(),
+                    page_index: 0,
+                    kind: ProtectedRegionKind::Formula,
+                    bbox: BoundingBox::new(214.0, 564.4, 379.0, 612.0),
+                    source: "paddle".to_string(),
+                    confidence: 0.99,
+                    reason: "provider_non_text:formula".to_string(),
+                }],
+                metadata: BTreeMap::new(),
+            }],
+        );
+
+        enforce_protected_regions(&mut document);
+
+        let block = &document.pages[0].blocks[0];
+        assert_eq!(block.role, BlockRole::Formula);
+        assert!(!block.policy.translate);
+        assert!(block.policy.locked);
+        assert_eq!(block.policy.source, PolicyDecisionSource::ProtectedRegion);
+    }
+
+    #[test]
+    fn collapsed_unmapped_glyph_geometry_uses_typographic_protection_margin() {
+        let glyph_bbox = BoundingBox::new(301.0, 556.2, 305.0, 567.5);
+        let mut glyph = text_block("delimiter", &[("\u{fffd}", glyph_bbox)]);
+        glyph.content.segments[0].style.font_size = Some(10.9);
+        glyph.content.lines[0].segments[0].style.font_size = Some(10.9);
+        let mut document = DocumentV1::new(
+            DocumentMetadata {
+                document_id: "formula-glyph".to_string(),
+                source_path: "fixture.pdf".into(),
+                provider: "fixture".to_string(),
+                provider_version: "1".to_string(),
+                extra: BTreeMap::new(),
+            },
+            vec![Page {
+                page_index: 0,
+                geometry: PageGeometry::new(595.0, 842.0),
+                blocks: vec![glyph],
+                protected_regions: vec![ProtectedRegion {
+                    id: "formula".to_string(),
+                    page_index: 0,
+                    kind: ProtectedRegionKind::Formula,
+                    bbox: BoundingBox::new(214.0, 564.4, 379.0, 612.0),
+                    source: "paddle".to_string(),
+                    confidence: 0.99,
+                    reason: "provider_non_text:formula".to_string(),
+                }],
+                metadata: BTreeMap::new(),
+            }],
+        );
+
+        enforce_protected_regions(&mut document);
+
+        let block = &document.pages[0].blocks[0];
+        assert_eq!(block.role, BlockRole::Formula);
+        assert!(!block.policy.translate);
+        assert!(block.policy.locked);
+        assert_eq!(block.policy.source, PolicyDecisionSource::ProtectedRegion);
+        assert_eq!(
+            block.metadata.get("protected_region_kind"),
+            Some(&json!("formula"))
+        );
     }
 
     #[test]

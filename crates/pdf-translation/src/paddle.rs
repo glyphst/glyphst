@@ -1452,6 +1452,7 @@ struct PaddleTrace<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ProtectedRegionKind;
 
     #[test]
     fn combines_jsonl_pages() {
@@ -1504,6 +1505,41 @@ mod tests {
         );
         assert!(document.pages[0].blocks[0].policy.translate);
         assert!(!document.pages[0].blocks[1].policy.translate);
+    }
+
+    #[test]
+    fn normalizes_formula_numbers_as_protected_regions() {
+        let payload = json!({
+            "dataInfo": {"pages": [{"width": 1000, "height": 2000}]},
+            "layoutParsingResults": [{
+                "prunedResult": {
+                    "parsing_res_list": [{
+                        "block_label": "formula_number",
+                        "block_content": "(4)",
+                        "block_bbox": [900, 1200, 940, 1240]
+                    }]
+                }
+            }]
+        });
+
+        let document = normalize_paddle_payload(
+            &payload,
+            "source.pdf",
+            "test",
+            "PaddleOCR-VL-1.6",
+            &[PageGeometry::new(500.0, 1000.0)],
+        )
+        .unwrap();
+        let page = &document.pages[0];
+
+        assert_eq!(page.protected_regions.len(), 1);
+        assert_eq!(page.protected_regions[0].kind, ProtectedRegionKind::Formula);
+        assert_eq!(
+            page.protected_regions[0].bbox,
+            BoundingBox::new(450.0, 600.0, 470.0, 620.0)
+        );
+        assert!(!page.blocks[0].policy.translate);
+        assert!(page.blocks[0].policy.locked);
     }
 
     #[test]

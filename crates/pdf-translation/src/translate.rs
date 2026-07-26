@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::policy::enforce_unmapped_glyph_policy;
 use crate::{
     Block, BlockRole, BoundingBox, CancellationToken, DocumentV1, Line, TextFlow, TextStyle,
 };
@@ -363,13 +364,14 @@ pub fn translate_document(
 }
 
 pub fn translate_document_resuming(
-    document: DocumentV1,
+    mut document: DocumentV1,
     backend: &dyn TranslationBackend,
     cancellation: &CancellationToken,
     resumed_units: Vec<TranslatedUnit>,
     mut on_update: impl FnMut(&TranslationRunSnapshot) -> Result<(), String>,
 ) -> Result<TranslatedDocument, TranslationDocumentError> {
     let started_at = Instant::now();
+    enforce_unmapped_glyph_policy(&mut document);
     let units = build_translation_units(&document);
     let total = units.len();
     if total == 0 {
@@ -3344,6 +3346,39 @@ mod tests {
         assert_eq!(plans[3].units.len(), 6);
         assert!(!plans[3].complex);
         assert_eq!(plans[4].units.len(), 1);
+    }
+
+    #[test]
+    fn unmapped_glyph_blocks_never_reach_translation_or_layout() {
+        struct NoCallBackend;
+
+        impl TranslationBackend for NoCallBackend {
+            fn translate_batch(
+                &self,
+                _units: &[TranslationUnit],
+            ) -> Result<Vec<TranslationUnitOutput>, TranslationBackendError> {
+                panic!("unmapped glyph block must not reach the translation backend")
+            }
+        }
+
+        let translated = translate_document(
+            test_document("\u{fffd}"),
+            &NoCallBackend,
+            &CancellationToken::new(),
+            |_, _| {},
+        )
+        .unwrap();
+
+        assert!(translated.units.is_empty());
+        let block = &translated.document.pages[0].blocks[0];
+        assert!(!block.policy.translate);
+        assert!(block.policy.locked);
+        assert_eq!(block.policy.reason, "unmapped_glyph_source");
+        let layout = crate::build_layout_with_options(
+            &translated,
+            crate::LayoutOptions::application_default(),
+        );
+        assert!(layout.pages[0].items.is_empty());
     }
 
     #[test]

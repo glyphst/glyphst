@@ -250,7 +250,9 @@ pub fn extract_native_document(
                         segment.bbox = segment.bbox.union(char_bbox);
                     } else {
                         segments.push(Segment {
-                            kind: if flags.contains(TextCharFlags::UNICODE_IS_GID) {
+                            kind: if flags.intersects(
+                                TextCharFlags::UNICODE_IS_CID | TextCharFlags::UNICODE_IS_GID,
+                            ) {
                                 SegmentKind::Literal
                             } else {
                                 SegmentKind::Text
@@ -279,12 +281,9 @@ pub fn extract_native_document(
                     .reduce(BoundingBox::union)
                     .unwrap_or_else(|| bounding_box(line.bounds()));
                 let line_bbox = match (baseline_y, line_font_size) {
-                    (Some(baseline), Some(font_size)) => BoundingBox::new(
-                        horizontal_bbox.x0,
-                        baseline - font_size * 0.82,
-                        horizontal_bbox.x1,
-                        baseline + font_size * 0.22,
-                    ),
+                    (Some(baseline), Some(font_size)) => {
+                        baseline_normalized_line_bbox(horizontal_bbox, baseline, font_size)
+                    }
                     _ => bounding_box(line.bounds()),
                 };
                 for segment in &mut segments {
@@ -2693,6 +2692,19 @@ fn quad_bbox(quad: mupdf::Quad) -> BoundingBox {
     )
 }
 
+fn baseline_normalized_line_bbox(
+    horizontal_bbox: BoundingBox,
+    baseline: f32,
+    font_size: f32,
+) -> BoundingBox {
+    BoundingBox::new(
+        horizontal_bbox.x0,
+        baseline - font_size * 0.82,
+        horizontal_bbox.x1,
+        baseline + font_size * 0.22,
+    )
+}
+
 fn trim_segments(segments: &mut Vec<Segment>) {
     while segments
         .first()
@@ -2788,6 +2800,24 @@ mod tests {
         let native = [BoundingBox::new(310.0, 440.0, 525.0, 750.0)];
 
         assert_eq!(reconciled_bbox(provider, native.into_iter()), None);
+    }
+
+    #[test]
+    fn malformed_tall_glyph_bounds_do_not_displace_line_geometry() {
+        let raw_bbox = BoundingBox::new(30.0, 20.0, 34.0, 40.0);
+
+        let bbox = baseline_normalized_line_bbox(raw_bbox, 30.0, 10.0);
+
+        assert_eq!(bbox, BoundingBox::new(30.0, 21.8, 34.0, 32.2));
+    }
+
+    #[test]
+    fn ordinary_text_keeps_baseline_normalized_vertical_bounds() {
+        let raw_bbox = BoundingBox::new(30.0, 20.0, 80.0, 40.0);
+
+        let bbox = baseline_normalized_line_bbox(raw_bbox, 30.0, 10.0);
+
+        assert_eq!(bbox, BoundingBox::new(30.0, 21.8, 80.0, 32.2));
     }
 
     #[test]

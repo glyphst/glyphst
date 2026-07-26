@@ -30,7 +30,7 @@ use crate::backend::GlyphstTranslationBackend;
 use crate::reviewer::GlyphstPolicyReviewer;
 
 const ARTIFACT_VERSION: u32 = 3;
-const PIPELINE_VERSION: &str = "native-rust-v18-ocr-semantic-lines";
+const PIPELINE_VERSION: &str = "native-rust-v20-ocr-semantic-lines";
 const CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone)]
