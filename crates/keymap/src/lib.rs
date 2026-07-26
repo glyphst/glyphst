@@ -21,7 +21,6 @@ macro_rules! fl {
     }};
 }
 
-pub use glyphst_actions::input;
 pub use glyphst_settings::{self as settings, localize, theme};
 pub use glyphst_ui::{icons, scrollbar};
 pub use keymap_editor::KeymapEditor;

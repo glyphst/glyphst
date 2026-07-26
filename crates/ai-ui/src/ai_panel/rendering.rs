@@ -20,18 +20,6 @@ impl AiPanel {
             (store.settings.ai.quick_ask, base_text_style)
         };
         let loading = self.loading;
-        let completion_matches = self.mention_completion_matches(cx);
-        let completion_selected = self
-            .mention_completion
-            .as_ref()
-            .map(|completion| completion.selected_ix)
-            .unwrap_or(0);
-        let completion_placement = if completion_matches.is_empty() {
-            None
-        } else {
-            self.completion_menu_placement(&completion_matches, window)
-        };
-        let completion_scroll = self.mention_completion_scroll.clone();
         let answer_index = self
             .messages
             .iter()
@@ -48,7 +36,7 @@ impl AiPanel {
         let show_answer = loading || !answer.is_empty() || generation_failure.is_some();
 
         div()
-            .key_context("QuickAsk TextInput")
+            .key_context("QuickAsk")
             .track_focus(&self.focus_handle)
             .relative()
             .flex()
@@ -66,7 +54,6 @@ impl AiPanel {
             })
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .on_action(cx.listener(Self::close))
-            .on_action(cx.listener(Self::submit))
             .child(
                 div().flex().flex_col().child(
                     div()
@@ -183,25 +170,6 @@ impl AiPanel {
                             },
                         )
                         .vertical_scrollbar_for(&self.scroll_handle, window, cx),
-                )
-            })
-            .when_some(completion_placement, |this, placement| {
-                this.child(
-                    deferred(
-                        anchored()
-                            .position(placement.position)
-                            .anchor(placement.anchor)
-                            .snap_to_window_with_margin(px(8.0))
-                            .child(Self::render_mention_completion_menu(
-                                completion_matches,
-                                completion_selected,
-                                placement.width,
-                                completion_scroll,
-                                theme,
-                                cx,
-                            )),
-                    )
-                    .with_priority(1),
                 )
             })
     }
@@ -404,6 +372,12 @@ impl AiPanel {
                     }),
                 )
             })
+            .when(is_user && can_mutate && !blocked, |this| {
+                this.on_double_click(cx.listener(move |this, _, window, cx| {
+                    this.start_editing_message(message_index, window, cx);
+                    cx.stop_propagation();
+                }))
+            })
             .child(
                 div()
                     .w_full()
@@ -424,7 +398,7 @@ impl AiPanel {
                     .when(!is_user, |this| this.px_1().pt_4().pb_2())
                     .when(is_editing, |this| {
                         this.child(
-                            Input::new(&self.composer_input)
+                            Input::new(&self.edit_input)
                                 .appearance(false)
                                 .bordered(false)
                                 .focus_bordered(false)

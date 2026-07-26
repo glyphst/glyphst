@@ -35,8 +35,8 @@ gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", defaul
     "wayland",
     "x11",
 ] }
-gpui_component = { git = "https://github.com/Ziqi-Yang/gpui-component", rev = "987d7f249bbbd8c3b0f9556f3edfa96901c76e20", package = "gpui-component" }
-gpui_component_assets = { git = "https://github.com/Ziqi-Yang/gpui-component", rev = "987d7f249bbbd8c3b0f9556f3edfa96901c76e20", package = "gpui-component-assets" }
+gpui_component = { git = "https://github.com/Ziqi-Yang/gpui-component", rev = "ec892a06116ab51a33cf99d052f83c9914ae44fc", package = "gpui-component" }
+gpui_component_assets = { git = "https://github.com/Ziqi-Yang/gpui-component", rev = "ec892a06116ab51a33cf99d052f83c9914ae44fc", package = "gpui-component-assets" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", default-features = false, features = [
     "font-kit",
     "wayland",
@@ -47,6 +47,7 @@ image = "0.25"
 i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system"] }
 i18n-embed-fl = "0.10"
 kdl = "6"
+lsp-types = { version = "0.97", features = ["proposed"] }
 mupdf = "0.7"
 redb = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "blocking", "multipart"] }

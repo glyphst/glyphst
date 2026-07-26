@@ -14,48 +14,42 @@ use glyphst_ui::activity::{
     ActivityCenter, BackgroundTaskEntry, BackgroundTaskId, CenterAction, TaskProgress,
 };
 use gpui::{
-    Context, EventEmitter, IntoElement, ParentElement as _, SharedString, Styled, Task, WeakEntity,
-    div, prelude::*,
+    ClipboardItem, Context, EventEmitter, IntoElement, ParentElement as _, SharedString, Styled,
+    Task, WeakEntity, div, prelude::*,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _, Size,
     button::{Button, ButtonVariants as _},
     notification::{Notification, NotificationType},
-    progress::Progress,
     searchable_list::SearchableListItem,
     v_flex,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DocumentTranslationJobAction {
-    Cancel,
-    Minimize,
     Retry,
     Open,
-    Dismiss,
+    CopyError,
 }
 
 impl DocumentTranslationJobAction {
     fn id(self) -> &'static str {
         match self {
-            Self::Cancel => "cancel",
-            Self::Minimize => "minimize",
             Self::Retry => "retry",
             Self::Open => "open",
-            Self::Dismiss => "dismiss",
+            Self::CopyError => "copy-error",
         }
     }
 
-    fn label(self, open_mode: DocumentTranslationOpenMode) -> &'static str {
+    fn label(self, open_mode: DocumentTranslationOpenMode, open_error: bool) -> &'static str {
         match self {
-            Self::Cancel => "Cancel",
-            Self::Minimize => "Minimize",
             Self::Retry => "Retry",
+            Self::Open if open_error => "Open again",
             Self::Open => match open_mode {
                 DocumentTranslationOpenMode::Document => "Open output",
                 DocumentTranslationOpenMode::Split => "Open split",
             },
-            Self::Dismiss => "Dismiss",
+            Self::CopyError => "Copy error",
         }
     }
 }
@@ -92,39 +86,28 @@ pub enum DocumentTranslationJobStatus {
     },
 }
 
-fn job_actions(
-    status: &DocumentTranslationJobStatus,
-    notification: bool,
-) -> Vec<DocumentTranslationJobAction> {
+fn job_actions(status: &DocumentTranslationJobStatus) -> Vec<DocumentTranslationJobAction> {
     match status {
-        DocumentTranslationJobStatus::Queued | DocumentTranslationJobStatus::Running { .. } => {
-            let mut actions = vec![DocumentTranslationJobAction::Cancel];
-            if notification {
-                actions.push(DocumentTranslationJobAction::Minimize);
-            }
-            actions
-        }
-        DocumentTranslationJobStatus::Cancelling { .. } if notification => {
-            vec![DocumentTranslationJobAction::Minimize]
-        }
-        DocumentTranslationJobStatus::Cancelling { .. }
-        | DocumentTranslationJobStatus::Opening { .. } => Vec::new(),
-        DocumentTranslationJobStatus::Cancelled => vec![
-            DocumentTranslationJobAction::Retry,
-            DocumentTranslationJobAction::Dismiss,
-        ],
+        DocumentTranslationJobStatus::Queued
+        | DocumentTranslationJobStatus::Running { .. }
+        | DocumentTranslationJobStatus::Cancelling { .. }
+        | DocumentTranslationJobStatus::Opening { .. }
+        | DocumentTranslationJobStatus::Cancelled => Vec::new(),
         DocumentTranslationJobStatus::Failed { retryable, .. } => {
-            let mut actions = Vec::new();
+            let mut actions = Vec::with_capacity(2);
             if *retryable {
                 actions.push(DocumentTranslationJobAction::Retry);
             }
-            actions.push(DocumentTranslationJobAction::Dismiss);
+            actions.push(DocumentTranslationJobAction::CopyError);
             actions
         }
-        DocumentTranslationJobStatus::Succeeded { .. } => vec![
-            DocumentTranslationJobAction::Open,
-            DocumentTranslationJobAction::Dismiss,
-        ],
+        DocumentTranslationJobStatus::Succeeded { open_error, .. } => {
+            let mut actions = vec![DocumentTranslationJobAction::Open];
+            if open_error.is_some() {
+                actions.push(DocumentTranslationJobAction::CopyError);
+            }
+            actions
+        }
     }
 }
 
@@ -176,15 +159,13 @@ pub enum DocumentTranslationJobEvent {
     },
 }
 
-/// Stable notification kind used to replace a translation notification as its
-/// job progresses.
+/// Stable notification kind for terminal translation results.
 pub struct DocumentTranslationNotification;
 
 struct DocumentTranslationJobRecord {
     snapshot: DocumentTranslationJobSnapshot,
     settings: Settings,
     cancellation: CancellationToken,
-    foregrounded: bool,
     task: Option<Task<()>>,
 }
 
@@ -192,7 +173,6 @@ pub struct DocumentTranslationJobManager {
     jobs: VecDeque<DocumentTranslationJobRecord>,
     next_id: DocumentTranslationJobId,
     active_job_id: Option<DocumentTranslationJobId>,
-    popup_job_id: Option<DocumentTranslationJobId>,
     background_tasks: HashMap<DocumentTranslationJobId, BackgroundTaskId>,
 }
 
@@ -215,7 +195,6 @@ impl DocumentTranslationJobManager {
             jobs: VecDeque::new(),
             next_id: 1,
             active_job_id: None,
-            popup_job_id: None,
             background_tasks: HashMap::new(),
         }
     }
@@ -238,14 +217,10 @@ impl DocumentTranslationJobManager {
             },
             settings,
             cancellation: CancellationToken::new(),
-            foregrounded: true,
             task: None,
         });
         self.register_background_task(id, cx);
         self.start_next(cx);
-        if self.job(id).is_some_and(|job| job.snapshot.is_active()) {
-            self.show_popup(id, cx);
-        }
         cx.notify();
         id
     }
@@ -279,7 +254,6 @@ impl DocumentTranslationJobManager {
             },
             settings: Settings::default(),
             cancellation: CancellationToken::new(),
-            foregrounded: false,
             task: None,
         });
         self.publish_terminal_notification(id, cx);
@@ -309,7 +283,6 @@ impl DocumentTranslationJobManager {
             },
             settings,
             cancellation: CancellationToken::new(),
-            foregrounded: true,
             task: None,
         });
         self.open(id, cx);
@@ -320,25 +293,6 @@ impl DocumentTranslationJobManager {
         self.jobs
             .iter()
             .any(|job| job.snapshot.request.source_path == source_path && job.snapshot.is_active())
-    }
-
-    pub fn reveal_for_source(
-        &mut self,
-        source_path: &std::path::Path,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(id) = self
-            .jobs
-            .iter()
-            .rev()
-            .find(|job| job.snapshot.request.source_path == source_path && job.snapshot.is_active())
-            .map(|job| job.snapshot.id)
-        else {
-            return false;
-        };
-        self.show_popup(id, cx);
-        cx.notify();
-        true
     }
 
     pub fn cancel_for_source(&mut self, source_path: &std::path::Path, cx: &mut Context<Self>) {
@@ -371,7 +325,6 @@ impl DocumentTranslationJobManager {
                 DocumentTranslationJobStatus::Running { progress } => {
                     job.cancellation.cancel();
                     job.snapshot.status = DocumentTranslationJobStatus::Cancelling { progress };
-                    job.foregrounded = false;
                 }
                 DocumentTranslationJobStatus::Cancelling { .. }
                 | DocumentTranslationJobStatus::Cancelled
@@ -380,10 +333,6 @@ impl DocumentTranslationJobManager {
                 | DocumentTranslationJobStatus::Opening { .. } => {}
             }
         }
-        if self.popup_job_id == Some(id) {
-            self.popup_job_id = None;
-        }
-        self.remove_job_notification(id, cx);
         if remove_job {
             self.jobs.retain(|job| job.snapshot.id != id);
             self.remove_background_task(id, cx);
@@ -394,19 +343,7 @@ impl DocumentTranslationJobManager {
         cx.notify();
     }
 
-    pub fn minimize(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
-        if let Some(job) = self.job_mut(id) {
-            job.foregrounded = false;
-        }
-        if self.popup_job_id == Some(id) {
-            self.popup_job_id = None;
-        }
-        self.remove_job_notification(id, cx);
-        cx.notify();
-    }
-
     pub fn retry(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
-        self.remove_job_notification(id, cx);
         let latest_settings = cx
             .has_global::<SettingsStore>()
             .then(|| cx.global::<SettingsStore>().settings.clone());
@@ -444,7 +381,6 @@ impl DocumentTranslationJobManager {
                     message: message.clone().into(),
                     retryable: false,
                 };
-                job.foregrounded = false;
                 invalid_languages = true;
             } else {
                 job.cancellation = CancellationToken::new();
@@ -456,7 +392,6 @@ impl DocumentTranslationJobManager {
                     job.snapshot.request.target_language = target_language;
                 }
                 job.snapshot.status = DocumentTranslationJobStatus::Queued;
-                job.foregrounded = true;
             }
         }
         if invalid_languages {
@@ -464,30 +399,13 @@ impl DocumentTranslationJobManager {
             cx.notify();
             return;
         }
+        self.remove_job_notification(id, cx);
         self.register_background_task(id, cx);
         self.start_next(cx);
-        if self.job(id).is_some_and(|job| job.snapshot.is_active()) {
-            self.show_popup(id, cx);
-        }
-        cx.notify();
-    }
-
-    pub fn dismiss(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
-        let can_dismiss = self.job(id).is_some_and(|job| !job.snapshot.is_active());
-        if !can_dismiss {
-            return;
-        }
-        self.remove_job_notification(id, cx);
-        self.remove_background_task(id, cx);
-        self.jobs.retain(|job| job.snapshot.id != id);
-        if self.popup_job_id == Some(id) {
-            self.popup_job_id = None;
-        }
         cx.notify();
     }
 
     pub fn open(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
-        self.remove_job_notification(id, cx);
         let Some((open_mode, source_path, output_path)) = self.job(id).and_then(|job| {
             let DocumentTranslationJobStatus::Succeeded { output_path, .. } = &job.snapshot.status
             else {
@@ -506,9 +424,7 @@ impl DocumentTranslationJobManager {
                 output_path: output_path.clone(),
             };
         }
-        if self.popup_job_id == Some(id) {
-            self.popup_job_id = None;
-        }
+        self.remove_job_notification(id, cx);
         match open_mode {
             DocumentTranslationOpenMode::Document => {
                 cx.emit(DocumentTranslationJobEvent::OpenDocument {
@@ -527,6 +443,20 @@ impl DocumentTranslationJobManager {
         cx.notify();
     }
 
+    fn copy_error(&self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+        let Some(message) = self.job(id).and_then(|job| match &job.snapshot.status {
+            DocumentTranslationJobStatus::Failed { message, .. } => Some(message.clone()),
+            DocumentTranslationJobStatus::Succeeded {
+                open_error: Some(message),
+                ..
+            } => Some(message.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(message.to_string()));
+    }
+
     pub fn finish_open(
         &mut self,
         id: DocumentTranslationJobId,
@@ -538,9 +468,6 @@ impl DocumentTranslationJobManager {
             Ok(()) => {
                 self.remove_background_task(id, cx);
                 self.jobs.retain(|job| job.snapshot.id != id);
-                if self.popup_job_id == Some(id) {
-                    self.popup_job_id = None;
-                }
             }
             Err(message) => {
                 let Some(job) = self.job_mut(id) else {
@@ -555,7 +482,6 @@ impl DocumentTranslationJobManager {
                     output_path,
                     open_error: Some(message),
                 };
-                job.foregrounded = false;
                 publish_error = true;
             }
         }
@@ -584,7 +510,6 @@ impl DocumentTranslationJobManager {
                 message: "Document translation is unavailable.".into(),
                 retryable: false,
             };
-            self.jobs[index].foregrounded = false;
             self.remove_background_task(id, cx);
             self.publish_terminal_notification(id, cx);
             return;
@@ -599,7 +524,6 @@ impl DocumentTranslationJobManager {
         self.jobs[index].snapshot.status = DocumentTranslationJobStatus::Running { progress: None };
         self.active_job_id = Some(id);
         self.sync_background_task(id, cx);
-        self.sync_popup_notification(id, cx);
 
         let task = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             let result_task = cx.background_spawn(async move {
@@ -641,7 +565,6 @@ impl DocumentTranslationJobManager {
             _ => return,
         }
         self.sync_background_task(id, cx);
-        self.sync_popup_notification(id, cx);
         cx.notify();
     }
 
@@ -665,28 +588,23 @@ impl DocumentTranslationJobManager {
         if was_cancelled {
             self.remove_background_task(id, cx);
             self.jobs.retain(|job| job.snapshot.id != id);
-            if self.popup_job_id == Some(id) {
-                self.popup_job_id = None;
-            }
             self.start_next(cx);
             cx.notify();
             return;
         }
 
-        let auto_open = {
+        {
             let Some(job) = self.job_mut(id) else {
                 self.start_next(cx);
                 return;
             };
             job.task = None;
-            let was_foregrounded = job.foregrounded;
             match result {
                 Ok(result) => {
                     job.snapshot.status = DocumentTranslationJobStatus::Succeeded {
                         output_path: result.output_path,
                         open_error: None,
                     };
-                    was_foregrounded
                 }
                 Err(error) => {
                     job.snapshot.status = DocumentTranslationJobStatus::Failed {
@@ -694,22 +612,11 @@ impl DocumentTranslationJobManager {
                         message: error.message.into(),
                         retryable: error.retryable,
                     };
-                    job.foregrounded = false;
-                    false
                 }
             }
-        };
-        if auto_open {
-            self.open(id, cx);
-            self.popup_job_id = None;
-            self.sync_background_task(id, cx);
-        } else {
-            self.remove_background_task(id, cx);
-            if self.popup_job_id == Some(id) {
-                self.popup_job_id = None;
-            }
-            self.publish_terminal_notification(id, cx);
         }
+        self.remove_background_task(id, cx);
+        self.publish_terminal_notification(id, cx);
         self.start_next(cx);
         cx.notify();
     }
@@ -796,77 +703,57 @@ impl DocumentTranslationJobManager {
         let Some(snapshot) = self.job(id).map(|job| job.snapshot.clone()) else {
             return;
         };
-        if self.popup_job_id == Some(id) {
-            self.popup_job_id = None;
-        }
-        self.remove_job_notification(id, cx);
+        let autohide = matches!(
+            snapshot.status,
+            DocumentTranslationJobStatus::Succeeded {
+                open_error: None,
+                ..
+            }
+        );
         cx.emit(DocumentTranslationJobEvent::ShowNotification { snapshot });
+        if autohide {
+            cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                cx.background_executor()
+                    .timer(glyphst_ui::TRANSIENT_FEEDBACK_DURATION)
+                    .await;
+                _ = this.update(cx, |this, cx| {
+                    let should_close = this.job(id).is_some_and(|job| {
+                        matches!(
+                            job.snapshot.status,
+                            DocumentTranslationJobStatus::Succeeded {
+                                open_error: None,
+                                ..
+                            }
+                        )
+                    });
+                    if should_close {
+                        this.remove_job_notification(id, cx);
+                    }
+                });
+            })
+            .detach();
+        }
     }
 
-    fn show_popup(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
-        if let Some(previous_id) = self.popup_job_id
-            && previous_id != id
-            && let Some(previous) = self.job_mut(previous_id)
-        {
-            previous.foregrounded = false;
-            self.remove_job_notification(previous_id, cx);
-        }
-        if let Some(job) = self.job_mut(id) {
-            job.foregrounded = true;
-        }
-        self.popup_job_id = Some(id);
-        self.sync_popup_notification(id, cx);
-    }
-
-    fn sync_popup_notification(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
-        if self.popup_job_id != Some(id) {
-            return;
-        }
-        let Some(snapshot) = self.job(id).map(|job| job.snapshot.clone()) else {
-            return;
-        };
-        cx.emit(DocumentTranslationJobEvent::ShowNotification { snapshot });
-    }
-
-    fn notification_closed(
-        &mut self,
-        id: DocumentTranslationJobId,
-        terminal: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn notification_closed(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
         let Some(job) = self.job(id) else {
             return;
         };
-        if terminal {
-            if !job.snapshot.is_active() {
-                self.remove_background_task(id, cx);
-                self.jobs.retain(|job| job.snapshot.id != id);
-                if self.popup_job_id == Some(id) {
-                    self.popup_job_id = None;
-                }
-                cx.notify();
-            }
-        } else if job.snapshot.is_active() && job.foregrounded && self.popup_job_id == Some(id) {
-            if let Some(job) = self.job_mut(id) {
-                job.foregrounded = false;
-            }
-            self.popup_job_id = None;
+        if !job.snapshot.is_active() {
+            self.remove_background_task(id, cx);
+            self.jobs.retain(|job| job.snapshot.id != id);
             cx.notify();
         }
     }
 }
 
-/// Build the window-scoped gpui-component notification for a translation job.
-///
-/// Pushing another notification with the same job id replaces the existing
-/// notification, so progress updates keep one stable card in the window's
-/// component notification layer.
+/// Build the window-scoped gpui-component notification for a terminal
+/// translation result.
 pub fn document_translation_notification(
     snapshot: DocumentTranslationJobSnapshot,
     manager: WeakEntity<DocumentTranslationJobManager>,
 ) -> Notification {
     let id = snapshot.id;
-    let terminal = !snapshot.is_active();
     let type_ = match &snapshot.status {
         DocumentTranslationJobStatus::Succeeded {
             open_error: None, ..
@@ -880,7 +767,7 @@ pub fn document_translation_notification(
         _ => NotificationType::Info,
     };
     let title = snapshot.title();
-    let (status, detail, fraction, indeterminate) = job_status_content(&snapshot);
+    let (status, detail, _, _) = job_status_content(&snapshot);
     let content_snapshot = snapshot.clone();
     let close_manager = manager.clone();
 
@@ -891,12 +778,14 @@ pub fn document_translation_notification(
         .message(status)
         .autohide(false)
         .content(move |_, _, cx| {
-            let progress_label = if indeterminate {
-                "Working…".to_string()
-            } else {
-                format!("{:.0}%", fraction * 100.0)
-            };
-            let actions = job_actions(&content_snapshot.status, true)
+            let open_error = matches!(
+                content_snapshot.status,
+                DocumentTranslationJobStatus::Succeeded {
+                    open_error: Some(_),
+                    ..
+                }
+            );
+            let actions = job_actions(&content_snapshot.status)
                 .into_iter()
                 .map(|action| {
                     document_translation_action_button(
@@ -904,6 +793,7 @@ pub fn document_translation_notification(
                         id,
                         content_snapshot.open_mode,
                         action,
+                        open_error,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -916,29 +806,6 @@ pub fn document_translation_notification(
                         .text_color(cx.theme().muted_foreground)
                         .child(detail.clone()),
                 )
-                .when(content_snapshot.is_active(), |this| {
-                    this.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Progress::new(format!("document-translation-progress-{id}"))
-                                    .with_size(Size::XSmall)
-                                    .loading(indeterminate)
-                                    .value(fraction * 100.0),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .min_w_12()
-                                    .text_right()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(progress_label),
-                            ),
-                    )
-                })
                 .when(!actions.is_empty(), |this| {
                     this.child(
                         div()
@@ -954,7 +821,7 @@ pub fn document_translation_notification(
         })
         .on_close(move |_, cx| {
             _ = close_manager.update(cx, |manager, cx| {
-                manager.notification_closed(id, terminal, cx);
+                manager.notification_closed(id, cx);
             });
         })
 }
@@ -964,17 +831,16 @@ fn document_translation_action_button(
     id: DocumentTranslationJobId,
     open_mode: DocumentTranslationOpenMode,
     action: DocumentTranslationJobAction,
+    open_error: bool,
 ) -> Button {
     let button = Button::new(format!("document-translation-job-{id}-{}", action.id()))
-        .label(action.label(open_mode))
+        .label(action.label(open_mode, open_error))
         .with_size(Size::XSmall)
         .on_click(move |_, _, cx| {
             _ = manager.update(cx, |manager, cx| match action {
-                DocumentTranslationJobAction::Cancel => manager.cancel(id, cx),
-                DocumentTranslationJobAction::Minimize => manager.minimize(id, cx),
                 DocumentTranslationJobAction::Retry => manager.retry(id, cx),
                 DocumentTranslationJobAction::Open => manager.open(id, cx),
-                DocumentTranslationJobAction::Dismiss => manager.dismiss(id, cx),
+                DocumentTranslationJobAction::CopyError => manager.copy_error(id, cx),
             });
             cx.stop_propagation();
         });
@@ -983,10 +849,7 @@ fn document_translation_action_button(
         DocumentTranslationJobAction::Open | DocumentTranslationJobAction::Retry => {
             button.primary()
         }
-        DocumentTranslationJobAction::Cancel => button.danger(),
-        DocumentTranslationJobAction::Minimize | DocumentTranslationJobAction::Dismiss => {
-            button.ghost()
-        }
+        DocumentTranslationJobAction::CopyError => button.ghost(),
     }
 }
 
@@ -1207,6 +1070,18 @@ mod tests {
             .count()
     }
 
+    fn remove_notification_count(events: &[DocumentTranslationJobEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    DocumentTranslationJobEvent::RemoveNotification { .. }
+                )
+            })
+            .count()
+    }
+
     #[test]
     fn target_language_options_are_searchable_and_preserve_custom_values() {
         let options = target_language_options("custom-language");
@@ -1221,10 +1096,7 @@ mod tests {
         assert!(english.matches("EN"));
     }
 
-    fn running_record(
-        id: DocumentTranslationJobId,
-        foregrounded: bool,
-    ) -> DocumentTranslationJobRecord {
+    fn running_record(id: DocumentTranslationJobId) -> DocumentTranslationJobRecord {
         DocumentTranslationJobRecord {
             snapshot: DocumentTranslationJobSnapshot {
                 id,
@@ -1239,13 +1111,12 @@ mod tests {
             },
             settings: Settings::default(),
             cancellation: CancellationToken::new(),
-            foregrounded,
             task: None,
         }
     }
 
     #[gpui::test]
-    fn preflight_errors_remain_until_dismissed(cx: &mut TestAppContext) {
+    fn preflight_errors_remain_until_notification_is_closed(cx: &mut TestAppContext) {
         cx.update(glyphst_ui::activity::init);
         let center = cx.update(|cx| ActivityCenter::global(cx));
         let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
@@ -1260,7 +1131,6 @@ mod tests {
             );
 
             assert_eq!(manager.jobs.len(), 1);
-            assert_eq!(manager.popup_job_id, None);
             manager.retry(id, cx);
             assert!(matches!(
                 manager.job(id).map(|job| &job.snapshot.status),
@@ -1270,9 +1140,8 @@ mod tests {
                 })
             ));
 
-            manager.dismiss(id, cx);
+            manager.notification_closed(id, cx);
             assert!(manager.jobs.is_empty());
-            assert_eq!(manager.popup_job_id, None);
             assert_eq!(center.read(cx).active_task_count(), 0);
         });
         cx.run_until_parked();
@@ -1280,66 +1149,35 @@ mod tests {
     }
 
     #[gpui::test]
-    fn minimizing_active_job_keeps_it_in_manager(cx: &mut TestAppContext) {
-        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
-
-        manager.update(cx, |manager, cx| {
-            let id = 7;
-            manager.jobs.push_back(running_record(id, true));
-            manager.popup_job_id = Some(id);
-
-            manager.minimize(id, cx);
-
-            assert_eq!(manager.jobs.len(), 1);
-            assert_eq!(manager.popup_job_id, None);
-            assert!(!manager.job(id).unwrap().foregrounded);
-            assert!(manager.job(id).unwrap().snapshot.is_active());
-        });
-    }
-
-    #[gpui::test]
-    fn foreground_success_auto_opens_without_terminal_popup(cx: &mut TestAppContext) {
-        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
-
-        manager.update(cx, |manager, cx| {
-            let id = 11;
-            manager.jobs.push_back(running_record(id, true));
-            manager.active_job_id = Some(id);
-            manager.popup_job_id = Some(id);
-
-            manager.finish(
-                id,
-                Ok(PdfTranslationResult {
-                    output_path: "/tmp/translated.pdf".into(),
-                    manifest_path: "/tmp/manifest.json".into(),
-                    job_directory: "/tmp/job".into(),
-                    fingerprint: "test".to_string(),
-                }),
-                cx,
-            );
-
-            assert_eq!(manager.popup_job_id, None);
-            assert!(matches!(
-                manager.job(id).map(|job| &job.snapshot.status),
-                Some(DocumentTranslationJobStatus::Opening { .. })
-            ));
-
-            manager.finish_open(id, Ok(()), cx);
-            assert!(manager.job(id).is_none());
-            assert!(manager.jobs.is_empty());
-        });
-    }
-
-    #[gpui::test]
-    fn minimized_success_emits_component_notification(cx: &mut TestAppContext) {
+    fn progress_stays_in_activity_center_and_success_notifies_once(cx: &mut TestAppContext) {
         cx.update(glyphst_ui::activity::init);
+        let center = cx.update(|cx| ActivityCenter::global(cx));
         let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
         let (_recorder, events) = record_job_events(&manager, cx);
 
         manager.update(cx, |manager, cx| {
             let id = 13;
-            manager.jobs.push_back(running_record(id, false));
+            manager.jobs.push_back(running_record(id));
             manager.active_job_id = Some(id);
+            manager.register_background_task(id, cx);
+            manager.update_progress(
+                id,
+                PdfTranslationProgress {
+                    stage: PdfTranslationStage::Translating,
+                    detail: "Translating page 1".to_string(),
+                    completed: Some(1),
+                    total: Some(1),
+                    translated: Some(1),
+                    cached: Some(0),
+                    retrying: Some(0),
+                    failed: Some(0),
+                    overall_fraction: 1.0,
+                    indeterminate: false,
+                },
+                cx,
+            );
+            assert_eq!(show_notification_count(&events.borrow()), 0);
+            assert_eq!(center.read(cx).active_task_count(), 1);
 
             manager.finish(
                 id,
@@ -1352,14 +1190,28 @@ mod tests {
                 cx,
             );
 
-            assert_eq!(manager.popup_job_id, None);
             assert!(matches!(
                 manager.job(id).map(|job| &job.snapshot.status),
                 Some(DocumentTranslationJobStatus::Succeeded { .. })
             ));
+            assert_eq!(center.read(cx).active_task_count(), 0);
         });
+        {
+            let events = events.borrow();
+            assert_eq!(show_notification_count(&events), 1);
+            assert_eq!(remove_notification_count(&events), 0);
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                DocumentTranslationJobEvent::OpenDocument { .. }
+                    | DocumentTranslationJobEvent::OpenSplit { .. }
+            )));
+        }
+
         cx.run_until_parked();
-        assert_eq!(show_notification_count(&events.borrow()), 1);
+        cx.executor()
+            .advance_clock(glyphst_ui::TRANSIENT_FEEDBACK_DURATION);
+        cx.run_until_parked();
+        assert_eq!(remove_notification_count(&events.borrow()), 1);
     }
 
     #[gpui::test]
@@ -1370,7 +1222,7 @@ mod tests {
 
         manager.update(cx, |manager, cx| {
             let id = 17;
-            let mut record = running_record(id, false);
+            let mut record = running_record(id);
             record.snapshot.status = DocumentTranslationJobStatus::Succeeded {
                 output_path: "/tmp/translated.pdf".into(),
                 open_error: None,
@@ -1384,7 +1236,6 @@ mod tests {
             ));
 
             manager.finish_open(id, Err("Could not read the output".into()), cx);
-            assert_eq!(manager.popup_job_id, None);
             assert!(matches!(
                 manager.job(id).map(|job| &job.snapshot.status),
                 Some(DocumentTranslationJobStatus::Succeeded {
@@ -1406,16 +1257,14 @@ mod tests {
 
         manager.update(cx, |manager, cx| {
             let id = 19;
-            let mut record = running_record(id, true);
+            let mut record = running_record(id);
             record.snapshot.status = DocumentTranslationJobStatus::Queued;
             manager.jobs.push_back(record);
-            manager.popup_job_id = Some(id);
             manager.register_background_task(id, cx);
 
             manager.cancel(id, cx);
 
             assert!(manager.job(id).is_none());
-            assert_eq!(manager.popup_job_id, None);
             assert_eq!(center.read(cx).active_task_count(), 0);
         });
         cx.run_until_parked();
@@ -1431,13 +1280,11 @@ mod tests {
 
         manager.update(cx, |manager, cx| {
             let id = 21;
-            manager.jobs.push_back(running_record(id, true));
+            manager.jobs.push_back(running_record(id));
             manager.active_job_id = Some(id);
-            manager.popup_job_id = Some(id);
             manager.register_background_task(id, cx);
 
             manager.cancel(id, cx);
-            assert_eq!(manager.popup_job_id, None);
             assert_eq!(center.read(cx).active_task_count(), 1);
 
             manager.finish(
@@ -1459,25 +1306,29 @@ mod tests {
     }
 
     #[test]
-    fn minimized_manager_cards_do_not_offer_minimize_again() {
+    fn notification_actions_only_apply_to_terminal_results() {
         let running = DocumentTranslationJobStatus::Running { progress: None };
+        assert!(job_actions(&running).is_empty());
+        assert!(
+            job_actions(&DocumentTranslationJobStatus::Cancelling { progress: None }).is_empty()
+        );
         assert_eq!(
-            job_actions(&running, true),
+            job_actions(&DocumentTranslationJobStatus::Failed {
+                stage: PdfTranslationStage::Translating,
+                message: "failed".into(),
+                retryable: true,
+            }),
             vec![
-                DocumentTranslationJobAction::Cancel,
-                DocumentTranslationJobAction::Minimize,
+                DocumentTranslationJobAction::Retry,
+                DocumentTranslationJobAction::CopyError,
             ]
         );
         assert_eq!(
-            job_actions(&running, false),
-            vec![DocumentTranslationJobAction::Cancel]
-        );
-        assert!(
-            job_actions(
-                &DocumentTranslationJobStatus::Cancelling { progress: None },
-                false
-            )
-            .is_empty()
+            job_actions(&DocumentTranslationJobStatus::Succeeded {
+                output_path: "/tmp/translated.pdf".into(),
+                open_error: None,
+            }),
+            vec![DocumentTranslationJobAction::Open]
         );
     }
 
@@ -1493,7 +1344,7 @@ mod tests {
 
         manager.update(cx, |manager, cx| {
             let id = 23;
-            let mut record = running_record(id, false);
+            let mut record = running_record(id);
             record.snapshot.status = DocumentTranslationJobStatus::Failed {
                 stage: PdfTranslationStage::Translating,
                 message: "temporary failure".into(),

@@ -31,17 +31,28 @@ fn changed_range(old: &str, new: &str) -> (Range<usize>, usize) {
 }
 
 impl AiPanel {
+    pub(super) fn active_composer_input(&self) -> Entity<InputState> {
+        if self.editing_turn.is_some() {
+            self.edit_input.clone()
+        } else {
+            self.composer_input.clone()
+        }
+    }
+
     pub(super) fn on_composer_input_event(
         &mut self,
-        _: &Entity<InputState>,
+        input: &Entity<InputState>,
         event: &InputEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if input != &self.active_composer_input() {
+            return;
+        }
         match event {
             InputEvent::Change => {
                 let (new_content, selected_range) = {
-                    let input = self.composer_input.read(cx);
+                    let input = input.read(cx);
                     (input.value(), input.selected_range())
                 };
 
@@ -53,15 +64,18 @@ impl AiPanel {
                 self.selected_range = selected_range;
                 self.selection_reversed = false;
                 self.marked_range = None;
-                self.update_mention_completion(cx);
                 self.clear_validation_notice();
                 cx.notify();
             }
+            InputEvent::CompletionAccepted {
+                item,
+                inserted_range,
+                ..
+            } => {
+                self.record_accepted_mention(item, inserted_range, cx);
+                self.sync_composer_highlights(cx);
+            }
             InputEvent::PressEnter { shift, .. } if !shift => {
-                if self.confirm_mention_completion(cx) {
-                    self.sync_composer_input(window, cx);
-                    return;
-                }
                 match submit_action(
                     self.editing_turn.is_some(),
                     self.generation_failure.as_ref(),
@@ -94,11 +108,12 @@ impl AiPanel {
     }
 
     pub(super) fn sync_composer_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let value = self.composer_input.read(cx).value();
+        let active_input = self.active_composer_input();
+        let value = active_input.read(cx).value();
         if value != self.content {
             let content = self.content.clone();
             let selected_range = self.selected_range.clone();
-            self.composer_input.update(cx, |input, cx| {
+            active_input.update(cx, |input, cx| {
                 input.set_value(content, window, cx);
                 input.set_selected_range(selected_range, cx);
             });
@@ -106,7 +121,7 @@ impl AiPanel {
         self.sync_composer_highlights(cx);
     }
 
-    fn sync_composer_highlights(&self, cx: &mut Context<Self>) {
+    pub(super) fn sync_composer_highlights(&self, cx: &mut Context<Self>) {
         let theme = cx.theme().colors;
         let style = HighlightStyle {
             color: Some(theme.accent_foreground),
@@ -120,8 +135,9 @@ impl AiPanel {
             .map(|mention| (mention.range.clone(), style))
             .collect::<Vec<_>>();
 
-        if self.composer_input.read(cx).text_highlights() != highlights {
-            self.composer_input.update(cx, |input, cx| {
+        let active_input = self.active_composer_input();
+        if active_input.read(cx).text_highlights() != highlights {
+            active_input.update(cx, |input, cx| {
                 input.set_text_highlights(highlights, cx);
             });
         }
@@ -158,8 +174,6 @@ impl AiPanel {
         self.selection_reversed = snapshot.selection_reversed;
         self.marked_range = snapshot.marked_range;
         self.composer_mentions = snapshot.mentions;
-        self.mention_completion = None;
-        self.update_mention_completion(cx);
         cx.notify();
     }
 
@@ -196,7 +210,7 @@ impl AiPanel {
         self.close_composer_menus();
         self.clear_validation_notice();
         self.sync_composer_input(window, cx);
-        self.composer_input.focus_handle(cx).focus(window, cx);
+        self.edit_input.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 
@@ -204,7 +218,6 @@ impl AiPanel {
         let Some(editing) = self.editing_turn.take() else {
             return false;
         };
-        self.edit_blur_subscription = None;
         self.restore_composer_snapshot(editing.saved_composer, cx);
         self.close_composer_menus();
         self.clear_validation_notice();
@@ -215,6 +228,6 @@ impl AiPanel {
     }
 
     pub(super) fn cursor_offset(&self, cx: &App) -> usize {
-        self.composer_input.read(cx).cursor()
+        self.active_composer_input().read(cx).cursor()
     }
 }

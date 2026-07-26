@@ -1,15 +1,13 @@
-use crate::{
-    library::HighlightColor,
-    settings::{SettingsStore, ui_rems},
-};
-pub use glyphst_actions::note_editor::{NoteCancel, NoteSave};
+use crate::{library::HighlightColor, settings::SettingsStore};
+pub use glyphst_actions::note_editor::NoteCancel;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, Render,
-    SharedString, Window, div, prelude::*, px, rgba,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton,
+    PromptButton, PromptLevel, Render, SharedString, Window, div, prelude::*, px, rgba,
 };
 use gpui_component::{
     ActiveTheme as _, StyledExt as _,
-    dialog::{DialogHeader, DialogTitle},
+    button::{Button, ButtonVariants as _},
+    dialog::{DialogFooter, DialogHeader, DialogTitle},
     input::{Input, InputState},
 };
 
@@ -26,6 +24,9 @@ pub struct NoteEditor {
     previous_focus_handle: FocusHandle,
     input: Entity<InputState>,
     color: HighlightColor,
+    initial_body: String,
+    initial_color: HighlightColor,
+    discard_prompt_pending: bool,
 }
 
 impl NoteEditor {
@@ -37,6 +38,7 @@ impl NoteEditor {
         cx: &mut Context<Self>,
     ) -> Self {
         let content_len = content.len();
+        let initial_body = content.trim().to_string();
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -53,10 +55,13 @@ impl NoteEditor {
             previous_focus_handle,
             input,
             color,
+            initial_body,
+            initial_color: color,
+            discard_prompt_pending: false,
         }
     }
 
-    fn save(&mut self, _: &NoteSave, window: &mut Window, cx: &mut Context<Self>) {
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.previous_focus_handle.focus(window, cx);
         cx.emit(NoteEditorEvent::Save {
             body: self.input.read(cx).value(),
@@ -64,9 +69,54 @@ impl NoteEditor {
         });
     }
 
-    fn cancel(&mut self, _: &NoteCancel, window: &mut Window, cx: &mut Context<Self>) {
+    fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.previous_focus_handle.focus(window, cx);
         cx.emit(NoteEditorEvent::Cancel);
+    }
+
+    fn has_unsaved_changes(&self, cx: &App) -> bool {
+        self.input.read(cx).value().trim() != self.initial_body || self.color != self.initial_color
+    }
+
+    pub fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.discard_prompt_pending {
+            return;
+        }
+        if !self.has_unsaved_changes(cx) {
+            self.dismiss(window, cx);
+            return;
+        }
+
+        let title = crate::fl!("note-discard-title");
+        let detail = crate::fl!("note-discard-detail");
+        let confirmation = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some(&detail),
+            &[
+                PromptButton::ok(crate::fl!("discard")),
+                PromptButton::cancel(crate::fl!("keep-editing")),
+            ],
+            cx,
+        );
+        self.discard_prompt_pending = true;
+        cx.spawn_in(window, async move |this, cx| {
+            let discard = confirmation.await == Ok(0);
+            _ = this.update_in(cx, |this, window, cx| {
+                this.discard_prompt_pending = false;
+                if discard {
+                    this.dismiss(window, cx);
+                } else {
+                    this.input.focus_handle(cx).focus(window, cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn cancel(&mut self, _: &NoteCancel, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_close(window, cx);
     }
 
     fn set_color(&mut self, color: HighlightColor, cx: &mut Context<Self>) {
@@ -127,7 +177,6 @@ impl Render for NoteEditor {
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
-            .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::cancel))
             .child(
                 DialogHeader::new()
@@ -157,10 +206,25 @@ impl Render for NoteEditor {
                     .px_3()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .text_size(ui_rems(12.0))
-                    .text_color(cx.theme().muted_foreground)
                     .child(color_palette)
-                    .child(crate::fl!("note-editor-help")),
+                    .child(
+                        DialogFooter::new()
+                            .child(
+                                Button::new("note-editor-close")
+                                    .label(crate::fl!("close"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.request_close(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("note-editor-save")
+                                    .label(crate::fl!("save"))
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.save(window, cx);
+                                    })),
+                            ),
+                    ),
             )
     }
 }

@@ -75,7 +75,6 @@ impl AiPanel {
         }
 
         self.editing_turn = None;
-        self.edit_blur_subscription = None;
         self.restore_composer_snapshot(editing.saved_composer, cx);
         self.pending_title_task = None;
         self.truncate_messages(editing.message_index);
@@ -359,7 +358,6 @@ impl AiPanel {
         }
         self.selection_reversed = false;
         self.marked_range = None;
-        self.mention_completion = None;
         self.close_composer_menus();
         self.clear_validation_notice();
         self.push_message(user_message, cx);
@@ -474,7 +472,9 @@ impl AiPanel {
         let generation = self.copy_feedback_generation;
         self.copied_target = Some(target);
         self.copy_feedback_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(COPY_FEEDBACK_DURATION).await;
+            cx.background_executor()
+                .timer(glyphst_ui::TRANSIENT_FEEDBACK_DURATION)
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if this.copy_feedback_generation == generation {
                     this.copied_target = None;

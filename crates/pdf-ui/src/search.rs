@@ -85,7 +85,7 @@ impl SearchBar {
                 }
             }
             InputEvent::PressEnter { shift, .. } => this.activate(*shift, cx),
-            InputEvent::Focus | InputEvent::Blur => {}
+            InputEvent::CompletionAccepted { .. } | InputEvent::Focus | InputEvent::Blur => {}
         })
         .detach();
 

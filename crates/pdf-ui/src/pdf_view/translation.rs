@@ -27,7 +27,8 @@ impl PdfView {
         let source_path = self.path.clone();
         if self
             .document_translation_jobs
-            .update(cx, |jobs, cx| jobs.reveal_for_source(&source_path, cx))
+            .read(cx)
+            .has_job_for_source(&source_path)
         {
             return;
         }
@@ -105,7 +106,8 @@ impl PdfView {
         let source_path = self.path.clone();
         if self
             .document_translation_jobs
-            .update(cx, |jobs, cx| jobs.reveal_for_source(&source_path, cx))
+            .read(cx)
+            .has_job_for_source(&source_path)
         {
             return;
         }
@@ -155,7 +157,8 @@ impl PdfView {
         let source_path = self.path.clone();
         if self
             .document_translation_jobs
-            .update(cx, |jobs, cx| jobs.reveal_for_source(&source_path, cx))
+            .read(cx)
+            .has_job_for_source(&source_path)
         {
             return;
         }

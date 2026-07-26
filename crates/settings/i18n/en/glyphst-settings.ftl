@@ -3,13 +3,16 @@ app-name = Glyphst
 ## Common
 
 cancel = Cancel
+close = Close
 cancel-selection = Cancel Selection
 copy = Copy
 markdown-copy-code = Copy Code
 markdown-unwrap-code = Unwrap Code Block
 current = Current
 delete = Delete
+discard = Discard
 edit = Edit
+keep-editing = Keep editing
 escape-key = Esc
 export = Export
 open-pdf = Open Document
@@ -314,7 +317,8 @@ new-tab-rendering-preview = Rendering preview…
 ## Notes
 
 note-title = Note
-note-editor-help = Ctrl+Enter saves · Esc cancels
+note-discard-title = Discard note changes?
+note-discard-detail = Your unsaved note changes will be lost.
 no-selected-text = No selected text
 untitled-note = Untitled note
 

@@ -74,7 +74,7 @@ impl HistoryPaletteDelegate {
 
 impl PickerDelegate for HistoryPaletteDelegate {
     fn key_context(&self) -> &'static str {
-        "History Menu TextInput"
+        "History Menu"
     }
 
     fn placeholder(&self) -> SharedString {

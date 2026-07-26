@@ -3,13 +3,16 @@ app-name = Glyphst
 ## Common
 
 cancel = 取消
+close = 关闭
 cancel-selection = 取消选择
 copy = 复制
 markdown-copy-code = 复制代码
 markdown-unwrap-code = 不换行代码块
 current = 当前
 delete = 删除
+discard = 放弃
 edit = 编辑
+keep-editing = 继续编辑
 escape-key = Esc
 export = 导出
 open-pdf = 打开文档
@@ -294,7 +297,8 @@ new-tab-rendering-preview = 正在渲染预览…
 ## Notes
 
 note-title = 笔记
-note-editor-help = Ctrl+Enter 保存 · Esc 取消
+note-discard-title = 放弃笔记更改？
+note-discard-detail = 未保存的笔记更改将会丢失。
 no-selected-text = 未选择文本
 untitled-note = 未命名笔记
 

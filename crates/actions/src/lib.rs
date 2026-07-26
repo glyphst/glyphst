@@ -1,46 +1,5 @@
 pub mod ai_panel {
-    gpui::actions!(ai_panel, [AiPanelClose, AiPanelSubmit]);
-}
-
-pub mod input {
-    gpui::actions!(
-        glyphst_input,
-        [
-            Backspace,
-            Delete,
-            DeleteWordBackward,
-            DeleteWordForward,
-            DeleteToLineStart,
-            DeleteToLineEnd,
-            Left,
-            Right,
-            WordLeft,
-            WordRight,
-            Up,
-            Down,
-            Home,
-            End,
-            DocumentStart,
-            DocumentEnd,
-            SelectAll,
-            SelectLeft,
-            SelectRight,
-            SelectWordLeft,
-            SelectWordRight,
-            SelectUp,
-            SelectDown,
-            SelectHome,
-            SelectEnd,
-            SelectDocumentStart,
-            SelectDocumentEnd,
-            Copy,
-            Cut,
-            Paste,
-            Undo,
-            Redo,
-            Newline
-        ]
-    );
+    gpui::actions!(ai_panel, [AiPanelClose]);
 }
 
 pub mod menu {
@@ -50,7 +9,7 @@ pub mod new_tab {
     gpui::actions!(new_tab, [EnterSelect, CancelSelect, DeleteSelected]);
 }
 pub mod note_editor {
-    gpui::actions!(note_editor, [NoteSave, NoteCancel]);
+    gpui::actions!(note_editor, [NoteCancel]);
 }
 pub mod settings_panel {
     gpui::actions!(settings_panel, [PanelClose]);

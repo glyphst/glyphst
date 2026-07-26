@@ -27,7 +27,6 @@ pub mod pdf_view;
 pub mod search;
 pub mod toc;
 
-pub use glyphst_actions::input;
 pub use glyphst_ai_ui::ai_panel;
 pub use glyphst_library as library;
 pub use glyphst_settings::{self as settings, localize, theme};

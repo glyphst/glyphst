@@ -1,14 +1,13 @@
 use std::{
-    cell::Cell, collections::HashSet, ops::Range, path::PathBuf, rc::Rc, sync::Arc, thread,
-    time::Duration,
+    cell::Cell, collections::HashSet, ops::Range, path::PathBuf, rc::Rc, thread, time::Duration,
 };
 
 use crate::{
     AiContext, AiContextProvider, AiPageState, ResolvedPageContext, ResolvedRegionContext,
 };
-use anyhow::anyhow;
+use anyhow::{Result, anyhow};
 use futures::{StreamExt, channel::mpsc};
-use glyphst_actions::ai_panel::{AiPanelClose, AiPanelSubmit};
+use glyphst_actions::ai_panel::AiPanelClose;
 use glyphst_ai::ai_chat::{
     AiStreamEvent, ChatMessage, ContextBlock, DEFAULT_SESSION_TITLE, DocumentContext,
     MAX_PAGE_IMAGE_BYTES, MentionKind, MentionOccurrence, MentionReference, Role,
@@ -24,7 +23,7 @@ use glyphst_settings::{
     AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore, localize::tr, ui_rems,
 };
 use glyphst_ui::{
-    icons::{Icon, IconName, toolbar_icon_button},
+    icons::{IconName, toolbar_icon_button},
     markdown::{Markdown, MarkdownContextMenuRequest, MarkdownElement, MarkdownStyle},
     picker::fuzzy_match,
     scrollbar::{ScrollbarHandle, WithScrollbar as _},
@@ -33,27 +32,27 @@ use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, DismissEvent,
     ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla,
     IntoElement, MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta,
-    ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, StyledText, Subscription, Task,
-    TextStyle, UniformListScrollHandle, Window, anchored, deferred, div, point, prelude::*, px,
-    transparent_black, uniform_list,
+    ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, TextStyle, WeakEntity,
+    Window, anchored, deferred, div, prelude::*, px, transparent_black,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, InteractiveElementExt as _, Selectable as _, Sizable as _,
     ThemeColor as Theme, WindowExt as _,
     alert::Alert,
     button::{Button, ButtonGroup, ButtonVariants as _},
-    input::{Input, InputEvent, InputState},
+    input::{
+        CompletionProvider, Escape as InputEscape, Input, InputEvent, InputState, Rope, RopeExt,
+    },
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
     popover::{Popover, PopoverState},
 };
+use lsp_types::{
+    CompletionContext, CompletionItem, CompletionResponse, CompletionTextEdit, Range as LspRange,
+    TextEdit,
+};
 
 pub const AI_PANEL_WIDTH: f32 = 360.0;
-const COMPLETION_MENU_MIN_WIDTH: f32 = 280.0;
-const COMPLETION_MENU_MAX_WIDTH: f32 = 540.0;
-const COMPLETION_MENU_ROW_HEIGHT: f32 = 40.0;
-const COMPLETION_MENU_VISIBLE_ROWS: usize = 8;
-const COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1500);
 
 struct AiValidationNotification;
 
@@ -74,23 +73,10 @@ struct ModelMenuRenderState {
     popover: Entity<PopoverState>,
 }
 
-#[derive(Clone, Copy)]
-struct CompletionMenuPlacement {
-    position: GpuiPoint<Pixels>,
-    anchor: Anchor,
-    width: f32,
-}
-
 #[derive(Clone)]
 enum ModelMenuEntry {
     Header(AiProvider),
     Model(AiProvider, AiModel),
-}
-
-#[derive(Clone)]
-struct MentionCompletion {
-    source_range: Range<usize>,
-    selected_ix: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -250,11 +236,18 @@ enum CopyFeedbackTarget {
     Error,
 }
 
+struct MentionCompletionProvider {
+    panel: WeakEntity<AiPanel>,
+    triggered: Cell<bool>,
+}
+
 pub struct AiPanel {
     focus_handle: FocusHandle,
     composer_input: Entity<InputState>,
+    edit_input: Entity<InputState>,
     model_search_input: Entity<InputState>,
     _composer_input_subscription: Subscription,
+    _edit_input_subscription: Subscription,
     _model_search_input_subscription: Subscription,
     previous_focus_handle: FocusHandle,
     mode: AiPanelMode,
@@ -283,15 +276,12 @@ pub struct AiPanel {
     session_updated: u64,
     sessions: Vec<AiSession>,
     view: AiPanelView,
-    mention_completion: Option<MentionCompletion>,
-    mention_completion_scroll: UniformListScrollHandle,
     composer_mentions: Vec<ComposerMention>,
     model_search_query: SharedString,
     model_menu_scroll: ScrollHandle,
     markdown_views: Vec<Entity<Markdown>>,
     validation_notice: Option<String>,
     editing_turn: Option<EditingTurn>,
-    edit_blur_subscription: Option<Subscription>,
     copied_target: Option<CopyFeedbackTarget>,
     copy_feedback_generation: u64,
     copy_feedback_task: Option<Task<()>>,
@@ -385,18 +375,39 @@ impl AiPanel {
             AiPanelMode::Sidebar => (3, 8),
             AiPanelMode::QuickAsk => (1, 4),
         };
+        let panel = cx.weak_entity();
+        let composer_provider = Rc::new(MentionCompletionProvider {
+            panel: panel.clone(),
+            triggered: Cell::new(false),
+        });
+        let edit_provider = Rc::new(MentionCompletionProvider {
+            panel,
+            triggered: Cell::new(false),
+        });
         let composer_input = cx.new(|cx| {
-            InputState::new(window, cx)
+            let mut input = InputState::new(window, cx)
                 .auto_grow(min_rows, max_rows)
                 .soft_wrap(true)
                 .submit_on_enter(true)
-                .placeholder(tr("ai-ask-placeholder"))
+                .placeholder(tr("ai-ask-placeholder"));
+            input.lsp.completion_provider = Some(composer_provider.clone());
+            input
+        });
+        let edit_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx)
+                .auto_grow(1, usize::MAX)
+                .soft_wrap(true)
+                .submit_on_enter(true);
+            input.lsp.completion_provider = Some(edit_provider.clone());
+            input
         });
         let model_search_input = cx
             .new(|cx| InputState::new(window, cx).placeholder(tr("ai-search-models-placeholder")));
         let focus_handle = composer_input.focus_handle(cx);
         let composer_input_subscription =
             cx.subscribe_in(&composer_input, window, Self::on_composer_input_event);
+        let edit_input_subscription =
+            cx.subscribe_in(&edit_input, window, Self::on_composer_input_event);
         let model_search_input_subscription = cx.subscribe_in(
             &model_search_input,
             window,
@@ -406,8 +417,10 @@ impl AiPanel {
         Self {
             focus_handle,
             composer_input,
+            edit_input,
             model_search_input,
             _composer_input_subscription: composer_input_subscription,
+            _edit_input_subscription: edit_input_subscription,
             _model_search_input_subscription: model_search_input_subscription,
             previous_focus_handle: init.previous_focus_handle,
             mode: init.mode,
@@ -436,15 +449,12 @@ impl AiPanel {
             session_updated: 0,
             sessions: init.sessions,
             view: AiPanelView::Chat,
-            mention_completion: None,
-            mention_completion_scroll: UniformListScrollHandle::new(),
             composer_mentions: Vec::new(),
             model_search_query: SharedString::default(),
             model_menu_scroll: ScrollHandle::new(),
             markdown_views: Vec::new(),
             validation_notice: None,
             editing_turn: None,
-            edit_blur_subscription: None,
             copied_target: None,
             copy_feedback_generation: 0,
             copy_feedback_task: None,
@@ -474,10 +484,14 @@ impl AiPanel {
     }
 
     fn close(&mut self, _: &AiPanelClose, window: &mut Window, cx: &mut Context<Self>) {
-        if self.message_context_menu.take().is_some() || self.mention_completion.is_some() {
-            self.close_composer_menus();
-            self.mention_completion = None;
-            cx.notify();
+        if self.close_message_context_menu(cx) {
+            return;
+        }
+        let active_input = self.active_composer_input();
+        let completion_closed = active_input.update(cx, |input, cx| {
+            input.handle_action_for_context_menu(Box::new(InputEscape), window, cx)
+        });
+        if completion_closed {
             return;
         }
         if self.editing_turn.is_some() {
@@ -488,22 +502,6 @@ impl AiPanel {
             return;
         }
         self.dismiss(window, cx);
-    }
-
-    fn submit(&mut self, _: &AiPanelSubmit, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm_mention_completion(cx) {
-            return;
-        }
-        match submit_action(
-            self.editing_turn.is_some(),
-            self.generation_failure.as_ref(),
-        ) {
-            SubmitAction::Edit => self.submit_edited_message(window, cx),
-            SubmitAction::Retry(assistant_index) => {
-                self.retry_assistant(assistant_index, window, cx)
-            }
-            SubmitAction::Send => self.send_message(window, cx),
-        }
     }
 }
 

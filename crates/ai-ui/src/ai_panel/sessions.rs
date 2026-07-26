@@ -147,7 +147,6 @@ impl AiPanel {
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
-        self.mention_completion = None;
         self.composer_mentions.clear();
         self.pending_title_task = None;
         self.generation_failure = None;
@@ -224,7 +223,6 @@ impl AiPanel {
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
-        self.mention_completion = None;
         self.composer_mentions.clear();
         self.pending_title_task = None;
         self.generation_failure = None;

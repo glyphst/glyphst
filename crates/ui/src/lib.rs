@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 pub mod activity;
 pub mod assets;
 pub mod fonts;
@@ -11,6 +13,9 @@ pub mod smooth_scroll;
 pub mod style;
 pub mod tooltip;
 
-pub use glyphst_actions::{input, menu};
+pub use glyphst_actions::menu;
 pub use glyphst_settings as settings;
 pub use glyphst_settings::theme;
+
+/// Shared lifetime for brief, non-blocking UI feedback.
+pub const TRANSIENT_FEEDBACK_DURATION: Duration = Duration::from_secs(2);

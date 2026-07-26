@@ -112,7 +112,7 @@ impl ThemeSelectorDelegate {
 
 impl PickerDelegate for ThemeSelectorDelegate {
     fn key_context(&self) -> &'static str {
-        "ThemeSelector Menu TextInput"
+        "ThemeSelector Menu"
     }
 
     fn placeholder(&self) -> SharedString {

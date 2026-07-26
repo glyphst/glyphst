@@ -161,51 +161,6 @@ fn source_reflects_user_override_versus_default() {
     assert_eq!(overridden.default_keystrokes, sample.default_keystrokes);
 }
 
-fn prompt_keymap() -> Keymap {
-    let mut bindings = AI_PROMPT_BINDINGS
-        .iter()
-        .map(|spec| {
-            KeyBinding::load(
-                &expand_platform_keystroke(spec.keystrokes),
-                (spec.build)(),
-                Some(Rc::new(
-                    KeyBindingContextPredicate::parse(spec.context).unwrap(),
-                )),
-                false,
-                None,
-                &DummyKeyboardMapper,
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
-    bindings.push(KeyBinding::new("enter", menu::Confirm, Some("Menu")));
-    let mut keymap = Keymap::default();
-    keymap.add_bindings(bindings);
-    keymap
-}
-
-fn internal_keymap(specs: impl IntoIterator<Item = &'static InternalBindingSpec>) -> Keymap {
-    let bindings = specs
-        .into_iter()
-        .map(|spec| {
-            KeyBinding::load(
-                &expand_platform_keystroke(spec.keystrokes),
-                (spec.build)(),
-                Some(Rc::new(
-                    KeyBindingContextPredicate::parse(spec.context).unwrap(),
-                )),
-                false,
-                None,
-                &DummyKeyboardMapper,
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
-    let mut keymap = Keymap::default();
-    keymap.add_bindings(bindings);
-    keymap
-}
-
 fn preset_keymap(preset: KeymapPreset) -> Keymap {
     let mut bindings = Vec::new();
 
@@ -226,25 +181,6 @@ fn preset_keymap(preset: KeymapPreset) -> Keymap {
             );
         }
     }
-
-    bindings.extend(
-        COMMON_TEXT_EDIT_BINDINGS
-            .iter()
-            .chain(PLATFORM_TEXT_EDIT_BINDINGS)
-            .map(|spec| {
-                KeyBinding::load(
-                    &expand_platform_keystroke(spec.keystrokes),
-                    (spec.build)(),
-                    Some(Rc::new(
-                        KeyBindingContextPredicate::parse(spec.context).unwrap(),
-                    )),
-                    false,
-                    None,
-                    &DummyKeyboardMapper,
-                )
-                .unwrap()
-            }),
-    );
 
     let mut keymap = Keymap::default();
     keymap.add_bindings(bindings);
@@ -272,97 +208,7 @@ fn first_action_for(keymap: &Keymap, keystrokes: &str, contexts: &[&str]) -> &'s
 }
 
 #[test]
-fn ai_prompts_use_zed_style_submit_and_newline_bindings() {
-    let keymap = prompt_keymap();
-    let submit = AiPanelSubmit::name_for_type();
-    let newline = input::Newline::name_for_type();
-
-    for context in ["AiPanel", "QuickAsk"] {
-        assert_eq!(first_action_for(&keymap, "enter", &[context]), submit);
-        assert_eq!(
-            first_action_for(&keymap, "primary-enter", &[context]),
-            submit
-        );
-        assert_eq!(
-            first_action_for(&keymap, "shift-enter", &[context]),
-            newline
-        );
-    }
-}
-
-#[test]
-fn menu_confirm_keeps_precedence_over_ai_prompt_submit() {
-    let keymap = prompt_keymap();
-    let confirm = menu::Confirm::name_for_type();
-
-    for context in ["AiPanel", "QuickAsk"] {
-        assert_eq!(
-            first_action_for(&keymap, "enter", &[context, "Menu"]),
-            confirm
-        );
-        assert_eq!(
-            first_action_for(&keymap, "enter", &[&format!("{context} Menu")]),
-            confirm
-        );
-    }
-}
-
-#[test]
-fn browser_text_bindings_dispatch_semantic_actions() {
-    let keymap = internal_keymap(
-        COMMON_TEXT_EDIT_BINDINGS
-            .iter()
-            .chain(PLATFORM_TEXT_EDIT_BINDINGS),
-    );
-
-    assert_eq!(
-        first_action_for(&keymap, "primary-z", &["TextInput"]),
-        input::Undo::name_for_type()
-    );
-    assert_eq!(
-        first_action_for(&keymap, "primary-shift-z", &["TextInput"]),
-        input::Redo::name_for_type()
-    );
-
-    #[cfg(target_os = "macos")]
-    {
-        assert_eq!(
-            first_action_for(&keymap, "alt-backspace", &["TextInput"]),
-            input::DeleteWordBackward::name_for_type()
-        );
-        assert_eq!(
-            first_action_for(&keymap, "alt-shift-right", &["TextInput"]),
-            input::SelectWordRight::name_for_type()
-        );
-        assert_eq!(
-            first_action_for(&keymap, "cmd-down", &["TextInput"]),
-            input::DocumentEnd::name_for_type()
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        assert_eq!(
-            first_action_for(&keymap, "ctrl-backspace", &["TextInput"]),
-            input::DeleteWordBackward::name_for_type()
-        );
-        assert_eq!(
-            first_action_for(&keymap, "ctrl-shift-right", &["TextInput"]),
-            input::SelectWordRight::name_for_type()
-        );
-        assert_eq!(
-            first_action_for(&keymap, "ctrl-end", &["TextInput"]),
-            input::DocumentEnd::name_for_type()
-        );
-        assert_eq!(
-            first_action_for(&keymap, "ctrl-y", &["TextInput"]),
-            input::Redo::name_for_type()
-        );
-    }
-}
-
-#[test]
-fn pdf_undo_redo_defaults_and_text_input_precedence() {
+fn pdf_undo_redo_defaults() {
     let undo_keystrokes = vec![expand_platform_keystroke("primary-z")];
     let mut redo_keystrokes = vec![expand_platform_keystroke("primary-shift-z")];
     if !cfg!(target_os = "macos") {
@@ -389,24 +235,11 @@ fn pdf_undo_redo_defaults_and_text_input_precedence() {
             first_action_for(&keymap, "primary-shift-z", &["PdfView"]),
             Redo::name_for_type()
         );
-        assert_eq!(
-            first_action_for(&keymap, "primary-z", &["PdfView", "TextInput"]),
-            input::Undo::name_for_type()
-        );
-        assert_eq!(
-            first_action_for(&keymap, "primary-shift-z", &["PdfView", "TextInput"]),
-            input::Redo::name_for_type()
-        );
-
         #[cfg(not(target_os = "macos"))]
         {
             assert_eq!(
                 first_action_for(&keymap, "ctrl-y", &["PdfView"]),
                 Redo::name_for_type()
-            );
-            assert_eq!(
-                first_action_for(&keymap, "ctrl-y", &["PdfView", "TextInput"]),
-                input::Redo::name_for_type()
             );
         }
     }

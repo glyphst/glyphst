@@ -4,7 +4,7 @@ impl Render for AiPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_composer_input(window, cx);
         self.sync_model_search_input(window, cx);
-        self.selected_range = self.composer_input.read(cx).selected_range();
+        self.selected_range = self.active_composer_input().read(cx).selected_range();
         if self.mode == AiPanelMode::QuickAsk {
             return self.render_quick_ask(window, cx).into_any_element();
         }
@@ -51,12 +51,6 @@ impl Render for AiPanel {
             .unwrap_or_else(|| selected_model.clone());
         let model_search_query = self.model_search_query.clone();
         let model_menu_scroll = self.model_menu_scroll.clone();
-        let completion_matches = self.mention_completion_matches(cx);
-        let completion_selected = self
-            .mention_completion
-            .as_ref()
-            .map(|completion| completion.selected_ix)
-            .unwrap_or(0);
         let (has_current_selection, has_current_region) = self.current_mention_availability(cx);
         let sessions = self.sessions.clone();
         let current_session_id = self.session_id;
@@ -69,13 +63,6 @@ impl Render for AiPanel {
         let message_context_menu = self.message_context_menu.clone();
         let show_scroll_to_bottom =
             !self.follow_output && self.scroll_handle.max_offset().y > px(0.0) && !empty_chat;
-        let completion_placement = if showing_sessions || completion_matches.is_empty() {
-            None
-        } else {
-            self.completion_menu_placement(&completion_matches, window)
-        };
-        let completion_scroll = self.mention_completion_scroll.clone();
-
         let mut message_rows = Vec::with_capacity(self.messages.len() + 1);
         for (message_index, (message, markdown)) in self
             .messages
@@ -93,7 +80,7 @@ impl Render for AiPanel {
                     panel_width,
                     base_text_style: base_text_style.clone(),
                     panel: entity.clone(),
-                    editing_focused: self.composer_input.focus_handle(cx).is_focused(window),
+                    editing_focused: self.edit_input.focus_handle(cx).is_focused(window),
                 },
                 cx,
             ));
@@ -163,7 +150,9 @@ impl Render for AiPanel {
             .xsmall()
             .compact()
             .ghost()
-            .label(model_label)
+            .label(model_label.clone())
+            .truncate_label()
+            .tooltip(model_label)
             .dropdown_caret(true)
             .max_w(px(120.0));
         let model_control = if loading {
@@ -238,7 +227,7 @@ impl Render for AiPanel {
             });
 
         div()
-            .key_context("AiPanel TextInput")
+            .key_context("AiPanel")
             .track_focus(&self.focus_handle)
             .relative()
             .flex()
@@ -258,7 +247,6 @@ impl Render for AiPanel {
                 cx.stop_propagation();
             })
             .on_action(cx.listener(Self::close))
-            .on_action(cx.listener(Self::submit))
             .child(
                 div()
                     .flex()
@@ -460,6 +448,7 @@ impl Render for AiPanel {
                                             .child(
                                                 div()
                                                     .flex()
+                                                    .flex_1()
                                                     .min_w_0()
                                                     .flex_wrap()
                                                     .items_center()
@@ -472,25 +461,6 @@ impl Render for AiPanel {
                             ),
                     )
                 })
-            })
-            .when_some(completion_placement, |this, placement| {
-                this.child(
-                    deferred(
-                        anchored()
-                            .position(placement.position)
-                            .anchor(placement.anchor)
-                            .snap_to_window_with_margin(px(8.0))
-                            .child(Self::render_mention_completion_menu(
-                                completion_matches,
-                                completion_selected,
-                                placement.width,
-                                completion_scroll,
-                                theme,
-                                cx,
-                            )),
-                    )
-                    .with_priority(1),
-                )
             })
             .when_some(message_context_menu, |this, menu| {
                 this.child(

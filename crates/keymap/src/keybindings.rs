@@ -1,10 +1,10 @@
 use std::{rc::Rc, sync::OnceLock};
 
 use glyphst_actions::{
-    ai_panel::{AiPanelClose, AiPanelSubmit},
-    input, menu,
+    ai_panel::AiPanelClose,
+    menu,
     new_tab::{CancelSelect, DeleteSelected, EnterSelect},
-    note_editor::{NoteCancel, NoteSave},
+    note_editor::NoteCancel,
     pane::{SplitDown, SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical},
     pdf_viewer::{
         AddBookmark, CancelDocumentTranslation, CancelRegionSelection, CloseTab, CopySelection,
@@ -158,216 +158,6 @@ struct CommandSpec {
     legacy_default: bool,
     build: fn() -> Box<dyn Action>,
 }
-
-struct InternalBindingSpec {
-    keystrokes: &'static str,
-    context: &'static str,
-    build: fn() -> Box<dyn Action>,
-}
-
-const AI_PROMPT_BINDINGS: &[InternalBindingSpec] = &[
-    InternalBindingSpec {
-        keystrokes: "enter",
-        context: "AiPanel",
-        build: boxed::<AiPanelSubmit>,
-    },
-    InternalBindingSpec {
-        keystrokes: "primary-enter",
-        context: "AiPanel",
-        build: boxed::<AiPanelSubmit>,
-    },
-    InternalBindingSpec {
-        keystrokes: "shift-enter",
-        context: "AiPanel",
-        build: boxed::<input::Newline>,
-    },
-    InternalBindingSpec {
-        keystrokes: "enter",
-        context: "QuickAsk",
-        build: boxed::<AiPanelSubmit>,
-    },
-    InternalBindingSpec {
-        keystrokes: "primary-enter",
-        context: "QuickAsk",
-        build: boxed::<AiPanelSubmit>,
-    },
-    InternalBindingSpec {
-        keystrokes: "shift-enter",
-        context: "QuickAsk",
-        build: boxed::<input::Newline>,
-    },
-];
-
-const COMMON_TEXT_EDIT_BINDINGS: &[InternalBindingSpec] = &[
-    InternalBindingSpec {
-        keystrokes: "primary-z",
-        context: "TextInput",
-        build: boxed::<input::Undo>,
-    },
-    InternalBindingSpec {
-        keystrokes: "primary-shift-z",
-        context: "TextInput",
-        build: boxed::<input::Redo>,
-    },
-];
-
-#[cfg(target_os = "macos")]
-const PLATFORM_TEXT_EDIT_BINDINGS: &[InternalBindingSpec] = &[
-    InternalBindingSpec {
-        keystrokes: "alt-backspace",
-        context: "TextInput",
-        build: boxed::<input::DeleteWordBackward>,
-    },
-    InternalBindingSpec {
-        keystrokes: "alt-delete",
-        context: "TextInput",
-        build: boxed::<input::DeleteWordForward>,
-    },
-    InternalBindingSpec {
-        keystrokes: "cmd-backspace",
-        context: "TextInput",
-        build: boxed::<input::DeleteToLineStart>,
-    },
-    InternalBindingSpec {
-        keystrokes: "cmd-delete",
-        context: "TextInput",
-        build: boxed::<input::DeleteToLineEnd>,
-    },
-    InternalBindingSpec {
-        keystrokes: "alt-left",
-        context: "TextInput",
-        build: boxed::<input::WordLeft>,
-    },
-    InternalBindingSpec {
-        keystrokes: "alt-right",
-        context: "TextInput",
-        build: boxed::<input::WordRight>,
-    },
-    InternalBindingSpec {
-        keystrokes: "alt-shift-left",
-        context: "TextInput",
-        build: boxed::<input::SelectWordLeft>,
-    },
-    InternalBindingSpec {
-        keystrokes: "alt-shift-right",
-        context: "TextInput",
-        build: boxed::<input::SelectWordRight>,
-    },
-    InternalBindingSpec {
-        keystrokes: "cmd-left",
-        context: "TextInput",
-        build: boxed::<input::Home>,
-    },
-    InternalBindingSpec {
-        keystrokes: "cmd-right",
-        context: "TextInput",
-        build: boxed::<input::End>,
-    },
-    InternalBindingSpec {
-        keystrokes: "cmd-shift-left",
-        context: "TextInput",
-        build: boxed::<input::SelectHome>,
-    },
-    InternalBindingSpec {
-        keystrokes: "cmd-shift-right",
-        context: "TextInput",
-        build: boxed::<input::SelectEnd>,
-    },
-    InternalBindingSpec {
-        keystrokes: "cmd-up",
-        context: "TextInput",
-        build: boxed::<input::DocumentStart>,
-    },
-    InternalBindingSpec {
-        keystrokes: "cmd-down",
-        context: "TextInput",
-        build: boxed::<input::DocumentEnd>,
-    },
-    InternalBindingSpec {
-        keystrokes: "cmd-shift-up",
-        context: "TextInput",
-        build: boxed::<input::SelectDocumentStart>,
-    },
-    InternalBindingSpec {
-        keystrokes: "cmd-shift-down",
-        context: "TextInput",
-        build: boxed::<input::SelectDocumentEnd>,
-    },
-];
-
-#[cfg(not(target_os = "macos"))]
-const PLATFORM_TEXT_EDIT_BINDINGS: &[InternalBindingSpec] = &[
-    InternalBindingSpec {
-        keystrokes: "ctrl-backspace",
-        context: "TextInput",
-        build: boxed::<input::DeleteWordBackward>,
-    },
-    InternalBindingSpec {
-        keystrokes: "ctrl-delete",
-        context: "TextInput",
-        build: boxed::<input::DeleteWordForward>,
-    },
-    InternalBindingSpec {
-        keystrokes: "ctrl-left",
-        context: "TextInput",
-        build: boxed::<input::WordLeft>,
-    },
-    InternalBindingSpec {
-        keystrokes: "ctrl-right",
-        context: "TextInput",
-        build: boxed::<input::WordRight>,
-    },
-    InternalBindingSpec {
-        keystrokes: "ctrl-shift-left",
-        context: "TextInput",
-        build: boxed::<input::SelectWordLeft>,
-    },
-    InternalBindingSpec {
-        keystrokes: "ctrl-shift-right",
-        context: "TextInput",
-        build: boxed::<input::SelectWordRight>,
-    },
-    InternalBindingSpec {
-        keystrokes: "ctrl-home",
-        context: "TextInput",
-        build: boxed::<input::DocumentStart>,
-    },
-    InternalBindingSpec {
-        keystrokes: "ctrl-end",
-        context: "TextInput",
-        build: boxed::<input::DocumentEnd>,
-    },
-    InternalBindingSpec {
-        keystrokes: "ctrl-shift-home",
-        context: "TextInput",
-        build: boxed::<input::SelectDocumentStart>,
-    },
-    InternalBindingSpec {
-        keystrokes: "ctrl-shift-end",
-        context: "TextInput",
-        build: boxed::<input::SelectDocumentEnd>,
-    },
-    InternalBindingSpec {
-        keystrokes: "ctrl-insert",
-        context: "TextInput",
-        build: boxed::<input::Copy>,
-    },
-    InternalBindingSpec {
-        keystrokes: "shift-delete",
-        context: "TextInput",
-        build: boxed::<input::Cut>,
-    },
-    InternalBindingSpec {
-        keystrokes: "shift-insert",
-        context: "TextInput",
-        build: boxed::<input::Paste>,
-    },
-    InternalBindingSpec {
-        keystrokes: "ctrl-y",
-        context: "TextInput",
-        build: boxed::<input::Redo>,
-    },
-];
 
 pub fn apply(cx: &mut App, preset: KeymapPreset, overrides: &[KeyBindingOverride]) {
     let mut bindings = cx
@@ -707,33 +497,6 @@ fn bindings_for_unknown_override(cx: &mut App, binding: &KeyBindingOverride) -> 
 }
 
 fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
-    add_many::<input::Backspace>(cx, bindings, &["backspace", "shift-backspace"], "TextInput");
-    add_many::<input::Delete>(cx, bindings, &["delete"], "TextInput");
-    add_many::<input::Left>(cx, bindings, &["left"], "TextInput");
-    add_many::<input::Right>(cx, bindings, &["right"], "TextInput");
-    add_many::<input::Home>(cx, bindings, &["home"], "TextInput");
-    add_many::<input::End>(cx, bindings, &["end"], "TextInput");
-    add_many::<input::SelectAll>(cx, bindings, &["primary-a"], "TextInput");
-    add_many::<input::SelectLeft>(cx, bindings, &["shift-left"], "TextInput");
-    add_many::<input::SelectRight>(cx, bindings, &["shift-right"], "TextInput");
-    add_many::<input::SelectHome>(cx, bindings, &["shift-home"], "TextInput");
-    add_many::<input::SelectEnd>(cx, bindings, &["shift-end"], "TextInput");
-    add_many::<input::Copy>(cx, bindings, &["primary-c"], "TextInput");
-    add_many::<input::Cut>(cx, bindings, &["primary-x"], "TextInput");
-    add_many::<input::Paste>(cx, bindings, &["primary-v"], "TextInput");
-    add_internal_binding_specs(cx, bindings, COMMON_TEXT_EDIT_BINDINGS);
-    add_internal_binding_specs(cx, bindings, PLATFORM_TEXT_EDIT_BINDINGS);
-
-    for context in ["NoteEditor", "AiPanel", "QuickAsk"] {
-        add_many::<input::Up>(cx, bindings, &["up"], context);
-        add_many::<input::Down>(cx, bindings, &["down"], context);
-        add_many::<input::SelectUp>(cx, bindings, &["shift-up"], context);
-        add_many::<input::SelectDown>(cx, bindings, &["shift-down"], context);
-    }
-    add_many::<input::Newline>(cx, bindings, &["enter"], "NoteEditor");
-    add_internal_binding_specs(cx, bindings, AI_PROMPT_BINDINGS);
-
-    // Keep menu bindings later so completions retain precedence over prompt submission.
     add_many::<menu::Confirm>(cx, bindings, &["enter"], "Menu");
     add_many::<menu::Cancel>(cx, bindings, &["escape"], "Menu");
     add_many::<menu::SelectNext>(cx, bindings, &["down"], "Menu");
@@ -743,7 +506,6 @@ fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
     add_many::<SearchInputConfirm>(cx, bindings, &["enter"], "Search");
     add_many::<SearchInputPrevious>(cx, bindings, &["shift-enter"], "Search");
     add_many::<SearchInputCancel>(cx, bindings, &["escape"], "Search");
-    add_many::<NoteSave>(cx, bindings, &["primary-enter"], "NoteEditor");
     add_many::<NoteCancel>(cx, bindings, &["escape"], "NoteEditor");
     add_many::<AiPanelClose>(cx, bindings, &["escape"], "AiPanel");
     add_many::<AiPanelClose>(cx, bindings, &["escape"], "QuickAsk");
@@ -751,24 +513,6 @@ fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
     add_many::<PanelClose>(cx, bindings, &["escape"], "SettingsPanel");
     add_many::<TogglePresentationMode>(cx, bindings, &["escape"], "PresentationMode");
     add_many::<CancelRegionSelection>(cx, bindings, &["escape"], "RegionSelection");
-}
-
-fn add_internal_binding_specs(
-    cx: &mut App,
-    bindings: &mut Vec<KeyBinding>,
-    specs: &[InternalBindingSpec],
-) {
-    for spec in specs {
-        let action = (spec.build)();
-        add_boxed_binding(
-            cx,
-            bindings,
-            action.name(),
-            spec.keystrokes,
-            action,
-            Some(spec.context),
-        );
-    }
 }
 
 fn add_many<A>(cx: &mut App, bindings: &mut Vec<KeyBinding>, keys: &[&str], context: &str)

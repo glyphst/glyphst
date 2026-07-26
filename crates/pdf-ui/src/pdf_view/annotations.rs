@@ -394,6 +394,17 @@ impl PdfView {
         }
     }
 
+    pub(super) fn request_close_note_editor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.note_editor.clone() else {
+            return;
+        };
+        editor.update(cx, |editor, cx| editor.request_close(window, cx));
+    }
+
     pub(super) fn remove_context_note(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.context_menu_note.or(self.hovered_note) else {
             return;

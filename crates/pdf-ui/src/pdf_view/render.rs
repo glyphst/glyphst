@@ -891,7 +891,7 @@ impl Render for PdfView {
             .when_some(self.note_editor.clone(), |this, editor| {
                 this.child(Self::render_centered_overlay(
                     editor,
-                    |this, window, cx| this.close_note_editor(window, cx),
+                    |this, window, cx| this.request_close_note_editor(window, cx),
                     ui_theme,
                     cx,
                 ))

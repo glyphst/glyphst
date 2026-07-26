@@ -75,7 +75,7 @@ impl CommandPaletteDelegate {
 
 impl PickerDelegate for CommandPaletteDelegate {
     fn key_context(&self) -> &'static str {
-        "CommandPalette Menu TextInput"
+        "CommandPalette Menu"
     }
 
     fn placeholder(&self) -> SharedString {
