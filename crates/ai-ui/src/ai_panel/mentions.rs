@@ -71,13 +71,12 @@ impl AiPanel {
     }
 
     fn mention_preview_content(
-        kind: MentionKind,
         payload: MentionPreviewPayload,
         cx: &mut Context<Self>,
     ) -> MentionPreviewContent {
         match payload {
             MentionPreviewPayload::Text(text) => {
-                let text = limit_mention_preview_text(kind, text);
+                let text = limit_mention_preview_text(text);
                 MentionPreviewContent::Text {
                     markdown: cx.new(|cx| Markdown::new(text.text.into(), cx)),
                     truncated: text.truncated,
@@ -154,7 +153,6 @@ impl AiPanel {
                 anchor: preview_anchor,
                 generation,
                 status: MentionPreviewStatus::Ready(Self::mention_preview_content(
-                    mention.reference.kind,
                     MentionPreviewPayload::Text(text),
                     cx,
                 )),
@@ -201,9 +199,7 @@ impl AiPanel {
                         let status = result
                             .map(|payload| {
                                 MentionPreviewStatus::Ready(Self::mention_preview_content(
-                                    reference.kind,
-                                    payload,
-                                    cx,
+                                    payload, cx,
                                 ))
                             })
                             .unwrap_or_else(MentionPreviewStatus::Error);
@@ -231,11 +227,7 @@ impl AiPanel {
                 }) {
                     let status = result
                         .map(|payload| {
-                            MentionPreviewStatus::Ready(Self::mention_preview_content(
-                                reference.kind,
-                                payload,
-                                cx,
-                            ))
+                            MentionPreviewStatus::Ready(Self::mention_preview_content(payload, cx))
                         })
                         .unwrap_or_else(MentionPreviewStatus::Error);
                     if let Some(preview) = this.mention_preview.as_mut() {

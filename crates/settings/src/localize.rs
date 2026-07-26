@@ -1,4 +1,4 @@
-use std::sync::LazyLock;
+use std::{collections::HashMap, sync::LazyLock};
 
 use i18n_embed::fluent::{FluentLanguageLoader, fluent_language_loader};
 use i18n_embed::unic_langid::LanguageIdentifier;
@@ -65,6 +65,10 @@ pub fn tr(message_id: &str) -> String {
     LANGUAGE_LOADER.get(message_id)
 }
 
+pub fn tr_with_number(message_id: &str, argument: &str, value: usize) -> String {
+    LANGUAGE_LOADER.get_args(message_id, HashMap::from([(argument, value as i64)]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,6 +78,10 @@ mod tests {
         assert_eq!(
             i18n_embed_fl::fl!(LANGUAGE_LOADER, "app-name"),
             "Glyphst".to_string()
+        );
+        assert_eq!(
+            tr_with_number("ai-mention-preview-truncated", "limit", 4_000),
+            "Preview limited to 4000 characters. The complete attached context is still sent to AI."
         );
     }
 

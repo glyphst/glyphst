@@ -21,7 +21,9 @@ use glyphst_library::{
     LibraryStore, current_timestamp,
 };
 use glyphst_settings::{
-    AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore, localize::tr, ui_rems,
+    AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore,
+    localize::{tr, tr_with_number},
+    ui_rems,
 };
 use glyphst_ui::{
     icons::{IconName, toolbar_icon_button},
@@ -49,6 +51,7 @@ use gpui_component::{
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
     popover::{Popover, PopoverState},
+    scroll::ScrollableElement as _,
 };
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionResponse, CompletionTextEdit, Range as LspRange,

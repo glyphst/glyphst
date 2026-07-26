@@ -458,17 +458,18 @@ fn trimmed_composer_content_rebases_explicit_mentions() {
 }
 
 #[test]
-fn document_preview_is_limited_at_a_unicode_boundary() {
+fn all_text_previews_are_limited_at_a_unicode_boundary() {
     let source = "文".repeat(MENTION_PREVIEW_MAX_CHARS + 1);
-    let limited = limit_mention_preview_text(MentionKind::DocumentText, source.clone());
+    let limited = limit_mention_preview_text(source);
 
     assert!(limited.truncated);
     assert_eq!(limited.text.chars().count(), MENTION_PREVIEW_MAX_CHARS);
-    assert_eq!(source.chars().count(), MENTION_PREVIEW_MAX_CHARS + 1);
+
+    let exact_limit = "文".repeat(MENTION_PREVIEW_MAX_CHARS);
     assert_eq!(
-        limit_mention_preview_text(MentionKind::Page, source.clone()),
+        limit_mention_preview_text(exact_limit.clone()),
         LimitedMentionPreviewText {
-            text: source,
+            text: exact_limit,
             truncated: false,
         }
     );

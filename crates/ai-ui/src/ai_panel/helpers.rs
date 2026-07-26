@@ -367,17 +367,7 @@ pub(super) struct LimitedMentionPreviewText {
     pub(super) truncated: bool,
 }
 
-pub(super) fn limit_mention_preview_text(
-    kind: MentionKind,
-    text: String,
-) -> LimitedMentionPreviewText {
-    if kind != MentionKind::DocumentText {
-        return LimitedMentionPreviewText {
-            text,
-            truncated: false,
-        };
-    }
-
+pub(super) fn limit_mention_preview_text(text: String) -> LimitedMentionPreviewText {
     let truncated = text.chars().nth(MENTION_PREVIEW_MAX_CHARS).is_some();
     LimitedMentionPreviewText {
         text: if truncated {

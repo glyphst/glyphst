@@ -4,7 +4,6 @@ impl AiPanel {
     pub(super) fn render_mention_preview(
         preview: MentionPreview,
         options: MentionPreviewRenderOptions,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let MentionPreviewRenderOptions {
@@ -33,45 +32,40 @@ impl AiPanel {
                 markdown,
                 truncated,
             }) => div()
+                .id(("ai-mention-preview-text", generation))
+                .relative()
+                .track_scroll(&scroll_handle)
                 .w_full()
                 .min_w_0()
-                .child(
-                    div()
-                        .id(("ai-mention-preview-text", generation))
-                        .track_scroll(&scroll_handle)
-                        .w_full()
-                        .min_w_0()
-                        .max_h(px(MENTION_PREVIEW_TEXT_MAX_HEIGHT))
-                        .flex()
-                        .flex_col()
-                        .overflow_y_scroll()
-                        .p_3()
-                        .cursor_text()
-                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                        .child(MarkdownElement::new(
-                            markdown,
-                            MarkdownStyle::from_theme(theme, base_text_style),
-                        ))
-                        .when(truncated, |this| {
-                            this.child(
-                                div()
-                                    .flex_none()
-                                    .mt_3()
-                                    .pt_2()
-                                    .border_t(px(1.0))
-                                    .border_color(theme.border)
-                                    .text_size(ui_rems(10.0))
-                                    .text_color(theme.muted_foreground)
-                                    .child(tr("ai-mention-preview-truncated")),
-                            )
-                        }),
-                )
-                .vertical_scrollbar_for_with_id(
-                    &scroll_handle,
-                    ("ai-mention-preview-scrollbar", generation),
-                    window,
-                    cx,
-                )
+                .max_h(px(MENTION_PREVIEW_TEXT_MAX_HEIGHT))
+                .flex()
+                .flex_col()
+                .overflow_y_scroll()
+                .p_3()
+                .cursor_text()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .child(MarkdownElement::new(
+                    markdown,
+                    MarkdownStyle::from_theme(theme, base_text_style),
+                ))
+                .when(truncated, |this| {
+                    this.child(
+                        div()
+                            .flex_none()
+                            .mt_3()
+                            .pt_2()
+                            .border_t(px(1.0))
+                            .border_color(theme.border)
+                            .text_size(ui_rems(10.0))
+                            .text_color(theme.muted_foreground)
+                            .child(tr_with_number(
+                                "ai-mention-preview-truncated",
+                                "limit",
+                                MENTION_PREVIEW_MAX_CHARS,
+                            )),
+                    )
+                })
+                .vertical_scrollbar(&scroll_handle)
                 .into_any_element(),
             MentionPreviewStatus::Ready(MentionPreviewContent::Image(image)) => div()
                 .w_full()
@@ -99,6 +93,7 @@ impl AiPanel {
             .border_1()
             .border_color(theme.border)
             .bg(theme.popover)
+            .overflow_hidden()
             .shadow_sm()
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(
@@ -345,7 +340,6 @@ impl AiPanel {
                                     theme,
                                     base_text_style,
                                 },
-                                window,
                                 cx,
                             )),
                     )
