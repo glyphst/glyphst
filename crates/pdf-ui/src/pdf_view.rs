@@ -60,9 +60,9 @@ use glyphst_translation_ui::{
     target_language_options,
 };
 use glyphst_ui::{
+    activity::ActivityCenter,
     icons::toolbar_icon_button,
     markdown::{Markdown, MarkdownElement, MarkdownStyle},
-    notification_center::NotificationCenter,
     tooltip::text_tooltip,
 };
 use gpui::{

@@ -245,8 +245,8 @@ impl PdfView {
     }
 
     pub fn render_workspace_footbar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
-        let background_activity = NotificationCenter::try_global(cx)
-            .and_then(|center| center.update(cx, |center, cx| center.render_activity(theme, cx)));
+        let background_activity =
+            ActivityCenter::try_global(cx).and_then(|center| center.read(cx).render_activity());
         div()
             .flex()
             .flex_row()

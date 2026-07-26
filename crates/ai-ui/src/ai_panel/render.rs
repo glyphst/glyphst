@@ -3,7 +3,9 @@ use super::*;
 
 impl Render for AiPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.message_mention_hitboxes.clear();
+        self.sync_composer_input(window, cx);
+        self.sync_model_search_input(window, cx);
+        self.selected_range = self.composer_input.read(cx).selected_range();
         if self.mode == AiPanelMode::QuickAsk {
             return self.render_quick_ask(window, cx).into_any_element();
         }
@@ -66,7 +68,6 @@ impl Render for AiPanel {
         let thinking_menu_open = self.thinking_menu_open;
         let thinking_menu_anchor = self.thinking_menu_anchor;
         let thinking_menu_position = thinking_menu_open.then_some(()).and(thinking_menu_anchor);
-        let model_search_focused = model_menu_open && self.focus_handle.is_focused(window);
         let completion_matches = self.mention_completion_matches(cx);
         let completion_selected = self
             .mention_completion
@@ -86,15 +87,6 @@ impl Render for AiPanel {
         let message_context_menu = self.message_context_menu.clone();
         let show_scroll_to_bottom =
             !self.follow_output && self.scroll_handle.max_offset().y > px(0.0) && !empty_chat;
-        let mention_preview = self.mention_preview.clone();
-        let mention_preview_scroll = self.mention_preview_scroll.clone();
-        let mention_preview_bounds = self.mention_preview_bounds.clone();
-        let (mention_preview_width, mention_preview_image_height) = Self::mention_preview_size(
-            mention_preview.as_ref(),
-            panel_width,
-            window.viewport_size().width.as_f32(),
-            window.viewport_size().height.as_f32(),
-        );
         let completion_placement = if showing_sessions || completion_matches.is_empty() {
             None
         } else {
@@ -119,7 +111,7 @@ impl Render for AiPanel {
                     panel_width,
                     base_text_style: base_text_style.clone(),
                     panel: entity.clone(),
-                    editing_focused: self.edit_focus_handle.is_focused(window),
+                    editing_focused: self.composer_input.focus_handle(cx).is_focused(window),
                 },
                 cx,
             ));
@@ -158,45 +150,11 @@ impl Render for AiPanel {
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
                 this.close_message_context_menu(cx);
             }))
-            .on_mouse_move(cx.listener(Self::on_panel_mouse_move))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
             .on_action(cx.listener(Self::close))
             .on_action(cx.listener(Self::submit))
-            .on_action(cx.listener(Self::newline))
-            .on_action(cx.listener(Self::backspace))
-            .on_action(cx.listener(Self::delete))
-            .on_action(cx.listener(Self::delete_word_backward))
-            .on_action(cx.listener(Self::delete_word_forward))
-            .on_action(cx.listener(Self::delete_to_line_start))
-            .on_action(cx.listener(Self::delete_to_line_end))
-            .on_action(cx.listener(Self::left))
-            .on_action(cx.listener(Self::right))
-            .on_action(cx.listener(Self::word_left))
-            .on_action(cx.listener(Self::word_right))
-            .on_action(cx.listener(Self::up))
-            .on_action(cx.listener(Self::down))
-            .on_action(cx.listener(Self::home))
-            .on_action(cx.listener(Self::end))
-            .on_action(cx.listener(Self::document_start))
-            .on_action(cx.listener(Self::document_end))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::select_left))
-            .on_action(cx.listener(Self::select_right))
-            .on_action(cx.listener(Self::select_word_left))
-            .on_action(cx.listener(Self::select_word_right))
-            .on_action(cx.listener(Self::select_up))
-            .on_action(cx.listener(Self::select_down))
-            .on_action(cx.listener(Self::select_home))
-            .on_action(cx.listener(Self::select_end))
-            .on_action(cx.listener(Self::select_document_start))
-            .on_action(cx.listener(Self::select_document_end))
-            .on_action(cx.listener(Self::copy))
-            .on_action(cx.listener(Self::cut))
-            .on_action(cx.listener(Self::paste))
-            .on_action(cx.listener(Self::undo))
-            .on_action(cx.listener(Self::redo))
             .child(
                 div()
                     .flex()
@@ -366,40 +324,15 @@ impl Render for AiPanel {
                                             .relative()
                                             .w_full()
                                             .min_h_0()
-                                            .pt_1()
-                                            .pr_2()
-                                            .key_context("TextInput")
                                             .when(empty_chat, |this| this.flex_1())
-                                            .cursor(CursorStyle::IBeam)
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(Self::on_mouse_down),
-                                            )
-                                            .on_mouse_up(
-                                                MouseButton::Left,
-                                                cx.listener(Self::on_mouse_up),
-                                            )
-                                            .on_mouse_up_out(
-                                                MouseButton::Left,
-                                                cx.listener(Self::on_mouse_up_out),
-                                            )
-                                            .on_mouse_down_out(
-                                                cx.listener(Self::on_mouse_down_out),
-                                            )
-                                            .on_mouse_move(cx.listener(Self::on_mouse_move))
-                                            .on_hover(cx.listener(
-                                                |this, hovered: &bool, window, cx| {
-                                                    if !*hovered {
-                                                        this.schedule_mention_preview_hide(
-                                                            window, cx,
-                                                        );
-                                                    }
-                                                },
-                                            ))
-                                            .child(AiInputElement {
-                                                panel: entity.clone(),
-                                                source: AiInputSource::Composer,
-                                            }),
+                                            .child(
+                                                Input::new(&self.composer_input)
+                                                    .appearance(false)
+                                                    .bordered(false)
+                                                    .focus_bordered(false)
+                                                    .w_full()
+                                                    .when(empty_chat, |input| input.h_full()),
+                                            ),
                                     )
                                     .when_some(validation_notice.clone(), |this, notice| {
                                         this.child(
@@ -666,30 +599,6 @@ impl Render for AiPanel {
                     .with_priority(1),
                 )
             })
-            .when_some(mention_preview, |this, preview| {
-                this.child(
-                    deferred(
-                        anchored()
-                            .position(preview.position)
-                            .anchor(preview.anchor)
-                            .snap_to_window_with_margin(px(8.0))
-                            .child(Self::render_mention_preview(
-                                preview,
-                                MentionPreviewRenderOptions {
-                                    width: mention_preview_width,
-                                    image_height: mention_preview_image_height,
-                                    scroll_handle: mention_preview_scroll,
-                                    bounds_cell: mention_preview_bounds,
-                                    theme,
-                                    base_text_style,
-                                },
-                                window,
-                                cx,
-                            )),
-                    )
-                    .with_priority(2),
-                )
-            })
             .when_some(attachment_menu_position, |this, anchor| {
                 this.child(
                     deferred(
@@ -721,8 +630,8 @@ impl Render for AiPanel {
                                     selected_model: model_menu_selected_model,
                                     provider_models,
                                     search_query: model_search_query,
+                                    search_input: self.model_search_input.clone(),
                                     scroll_handle: model_menu_scroll,
-                                    focused: model_search_focused,
                                 },
                                 theme,
                                 window,

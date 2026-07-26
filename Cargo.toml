@@ -35,8 +35,8 @@ gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", defaul
     "wayland",
     "x11",
 ] }
-gpui_component = { git = "https://github.com/longbridge/gpui-component", rev = "3f9e655e8668fff37df41c541e0d9f3ec992fa7d", package = "gpui-component" }
-gpui_component_assets = { git = "https://github.com/longbridge/gpui-component", rev = "3f9e655e8668fff37df41c541e0d9f3ec992fa7d", package = "gpui-component-assets" }
+gpui_component = { git = "https://github.com/Ziqi-Yang/gpui-component", rev = "1bc8d5f38dba5252f85d4c61e33e8b1c6948a9ac", package = "gpui-component" }
+gpui_component_assets = { git = "https://github.com/Ziqi-Yang/gpui-component", rev = "1bc8d5f38dba5252f85d4c61e33e8b1c6948a9ac", package = "gpui-component-assets" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", default-features = false, features = [
     "font-kit",
     "wayland",
@@ -48,7 +48,6 @@ i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system
 i18n-embed-fl = "0.10"
 kdl = "6"
 mupdf = "0.7"
-pulldown-cmark = { version = "0.13", default-features = false }
 redb = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "blocking", "multipart"] }
 rust-embed = { version = "8", features = ["include-exclude"] }
@@ -66,7 +65,6 @@ typst-kit = { version = "=0.15.1", default-features = false, features = [
 ] }
 typst-layout = "=0.15.1"
 typst-pdf = "=0.15.1"
-unicode-segmentation = "1"
 ztracing = { git = "https://github.com/zed-industries/zed" }
 
 [profile.dev.package.tikv-jemalloc-sys]

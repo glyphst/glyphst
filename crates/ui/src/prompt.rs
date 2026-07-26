@@ -1,12 +1,13 @@
-use crate::{menu, settings::SettingsStore, settings::ui_rems, style::modal_shadow};
+use crate::menu;
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, PromptButton, PromptHandle,
-    PromptLevel, PromptResponse, Render, RenderablePromptHandle, Window, div, prelude::*, px, rgb,
-    rgba,
+    PromptLevel, PromptResponse, Render, RenderablePromptHandle, Window, div, prelude::*, px,
 };
 use gpui_component::{
     Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
+    dialog::{AlertDialog, DialogFooter},
+    scroll::ScrollableElement as _,
 };
 
 pub fn init(cx: &mut App) {
@@ -85,7 +86,6 @@ impl GlyphstPrompt {
 
 impl Render for GlyphstPrompt {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.global::<SettingsStore>().resolved_theme;
         let buttons = self
             .actions
             .iter()
@@ -106,6 +106,7 @@ impl Render for GlyphstPrompt {
                     }))
             })
             .collect::<Vec<_>>();
+        let detail = self.detail.clone();
 
         div()
             .key_context("Menu")
@@ -115,59 +116,21 @@ impl Render for GlyphstPrompt {
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_prev))
             .size_full()
-            .absolute()
-            .inset_0()
-            .occlude()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p_4()
-            .bg(rgba(0x00000066))
             .child(
-                div()
-                    .w(px(480.0))
-                    .max_w_full()
-                    .max_h_full()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .p_4()
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .bg(rgb(theme.surface_background))
-                    .shadow(modal_shadow(theme))
-                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        div()
-                            .min_w_0()
-                            .w_full()
-                            .whitespace_normal()
-                            .text_size(ui_rems(15.0))
-                            .text_color(rgb(theme.text))
-                            .child(self.message.clone()),
-                    )
-                    .children(self.detail.clone().map(|detail| {
-                        div()
-                            .id("glyphst-prompt-detail")
-                            .min_w_0()
-                            .w_full()
-                            .max_h(px(240.0))
-                            .overflow_y_scroll()
-                            .whitespace_normal()
-                            .text_size(ui_rems(12.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(detail)
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .justify_end()
-                            .gap_2()
-                            .children(buttons),
-                    ),
+                AlertDialog::new(cx)
+                    .width(px(480.0))
+                    .keyboard(false)
+                    .title(self.message.clone())
+                    .when_some(detail, |dialog, detail| {
+                        dialog.description(
+                            div()
+                                .max_h(px(240.0))
+                                .whitespace_normal()
+                                .overflow_y_scrollbar()
+                                .child(detail),
+                        )
+                    })
+                    .footer(DialogFooter::new().flex_wrap().children(buttons)),
             )
     }
 }

@@ -1,16 +1,14 @@
+pub mod activity;
 pub mod assets;
 pub mod fonts;
 pub mod icons;
 pub mod markdown;
-pub mod notification_center;
 pub mod picker;
 pub mod prompt;
 pub mod root;
 pub mod scrollbar;
 pub mod smooth_scroll;
 pub mod style;
-pub mod text_edit;
-pub mod text_input;
 pub mod tooltip;
 
 pub use glyphst_actions::{input, menu};

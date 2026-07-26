@@ -20,156 +20,11 @@ impl AiPanel {
             .child(message)
     }
 
-    pub(super) fn render_mention_preview(
-        preview: MentionPreview,
-        options: MentionPreviewRenderOptions,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let MentionPreviewRenderOptions {
-            width,
-            image_height,
-            scroll_handle,
-            bounds_cell,
-            theme,
-            base_text_style,
-        } = options;
-        let generation = preview.generation;
-        let preview_anchor = preview.anchor;
-        let body = match preview.status {
-            MentionPreviewStatus::Loading => div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .h(px(72.0))
-                .p_3()
-                .child(Self::render_loading_indicator(
-                    "ai-mention-preview-loading",
-                    theme,
-                ))
-                .into_any_element(),
-            MentionPreviewStatus::Ready(MentionPreviewContent::Text {
-                markdown,
-                truncated,
-            }) => div()
-                .w_full()
-                .min_w_0()
-                .child(
-                    div()
-                        .id(("ai-mention-preview-text", generation))
-                        .track_scroll(&scroll_handle)
-                        .w_full()
-                        .min_w_0()
-                        .max_h(px(MENTION_PREVIEW_TEXT_MAX_HEIGHT))
-                        .flex()
-                        .flex_col()
-                        .overflow_y_scroll()
-                        .p_3()
-                        .cursor_text()
-                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                        .child(MarkdownElement::new(
-                            markdown,
-                            MarkdownStyle::from_theme(theme, base_text_style),
-                        ))
-                        .when(truncated, |this| {
-                            this.child(
-                                div()
-                                    .flex_none()
-                                    .mt_3()
-                                    .pt_2()
-                                    .border_t(px(1.0))
-                                    .border_color(rgb(theme.border_variant))
-                                    .text_size(ui_rems(10.0))
-                                    .text_color(rgb(theme.text_muted))
-                                    .child(tr("ai-mention-preview-truncated")),
-                            )
-                        }),
-                )
-                .vertical_scrollbar_for_with_id(
-                    &scroll_handle,
-                    ("ai-mention-preview-scrollbar", generation),
-                    window,
-                    cx,
-                )
-                .into_any_element(),
-            MentionPreviewStatus::Ready(MentionPreviewContent::Image(image)) => div()
-                .w_full()
-                .min_w_0()
-                .h(px(image_height))
-                .overflow_hidden()
-                .bg(rgb(theme.tab_active_background))
-                .child(img(image.image).size_full().object_fit(ObjectFit::Contain))
-                .into_any_element(),
-            MentionPreviewStatus::Error(error) => div()
-                .p_3()
-                .text_size(ui_rems(12.0))
-                .text_color(rgb(theme.error))
-                .child(error)
-                .into_any_element(),
-        };
-
-        let card = div()
-            .id(("ai-mention-preview", generation))
-            .occlude()
-            .w_full()
-            .flex()
-            .flex_col()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.surface_background))
-            .shadow_sm()
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .border_b(px(1.0))
-                    .border_color(rgb(theme.border_variant))
-                    .text_size(ui_rems(11.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(preview.reference.display_text()),
-            )
-            .child(body);
-        let measure = canvas(
-            move |measured_bounds, _window, _cx| {
-                bounds_cell.set(Some(measured_bounds));
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full()
-        .top_0()
-        .left_0();
-
-        div()
-            .id(("ai-mention-preview-hover-region", generation))
-            .relative()
-            .w(px(width))
-            .when(preview_anchor == Anchor::TopLeft, |this| {
-                this.pt(px(MENTION_PREVIEW_BRIDGE_HEIGHT))
-            })
-            .when(preview_anchor == Anchor::BottomLeft, |this| {
-                this.pb(px(MENTION_PREVIEW_BRIDGE_HEIGHT))
-            })
-            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
-                if *hovered {
-                    this.cancel_mention_preview_hide();
-                } else {
-                    this.schedule_mention_preview_hide(window, cx);
-                }
-            }))
-            .child(measure)
-            .child(card)
-            .into_any_element()
-    }
-
     pub(super) fn render_quick_ask(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let entity = cx.entity();
         let (theme, quick_ask, base_text_style) = {
             let store = cx.global::<SettingsStore>();
             let font = &store.settings.font;
@@ -188,15 +43,6 @@ impl AiPanel {
         };
         let loading = self.loading;
         let validation_toast = self.validation_toast.clone();
-        let mention_preview = self.mention_preview.clone();
-        let mention_preview_scroll = self.mention_preview_scroll.clone();
-        let mention_preview_bounds = self.mention_preview_bounds.clone();
-        let (mention_preview_width, mention_preview_image_height) = Self::mention_preview_size(
-            mention_preview.as_ref(),
-            self.width,
-            window.viewport_size().width.as_f32(),
-            window.viewport_size().height.as_f32(),
-        );
         let completion_matches = self.mention_completion_matches(cx);
         let completion_selected = self
             .mention_completion
@@ -245,63 +91,21 @@ impl AiPanel {
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .on_action(cx.listener(Self::close))
             .on_action(cx.listener(Self::submit))
-            .on_action(cx.listener(Self::newline))
-            .on_action(cx.listener(Self::backspace))
-            .on_action(cx.listener(Self::delete))
-            .on_action(cx.listener(Self::delete_word_backward))
-            .on_action(cx.listener(Self::delete_word_forward))
-            .on_action(cx.listener(Self::delete_to_line_start))
-            .on_action(cx.listener(Self::delete_to_line_end))
-            .on_action(cx.listener(Self::left))
-            .on_action(cx.listener(Self::right))
-            .on_action(cx.listener(Self::word_left))
-            .on_action(cx.listener(Self::word_right))
-            .on_action(cx.listener(Self::up))
-            .on_action(cx.listener(Self::down))
-            .on_action(cx.listener(Self::home))
-            .on_action(cx.listener(Self::end))
-            .on_action(cx.listener(Self::document_start))
-            .on_action(cx.listener(Self::document_end))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::select_left))
-            .on_action(cx.listener(Self::select_right))
-            .on_action(cx.listener(Self::select_word_left))
-            .on_action(cx.listener(Self::select_word_right))
-            .on_action(cx.listener(Self::select_up))
-            .on_action(cx.listener(Self::select_down))
-            .on_action(cx.listener(Self::select_home))
-            .on_action(cx.listener(Self::select_end))
-            .on_action(cx.listener(Self::select_document_start))
-            .on_action(cx.listener(Self::select_document_end))
-            .on_action(cx.listener(Self::copy))
-            .on_action(cx.listener(Self::cut))
-            .on_action(cx.listener(Self::paste))
-            .on_action(cx.listener(Self::undo))
-            .on_action(cx.listener(Self::redo))
             .child(
                 div().flex().flex_col().child(
                     div()
                         .id("quick-ask-composer-input")
                         .relative()
-                        .key_context("TextInput")
                         .min_h(px(32.0))
-                        .px_3()
-                        .py_2()
-                        .cursor(CursorStyle::IBeam)
-                        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                        .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
-                        .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
-                        .on_mouse_move(cx.listener(Self::on_mouse_move))
-                        .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
-                            if !*hovered {
-                                this.schedule_mention_preview_hide(window, cx);
-                            }
-                        }))
-                        .child(AiInputElement {
-                            panel: entity,
-                            source: AiInputSource::Composer,
-                        }),
+                        .child(
+                            Input::new(&self.composer_input)
+                                .appearance(false)
+                                .bordered(false)
+                                .focus_bordered(false)
+                                .w_full()
+                                .px_3()
+                                .py_2(),
+                        ),
                 ),
             )
             .when(loading, |this| {
@@ -428,30 +232,6 @@ impl AiPanel {
                     .with_priority(1),
                 )
             })
-            .when_some(mention_preview, |this, preview| {
-                this.child(
-                    deferred(
-                        anchored()
-                            .position(preview.position)
-                            .anchor(preview.anchor)
-                            .snap_to_window_with_margin(px(8.0))
-                            .child(Self::render_mention_preview(
-                                preview,
-                                MentionPreviewRenderOptions {
-                                    width: mention_preview_width,
-                                    image_height: mention_preview_image_height,
-                                    scroll_handle: mention_preview_scroll,
-                                    bounds_cell: mention_preview_bounds,
-                                    theme,
-                                    base_text_style,
-                                },
-                                window,
-                                cx,
-                            )),
-                    )
-                    .with_priority(2),
-                )
-            })
             .when_some(validation_toast, |this, notice| {
                 this.child(deferred(Self::render_validation_toast(notice, theme)).with_priority(3))
             })
@@ -493,7 +273,6 @@ impl AiPanel {
         } = input;
         let is_user = message.role == Role::User;
         let content = message.display_text();
-        let edit_focus_handle = self.edit_focus_handle.clone();
         let is_active_generation = self
             .active_generation
             .is_some_and(|target| target.assistant_index == message_index);
@@ -513,29 +292,17 @@ impl AiPanel {
         let copied = self.copied_target == Some(CopyFeedbackTarget::Message(message_index));
         let row_width = (panel_width - 24.0).max(160.0);
 
-        let message_content = if is_user {
-            AiInputElement {
-                panel: entity.clone(),
-                source: AiInputSource::UserMessage {
-                    message_index,
-                    content: content.clone().into(),
-                    mentions: display_mentions_for_message(&message),
-                },
-            }
-            .into_any_element()
-        } else {
-            let message_entity = entity.clone();
-            MarkdownElement::new(
-                markdown,
-                MarkdownStyle::from_theme(theme, base_text_style).with_code_block_actions(true),
-            )
-            .on_context_menu(move |request, window, cx| {
-                message_entity.update(cx, |this, cx| {
-                    this.open_message_context_menu(message_index, request, window, cx);
-                });
-            })
-            .into_any_element()
-        };
+        let message_entity = entity.clone();
+        let message_content = MarkdownElement::new(
+            markdown,
+            MarkdownStyle::from_theme(theme, base_text_style).with_code_block_actions(!is_user),
+        )
+        .on_context_menu(move |request, window, cx| {
+            message_entity.update(cx, |this, cx| {
+                this.open_message_context_menu(message_index, request, window, cx);
+            });
+        })
+        .into_any_element();
 
         let copy_icon = if copied {
             IconName::Check
@@ -647,9 +414,6 @@ impl AiPanel {
             .when(is_user, |this| this.pt_2().pb_3())
             .when(!is_user, |this| this.py_1())
             .when(blocked, |this| this.opacity(0.45))
-            .when(is_editing, |this| {
-                this.on_mouse_down_out(cx.listener(Self::on_message_edit_mouse_down_out))
-            })
             .when(!is_editing && !blocked, |this| {
                 this.on_mouse_down(
                     MouseButton::Right,
@@ -690,20 +454,13 @@ impl AiPanel {
                     })
                     .when(!is_user, |this| this.px_1().pt_4().pb_2())
                     .when(is_editing, |this| {
-                        this.track_focus(&edit_focus_handle)
-                            .key_context("TextInput")
-                            .cursor(CursorStyle::IBeam)
-                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
-                            .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
-                            .on_mouse_move(cx.listener(Self::on_mouse_move))
-                    })
-                    .when(is_editing, |this| {
-                        this.child(AiInputElement {
-                            panel: entity.clone(),
-                            source: AiInputSource::EditedMessage,
-                        })
+                        this.child(
+                            Input::new(&self.composer_input)
+                                .appearance(false)
+                                .bordered(false)
+                                .focus_bordered(false)
+                                .w_full(),
+                        )
                     })
                     .when(!is_editing && is_loading, |this| {
                         this.child(Self::render_loading_indicator("ai-message-loading", theme))

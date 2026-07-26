@@ -43,9 +43,6 @@ pub mod input {
     );
 }
 
-pub mod markdown {
-    gpui::actions!(markdown, [Copy]);
-}
 pub mod menu {
     gpui::actions!(menu, [Confirm, Cancel, SelectNext, SelectPrev, Remove]);
 }

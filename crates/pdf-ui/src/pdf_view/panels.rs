@@ -47,6 +47,7 @@ impl PdfView {
                 document_path.clone(),
                 page_state,
                 width,
+                window,
                 cx,
             )
         });
@@ -134,6 +135,7 @@ impl PdfView {
                 document_path.clone(),
                 page_state,
                 self.ai_panel_width,
+                window,
                 cx,
             )
         });
@@ -253,7 +255,13 @@ impl PdfView {
         let selected_ix = self.current_toc_palette_match_ix(&entries);
         let delegate = TocPaletteDelegate::new(cx.entity().downgrade(), entries);
         let palette = cx.new(|cx| {
-            Picker::new_with_selected_ix(previous_focus_handle.clone(), delegate, selected_ix, cx)
+            Picker::new_with_selected_ix(
+                previous_focus_handle.clone(),
+                delegate,
+                selected_ix,
+                window,
+                cx,
+            )
         });
 
         cx.subscribe_in(&palette, window, |this, _, _: &PickerEvent, window, cx| {
@@ -320,7 +328,7 @@ impl PdfView {
 
         let previous_focus_handle = self.focus_handle.clone();
         let delegate = NotesPaletteDelegate::new(cx.entity().downgrade(), entries);
-        let palette = cx.new(|cx| Picker::new(previous_focus_handle.clone(), delegate, cx));
+        let palette = cx.new(|cx| Picker::new(previous_focus_handle.clone(), delegate, window, cx));
 
         cx.subscribe_in(&palette, window, |this, _, _: &PickerEvent, window, cx| {
             this.close_notes_palette(window, cx);
@@ -364,7 +372,7 @@ impl PdfView {
         let entries = cx.global::<LibraryStore>().history_entries().to_vec();
         let previous_focus_handle = self.focus_handle.clone();
         let delegate = HistoryPaletteDelegate::new(cx.entity().downgrade(), entries);
-        let palette = cx.new(|cx| Picker::new(previous_focus_handle.clone(), delegate, cx));
+        let palette = cx.new(|cx| Picker::new(previous_focus_handle.clone(), delegate, window, cx));
 
         cx.subscribe_in(&palette, window, |this, _, _: &PickerEvent, window, cx| {
             this.close_history_palette(window, cx);
@@ -395,7 +403,7 @@ impl PdfView {
         let previous_focus_handle = self.focus_handle.clone();
         let delegate =
             BookmarkPaletteDelegate::new(cx.entity().downgrade(), bookmarks, self.path.clone());
-        let palette = cx.new(|cx| Picker::new(previous_focus_handle.clone(), delegate, cx));
+        let palette = cx.new(|cx| Picker::new(previous_focus_handle.clone(), delegate, window, cx));
 
         cx.subscribe_in(&palette, window, |this, _, _: &PickerEvent, window, cx| {
             this.close_bookmark_palette(window, cx);
@@ -427,7 +435,13 @@ impl PdfView {
         let delegate =
             BookmarkPromptDelegate::new(self.path.clone(), self.current_document_position());
         let prompt = cx.new(|cx| {
-            Picker::with_content(previous_focus_handle.clone(), delegate, default_label, cx)
+            Picker::with_content(
+                previous_focus_handle.clone(),
+                delegate,
+                default_label,
+                window,
+                cx,
+            )
         });
 
         cx.subscribe_in(&prompt, window, |this, _, _: &PickerEvent, window, cx| {
@@ -462,7 +476,13 @@ impl PdfView {
         let delegate = GoToPagePromptDelegate::new(cx.entity().downgrade(), self.page_count());
         let current_page = self.current_page().to_string().into();
         let prompt = cx.new(|cx| {
-            Picker::with_content(previous_focus_handle.clone(), delegate, current_page, cx)
+            Picker::with_content(
+                previous_focus_handle.clone(),
+                delegate,
+                current_page,
+                window,
+                cx,
+            )
         });
 
         cx.subscribe_in(&prompt, window, |this, _, _: &PickerEvent, window, cx| {

@@ -37,6 +37,7 @@ impl Render for MessageScrollTestView {
 }
 
 fn install_test_settings(cx: &mut App) {
+    gpui_component::init(cx);
     let settings = glyphst_settings::Settings::default();
     let appearance = glyphst_settings::theme::ThemeAppearance::Light;
     let theme_catalog =
@@ -133,82 +134,6 @@ fn failed_submit_retries_the_failed_assistant() {
     assert_eq!(submit_action(false, Some(&failure)), SubmitAction::Retry(3));
     assert_eq!(submit_action(true, Some(&failure)), SubmitAction::Edit);
     assert_eq!(submit_action(false, None), SubmitAction::Send);
-}
-
-#[test]
-fn historical_message_editing_uses_one_line_auto_height() {
-    let edited = AiInputSource::EditedMessage;
-    assert_eq!(
-        input_line_constraints(AiPanelMode::Sidebar, &edited, false),
-        (false, 1, None)
-    );
-
-    let composer = AiInputSource::Composer;
-    assert_eq!(
-        input_line_constraints(AiPanelMode::Sidebar, &composer, false),
-        (false, 3, Some(8))
-    );
-    assert_eq!(
-        input_line_constraints(AiPanelMode::QuickAsk, &composer, false),
-        (false, 1, Some(4))
-    );
-}
-
-#[test]
-fn measured_input_height_respects_composer_limits_without_clipping_messages() {
-    let line_height = px(20.0);
-
-    assert_eq!(
-        constrained_input_height(px(180.0), line_height, 1, None),
-        px(180.0)
-    );
-    assert_eq!(
-        constrained_input_height(px(20.0), line_height, 3, Some(8)),
-        px(60.0)
-    );
-    assert_eq!(
-        constrained_input_height(px(200.0), line_height, 3, Some(8)),
-        px(160.0)
-    );
-}
-
-#[test]
-fn measured_input_height_tracks_available_wrap_width() {
-    let mut cx = TestAppContext::single();
-    cx.update(install_test_settings);
-    let handle = ScrollHandle::new();
-    let window = cx.add_window({
-        let handle = handle.clone();
-        move |_, _| MessageScrollTestView {
-            handle,
-            row_heights: Vec::new(),
-        }
-    });
-    let (narrow_height, wide_height, line_height) = cx
-        .update_window(window.into(), |_, window, _| {
-            let text: SharedString = "WWWWWWWWWWWWWWWWWWWW WWWWWWWWWWWWWWWWWWWW".into();
-            let text_style = window.text_style();
-            let font_size = text_style.font_size.to_pixels(window.rem_size());
-            let line_height = window.line_height();
-            let runs = [text_style.to_run(text.len())];
-            let measure = |width| {
-                window
-                    .text_system()
-                    .shape_text(text.clone(), font_size, &runs, Some(width), None)
-                    .unwrap()
-                    .iter()
-                    .map(|line| line.size(line_height).height)
-                    .sum::<Pixels>()
-            };
-            (measure(px(120.0)), measure(px(480.0)), line_height)
-        })
-        .unwrap();
-
-    assert!(narrow_height > wide_height);
-    assert_eq!(
-        constrained_input_height(narrow_height, line_height, 1, None),
-        narrow_height
-    );
 }
 
 #[test]
@@ -314,26 +239,6 @@ fn selection_mentions_keep_distinct_snapshots_in_order() {
 }
 
 #[test]
-fn selection_preview_uses_the_hovered_occurrence_snapshot() {
-    let mut mentions = parse_composer_mentions("@selection and @selection");
-    mentions[0].captured = Some(CapturedMention::Text("First selection".to_string()));
-    mentions[1].captured = Some(CapturedMention::Text("Second selection".to_string()));
-    let live_context = AiContext {
-        selected_text: Some("Later selection".to_string()),
-        ..AiContext::default()
-    };
-
-    assert_eq!(
-        mention_preview_text(&mentions[0], Some(&live_context)).as_deref(),
-        Some("First selection")
-    );
-    assert_eq!(
-        mention_preview_text(&mentions[1], Some(&live_context)).as_deref(),
-        Some("Second selection")
-    );
-}
-
-#[test]
 fn region_mentions_keep_distinct_geometry_snapshots() {
     let mut mentions = parse_composer_mentions("@region-image and @region-image");
     let first = region_reference(0, 1.0);
@@ -345,231 +250,6 @@ fn region_mentions_keep_distinct_geometry_snapshots() {
     assert_eq!(
         region_references_for_composer_mentions(&mentions),
         vec![first, second]
-    );
-}
-
-#[test]
-fn document_text_preview_uses_current_document_context() {
-    let mention = parse_composer_mentions("@document").remove(0);
-    let context = AiContext {
-        document_text: Some("Document body".to_string()),
-        ..AiContext::default()
-    };
-
-    assert_eq!(
-        mention_preview_text(&mention, Some(&context)).as_deref(),
-        Some("Document body")
-    );
-}
-
-#[test]
-fn document_text_preview_prefers_the_historical_snapshot() {
-    let mut mention = parse_composer_mentions("@document").remove(0);
-    mention.captured = Some(CapturedMention::Text("Historical document".to_string()));
-    let context = AiContext {
-        document_text: Some("Current document".to_string()),
-        ..AiContext::default()
-    };
-
-    assert_eq!(
-        mention_preview_text(&mention, Some(&context)).as_deref(),
-        Some("Historical document")
-    );
-}
-
-#[test]
-fn document_image_preview_is_disabled() {
-    let mention = parse_composer_mentions("@document-image").remove(0);
-    assert!(mention_preview_text(&mention, None).is_none());
-}
-
-#[test]
-fn resolved_page_preview_matches_text_and_image_references() {
-    let text_reference = MentionReference::new(MentionKind::Page, Some(2));
-    let text = ResolvedPageContext::Text(ContextBlock::new(
-        MentionKind::Page,
-        Some(2),
-        "Page text".to_string(),
-    ));
-    assert!(matches!(
-        preview_content_from_resolved(text_reference, &[text]),
-        Ok(MentionPreviewPayload::Text(text)) if text == "Page text"
-    ));
-
-    let image_reference = MentionReference::new(MentionKind::PageImage, Some(3));
-    let mut image_bytes = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new(&mut image_bytes)
-        .encode(&[255; 4 * 6 * 3], 4, 6, image::ExtendedColorType::Rgb8)
-        .unwrap();
-    let image = ResolvedPageContext::Image(glyphst_ai::ai_chat::ImageContext::new(
-        MentionKind::PageImage,
-        Some(3),
-        "image/jpeg",
-        image_bytes.clone(),
-    ));
-    match preview_content_from_resolved(image_reference, &[image]) {
-        Ok(MentionPreviewPayload::Image(image)) => {
-            assert_eq!(image.image.format, ImageFormat::Jpeg);
-            assert_eq!(image.image.bytes, image_bytes);
-            assert_eq!((image.width, image.height), (4, 6));
-        }
-        Ok(MentionPreviewPayload::Text(_)) | Err(_) => panic!("expected image preview"),
-    }
-}
-
-#[test]
-fn resolved_region_preview_matches_captured_geometry() {
-    let reference = region_reference(1, 3.0);
-    let mut image_bytes = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new(&mut image_bytes)
-        .encode(&[255; 5 * 7 * 3], 5, 7, image::ExtendedColorType::Rgb8)
-        .unwrap();
-    let resolved = ResolvedRegionContext {
-        reference: reference.clone(),
-        image: glyphst_ai::ai_chat::ImageContext::new_region(
-            reference.clone(),
-            "image/jpeg",
-            image_bytes,
-        ),
-    };
-
-    assert!(matches!(
-        preview_content_from_resolved_region(&reference, &[resolved]),
-        Ok(MentionPreviewPayload::Image(image)) if (image.width, image.height) == (5, 7)
-    ));
-}
-
-#[test]
-fn document_preview_is_limited_at_a_unicode_boundary() {
-    let source = "文".repeat(MENTION_PREVIEW_MAX_CHARS + 1);
-    let limited = limit_mention_preview_text(MentionKind::DocumentText, source.clone());
-
-    assert!(limited.truncated);
-    assert_eq!(limited.text.chars().count(), MENTION_PREVIEW_MAX_CHARS);
-    assert_eq!(source.chars().count(), MENTION_PREVIEW_MAX_CHARS + 1);
-
-    assert_eq!(
-        limit_mention_preview_text(MentionKind::Page, source.clone()),
-        LimitedMentionPreviewText {
-            text: source,
-            truncated: false,
-        }
-    );
-}
-
-#[test]
-fn async_preview_results_require_matching_identity() {
-    let reference = MentionReference::new(MentionKind::Page, Some(2));
-    let source = MentionPreviewSource::Message(3);
-    let trigger_bounds = Bounds {
-        origin: point(px(10.0), px(10.0)),
-        size: size(px(80.0), px(20.0)),
-    };
-    let preview = MentionPreview {
-        source,
-        reference,
-        source_range: 4..12,
-        trigger_bounds,
-        position: point(px(0.0), px(0.0)),
-        anchor: Anchor::TopLeft,
-        generation: 7,
-        status: MentionPreviewStatus::Loading,
-    };
-
-    assert!(mention_preview_matches(
-        &preview,
-        source,
-        7,
-        reference,
-        &(4..12)
-    ));
-    assert!(!mention_preview_matches(
-        &preview,
-        MentionPreviewSource::Message(4),
-        7,
-        reference,
-        &(4..12)
-    ));
-    assert!(!mention_preview_matches(
-        &preview,
-        source,
-        8,
-        reference,
-        &(4..12)
-    ));
-    assert!(!mention_preview_matches(
-        &preview,
-        source,
-        7,
-        MentionReference::new(MentionKind::Page, Some(3)),
-        &(4..12)
-    ));
-    assert!(!mention_preview_matches(
-        &preview,
-        source,
-        7,
-        reference,
-        &(5..13)
-    ));
-}
-
-#[test]
-fn preview_hover_region_includes_trigger_and_panel() {
-    let trigger_bounds = Bounds {
-        origin: point(px(10.0), px(10.0)),
-        size: size(px(80.0), px(20.0)),
-    };
-    let preview_bounds = Bounds {
-        origin: point(px(10.0), px(30.0)),
-        size: size(px(320.0), px(126.0)),
-    };
-
-    assert!(mention_preview_region_contains(
-        point(px(20.0), px(20.0)),
-        Some(trigger_bounds),
-        Some(preview_bounds),
-    ));
-    assert!(mention_preview_region_contains(
-        point(px(20.0), px(33.0)),
-        Some(trigger_bounds),
-        Some(preview_bounds),
-    ));
-    assert!(!mention_preview_region_contains(
-        point(px(340.0), px(160.0)),
-        Some(trigger_bounds),
-        Some(preview_bounds),
-    ));
-}
-
-#[test]
-fn mention_preview_width_clamps_to_panel_and_window() {
-    assert_eq!(AiPanel::mention_preview_width(400.0, 800.0), 320.0);
-    assert_eq!(AiPanel::mention_preview_width(240.0, 800.0), 240.0);
-    assert_eq!(AiPanel::mention_preview_width(400.0, 300.0), 284.0);
-    assert_eq!(AiPanel::mention_preview_width(0.0, 10.0), 0.0);
-}
-
-#[test]
-fn mention_preview_image_size_preserves_aspect_ratio() {
-    assert_eq!(
-        AiPanel::mention_preview_image_size(320.0, 640.0, 1_000, 2_000),
-        (320.0, 640.0)
-    );
-    assert_eq!(
-        AiPanel::mention_preview_image_size(320.0, 640.0, 2_000, 1_000),
-        (320.0, 160.0)
-    );
-}
-
-#[test]
-fn mention_preview_image_size_shrinks_uniformly_to_available_height() {
-    assert_eq!(
-        AiPanel::mention_preview_image_size(320.0, 220.0, 1_000, 2_000),
-        (110.0, 220.0)
-    );
-    assert_eq!(
-        AiPanel::mention_preview_image_size(0.0, 220.0, 1_000, 2_000),
-        (0.0, 0.0)
     );
 }
 
@@ -600,57 +280,6 @@ fn deleting_selection_mention_removes_only_its_snapshot() {
 }
 
 #[test]
-fn word_deletion_expands_to_the_whole_mention() {
-    let source = "ask @document now";
-    let mentions = parse_composer_mentions(source);
-    let mention = &mentions[0];
-
-    let backward = backward_word_deletion_start(source, mention.range.end)..mention.range.end;
-    assert_eq!(expand_range_to_mentions(backward, &mentions), mention.range);
-
-    let forward = mention.range.start..forward_word_deletion_end(source, mention.range.start);
-    assert_eq!(expand_range_to_mentions(forward, &mentions), mention.range);
-    assert_eq!(
-        mention_aware_word_left(source, mention.range.end, &mentions),
-        mention.range.start
-    );
-    assert_eq!(
-        mention_aware_word_right(source, mention.range.start, &mentions),
-        mention.range.end
-    );
-}
-
-#[test]
-fn composer_history_restores_mentions_and_page_edit_state() {
-    let mentions = parse_composer_mentions("@page(12)");
-    let digits = AiPanel::page_digits_range(&mentions[0]).unwrap();
-    let before = ComposerSnapshot {
-        content: "@page(12)".into(),
-        selected_range: digits.clone(),
-        selection_reversed: false,
-        marked_range: Some(digits.clone()),
-        mentions: mentions.clone(),
-        active_page_number_edit: Some(ActivePageNumberEdit {
-            mention_start: mentions[0].range.start,
-            digits,
-        }),
-    };
-    let after = ComposerSnapshot {
-        content: "done".into(),
-        selected_range: 4..4,
-        selection_reversed: false,
-        marked_range: None,
-        mentions: Vec::new(),
-        active_page_number_edit: None,
-    };
-    let mut history = EditHistory::default();
-    history.record(before.clone(), &after, EditGroup::Isolated);
-
-    assert_eq!(history.undo(after.clone()), Some(before.clone()));
-    assert_eq!(history.redo(before), Some(after));
-}
-
-#[test]
 fn non_selection_references_remain_deduplicated() {
     let mentions =
         parse_composer_mentions("@document @document @page(2) @page(2) @selection @selection");
@@ -663,46 +292,6 @@ fn non_selection_references_remain_deduplicated() {
             MentionReference::new(MentionKind::Selection, None),
             MentionReference::new(MentionKind::Selection, None),
         ]
-    );
-}
-
-#[test]
-fn page_validation_defaults_and_clamps() {
-    assert_eq!(validate_page_number("", 20), 1);
-    assert_eq!(validate_page_number("0", 20), 1);
-    assert_eq!(validate_page_number("12", 20), 12);
-    assert_eq!(validate_page_number("99", 20), 20);
-}
-
-#[test]
-fn empty_page_number_backspace_targets_the_whole_mention() {
-    for source in ["@page(1)", "@page-image(1)"] {
-        let mentions = parse_composer_mentions(source);
-        let digits = AiPanel::page_digits_range(&mentions[0]).unwrap();
-        let active = ActivePageNumberEdit {
-            mention_start: mentions[0].range.start,
-            digits: digits.start..digits.start,
-        };
-
-        assert_eq!(
-            mention_range_for_empty_page_number_backspace(&active, active.digits.start, &mentions,),
-            Some(mentions[0].range.clone())
-        );
-    }
-}
-
-#[test]
-fn nonempty_page_number_backspace_keeps_digit_editing_active() {
-    let mentions = parse_composer_mentions("@page(12)");
-    let digits = AiPanel::page_digits_range(&mentions[0]).unwrap();
-    let active = ActivePageNumberEdit {
-        mention_start: mentions[0].range.start,
-        digits: digits.clone(),
-    };
-
-    assert_eq!(
-        mention_range_for_empty_page_number_backspace(&active, digits.end, &mentions),
-        None
     );
 }
 
@@ -792,10 +381,7 @@ fn selection_mentions_are_available_only_with_selected_text() {
 #[test]
 fn manual_mention_tokens_remain_plain_without_explicit_mentions() {
     let source = "Compare @selection with @document";
-    let display = composer_display(source, &[]);
 
-    assert_eq!(display.text, source);
-    assert!(display.mentions.is_empty());
     assert!(references_for_composer_mentions(&[]).is_empty());
     assert_eq!(request_prompt_without_mentions(source, &[]), source);
 }
@@ -953,64 +539,6 @@ fn quick_ask_preflight_excludes_the_replaced_exchange() {
 }
 
 #[test]
-fn composer_display_maps_source_offsets_and_hides_canonical_syntax() {
-    let source = "α @page(12) and @selection β";
-    let mentions = parse_composer_mentions(source);
-    let display = composer_display(source, &mentions);
-
-    assert!(!display.text.contains('@'));
-    assert!(!display.text.contains('('));
-    assert!(display.text.contains("page"));
-    assert!(display.text.contains("12"));
-    assert!(display.text.contains("selection"));
-    assert_eq!(display.mentions.len(), 2);
-    assert!(display.mentions[0].number_range.is_some());
-    assert!(display.mentions[1].number_range.is_none());
-    assert_eq!(
-        display.source_offset(display.mentions[1].range.start + 1),
-        mentions[1].range.start
-    );
-    assert_eq!(
-        display.source_offset(display.mentions[1].range.end - 1),
-        mentions[1].range.end
-    );
-    for (display_mention, mention) in display.mentions.iter().zip(&mentions) {
-        assert_eq!(
-            display.text[display_mention.range.end..].chars().next(),
-            Some('\u{00a0}')
-        );
-        assert_eq!(
-            display.source_offset(display_mention.range.end),
-            mention.range.end
-        );
-        assert_eq!(
-            display.source_offset(display_mention.range.end + '\u{00a0}'.len_utf8()),
-            mention.range.end
-        );
-    }
-
-    for source_offset in [
-        0,
-        "α".len(),
-        mentions[0].range.start,
-        mentions[0].range.end,
-        source.len(),
-    ] {
-        assert_eq!(
-            display.source_offset(display.display_offset(source_offset)),
-            source_offset
-        );
-    }
-    let digits = AiPanel::page_digits_range(&mentions[0]).unwrap();
-    for source_offset in digits.start..=digits.end {
-        assert_eq!(
-            display.source_offset(display.display_offset(source_offset)),
-            source_offset
-        );
-    }
-}
-
-#[test]
 fn document_image_hydration_attaches_every_resolved_page() {
     let document_image = MentionReference::new(MentionKind::DocumentImage, None);
     let mut message = ChatMessage::user(
@@ -1149,72 +677,6 @@ fn duplicate_document_occurrences_share_the_historical_snapshot() {
         mentions
             .iter()
             .all(|mention| mention.captured_text() == Some("historical document"))
-    );
-}
-
-#[test]
-fn sent_message_pills_only_use_validated_occurrences() {
-    let text = "literal @selection and attached @selection";
-    let attached = find_mention_references(text)[1].clone();
-    let reference = MentionReference::new(MentionKind::Selection, None);
-    let exact = ChatMessage::user(
-        text.to_string(),
-        "literal @selection and attached".to_string(),
-        vec![ContextBlock::new(
-            MentionKind::Selection,
-            None,
-            "historical selection".to_string(),
-        )],
-        vec![reference],
-    )
-    .with_mention_occurrences(vec![MentionOccurrence::new(attached.0.clone(), attached.1)]);
-    let mentions = display_mentions_for_message(&exact);
-    assert_eq!(mentions.len(), 1);
-    assert_eq!(mentions[0].range, attached.0);
-    let hovered = historical_preview_mention(
-        &exact,
-        (
-            MentionHitbox {
-                source_range: mentions[0].range.clone(),
-                bounds: Bounds {
-                    origin: point(px(0.0), px(0.0)),
-                    size: size(px(10.0), px(10.0)),
-                },
-            },
-            mentions[0].clone(),
-        ),
-    );
-    assert_eq!(hovered.1.captured_text(), Some("historical selection"));
-
-    let legacy = ChatMessage::user(
-        text.to_string(),
-        "literal @selection and attached".to_string(),
-        Vec::new(),
-        vec![reference],
-    );
-    assert!(display_mentions_for_message(&legacy).is_empty());
-}
-
-#[test]
-fn sent_message_click_selection_is_utf8_and_mention_safe() {
-    let text = "écho @page(2)\nnext line";
-    let mentions = parse_composer_mentions(text);
-    assert_eq!(selection_range_for_click(text, &mentions, 1, 2), 0..5);
-
-    let mention = mentions.first().unwrap();
-    assert_eq!(
-        selection_range_for_click(text, &mentions, mention.range.start + 2, 1),
-        mention.range.start..mention.range.start
-    );
-    assert_eq!(
-        selection_range_for_click(text, &mentions, mention.range.start, 2),
-        mention.range
-    );
-
-    let second_line = text.find("next").unwrap();
-    assert_eq!(
-        selection_range_for_click(text, &mentions, second_line, 3),
-        second_line..text.len()
     );
 }
 

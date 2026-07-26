@@ -50,8 +50,6 @@ impl AiPanel {
         if self.loading {
             return;
         }
-        self.finish_page_number_edit(cx);
-
         let Some(editing) = self.editing_turn.clone() else {
             return;
         };
@@ -79,7 +77,6 @@ impl AiPanel {
         self.editing_turn = None;
         self.edit_blur_subscription = None;
         self.restore_composer_snapshot(editing.saved_composer, cx);
-        self.composer_history.clear();
         self.pending_title_task = None;
         self.truncate_messages(editing.message_index);
         if editing.message_index == 0 {
@@ -314,8 +311,6 @@ impl AiPanel {
             return;
         }
 
-        self.finish_page_number_edit(cx);
-
         let Some(PreparedComposerMessage {
             display_prompt,
             submitted_mentions,
@@ -336,7 +331,6 @@ impl AiPanel {
             self.show_validation_notice(error.to_string(), cx);
             return;
         }
-        self.invalidate_mention_preview();
 
         if self.mode == AiPanelMode::QuickAsk {
             self.messages.clear();
@@ -356,9 +350,6 @@ impl AiPanel {
         self.selection_reversed = false;
         self.marked_range = None;
         self.mention_completion = None;
-        self.active_page_number_edit = None;
-        self.last_cursor_pos = None;
-        self.composer_history.clear();
         self.close_composer_menus();
         self.clear_validation_notice();
         self.push_message(user_message, cx);

@@ -13,7 +13,7 @@ use crate::{
     keystroke_input::{
         KeystrokeInput, KeystrokeInputEvent, format_keystroke, render_keybinding_keystroke,
     },
-    scrollbar::uniform_list_scrollbar_for,
+    scrollbar::Scrollbar,
     settings::{Settings, SettingsStore, ui_rems},
     theme::Theme,
 };
@@ -977,7 +977,7 @@ impl Focusable for KeymapEditor {
 }
 
 impl Render for KeymapEditor {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (settings, theme) = {
             let store = cx.global::<SettingsStore>();
             (store.settings.clone(), store.resolved_theme)
@@ -1077,33 +1077,37 @@ impl Render for KeymapEditor {
                     .min_h_0()
                     .overflow_hidden()
                     .child(
-                        uniform_list(
-                            "keymap-editor-list",
-                            row_count,
-                            cx.processor(
-                                move |this: &mut KeymapEditor,
-                                      visible_range: Range<usize>,
-                                      _window,
-                                      cx| {
-                                    visible_range
-                                        .filter_map(|ix| {
-                                            rows.get(ix).cloned().map(|binding| (ix, binding))
-                                        })
-                                        .map(|(ix, binding)| {
-                                            this.render_row(ix, binding, theme, cx)
-                                        })
-                                        .collect::<Vec<_>>()
-                                },
+                        div()
+                            .relative()
+                            .size_full()
+                            .child(
+                                uniform_list(
+                                    "keymap-editor-list",
+                                    row_count,
+                                    cx.processor(
+                                        move |this: &mut KeymapEditor,
+                                              visible_range: Range<usize>,
+                                              _window,
+                                              cx| {
+                                            visible_range
+                                                .filter_map(|ix| {
+                                                    rows.get(ix)
+                                                        .cloned()
+                                                        .map(|binding| (ix, binding))
+                                                })
+                                                .map(|(ix, binding)| {
+                                                    this.render_row(ix, binding, theme, cx)
+                                                })
+                                                .collect::<Vec<_>>()
+                                        },
+                                    ),
+                                )
+                                .track_scroll(&scroll_handle)
+                                .size_full(),
+                            )
+                            .child(
+                                Scrollbar::vertical(&scroll_handle).id("keymap-editor-scrollbar"),
                             ),
-                        )
-                        .track_scroll(&scroll_handle)
-                        .with_decoration(uniform_list_scrollbar_for(
-                            &scroll_handle,
-                            "keymap-editor-scrollbar",
-                            window,
-                            cx,
-                        ))
-                        .size_full(),
                     ),
             )
             .when(row_count == 0, |this| {

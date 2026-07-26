@@ -6,7 +6,6 @@ cancel = Cancel
 cancel-selection = Cancel Selection
 copy = Copy
 markdown-copy-code = Copy Code
-markdown-wrap-code = Wrap Code Block
 markdown-unwrap-code = Unwrap Code Block
 current = Current
 delete = Delete

@@ -1,12 +1,5 @@
 use std::{
-    cell::{Cell, RefCell},
-    collections::HashSet,
-    io::Cursor,
-    ops::Range,
-    path::PathBuf,
-    rc::Rc,
-    sync::Arc,
-    thread,
+    cell::Cell, collections::HashSet, ops::Range, path::PathBuf, rc::Rc, sync::Arc, thread,
     time::Duration,
 };
 
@@ -15,10 +8,7 @@ use crate::{
 };
 use anyhow::anyhow;
 use futures::{StreamExt, channel::mpsc};
-use glyphst_actions::{
-    ai_panel::{AiPanelClose, AiPanelSubmit},
-    input,
-};
+use glyphst_actions::ai_panel::{AiPanelClose, AiPanelSubmit};
 use glyphst_ai::ai_chat::{
     AiStreamEvent, ChatMessage, ContextBlock, DEFAULT_SESSION_TITLE, DocumentContext,
     MAX_PAGE_IMAGE_BYTES, MentionKind, MentionOccurrence, MentionReference, Role,
@@ -38,40 +28,24 @@ use glyphst_ui::{
     icons::{Icon, IconName, toolbar_icon_button},
     markdown::{Markdown, MarkdownContextMenuRequest, MarkdownElement, MarkdownStyle},
     picker::fuzzy_match,
-    scrollbar::{ScrollableHandle, WithScrollbar as _},
-    text_edit::{
-        EditGroup, EditHistory, backward_word_deletion_start, forward_word_deletion_end, line_end,
-        line_start, next_grapheme_boundary, next_word_end, offset_from_utf16, offset_to_utf16,
-        previous_grapheme_boundary, previous_word_start, range_from_utf16, range_to_utf16,
-    },
+    scrollbar::{ScrollbarHandle, WithScrollbar as _},
     tooltip::text_tooltip,
 };
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, App, AvailableSpace, BorderStyle, Bounds,
-    ClipboardItem, Context, Corners, CursorStyle, DispatchPhase, Edges, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    FontWeight, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, Image, ImageFormat,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point as GpuiPoint, Render, ScrollDelta,
-    ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Style, StyledText, Subscription,
-    Task, TextRun, TextStyle, TransformationMatrix, UTF16Selection, UniformListScrollHandle,
-    Window, WrappedLine, anchored, canvas, deferred, div, fill, img, point, prelude::*, px, quad,
-    relative, rgb, rgba, size, uniform_list,
+    Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, ElementId, Entity,
+    EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, IntoElement, MouseButton,
+    MouseDownEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta, ScrollHandle, ScrollStrategy,
+    ScrollWheelEvent, SharedString, StyledText, Subscription, Task, TextStyle,
+    UniformListScrollHandle, Window, anchored, deferred, div, point, prelude::*, px, rgb, rgba,
+    uniform_list,
 };
+use gpui_component::input::{Input, InputEvent, InputState};
 
 pub const AI_PANEL_WIDTH: f32 = 360.0;
 const COMPLETION_MENU_MIN_WIDTH: f32 = 280.0;
 const COMPLETION_MENU_MAX_WIDTH: f32 = 540.0;
 const COMPLETION_MENU_ROW_HEIGHT: f32 = 40.0;
 const COMPLETION_MENU_VISIBLE_ROWS: usize = 8;
-const DRAG_SELECT_THRESHOLD: f32 = 2.0;
-const MENTION_PREVIEW_HIDE_DELAY: Duration = Duration::from_millis(150);
-const MENTION_PREVIEW_MAX_CHARS: usize = 4_000;
-const MENTION_PREVIEW_WIDTH: f32 = 320.0;
-const MENTION_PREVIEW_TEXT_MAX_HEIGHT: f32 = 240.0;
-const MENTION_PREVIEW_WINDOW_MARGIN: f32 = 8.0;
-const MENTION_PREVIEW_BRIDGE_HEIGHT: f32 = 6.0;
-const MENTION_PREVIEW_HEADER_HEIGHT: f32 = 34.0;
 const VALIDATION_NOTICE_DURATION: Duration = Duration::from_secs(4);
 const COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1500);
 
@@ -86,8 +60,8 @@ struct ModelMenuRenderState {
     selected_model: String,
     provider_models: Vec<(AiProvider, Vec<AiModel>)>,
     search_query: SharedString,
+    search_input: Entity<InputState>,
     scroll_handle: ScrollHandle,
-    focused: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -146,49 +120,6 @@ impl ComposerMention {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DisplayMention {
-    kind: MentionKind,
-    source_range: Range<usize>,
-    range: Range<usize>,
-    icon_range: Range<usize>,
-    number_range: Option<Range<usize>>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct ComposerDisplay {
-    text: String,
-    source_to_display: Vec<usize>,
-    display_to_source: Vec<usize>,
-    mentions: Vec<DisplayMention>,
-}
-
-impl ComposerDisplay {
-    fn source_offset(&self, display_offset: usize) -> usize {
-        self.display_to_source
-            .get(display_offset.min(self.display_to_source.len().saturating_sub(1)))
-            .copied()
-            .unwrap_or(0)
-    }
-
-    fn display_offset(&self, source_offset: usize) -> usize {
-        self.source_to_display
-            .get(source_offset.min(self.source_to_display.len().saturating_sub(1)))
-            .copied()
-            .unwrap_or(0)
-    }
-
-    fn display_range(&self, source_range: &Range<usize>) -> Range<usize> {
-        self.display_offset(source_range.start)..self.display_offset(source_range.end)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ActivePageNumberEdit {
-    mention_start: usize,
-    digits: Range<usize>,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AiPanelView {
     Chat,
@@ -202,72 +133,12 @@ enum AiPanelMode {
 }
 
 #[derive(Clone)]
-enum MentionPreviewContent {
-    Text {
-        markdown: Entity<Markdown>,
-        truncated: bool,
-    },
-    Image(MentionPreviewImage),
-}
-
-enum MentionPreviewPayload {
-    Text(String),
-    Image(MentionPreviewImage),
-}
-
-#[derive(Clone)]
-struct MentionPreviewImage {
-    image: Arc<Image>,
-    width: u32,
-    height: u32,
-}
-
-#[derive(Clone)]
-enum MentionPreviewStatus {
-    Loading,
-    Ready(MentionPreviewContent),
-    Error(String),
-}
-
-#[derive(Clone)]
-struct MentionPreview {
-    source: MentionPreviewSource,
-    reference: MentionReference,
-    source_range: Range<usize>,
-    trigger_bounds: Bounds<Pixels>,
-    position: GpuiPoint<Pixels>,
-    anchor: Anchor,
-    generation: u64,
-    status: MentionPreviewStatus,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MentionPreviewSource {
-    Composer,
-    Message(usize),
-}
-
-#[derive(Clone)]
-struct MentionPreviewRenderOptions {
-    width: f32,
-    image_height: f32,
-    scroll_handle: ScrollHandle,
-    bounds_cell: Rc<Cell<Option<Bounds<Pixels>>>>,
-    theme: Theme,
-    base_text_style: TextStyle,
-}
-
-#[derive(Clone)]
 struct TrackedScrollHandle {
     handle: ScrollHandle,
     interacted: Rc<Cell<bool>>,
 }
 
-impl ScrollableHandle for TrackedScrollHandle {
-    fn max_offset(&self) -> GpuiPoint<Pixels> {
-        self.handle.max_offset()
-    }
-
+impl ScrollbarHandle for TrackedScrollHandle {
     fn set_offset(&self, point: GpuiPoint<Pixels>) {
         self.interacted.set(true);
         self.handle.set_offset(point);
@@ -277,26 +148,13 @@ impl ScrollableHandle for TrackedScrollHandle {
         self.handle.offset()
     }
 
-    fn viewport(&self) -> Bounds<Pixels> {
-        self.handle.bounds()
+    fn content_size(&self) -> gpui::Size<Pixels> {
+        (self.handle.max_offset() + self.handle.bounds().size.into()).into()
     }
 
-    fn drag_started(&self) {
+    fn start_drag(&self) {
         self.interacted.set(true);
     }
-}
-
-#[derive(Clone)]
-struct MentionHitbox {
-    source_range: Range<usize>,
-    bounds: Bounds<Pixels>,
-}
-
-#[derive(Clone)]
-struct MessageMentionHitbox {
-    message_index: usize,
-    hitbox: MentionHitbox,
-    mention: ComposerMention,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,7 +193,6 @@ struct ComposerSnapshot {
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
     mentions: Vec<ComposerMention>,
-    active_page_number_edit: Option<ActivePageNumberEdit>,
 }
 
 #[derive(Clone)]
@@ -378,7 +235,10 @@ enum CopyFeedbackTarget {
 
 pub struct AiPanel {
     focus_handle: FocusHandle,
-    edit_focus_handle: FocusHandle,
+    composer_input: Entity<InputState>,
+    model_search_input: Entity<InputState>,
+    _composer_input_subscription: Subscription,
+    _model_search_input_subscription: Subscription,
     previous_focus_handle: FocusHandle,
     mode: AiPanelMode,
     messages: Vec<ChatMessage>,
@@ -387,9 +247,6 @@ pub struct AiPanel {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
-    last_lines: Vec<LaidOutLine>,
-    last_bounds: Option<Bounds<Pixels>>,
-    drag_origin: Option<GpuiPoint<Pixels>>,
     loading: bool,
     scroll_handle: ScrollHandle,
     sessions_scroll: ScrollHandle,
@@ -412,23 +269,11 @@ pub struct AiPanel {
     mention_completion: Option<MentionCompletion>,
     mention_completion_scroll: UniformListScrollHandle,
     composer_mentions: Vec<ComposerMention>,
-    active_page_number_edit: Option<ActivePageNumberEdit>,
-    last_display: Option<ComposerDisplay>,
-    last_cursor_pos: Option<GpuiPoint<Pixels>>,
-    mention_hitboxes: Vec<MentionHitbox>,
-    message_mention_hitboxes: Vec<MessageMentionHitbox>,
-    mention_preview: Option<MentionPreview>,
-    mention_preview_generation: u64,
-    pending_mention_preview: Option<Task<()>>,
-    mention_preview_hide_task: Option<Task<()>>,
-    mention_preview_scroll: ScrollHandle,
-    mention_preview_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     attachment_menu_open: bool,
     attachment_menu_anchor: Option<GpuiPoint<Pixels>>,
     model_menu_open: bool,
     model_menu_anchor: Option<GpuiPoint<Pixels>>,
     model_search_query: SharedString,
-    model_search_history: EditHistory<SharedString>,
     model_menu_scroll: ScrollHandle,
     thinking_menu_open: bool,
     thinking_menu_anchor: Option<GpuiPoint<Pixels>>,
@@ -446,95 +291,11 @@ pub struct AiPanel {
     message_scroll_interacted: Rc<Cell<bool>>,
     message_scroll_task: Option<Task<()>>,
     message_context_menu: Option<MessageContextMenu>,
-    composer_history: EditHistory<ComposerSnapshot>,
-}
-
-struct LaidOutLine {
-    start: usize,
-    line: WrappedLine,
-}
-
-struct AiInputElement {
-    panel: Entity<AiPanel>,
-    source: AiInputSource,
-}
-
-struct AiInputLayoutState {
-    display: ComposerDisplay,
-    measurement: Rc<RefCell<Option<AiInputMeasurement>>>,
-}
-
-struct AiInputMeasurement {
-    width: Pixels,
-    lines: Vec<WrappedLine>,
-}
-
-#[derive(Clone)]
-enum AiInputSource {
-    Composer,
-    EditedMessage,
-    UserMessage {
-        message_index: usize,
-        content: SharedString,
-        mentions: Vec<ComposerMention>,
-    },
-}
-
-fn input_line_constraints(
-    mode: AiPanelMode,
-    source: &AiInputSource,
-    messages_empty: bool,
-) -> (bool, usize, Option<usize>) {
-    match source {
-        AiInputSource::Composer => {
-            let empty_chat = mode == AiPanelMode::Sidebar && messages_empty;
-            if mode == AiPanelMode::QuickAsk {
-                (empty_chat, 1, Some(4))
-            } else {
-                (empty_chat, 3, Some(8))
-            }
-        }
-        AiInputSource::EditedMessage | AiInputSource::UserMessage { .. } => (false, 1, None),
-    }
-}
-
-fn constrained_input_height(
-    measured_height: Pixels,
-    line_height: Pixels,
-    min_lines: usize,
-    max_lines: Option<usize>,
-) -> Pixels {
-    let min_height = line_height * min_lines as f32;
-    let height = measured_height.max(min_height);
-    max_lines.map_or(height, |max_lines| {
-        height.min(line_height * max_lines as f32)
-    })
 }
 
 fn loading_dot_opacity(delta: f32, phase: f32) -> f32 {
     let wave = (1.0 + (std::f32::consts::TAU * (delta - phase)).cos()) / 2.0;
     0.25 + 0.75 * wave
-}
-
-struct PrepaintState {
-    lines: Option<Vec<LaidOutLine>>,
-    display: ComposerDisplay,
-    cursor: Option<PaintQuad>,
-    cursor_position: Option<GpuiPoint<Pixels>>,
-    selections: Vec<PaintQuad>,
-    mention_quads: Vec<PaintQuad>,
-    active_number_quads: Vec<PaintQuad>,
-    mention_icons: Vec<(Bounds<Pixels>, MentionKind)>,
-    mention_hitboxes: Vec<MentionHitbox>,
-    hitbox: Option<Hitbox>,
-}
-
-#[derive(Clone, Copy)]
-struct DecorationStyle {
-    background: gpui::Hsla,
-    border: gpui::Hsla,
-    border_width: Pixels,
-    radius: Pixels,
 }
 
 struct AiPanelInit {
@@ -551,7 +312,6 @@ struct AiPanelInit {
 mod chat;
 mod composer;
 mod helpers;
-mod input_element;
 mod mentions;
 mod menus;
 mod render;
@@ -565,6 +325,7 @@ impl AiPanel {
         document_path: PathBuf,
         page_state: AiPageState,
         width: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let session_id = cx.global_mut::<LibraryStore>().next_ai_session_id();
@@ -580,6 +341,7 @@ impl AiPanel {
                 session_id,
                 sessions,
             },
+            window,
             cx,
         )
     }
@@ -590,6 +352,7 @@ impl AiPanel {
         document_path: PathBuf,
         page_state: AiPageState,
         width: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_with_mode(
@@ -603,14 +366,40 @@ impl AiPanel {
                 session_id: 0,
                 sessions: Vec::new(),
             },
+            window,
             cx,
         )
     }
 
-    fn new_with_mode(init: AiPanelInit, cx: &mut Context<Self>) -> Self {
+    fn new_with_mode(init: AiPanelInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (min_rows, max_rows) = match init.mode {
+            AiPanelMode::Sidebar => (3, 8),
+            AiPanelMode::QuickAsk => (1, 4),
+        };
+        let composer_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .auto_grow(min_rows, max_rows)
+                .soft_wrap(true)
+                .submit_on_enter(true)
+                .placeholder(tr("ai-ask-placeholder"))
+        });
+        let model_search_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder(tr("ai-search-models-placeholder")));
+        let focus_handle = composer_input.focus_handle(cx);
+        let composer_input_subscription =
+            cx.subscribe_in(&composer_input, window, Self::on_composer_input_event);
+        let model_search_input_subscription = cx.subscribe_in(
+            &model_search_input,
+            window,
+            Self::on_model_search_input_event,
+        );
+
         Self {
-            focus_handle: cx.focus_handle(),
-            edit_focus_handle: cx.focus_handle(),
+            focus_handle,
+            composer_input,
+            model_search_input,
+            _composer_input_subscription: composer_input_subscription,
+            _model_search_input_subscription: model_search_input_subscription,
             previous_focus_handle: init.previous_focus_handle,
             mode: init.mode,
             messages: Vec::new(),
@@ -619,9 +408,6 @@ impl AiPanel {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
-            last_lines: Vec::new(),
-            last_bounds: None,
-            drag_origin: None,
             loading: false,
             scroll_handle: ScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
@@ -644,23 +430,11 @@ impl AiPanel {
             mention_completion: None,
             mention_completion_scroll: UniformListScrollHandle::new(),
             composer_mentions: Vec::new(),
-            active_page_number_edit: None,
-            last_display: None,
-            last_cursor_pos: None,
-            mention_hitboxes: Vec::new(),
-            message_mention_hitboxes: Vec::new(),
-            mention_preview: None,
-            mention_preview_generation: 0,
-            pending_mention_preview: None,
-            mention_preview_hide_task: None,
-            mention_preview_scroll: ScrollHandle::new(),
-            mention_preview_bounds: Rc::new(Cell::new(None)),
             attachment_menu_open: false,
             attachment_menu_anchor: None,
             model_menu_open: false,
             model_menu_anchor: None,
             model_search_query: SharedString::default(),
-            model_search_history: EditHistory::default(),
             model_menu_scroll: ScrollHandle::new(),
             thinking_menu_open: false,
             thinking_menu_anchor: None,
@@ -678,18 +452,10 @@ impl AiPanel {
             message_scroll_interacted: Rc::new(Cell::new(false)),
             message_scroll_task: None,
             message_context_menu: None,
-            composer_history: EditHistory::default(),
         }
     }
 
     pub fn set_width(&mut self, width: f32) {
-        if (self.width - width).abs() > f32::EPSILON {
-            self.last_lines.clear();
-            self.last_bounds = None;
-            self.last_display = None;
-            self.last_cursor_pos = None;
-            self.invalidate_mention_preview();
-        }
         self.width = width;
     }
 
@@ -699,7 +465,6 @@ impl AiPanel {
         }
         let stopped_generation = self.stop_generation(cx);
         self.update_current_page(cx);
-        self.invalidate_mention_preview();
         if self.mode == AiPanelMode::Sidebar && !stopped_generation {
             self.save_current_session(cx);
         }
@@ -730,9 +495,6 @@ impl AiPanel {
     }
 
     fn submit(&mut self, _: &AiPanelSubmit, window: &mut Window, cx: &mut Context<Self>) {
-        if self.finish_page_number_edit(cx) {
-            return;
-        }
         if self.confirm_mention_completion(cx) {
             return;
         }

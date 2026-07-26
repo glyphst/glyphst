@@ -19,7 +19,7 @@ use glyphst_pdf_translation_app::{PdfTranslationService, run_typst_worker_if_req
 use glyphst_pdf_ui::pdf_view::RenderCache;
 use glyphst_settings::{SettingsStore, localize, sync_component_theme};
 use glyphst_translation::TranslationService;
-use glyphst_ui::{assets, fonts, notification_center, prompt};
+use glyphst_ui::{activity, assets, fonts, prompt};
 use glyphst_workspace::{
     NewTab, Workspace, WorkspaceCallbacks, WorkspaceWindowHandle, WorkspaceWindowRequest,
 };
@@ -61,7 +61,7 @@ fn main() {
             cx.set_global(settings_store);
             sync_component_theme(cx);
             prompt::init(cx);
-            notification_center::init(cx);
+            activity::init(cx);
             cx.set_global(LibraryStore::load());
             cx.set_global(RenderCache::new());
             match TranslationService::new() {

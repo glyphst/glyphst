@@ -6,7 +6,6 @@ cancel = 取消
 cancel-selection = 取消选择
 copy = 复制
 markdown-copy-code = 复制代码
-markdown-wrap-code = 自动换行代码块
 markdown-unwrap-code = 不换行代码块
 current = 当前
 delete = 删除

@@ -23,7 +23,7 @@ pub use glyphst_actions::new_tab::{CancelSelect, DeleteSelected, EnterSelect};
 use crate::{
     library::{HistoryEntry, LibraryStore},
     pdf_view::{NextHalfPage, PreviousHalfPage, ScrollLineDown, ScrollLineUp},
-    scrollbar::{ScrollableHandle, uniform_list_scrollbar_for},
+    scrollbar::{Scrollbar, ScrollbarHandle as _},
     settings::{SettingsStore, ui_rems},
     theme::Theme,
 };
@@ -287,7 +287,7 @@ impl NewTab {
     }
 
     fn scroll_by(&mut self, delta_y: Pixels, cx: &mut Context<Self>) {
-        let max_offset = self.scroll.max_offset().y;
+        let max_offset = self.scroll.0.borrow().base_handle.max_offset().y;
         if max_offset <= px(0.) {
             return;
         }
@@ -593,7 +593,7 @@ impl NewTabEntry {
 impl EventEmitter<NewTabEvent> for NewTab {}
 
 impl Render for NewTab {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let cols = self.cols.max(1);
         let rows = self.entries.len().div_ceil(cols);
@@ -643,78 +643,84 @@ impl Render for NewTab {
                 .min_h_0()
                 .overflow_hidden()
                 .child(
-                    uniform_list(
-                        "new-tab-list",
-                        rows,
-                        cx.processor(move |this, visible_range: Range<usize>, _window, cx| {
-                            let theme = cx.global::<SettingsStore>().resolved_theme;
-                            let prewarm_range = visible_range.start.saturating_sub(1)
-                                ..(visible_range.end + 1).min(rows);
-                            let visible_paths = prewarm_range
-                                .flat_map(|row_ix| {
-                                    let first_entry_ix = row_ix * cols;
-                                    first_entry_ix..first_entry_ix + cols
-                                })
-                                .filter_map(|entry_ix| {
-                                    this.entries.get(entry_ix).map(|entry| entry.path.clone())
-                                })
-                                .collect::<Vec<_>>();
+                    div()
+                        .relative()
+                        .size_full()
+                        .child(
+                            uniform_list(
+                                "new-tab-list",
+                                rows,
+                                cx.processor(
+                                    move |this, visible_range: Range<usize>, _window, cx| {
+                                        let theme = cx.global::<SettingsStore>().resolved_theme;
+                                        let prewarm_range = visible_range.start.saturating_sub(1)
+                                            ..(visible_range.end + 1).min(rows);
+                                        let visible_paths = prewarm_range
+                                            .flat_map(|row_ix| {
+                                                let first_entry_ix = row_ix * cols;
+                                                first_entry_ix..first_entry_ix + cols
+                                            })
+                                            .filter_map(|entry_ix| {
+                                                this.entries
+                                                    .get(entry_ix)
+                                                    .map(|entry| entry.path.clone())
+                                            })
+                                            .collect::<Vec<_>>();
 
-                            for path in visible_paths {
-                                this.start_thumbnail_render(path, cx);
-                            }
-
-                            visible_range
-                                .map(|row_ix| {
-                                    let mut row = div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_start()
-                                        .justify_center()
-                                        .gap(px(horizontal_gap))
-                                        .w_full()
-                                        .h(px(CARD_HEIGHT + GRID_GAP))
-                                        .px(px(GRID_PADDING_X))
-                                        .py_2();
-
-                                    for col_ix in 0..cols {
-                                        let entry_ix = row_ix * cols + col_ix;
-                                        if let Some(entry) = this.entries.get(entry_ix) {
-                                            let thumbnail = this
-                                                .thumbnails
-                                                .get(&entry.path)
-                                                .cloned()
-                                                .unwrap_or(ThumbnailState::Loading);
-                                            let selecting = this.selecting;
-                                            let selected = this.selection.contains(&entry_ix);
-
-                                            row = row.child(Self::render_card(
-                                                entry, thumbnail, selecting, selected, entry_ix,
-                                                theme, cx,
-                                            ));
-                                        } else {
-                                            row = row.child(
-                                                div()
-                                                    .flex_none()
-                                                    .w(px(CARD_WIDTH))
-                                                    .h(px(CARD_HEIGHT)),
-                                            );
+                                        for path in visible_paths {
+                                            this.start_thumbnail_render(path, cx);
                                         }
-                                    }
 
-                                    row
-                                })
-                                .collect::<Vec<_>>()
-                        }),
-                    )
-                    .track_scroll(&scroll_handle)
-                    .with_decoration(uniform_list_scrollbar_for(
-                        &scroll_handle,
-                        "new-tab-scrollbar",
-                        window,
-                        cx,
-                    ))
-                    .size_full(),
+                                        visible_range
+                                            .map(|row_ix| {
+                                                let mut row = div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_start()
+                                                    .justify_center()
+                                                    .gap(px(horizontal_gap))
+                                                    .w_full()
+                                                    .h(px(CARD_HEIGHT + GRID_GAP))
+                                                    .px(px(GRID_PADDING_X))
+                                                    .py_2();
+
+                                                for col_ix in 0..cols {
+                                                    let entry_ix = row_ix * cols + col_ix;
+                                                    if let Some(entry) = this.entries.get(entry_ix)
+                                                    {
+                                                        let thumbnail = this
+                                                            .thumbnails
+                                                            .get(&entry.path)
+                                                            .cloned()
+                                                            .unwrap_or(ThumbnailState::Loading);
+                                                        let selecting = this.selecting;
+                                                        let selected =
+                                                            this.selection.contains(&entry_ix);
+
+                                                        row = row.child(Self::render_card(
+                                                            entry, thumbnail, selecting, selected,
+                                                            entry_ix, theme, cx,
+                                                        ));
+                                                    } else {
+                                                        row = row.child(
+                                                            div()
+                                                                .flex_none()
+                                                                .w(px(CARD_WIDTH))
+                                                                .h(px(CARD_HEIGHT)),
+                                                        );
+                                                    }
+                                                }
+
+                                                row
+                                            })
+                                            .collect::<Vec<_>>()
+                                    },
+                                ),
+                            )
+                            .track_scroll(&scroll_handle)
+                            .size_full(),
+                        )
+                        .child(Scrollbar::vertical(&scroll_handle).id("new-tab-scrollbar")),
                 )
                 .into_any_element()
         };
@@ -787,10 +793,12 @@ impl Render for NewTab {
                 this.scroll_by(-px(NEW_TAB_ROW_HEIGHT), cx);
             }))
             .on_action(cx.listener(|this, _: &NextHalfPage, _, cx| {
-                this.scroll_by(this.scroll.viewport().size.height * 0.5, cx);
+                let viewport_height = this.scroll.0.borrow().base_handle.bounds().size.height;
+                this.scroll_by(viewport_height * 0.5, cx);
             }))
             .on_action(cx.listener(|this, _: &PreviousHalfPage, _, cx| {
-                this.scroll_by(-(this.scroll.viewport().size.height * 0.5), cx);
+                let viewport_height = this.scroll.0.borrow().base_handle.bounds().size.height;
+                this.scroll_by(-(viewport_height * 0.5), cx);
             }))
             .on_action(cx.listener(|this, _: &EnterSelect, _, cx| {
                 this.enter_select(cx);

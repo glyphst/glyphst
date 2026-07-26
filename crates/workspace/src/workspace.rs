@@ -3,15 +3,16 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use glyphst_translation_ui::{
     DocumentTranslationJobEvent, DocumentTranslationJobId, DocumentTranslationJobManager,
+    DocumentTranslationNotification, document_translation_notification,
 };
-use glyphst_ui::notification_center::NotificationCenter;
+use glyphst_ui::activity::ActivityCenter;
 use glyphst_ui::root::render_overlays;
 use gpui::{
     AnyElement, App, Context, DismissEvent, DragMoveEvent, Entity, FocusHandle, Focusable,
     IntoElement, MouseButton, MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString,
     Window, WindowAppearance, div, point, prelude::*, px, rgba,
 };
-use gpui_component::{menu::PopupMenu, status_bar::StatusBar};
+use gpui_component::{WindowExt as _, menu::PopupMenu, status_bar::StatusBar};
 
 mod chrome;
 
@@ -167,8 +168,8 @@ impl Workspace {
         workspace.subscribe_to_pane(&pane, window, cx);
         cx.observe(&document_translation_jobs, |_, _, cx| cx.notify())
             .detach();
-        if let Some(notification_center) = NotificationCenter::try_global(cx) {
-            cx.observe(&notification_center, |_, _, cx| cx.notify())
+        if let Some(activity_center) = ActivityCenter::try_global(cx) {
+            cx.observe(&activity_center, |_, _, cx| cx.notify())
                 .detach();
         }
         cx.subscribe_in(
@@ -206,6 +207,21 @@ impl Workspace {
                             jobs.finish_open(*id, Err(format!("{error:#}").into()), cx);
                         });
                     }
+                }
+                DocumentTranslationJobEvent::ShowNotification { snapshot } => {
+                    window.push_notification(
+                        document_translation_notification(
+                            snapshot.clone(),
+                            this.document_translation_jobs.downgrade(),
+                        ),
+                        cx,
+                    );
+                }
+                DocumentTranslationJobEvent::RemoveNotification { id } => {
+                    window.remove_notification1::<DocumentTranslationNotification>(
+                        id.to_string(),
+                        cx,
+                    );
                 }
             },
         )
@@ -983,8 +999,8 @@ impl Workspace {
             }
         }
 
-        let activity = NotificationCenter::try_global(cx)
-            .and_then(|center| center.update(cx, |center, cx| center.render_activity(theme, cx)));
+        let activity =
+            ActivityCenter::try_global(cx).and_then(|center| center.read(cx).render_activity());
         if let Some(activity) = activity {
             div()
                 .size_full()
@@ -1297,7 +1313,7 @@ impl Workspace {
             .collect::<Vec<_>>();
         let delegate = CommandPaletteDelegate::new(actions);
         let picker_previous_focus_handle = previous_focus_handle.clone();
-        let palette = cx.new(|cx| Picker::new(picker_previous_focus_handle, delegate, cx));
+        let palette = cx.new(|cx| Picker::new(picker_previous_focus_handle, delegate, window, cx));
 
         cx.subscribe_in(&palette, window, |this, _, _: &PickerEvent, window, cx| {
             this.close_command_palette(window, cx);
@@ -1352,7 +1368,13 @@ impl Workspace {
 
         let picker_previous_focus_handle = previous_focus_handle.clone();
         let selector = cx.new(|cx| {
-            Picker::new_with_selected_ix(picker_previous_focus_handle, delegate, selected_ix, cx)
+            Picker::new_with_selected_ix(
+                picker_previous_focus_handle,
+                delegate,
+                selected_ix,
+                window,
+                cx,
+            )
         });
 
         cx.subscribe_in(&selector, window, |this, _, _: &PickerEvent, window, cx| {
@@ -1509,37 +1531,6 @@ impl Render for Workspace {
                 self.active_tab_label(cx),
             )
         });
-        let document_translation_notification = (!active_pdf_is_presentation)
-            .then(|| {
-                self.document_translation_jobs
-                    .update(cx, |jobs, cx| jobs.render_notification(theme, cx))
-            })
-            .flatten();
-        let center_notifications = (!active_pdf_is_presentation && window.is_window_active())
-            .then(|| {
-                NotificationCenter::try_global(cx).and_then(|center| {
-                    center.update(cx, |center, cx| center.render_notifications(theme, cx))
-                })
-            })
-            .flatten();
-        let notification_stack = {
-            let mut notifications = Vec::new();
-            if let Some(notification) = document_translation_notification {
-                notifications.push(notification);
-            }
-            if let Some(notification) = center_notifications {
-                notifications.push(notification);
-            }
-            (!notifications.is_empty()).then(|| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .items_end()
-                    .children(notifications)
-            })
-        };
-
         div()
             .id("workspace")
             .size_full()
@@ -1690,23 +1681,15 @@ impl Render for Workspace {
                     cx,
                 ))
             })
-            .when_some(notification_stack, |this, notifications| {
-                this.child(
-                    div()
-                        .absolute()
-                        .right_3()
-                        .bottom(px(38.0))
-                        .child(notifications),
-                )
-            })
             .children(root_overlays)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use glyphst_translation_ui::DocumentTranslationOpenMode;
     use gpui::{AppContext as _, Modifiers, TestAppContext};
-    use gpui_component::Root;
+    use gpui_component::{Root, WindowExt as _};
 
     use super::{
         Workspace, WorkspaceCallbacks, WorkspaceMenu, WorkspaceWindowHandle, WorkspaceWindowRequest,
@@ -1745,6 +1728,45 @@ mod tests {
 
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.active_pane.read(cx).active_tab_is_new_tab());
+        });
+    }
+
+    #[gpui::test]
+    fn translation_failures_use_component_notification_layer(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            glyphst_ui::activity::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+
+        workspace.update_in(cx, |workspace, _, cx| {
+            workspace.document_translation_jobs.update(cx, |jobs, cx| {
+                jobs.report_preflight_error(
+                    "/tmp/source.pdf".into(),
+                    DocumentTranslationOpenMode::Document,
+                    "Invalid target language",
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |_, window, cx| {
+            assert_eq!(window.notifications(cx).len(), 1);
         });
     }
 

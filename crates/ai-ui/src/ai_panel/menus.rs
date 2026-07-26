@@ -2,21 +2,6 @@ use super::helpers::*;
 use super::*;
 
 impl AiPanel {
-    pub(super) fn edit_model_search_query(
-        &mut self,
-        range: Range<usize>,
-        new_text: &str,
-        group: EditGroup,
-        cx: &mut Context<Self>,
-    ) {
-        let before = self.model_search_query.clone();
-        let query = self.model_search_query.to_string();
-        self.model_search_query =
-            (query[..range.start].to_owned() + new_text + &query[range.end..]).into();
-        self.model_search_history
-            .record(before, &self.model_search_query, group);
-        cx.notify();
-    }
     pub(super) fn open_message_context_menu(
         &mut self,
         message_index: usize,
@@ -211,7 +196,6 @@ impl AiPanel {
         self.model_menu_open = false;
         self.model_menu_anchor = None;
         self.model_search_query = SharedString::default();
-        self.model_search_history.clear();
         self.thinking_menu_open = false;
         self.thinking_menu_anchor = None;
     }
@@ -236,7 +220,6 @@ impl AiPanel {
         self.model_menu_open = false;
         self.model_menu_anchor = None;
         self.model_search_query = SharedString::default();
-        self.model_search_history.clear();
         self.thinking_menu_open = false;
         self.thinking_menu_anchor = None;
         cx.notify();
@@ -252,7 +235,6 @@ impl AiPanel {
             return;
         }
         self.message_context_menu = None;
-        self.focus_handle.focus(window, cx);
         self.model_menu_open = !self.model_menu_open;
         self.model_menu_anchor = self
             .model_menu_open
@@ -262,7 +244,12 @@ impl AiPanel {
         self.thinking_menu_open = false;
         self.thinking_menu_anchor = None;
         self.model_search_query = SharedString::default();
-        self.model_search_history.clear();
+        self.sync_model_search_input(window, cx);
+        if self.model_menu_open {
+            self.model_search_input.focus_handle(cx).focus(window, cx);
+        } else {
+            self.composer_input.focus_handle(cx).focus(window, cx);
+        }
         cx.notify();
     }
 
@@ -284,7 +271,6 @@ impl AiPanel {
         self.model_menu_open = false;
         self.model_menu_anchor = None;
         self.model_search_query = SharedString::default();
-        self.model_search_history.clear();
         cx.notify();
     }
 
@@ -396,7 +382,6 @@ impl AiPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let query = state.search_query.to_string();
-        let query_empty = query.is_empty();
         let query_lower = query.to_ascii_lowercase();
         let mut entries = Vec::new();
         for (provider, models) in state.provider_models {
@@ -418,7 +403,7 @@ impl AiPanel {
         }
         let entry_count = entries.len();
         let scroll_handle = state.scroll_handle.clone();
-        let search_focused = state.focused;
+        let search_input = state.search_input;
 
         let mut menu = div()
             .w(px(340.0))
@@ -437,47 +422,7 @@ impl AiPanel {
             });
 
         menu = menu
-            .child(
-                div()
-                    .mx_2()
-                    .mt_2()
-                    .mb_2()
-                    .h(px(30.0))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .border_1()
-                    .border_color(rgb(if search_focused {
-                        theme.accent
-                    } else {
-                        theme.border_variant
-                    }))
-                    .bg(rgb(theme.tab_active_background))
-                    .text_color(rgb(if query_empty {
-                        theme.text_muted
-                    } else {
-                        theme.text
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.focus_handle.focus(window, cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .when(query_empty && search_focused, |this| {
-                        this.child(div().w(px(1.0)).h(px(14.0)).bg(rgb(theme.accent)))
-                    })
-                    .child(if query_empty {
-                        tr("ai-search-models-placeholder")
-                    } else {
-                        query
-                    })
-                    .when(!query_empty && search_focused, |this| {
-                        this.child(div().w(px(1.0)).h(px(14.0)).bg(rgb(theme.accent)))
-                    }),
-            )
+            .child(Input::new(&search_input).w_full().mx_2().mt_2().mb_2())
             .child(
                 div()
                     .mx_2()

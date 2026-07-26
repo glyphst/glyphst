@@ -300,7 +300,7 @@ impl PdfView {
 
         let previous_focus_handle = self.focus_handle.clone();
         let editor =
-            cx.new(|cx| NoteEditor::new(previous_focus_handle.clone(), content, color, cx));
+            cx.new(|cx| NoteEditor::new(previous_focus_handle.clone(), content, color, window, cx));
 
         cx.subscribe_in(&editor, window, |this, _, event, window, cx| match event {
             NoteEditorEvent::Save { body, color } => {

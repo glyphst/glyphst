@@ -122,7 +122,6 @@ impl AiPanel {
         self.refresh_sessions(cx);
         self.view = AiPanelView::Sessions;
         self.message_context_menu = None;
-        self.hide_mention_preview(cx);
         self.close_composer_menus();
         cx.notify();
     }
@@ -150,14 +149,10 @@ impl AiPanel {
         self.marked_range = None;
         self.mention_completion = None;
         self.composer_mentions.clear();
-        self.invalidate_mention_preview();
-        self.active_page_number_edit = None;
-        self.last_cursor_pos = None;
         self.pending_title_task = None;
         self.generation_failure = None;
         self.active_generation = None;
         self.message_context_menu = None;
-        self.composer_history.clear();
         self.clear_validation_notice();
         self.close_composer_menus();
         self.reset_message_scroll();
@@ -231,14 +226,10 @@ impl AiPanel {
         self.marked_range = None;
         self.mention_completion = None;
         self.composer_mentions.clear();
-        self.invalidate_mention_preview();
-        self.active_page_number_edit = None;
-        self.last_cursor_pos = None;
         self.pending_title_task = None;
         self.generation_failure = None;
         self.active_generation = None;
         self.message_context_menu = None;
-        self.composer_history.clear();
         self.clear_validation_notice();
         self.close_composer_menus();
         self.reset_message_scroll();

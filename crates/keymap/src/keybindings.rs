@@ -2,7 +2,7 @@ use std::{rc::Rc, sync::OnceLock};
 
 use glyphst_actions::{
     ai_panel::{AiPanelClose, AiPanelSubmit},
-    input, markdown, menu,
+    input, menu,
     new_tab::{CancelSelect, DeleteSelected, EnterSelect},
     note_editor::{NoteCancel, NoteSave},
     pane::{SplitDown, SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical},
@@ -719,7 +719,6 @@ fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
     add_many::<input::SelectHome>(cx, bindings, &["shift-home"], "TextInput");
     add_many::<input::SelectEnd>(cx, bindings, &["shift-end"], "TextInput");
     add_many::<input::Copy>(cx, bindings, &["primary-c"], "TextInput");
-    add_many::<markdown::Copy>(cx, bindings, &["primary-c"], "Markdown");
     add_many::<input::Cut>(cx, bindings, &["primary-x"], "TextInput");
     add_many::<input::Paste>(cx, bindings, &["primary-v"], "TextInput");
     add_internal_binding_specs(cx, bindings, COMMON_TEXT_EDIT_BINDINGS);

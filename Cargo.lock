@@ -2654,7 +2654,7 @@ dependencies = [
  "glyphst-settings",
  "glyphst-ui",
  "gpui",
- "image",
+ "gpui-component",
 ]
 
 [[package]]
@@ -2833,10 +2833,8 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
- "pulldown-cmark",
  "rust-embed",
  "smallvec",
- "unicode-segmentation",
 ]
 
 [[package]]
@@ -2982,7 +2980,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/longbridge/gpui-component?rev=3f9e655e8668fff37df41c541e0d9f3ec992fa7d#3f9e655e8668fff37df41c541e0d9f3ec992fa7d"
+source = "git+https://github.com/Ziqi-Yang/gpui-component?rev=1bc8d5f38dba5252f85d4c61e33e8b1c6948a9ac#1bc8d5f38dba5252f85d4c61e33e8b1c6948a9ac"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3030,7 +3028,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/longbridge/gpui-component?rev=3f9e655e8668fff37df41c541e0d9f3ec992fa7d#3f9e655e8668fff37df41c541e0d9f3ec992fa7d"
+source = "git+https://github.com/Ziqi-Yang/gpui-component?rev=1bc8d5f38dba5252f85d4c61e33e8b1c6948a9ac#1bc8d5f38dba5252f85d4c61e33e8b1c6948a9ac"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3044,7 +3042,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/longbridge/gpui-component?rev=3f9e655e8668fff37df41c541e0d9f3ec992fa7d#3f9e655e8668fff37df41c541e0d9f3ec992fa7d"
+source = "git+https://github.com/Ziqi-Yang/gpui-component?rev=1bc8d5f38dba5252f85d4c61e33e8b1c6948a9ac#1bc8d5f38dba5252f85d4c61e33e8b1c6948a9ac"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6205,17 +6203,6 @@ checksum = "645dbe486e346d9b5de3ef16ede18c26e6c70ad97418f4874b8b1889d6e761ea"
 dependencies = [
  "ar_archive_writer",
  "cc",
-]
-
-[[package]]
-name = "pulldown-cmark"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
-dependencies = [
- "bitflags 2.11.1",
- "memchr",
- "unicase",
 ]
 
 [[package]]

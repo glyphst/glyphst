@@ -13,10 +13,7 @@ use glyphst_settings::{
     Settings, SettingsStore, localize, setup_ui_font, sync_component_theme, ui_rems,
 };
 use glyphst_ui::{
-    notification_center::{
-        BackgroundTaskEntry, NotificationCenter, NotificationEntry, NotificationLevel,
-        SUCCESS_NOTICE_DURATION,
-    },
+    activity::{ActivityCenter, BackgroundTaskEntry},
     root::{RootWindowHandle, render_overlays},
 };
 use gpui::{
@@ -25,9 +22,10 @@ use gpui::{
     px, size,
 };
 use gpui_component::{
-    ActiveTheme as _, Root, Sizable as _, Size, TitleBar,
+    ActiveTheme as _, Root, Sizable as _, Size, TitleBar, WindowExt as _,
     button::Button,
     group_box::GroupBoxVariant,
+    notification::Notification,
     setting::{SelectIndex, Settings as ComponentSettings},
 };
 use std::{
@@ -689,8 +687,7 @@ impl SettingsWindow {
         if self.translation_data_clear_pending {
             return;
         }
-        if !cx.has_global::<PdfTranslationService>() || NotificationCenter::try_global(cx).is_none()
-        {
+        if !cx.has_global::<PdfTranslationService>() || ActivityCenter::try_global(cx).is_none() {
             self.status = None;
             self.save_error = Some("Translation data service is unavailable.".into());
             cx.notify();
@@ -698,7 +695,7 @@ impl SettingsWindow {
         }
 
         let service = cx.global::<PdfTranslationService>().clone();
-        let notification_center = NotificationCenter::global(cx);
+        let activity_center = ActivityCenter::global(cx);
         let confirmation = window.prompt(
             PromptLevel::Warning,
             "Clear all translation data?",
@@ -715,9 +712,9 @@ impl SettingsWindow {
         self.status = None;
         self.save_error = None;
         self.translation_data_clear_pending = true;
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             if confirmation.await != Ok(0) {
-                _ = this.update(cx, |this, cx| {
+                _ = this.update_in(cx, |this, _, cx| {
                     this.translation_data_clear_pending = false;
                     this.translation_data_clear_running = false;
                     cx.notify();
@@ -725,7 +722,7 @@ impl SettingsWindow {
                 return;
             }
 
-            let task_id = notification_center.update(cx, |center, cx| {
+            let task_id = activity_center.update(cx, |center, cx| {
                 center.add_task(
                     BackgroundTaskEntry::new(
                         "Clearing translation data",
@@ -734,7 +731,7 @@ impl SettingsWindow {
                     cx,
                 )
             });
-            _ = this.update(cx, |this, cx| {
+            _ = this.update_in(cx, |this, _, cx| {
                 this.translation_data_clear_running = true;
                 cx.notify();
             });
@@ -746,32 +743,28 @@ impl SettingsWindow {
                         .map_err(|error| format!("{error:#}"))
                 })
                 .await;
-            notification_center.update(cx, |center, cx| {
+            activity_center.update(cx, |center, cx| {
                 center.remove_task(task_id, cx);
+            });
+            _ = this.update_in(cx, |this, window, cx| {
+                this.translation_data_clear_pending = false;
+                this.translation_data_clear_running = false;
                 match &result {
                     Ok(()) => {
-                        center.show_notification(
-                            NotificationEntry::new(
-                                NotificationLevel::Success,
-                                "Translation data cleared",
-                            ),
-                            Some(SUCCESS_NOTICE_DURATION),
+                        window.push_notification(
+                            Notification::success("Translation data cleared"),
                             cx,
                         );
                     }
                     Err(error) => {
-                        let mut notification = NotificationEntry::new(
-                            NotificationLevel::Error,
-                            "Could not clear translation data",
+                        window.push_notification(
+                            Notification::error(error.clone())
+                                .title("Could not clear translation data")
+                                .autohide(false),
+                            cx,
                         );
-                        notification.detail = Some(error.clone().into());
-                        center.show_notification(notification, None, cx);
                     }
                 }
-            });
-            _ = this.update(cx, |this, cx| {
-                this.translation_data_clear_pending = false;
-                this.translation_data_clear_running = false;
                 cx.notify();
             });
         })
@@ -836,24 +829,13 @@ impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root_overlays = render_overlays(window, cx);
         let ui_font = setup_ui_font(window, cx);
-        let resolved = cx.global::<SettingsStore>().resolved_theme;
         let settings = ComponentSettings::new("glyphst-settings")
             .with_size(Size::Small)
             .with_group_variant(GroupBoxVariant::Outline)
             .default_selected_index(self.initial_selection)
             .pages(self.setting_pages(cx));
-        let background_activity = NotificationCenter::try_global(cx).and_then(|center| {
-            center.update(cx, |center, cx| center.render_activity(resolved, cx))
-        });
-        let center_notifications = window
-            .is_window_active()
-            .then(|| {
-                NotificationCenter::try_global(cx).and_then(|center| {
-                    center.update(cx, |center, cx| center.render_notifications(resolved, cx))
-                })
-            })
-            .flatten();
-
+        let background_activity =
+            ActivityCenter::try_global(cx).and_then(|center| center.read(cx).render_activity());
         div()
             .key_context("SettingsPanel")
             .track_focus(&self.focus_handle)
@@ -928,15 +910,6 @@ impl Render for SettingsWindow {
                         this.child(div().text_color(cx.theme().danger).child(error))
                     }),
             )
-            .when_some(center_notifications, |this, notifications| {
-                this.child(
-                    div()
-                        .absolute()
-                        .right_3()
-                        .bottom(px(72.0))
-                        .child(notifications),
-                )
-            })
             .children(root_overlays)
     }
 }
@@ -973,7 +946,7 @@ mod tests {
     fn initialize_ui_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
-            glyphst_ui::notification_center::init(cx);
+            glyphst_ui::activity::init(cx);
             let store = SettingsStore::memory();
             store.install_theme_catalog(cx).unwrap();
             cx.set_global(store);

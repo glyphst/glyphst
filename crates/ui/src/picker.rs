@@ -1,30 +1,32 @@
 use std::ops::Range;
 
-use crate::input;
-use crate::menu;
-use crate::scrollbar::uniform_list_scrollbar_for;
-use crate::settings::SettingsStore;
-use crate::style::{INPUT_ROW_HEIGHT, RADIUS_LG, RADIUS_MD, TextSize, modal_shadow};
-use crate::text_edit::{
-    EditGroup, EditHistory, TextSnapshot, backward_word_deletion_start, forward_word_deletion_end,
-    next_grapheme_boundary, next_word_end, offset_from_utf16, offset_to_utf16,
-    previous_grapheme_boundary, previous_word_start, range_from_utf16, range_to_utf16,
-};
-use crate::text_input::SingleLineTextElement;
-use crate::theme::Theme;
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent,
-    Pixels, Point as GpuiPoint, Render, ScrollStrategy, ShapedLine, SharedString, UTF16Selection,
-    UniformListScrollHandle, Window, div, point, prelude::*, px, rgb, rgba, uniform_list,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, EventEmitter, FocusHandle,
+    Focusable, IntoElement, MouseButton, Render, ScrollStrategy, SharedString, Subscription,
+    WeakEntity, Window, div, prelude::*, px,
+};
+use gpui_component::{
+    ActiveTheme as _, IndexPath, StyledExt as _,
+    input::{Input, InputEvent, InputState},
+    list::{List, ListDelegate, ListItem, ListState},
 };
 
-const LIST_VERTICAL_PADDING: f32 = 4.0;
+use crate::{
+    menu,
+    settings::SettingsStore,
+    style::{INPUT_ROW_HEIGHT, TextSize},
+    theme::Theme,
+};
 
 pub enum PickerEvent {
     Dismissed,
 }
 
+/// Application-specific data for a picker.
+///
+/// Glyphst retains this small protocol because picker rows perform domain
+/// actions, while all input, list navigation, selection presentation,
+/// virtualization, and scrolling are supplied by gpui-component.
 pub trait PickerDelegate: Sized + 'static {
     fn key_context(&self) -> &'static str;
     fn placeholder(&self) -> SharedString;
@@ -65,31 +67,36 @@ pub trait PickerDelegate: Sized + 'static {
 }
 
 pub struct Picker<D: PickerDelegate> {
-    focus_handle: FocusHandle,
     previous_focus_handle: FocusHandle,
-    content: SharedString,
-    selected_range: Range<usize>,
-    selection_reversed: bool,
-    marked_range: Option<Range<usize>>,
-    last_layout: Option<ShapedLine>,
-    last_bounds: Option<Bounds<Pixels>>,
-    scroll_offset: Pixels,
-    drag_origin: Option<GpuiPoint<Pixels>>,
+    input: Entity<InputState>,
+    list: Entity<ListState<PickerListDelegate<D>>>,
     selected_ix: usize,
-    list_scroll_handle: UniformListScrollHandle,
     delegate: D,
-    history: EditHistory<TextSnapshot>,
+    _input_subscription: Subscription,
 }
 
 impl<D: PickerDelegate> Picker<D> {
-    pub fn new(previous_focus_handle: FocusHandle, delegate: D, cx: &mut Context<Self>) -> Self {
-        Self::with_content_and_selected_ix(previous_focus_handle, delegate, "".into(), 0, cx)
+    pub fn new(
+        previous_focus_handle: FocusHandle,
+        delegate: D,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_content_and_selected_ix(
+            previous_focus_handle,
+            delegate,
+            "".into(),
+            0,
+            window,
+            cx,
+        )
     }
 
     pub fn new_with_selected_ix(
         previous_focus_handle: FocusHandle,
         delegate: D,
         selected_ix: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::with_content_and_selected_ix(
@@ -97,6 +104,7 @@ impl<D: PickerDelegate> Picker<D> {
             delegate,
             "".into(),
             selected_ix,
+            window,
             cx,
         )
     }
@@ -105,72 +113,107 @@ impl<D: PickerDelegate> Picker<D> {
         previous_focus_handle: FocusHandle,
         delegate: D,
         content: SharedString,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_content_and_selected_ix(previous_focus_handle, delegate, content, 0, cx)
+        Self::with_content_and_selected_ix(previous_focus_handle, delegate, content, 0, window, cx)
     }
 
     fn with_content_and_selected_ix(
         previous_focus_handle: FocusHandle,
-        delegate: D,
+        mut delegate: D,
         content: SharedString,
         selected_ix: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        delegate.update_matches(content.as_ref());
+        let selected_ix = selected_ix.min(delegate.match_count().saturating_sub(1));
+        let placeholder = delegate.placeholder();
         let content_len = content.len();
-        let mut this = Self {
-            focus_handle: cx.focus_handle(),
-            previous_focus_handle,
-            content,
-            selected_range: 0..content_len,
-            selection_reversed: false,
-            marked_range: None,
-            last_layout: None,
-            last_bounds: None,
-            scroll_offset: px(0.0),
-            drag_origin: None,
-            selected_ix,
-            list_scroll_handle: UniformListScrollHandle::new(),
-            delegate,
-            history: EditHistory::default(),
-        };
-        this.update_matches();
-        this
-    }
 
-    fn update_matches(&mut self) {
-        self.delegate.update_matches(self.content.as_ref());
-        self.selected_ix = self
-            .selected_ix
-            .min(self.delegate.match_count().saturating_sub(1));
-        self.center_selected();
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder)
+                .default_value(content)
+        });
+        input.update(cx, |input, cx| {
+            input.set_selected_range(0..content_len, cx);
+        });
+
+        let picker = cx.entity().downgrade();
+        let list = cx.new(|cx| {
+            ListState::new(
+                PickerListDelegate {
+                    picker,
+                    selected_ix: None,
+                },
+                window,
+                cx,
+            )
+        });
+        if delegate.match_count() > 0 {
+            list.update(cx, |list, cx| {
+                list.set_selected_index(Some(IndexPath::new(selected_ix)), window, cx);
+            });
+        }
+
+        let _input_subscription = cx.subscribe_in(&input, window, Self::on_input_event);
+
+        Self {
+            previous_focus_handle,
+            input,
+            list,
+            selected_ix,
+            delegate,
+            _input_subscription,
+        }
     }
 
     pub fn update_delegate(&mut self, update: impl FnOnce(&mut D), cx: &mut Context<Self>) {
         update(&mut self.delegate);
-        self.update_matches();
+        let query = self.input.read(cx).value();
+        self.delegate.update_matches(query.as_ref());
+        self.clamp_selection();
         cx.notify();
     }
 
-    fn match_count(&self) -> usize {
-        self.delegate.match_count()
-    }
-
-    fn row_height(&self) -> f32 {
-        self.delegate.row_height()
-    }
-
-    fn list_viewport_height(&self) -> f32 {
-        self.row_height() * self.match_count().min(self.delegate.max_visible_matches()) as f32
-    }
-
-    fn center_selected(&mut self) {
-        if self.match_count() == 0 {
-            return;
+    fn on_input_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                let query = input.read(cx).value();
+                self.delegate.update_matches(query.as_ref());
+                self.clamp_selection();
+                self.sync_list_selection(window, cx);
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => self.confirm_selected(window, cx),
+            InputEvent::Focus | InputEvent::Blur => {}
         }
+    }
 
-        self.list_scroll_handle
-            .scroll_to_item_strict(self.selected_ix, ScrollStrategy::Center);
+    fn clamp_selection(&mut self) {
+        self.selected_ix = self
+            .selected_ix
+            .min(self.delegate.match_count().saturating_sub(1));
+    }
+
+    fn sync_list_selection(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = (self.delegate.match_count() > 0).then(|| IndexPath::new(self.selected_ix));
+        self.list.update(cx, |list, cx| {
+            if list.selected_index() != selected {
+                list.set_selected_index(selected, window, cx);
+            }
+            if let Some(selected) = selected {
+                list.scroll_to_item(selected, ScrollStrategy::Center, window, cx);
+            }
+        });
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -180,8 +223,8 @@ impl<D: PickerDelegate> Picker<D> {
     }
 
     fn confirm_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_ix >= self.match_count() {
-            let content = self.content.clone();
+        if self.selected_ix >= self.delegate.match_count() {
+            let content = self.input.read(cx).value();
             self.previous_focus_handle.focus(window, cx);
             self.delegate
                 .confirm_input(content, &self.previous_focus_handle, window, cx);
@@ -189,779 +232,187 @@ impl<D: PickerDelegate> Picker<D> {
             return;
         }
 
-        self.previous_focus_handle.focus(window, cx);
-        self.delegate
-            .confirm(self.selected_ix, &self.previous_focus_handle, window, cx);
-        self.delegate.dismissed(cx);
-        cx.emit(PickerEvent::Dismissed);
+        self.confirm_match(self.selected_ix, window, cx);
     }
 
-    fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        self.confirm_selected(window, cx);
+    fn confirm_match(&mut self, match_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if match_ix >= self.delegate.match_count() {
+            return;
+        }
+
+        self.selected_ix = match_ix;
+        self.previous_focus_handle.focus(window, cx);
+        self.delegate
+            .confirm(match_ix, &self.previous_focus_handle, window, cx);
+        self.delegate.dismissed(cx);
+        cx.emit(PickerEvent::Dismissed);
     }
 
     fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss(window, cx);
     }
 
-    fn select_next(&mut self, _: &menu::SelectNext, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_ix + 1 < self.match_count() {
+    fn select_next(&mut self, _: &menu::SelectNext, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_ix + 1 < self.delegate.match_count() {
             self.selected_ix += 1;
-            self.center_selected();
             self.delegate.selection_changed(self.selected_ix, cx);
+            self.sync_list_selection(window, cx);
             cx.notify();
         }
     }
 
-    fn select_prev(&mut self, _: &menu::SelectPrev, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_prev(&mut self, _: &menu::SelectPrev, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_ix > 0 {
             self.selected_ix -= 1;
-            self.center_selected();
             self.delegate.selection_changed(self.selected_ix, cx);
+            self.sync_list_selection(window, cx);
             cx.notify();
         }
     }
 
-    fn left(&mut self, _: &input::Left, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.move_to(
-                previous_grapheme_boundary(&self.content, self.cursor_offset()),
-                cx,
-            );
-        } else {
-            self.move_to(self.selected_range.start, cx);
-        }
-    }
-
-    fn right(&mut self, _: &input::Right, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.move_to(
-                next_grapheme_boundary(&self.content, self.selected_range.end),
-                cx,
-            );
-        } else {
-            self.move_to(self.selected_range.end, cx);
-        }
-    }
-
-    fn word_left(&mut self, _: &input::WordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.move_to(previous_word_start(&self.content, self.cursor_offset()), cx);
-        } else {
-            self.move_to(self.selected_range.start, cx);
-        }
-    }
-
-    fn word_right(&mut self, _: &input::WordRight, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.move_to(next_word_end(&self.content, self.cursor_offset()), cx);
-        } else {
-            self.move_to(self.selected_range.end, cx);
-        }
-    }
-
-    fn select_all(&mut self, _: &input::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, cx);
-        self.select_to(self.content.len(), cx);
-    }
-
-    fn select_left(&mut self, _: &input::SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(
-            previous_grapheme_boundary(&self.content, self.cursor_offset()),
-            cx,
-        );
-    }
-
-    fn select_right(&mut self, _: &input::SelectRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(
-            next_grapheme_boundary(&self.content, self.cursor_offset()),
-            cx,
-        );
-    }
-
-    fn select_word_left(
-        &mut self,
-        _: &input::SelectWordLeft,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.select_to(previous_word_start(&self.content, self.cursor_offset()), cx);
-    }
-
-    fn select_word_right(
-        &mut self,
-        _: &input::SelectWordRight,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.select_to(next_word_end(&self.content, self.cursor_offset()), cx);
-    }
-
-    fn select_home(&mut self, _: &input::SelectHome, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(0, cx);
-    }
-
-    fn select_end(&mut self, _: &input::SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.content.len(), cx);
-    }
-
-    fn select_document_start(
-        &mut self,
-        _: &input::SelectDocumentStart,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.select_to(0, cx);
-    }
-
-    fn select_document_end(
-        &mut self,
-        _: &input::SelectDocumentEnd,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.select_to(self.content.len(), cx);
-    }
-
-    fn copy(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
-        self.copy_selected_text(cx);
-    }
-
-    fn cut(&mut self, _: &input::Cut, _: &mut Window, cx: &mut Context<Self>) {
-        if self.copy_selected_text(cx) {
-            self.replace_range(self.selected_range.clone(), "", EditGroup::Isolated, cx);
-        }
-    }
-
-    fn home(&mut self, _: &input::Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, cx);
-    }
-
-    fn end(&mut self, _: &input::End, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.content.len(), cx);
-    }
-
-    fn document_start(&mut self, _: &input::DocumentStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, cx);
-    }
-
-    fn document_end(&mut self, _: &input::DocumentEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.content.len(), cx);
-    }
-
-    fn backspace(&mut self, _: &input::Backspace, _: &mut Window, cx: &mut Context<Self>) {
-        let range = if self.selected_range.is_empty() {
-            previous_grapheme_boundary(&self.content, self.cursor_offset())..self.cursor_offset()
-        } else {
-            self.selected_range.clone()
-        };
-        self.replace_range(range, "", EditGroup::Backspace, cx);
-    }
-
-    fn delete(&mut self, _: &input::Delete, _: &mut Window, cx: &mut Context<Self>) {
-        let range = if self.selected_range.is_empty() {
-            self.cursor_offset()..next_grapheme_boundary(&self.content, self.cursor_offset())
-        } else {
-            self.selected_range.clone()
-        };
-        self.replace_range(range, "", EditGroup::Delete, cx);
-    }
-
-    fn delete_word_backward(
-        &mut self,
-        _: &input::DeleteWordBackward,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = if self.selected_range.is_empty() {
-            backward_word_deletion_start(&self.content, self.cursor_offset())..self.cursor_offset()
-        } else {
-            self.selected_range.clone()
-        };
-        self.replace_range(range, "", EditGroup::Isolated, cx);
-    }
-
-    fn delete_word_forward(
-        &mut self,
-        _: &input::DeleteWordForward,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = if self.selected_range.is_empty() {
-            self.cursor_offset()..forward_word_deletion_end(&self.content, self.cursor_offset())
-        } else {
-            self.selected_range.clone()
-        };
-        self.replace_range(range, "", EditGroup::Isolated, cx);
-    }
-
-    fn delete_to_line_start(
-        &mut self,
-        _: &input::DeleteToLineStart,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = if self.selected_range.is_empty() {
-            0..self.cursor_offset()
-        } else {
-            self.selected_range.clone()
-        };
-        self.replace_range(range, "", EditGroup::Isolated, cx);
-    }
-
-    fn delete_to_line_end(
-        &mut self,
-        _: &input::DeleteToLineEnd,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = if self.selected_range.is_empty() {
-            self.cursor_offset()..self.content.len()
-        } else {
-            self.selected_range.clone()
-        };
-        self.replace_range(range, "", EditGroup::Isolated, cx);
-    }
-
-    fn paste(&mut self, _: &input::Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            let text = text.replace(['\n', '\r'], " ");
-            self.replace_range(self.selected_range.clone(), &text, EditGroup::Isolated, cx);
-        }
-    }
-
-    fn undo(&mut self, _: &input::Undo, _: &mut Window, cx: &mut Context<Self>) {
-        let current = self.snapshot();
-        if let Some(snapshot) = self.history.undo(current) {
-            self.restore(snapshot, cx);
-        }
-    }
-
-    fn redo(&mut self, _: &input::Redo, _: &mut Window, cx: &mut Context<Self>) {
-        let current = self.snapshot();
-        if let Some(snapshot) = self.history.redo(current) {
-            self.restore(snapshot, cx);
-        }
-    }
-
-    fn remove_selected(&mut self, _: &menu::Remove, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_ix < self.match_count() {
+    fn remove_selected(&mut self, _: &menu::Remove, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_ix < self.delegate.match_count() {
             self.delegate.remove_match(self.selected_ix, cx);
-            self.update_matches();
+            let query = self.input.read(cx).value();
+            self.delegate.update_matches(query.as_ref());
+            self.clamp_selection();
+            self.sync_list_selection(window, cx);
             cx.notify();
         }
-    }
-
-    fn on_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.focus_handle.focus(window, cx);
-        self.drag_origin = Some(event.position);
-
-        if event.modifiers.shift {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
-        } else {
-            self.move_to(self.index_for_mouse_position(event.position), cx);
-        }
-        cx.stop_propagation();
-    }
-
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.drag_origin = None;
-        cx.stop_propagation();
-    }
-
-    fn on_mouse_down_out(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_selection(cx);
-    }
-
-    fn cancel_selection(&mut self, cx: &mut Context<Self>) {
-        self.drag_origin = None;
-        if !self.selected_range.is_empty() {
-            self.move_to(self.cursor_offset(), cx);
-        } else {
-            self.history.break_group();
-        }
-    }
-
-    fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.history.break_group();
-        let offset = offset.min(self.content.len());
-        self.selected_range = offset..offset;
-        self.selection_reversed = false;
-        cx.notify();
-    }
-
-    fn cursor_offset(&self) -> usize {
-        if self.selection_reversed {
-            self.selected_range.start
-        } else {
-            self.selected_range.end
-        }
-    }
-
-    fn index_for_mouse_position(&self, position: GpuiPoint<Pixels>) -> usize {
-        if self.content.is_empty() {
-            return 0;
-        }
-
-        let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
-        else {
-            return 0;
-        };
-
-        crate::text_input::index_for_mouse_position_with_scroll(
-            line,
-            *bounds,
-            position,
-            self.scroll_offset,
-        )
-    }
-
-    fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.history.break_group();
-        let offset = offset.min(self.content.len());
-        if self.selection_reversed {
-            self.selected_range.start = offset;
-        } else {
-            self.selected_range.end = offset;
-        };
-
-        if self.selected_range.end < self.selected_range.start {
-            self.selection_reversed = !self.selection_reversed;
-            self.selected_range = self.selected_range.end..self.selected_range.start;
-        }
-
-        cx.notify();
-    }
-
-    fn snapshot(&self) -> TextSnapshot {
-        TextSnapshot::new(
-            self.content.clone(),
-            self.selected_range.clone(),
-            self.selection_reversed,
-            self.marked_range.clone(),
-        )
-    }
-
-    fn restore(&mut self, snapshot: TextSnapshot, cx: &mut Context<Self>) {
-        self.content = snapshot.content;
-        self.selected_range = snapshot.selected_range;
-        self.selection_reversed = snapshot.selection_reversed;
-        self.marked_range = snapshot.marked_range;
-        self.update_matches();
-        cx.notify();
-    }
-
-    fn replace_range(
-        &mut self,
-        range: Range<usize>,
-        new_text: &str,
-        group: EditGroup,
-        cx: &mut Context<Self>,
-    ) {
-        let before = self.snapshot();
-        self.content =
-            (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
-        let cursor = range.start + new_text.len();
-        self.selected_range = cursor..cursor;
-        self.selection_reversed = false;
-        self.marked_range = None;
-        let after = self.snapshot();
-        self.history.record(before, &after, group);
-        self.update_matches();
-        cx.notify();
-    }
-
-    fn copy_selected_text(&self, cx: &mut Context<Self>) -> bool {
-        if self.selected_range.is_empty() {
-            return false;
-        }
-
-        cx.write_to_clipboard(ClipboardItem::new_string(
-            self.content[self.selected_range.clone()].to_string(),
-        ));
-        true
-    }
-
-    fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        range_to_utf16(&self.content, range)
-    }
-
-    fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
-        range_from_utf16(&self.content, range_utf16)
-    }
-}
-
-impl<D: PickerDelegate> EntityInputHandler for Picker<D> {
-    fn text_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        actual_range: &mut Option<Range<usize>>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<String> {
-        let range = self.range_from_utf16(&range_utf16);
-        actual_range.replace(self.range_to_utf16(&range));
-        Some(self.content[range].to_string())
-    }
-
-    fn selected_text_range(
-        &mut self,
-        _: bool,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        Some(UTF16Selection {
-            range: self.range_to_utf16(&self.selected_range),
-            reversed: self.selection_reversed,
-        })
-    }
-
-    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        self.marked_range
-            .as_ref()
-            .map(|range| self.range_to_utf16(range))
-    }
-
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
-        self.marked_range = None;
-        self.history.break_group();
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let group = if self.marked_range.is_some() {
-            EditGroup::Composition
-        } else {
-            EditGroup::Typing
-        };
-        let range = range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
-
-        self.replace_range(range, new_text, group, cx);
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        new_selected_range_utf16: Option<Range<usize>>,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
-        let selected_range_start = range.start;
-        let before = self.snapshot();
-
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
-        self.marked_range =
-            (!new_text.is_empty()).then_some(range.start..range.start + new_text.len());
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|range_utf16| {
-                let start = offset_from_utf16(new_text, range_utf16.start);
-                let end = offset_from_utf16(new_text, range_utf16.end);
-                selected_range_start + start..selected_range_start + end
-            })
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
-        self.selection_reversed = false;
-        let after = self.snapshot();
-        self.history.record(before, &after, EditGroup::Composition);
-        self.update_matches();
-        cx.notify();
-    }
-
-    fn bounds_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        bounds: Bounds<Pixels>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>> {
-        let last_layout = self.last_layout.as_ref()?;
-        let range = self.range_from_utf16(&range_utf16);
-        Some(Bounds::from_corners(
-            point(
-                bounds.left() + last_layout.x_for_index(range.start) - self.scroll_offset,
-                bounds.top(),
-            ),
-            point(
-                bounds.left() + last_layout.x_for_index(range.end) - self.scroll_offset,
-                bounds.bottom(),
-            ),
-        ))
-    }
-
-    fn character_index_for_point(
-        &mut self,
-        point: GpuiPoint<Pixels>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<usize> {
-        let bounds = self.last_bounds?;
-        let line = self.last_layout.as_ref()?;
-        let utf8_index = line.index_for_x(point.x - bounds.left() + self.scroll_offset)?;
-        Some(offset_to_utf16(&self.content, utf8_index))
     }
 }
 
 impl<D: PickerDelegate> EventEmitter<PickerEvent> for Picker<D> {}
 
 impl<D: PickerDelegate> Focusable for Picker<D> {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
-
-impl<D: PickerDelegate> crate::text_input::SingleLineInput for Picker<D> {
-    fn content(&self) -> &SharedString {
-        &self.content
-    }
-
-    fn placeholder(&self) -> SharedString {
-        self.delegate.placeholder()
-    }
-
-    fn mask(&self) -> bool {
-        false
-    }
-
-    fn selected_range(&self) -> &Range<usize> {
-        &self.selected_range
-    }
-
-    fn marked_range(&self) -> Option<&Range<usize>> {
-        self.marked_range.as_ref()
-    }
-
-    fn cursor_offset(&self) -> usize {
-        Self::cursor_offset(self)
-    }
-
-    fn scroll_offset(&self) -> Pixels {
-        self.scroll_offset
-    }
-
-    fn set_render_state(&mut self, layout: ShapedLine, bounds: Bounds<Pixels>, scroll: Pixels) {
-        self.last_layout = Some(layout);
-        self.last_bounds = Some(bounds);
-        self.scroll_offset = scroll;
-    }
-
-    fn set_scroll_offset(&mut self, scroll: Pixels) {
-        self.scroll_offset = scroll;
-    }
-
-    fn is_dragging(&self) -> bool {
-        self.drag_origin.is_some()
-    }
-
-    fn extend_selection_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.select_to(offset, cx);
-    }
-
-    fn end_drag(&mut self) {
-        self.drag_origin = None;
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.input.focus_handle(cx)
     }
 }
 
 impl<D: PickerDelegate> Render for Picker<D> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity();
-        let theme = cx.global::<SettingsStore>().resolved_theme;
-        let match_count = self.match_count();
-        let list_height = self.list_viewport_height();
-        let scroll_handle = self.list_scroll_handle.clone();
+        self.sync_list_selection(window, cx);
+
+        let match_count = self.delegate.match_count();
+        let list_height = if match_count == 0 {
+            44.0
+        } else {
+            self.delegate.row_height() * match_count.min(self.delegate.max_visible_matches()) as f32
+        };
 
         div()
             .key_context(self.delegate.key_context())
-            .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
             .w(px(self.delegate.width()))
-            .rounded(px(RADIUS_LG))
-            .border_1()
-            .border_color(rgb(theme.border_variant))
-            .shadow(modal_shadow(theme))
+            .max_h(px(INPUT_ROW_HEIGHT + list_height))
+            .popover_style(cx)
             .overflow_hidden()
-            .bg(rgb(theme.surface_background))
             .text_size(TextSize::Default.rems())
-            .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
-            .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_prev))
-            .on_action(cx.listener(Self::backspace))
-            .on_action(cx.listener(Self::delete))
-            .on_action(cx.listener(Self::delete_word_backward))
-            .on_action(cx.listener(Self::delete_word_forward))
-            .on_action(cx.listener(Self::delete_to_line_start))
-            .on_action(cx.listener(Self::delete_to_line_end))
-            .on_action(cx.listener(Self::left))
-            .on_action(cx.listener(Self::right))
-            .on_action(cx.listener(Self::word_left))
-            .on_action(cx.listener(Self::word_right))
-            .on_action(cx.listener(Self::home))
-            .on_action(cx.listener(Self::end))
-            .on_action(cx.listener(Self::document_start))
-            .on_action(cx.listener(Self::document_end))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::select_left))
-            .on_action(cx.listener(Self::select_right))
-            .on_action(cx.listener(Self::select_word_left))
-            .on_action(cx.listener(Self::select_word_right))
-            .on_action(cx.listener(Self::select_home))
-            .on_action(cx.listener(Self::select_end))
-            .on_action(cx.listener(Self::select_document_start))
-            .on_action(cx.listener(Self::select_document_end))
-            .on_action(cx.listener(Self::copy))
-            .on_action(cx.listener(Self::cut))
-            .on_action(cx.listener(Self::paste))
-            .on_action(cx.listener(Self::undo))
-            .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::remove_selected))
             .child(
                 div()
-                    .flex()
-                    .items_center()
                     .h(px(INPUT_ROW_HEIGHT))
-                    .px_3()
-                    .border_b(px(1.0))
-                    .border_color(rgb(theme.border_variant))
-                    .cursor(CursorStyle::IBeam)
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
-                    .child(SingleLineTextElement::new(entity)),
+                    .flex_none()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(Input::new(&self.input).appearance(false).px_2()),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .py(px(LIST_VERTICAL_PADDING))
-                    .when(match_count == 0, |this| {
-                        this.child(
-                            div()
-                                .h(px(44.0))
-                                .flex()
-                                .items_center()
-                                .px_3()
-                                .text_color(rgb(theme.text_muted))
-                                .child(self.delegate.empty_message()),
-                        )
-                    })
-                    .when(match_count > 0, |this| {
-                        this.child(
-                            div()
-                                .h(px(list_height))
-                                .overflow_hidden()
-                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                                .child(
-                                    uniform_list(
-                                        "picker-matches",
-                                        match_count,
-                                        cx.processor(
-                                            move |this, visible_range: Range<usize>, window, cx| {
-                                                let theme =
-                                                    cx.global::<SettingsStore>().resolved_theme;
-                                                let row_height = this.row_height();
-                                                let previous_focus_handle =
-                                                    this.previous_focus_handle.clone();
-
-                                                visible_range
-                                                    .map(|match_ix| {
-                                                        let selected = match_ix == this.selected_ix;
-                                                        let match_id =
-                                                            this.delegate.match_id(match_ix);
-                                                        div()
-                                                            .w_full()
-                                                            .h(px(row_height))
-                                                            .px_1()
-                                                            .text_size(TextSize::Default.rems())
-                                                            .cursor_pointer()
-                                                            .on_mouse_down(
-                                                                MouseButton::Left,
-                                                                cx.listener(
-                                                                    move |this, _, window, cx| {
-                                                                        this.selected_ix = match_ix;
-                                                                        this.confirm_selected(
-                                                                            window, cx,
-                                                                        );
-                                                                        cx.stop_propagation();
-                                                                    },
-                                                                ),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .id(match_id)
-                                                                    .flex()
-                                                                    .flex_row()
-                                                                    .items_center()
-                                                                    .justify_between()
-                                                                    .size_full()
-                                                                    .rounded(px(RADIUS_MD))
-                                                                    .px_2()
-                                                                    .bg(if selected {
-                                                                        rgb(theme.element_selected)
-                                                                    } else {
-                                                                        rgba(0x00000000)
-                                                                    })
-                                                                    .when(!selected, |this| {
-                                                                        this.hover(move |style| {
-                                                                            style
-                                                                                .bg(rgb(theme
-                                                                                    .element_hover))
-                                                                        })
-                                                                    })
-                                                                    .child(
-                                                                        this.delegate.render_match(
-                                                                            match_ix,
-                                                                            theme,
-                                                                            &previous_focus_handle,
-                                                                            window,
-                                                                        ),
-                                                                    ),
-                                                            )
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                            },
-                                        ),
-                                    )
-                                    .track_scroll(&scroll_handle)
-                                    .with_decoration(uniform_list_scrollbar_for(
-                                        &scroll_handle,
-                                        "picker-matches-scrollbar",
-                                        window,
-                                        cx,
-                                    ))
-                                    .size_full(),
-                                ),
-                        )
-                    }),
+                List::new(&self.list)
+                    .h(px(list_height))
+                    .max_h(px(list_height))
+                    .scrollbar_visible(true),
             )
+    }
+}
+
+struct PickerListDelegate<D: PickerDelegate> {
+    picker: WeakEntity<Picker<D>>,
+    selected_ix: Option<usize>,
+}
+
+impl<D: PickerDelegate> ListDelegate for PickerListDelegate<D> {
+    type Item = ListItem;
+
+    fn items_count(&self, _: usize, cx: &App) -> usize {
+        self.picker
+            .upgrade()
+            .map(|picker| picker.read(cx).delegate.match_count())
+            .unwrap_or(0)
+    }
+
+    fn render_item(
+        &mut self,
+        ix: IndexPath,
+        window: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> Option<Self::Item> {
+        let picker = self.picker.upgrade()?;
+        let picker = picker.read(cx);
+        let theme = cx.global::<SettingsStore>().resolved_theme;
+        let content =
+            picker
+                .delegate
+                .render_match(ix.row, theme, &picker.previous_focus_handle, window);
+
+        Some(
+            ListItem::new(picker.delegate.match_id(ix.row))
+                .h(px(picker.delegate.row_height()))
+                .child(content),
+        )
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> impl IntoElement {
+        let message = self
+            .picker
+            .upgrade()
+            .map(|picker| picker.read(cx).delegate.empty_message())
+            .unwrap_or_default();
+
+        div()
+            .h(px(44.0))
+            .w_full()
+            .flex()
+            .items_center()
+            .px_3()
+            .text_color(cx.theme().muted_foreground)
+            .child(message)
+    }
+
+    fn set_selected_index(
+        &mut self,
+        ix: Option<IndexPath>,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) {
+        self.selected_ix = ix.map(|ix| ix.row);
+    }
+
+    fn confirm(&mut self, _: bool, window: &mut Window, cx: &mut Context<ListState<Self>>) {
+        let Some(match_ix) = self.selected_ix else {
+            return;
+        };
+        _ = self.picker.update(cx, |picker, cx| {
+            picker.confirm_match(match_ix, window, cx);
+        });
+    }
+
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<ListState<Self>>) {
+        _ = self.picker.update(cx, |picker, cx| {
+            picker.dismiss(window, cx);
+        });
     }
 }
 
