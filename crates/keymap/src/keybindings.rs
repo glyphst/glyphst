@@ -46,6 +46,28 @@ pub fn capture_framework_bindings(cx: &mut App) {
     cx.set_global(FrameworkKeyBindings(bindings));
 }
 
+/// Install platform input bindings that Glyphst expects but gpui-component
+/// intentionally does not define outside macOS.
+pub fn install_input_compatibility_bindings(cx: &mut App) {
+    #[cfg(not(target_os = "macos"))]
+    {
+        use gpui_component::input::{
+            Copy, Cut, MoveToEnd, MoveToStart, Paste, SelectToEnd, SelectToStart,
+        };
+
+        const INPUT_CONTEXT: &str = "Input";
+        cx.bind_keys([
+            KeyBinding::new("shift-delete", Cut, Some(INPUT_CONTEXT)),
+            KeyBinding::new("ctrl-home", MoveToStart, Some(INPUT_CONTEXT)),
+            KeyBinding::new("ctrl-end", MoveToEnd, Some(INPUT_CONTEXT)),
+            KeyBinding::new("ctrl-shift-home", SelectToStart, Some(INPUT_CONTEXT)),
+            KeyBinding::new("ctrl-shift-end", SelectToEnd, Some(INPUT_CONTEXT)),
+            KeyBinding::new("ctrl-insert", Copy, Some(INPUT_CONTEXT)),
+            KeyBinding::new("shift-insert", Paste, Some(INPUT_CONTEXT)),
+        ]);
+    }
+}
+
 const OVERLAY_CONTEXTS: &[&str] = &[
     "GridOverview",
     "CommandPalette",

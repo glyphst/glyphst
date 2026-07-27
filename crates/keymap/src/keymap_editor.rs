@@ -9,6 +9,7 @@ use gpui::{
 use crate::{
     icons::{Icon, IconName},
     keybindings::{self, EditableKeyBinding, KeyBindingCategory},
+    keystroke_recorder::{KeystrokeRecorder, KeystrokeRecorderEvent},
     scrollbar::Scrollbar,
     settings::{Settings, SettingsStore, ui_rems},
 };
@@ -19,7 +20,7 @@ use gpui_component::{
     button::Button,
     dialog::DialogButtonProps,
     input::{Input, InputEvent, InputState},
-    kbd::{Kbd, KeystrokeRecorder, KeystrokeRecorderEvent},
+    kbd::Kbd,
     menu::{ContextMenuExt as _, PopupMenuItem},
 };
 

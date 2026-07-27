@@ -32,7 +32,7 @@ overflow. Structural and searchable-text validation reject incomplete output.
 
 ## Design reference
 
-The implementation is informed by the layout-preserving approach in the local
-`/home/meowking/proj/probe/retain-pdf` reference project. Glyphst keeps its own document model,
-protected-region policy, translation validation, and application adapter so its viewer workflow
-and sample-specific regressions remain first-class requirements.
+The implementation is informed by the layout-preserving approach in the
+`references/retain-pdf` submodule. Glyphst keeps its own document model, protected-region policy,
+translation validation, and application adapter so its viewer workflow and sample-specific
+regressions remain first-class requirements.

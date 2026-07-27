@@ -159,8 +159,15 @@ impl Render for AiPanel {
             .xsmall()
             .compact()
             .ghost()
-            .label(model_label.clone())
-            .truncate_label()
+            .flex_shrink_1()
+            .min_w_0()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(model_label.clone()),
+            )
             .tooltip(model_label)
             .dropdown_caret(true)
             .max_w(px(120.0));

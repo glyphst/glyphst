@@ -363,6 +363,12 @@ keymap-conflicting-bindings =
 keymap-context = Context: { $context }
 keymap-preset-modern = Modern
 keymap-preset-vim = Vim
+keymap-recorder-recording = Press a shortcut…
+keymap-recorder-placeholder = No shortcut recorded
+keymap-recorder-rec = REC
+keymap-recorder-stop = Stop
+keymap-recorder-clear = Clear
+keymap-recorder-record = Record
 
 ## Thinking levels
 

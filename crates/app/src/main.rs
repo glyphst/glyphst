@@ -48,6 +48,7 @@ fn main() {
         .with_assets(assets::Assets::default())
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
+            keybindings::install_input_compatibility_bindings(cx);
             keybindings::capture_framework_bindings(cx);
 
             if let Err(error) = fonts::load_embedded_fonts(cx) {

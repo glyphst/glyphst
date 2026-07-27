@@ -339,6 +339,12 @@ keymap-conflicting-bindings = 存在 { $count } 个使用相同按键的绑定�
 keymap-context = 上下文：{ $context }
 keymap-preset-modern = 现代
 keymap-preset-vim = Vim
+keymap-recorder-recording = 请按快捷键…
+keymap-recorder-placeholder = 尚未录制快捷键
+keymap-recorder-rec = 录制
+keymap-recorder-stop = 停止
+keymap-recorder-clear = 清除
+keymap-recorder-record = 录制
 
 ## Thinking levels
 

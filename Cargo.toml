@@ -35,8 +35,8 @@ gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", defaul
     "wayland",
     "x11",
 ] }
-gpui_component = { git = "https://github.com/Ziqi-Yang/gpui-component", rev = "962db85879db898c51e61eb64cc4f5b2769d93c0", package = "gpui-component" }
-gpui_component_assets = { git = "https://github.com/Ziqi-Yang/gpui-component", rev = "962db85879db898c51e61eb64cc4f5b2769d93c0", package = "gpui-component-assets" }
+gpui_component = { git = "ssh://gitea@10.126.126.2/glyphst/gpui-component.git", rev = "c793cd6db28ca98472700e86db09cf8491d5b705", package = "gpui-component" }
+gpui_component_assets = { git = "ssh://gitea@10.126.126.2/glyphst/gpui-component.git", rev = "c793cd6db28ca98472700e86db09cf8491d5b705", package = "gpui-component-assets" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", default-features = false, features = [
     "font-kit",
     "wayland",
