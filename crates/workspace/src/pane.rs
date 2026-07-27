@@ -645,12 +645,29 @@ impl Pane {
         &mut self,
         dragged_tab: &DraggedTab,
         to: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(from) = self.tab_ix_for_entity_id(dragged_tab.tab_id) else {
             return;
         };
+        if from == to.min(self.tabs.len().saturating_sub(1)) {
+            self.activate_tab(from, window, cx);
+            return;
+        }
         self.move_tab(from, to, cx);
+    }
+
+    pub(crate) fn activate_dragged_tab(
+        &mut self,
+        dragged_tab: &DraggedTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_ix) = self.tab_ix_for_entity_id(dragged_tab.tab_id) else {
+            return;
+        };
+        self.activate_tab(tab_ix, window, cx);
     }
 
     pub(crate) fn flush_all_tabs(&mut self, cx: &mut Context<Self>) {

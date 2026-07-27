@@ -1026,6 +1026,7 @@ pub struct DocumentView {
     target_scroll_y_doc: f32,
     document_scroll: ManualScrollHandle,
     ai_panel: Option<Entity<AiPanel>>,
+    ai_panel_visible: bool,
     quick_ask: Option<Entity<AiPanel>>,
     quick_ask_visible: bool,
     search_bar: Option<Entity<SearchBar>>,

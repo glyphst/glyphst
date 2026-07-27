@@ -3,7 +3,7 @@ use std::fs;
 use gpui::{AppContext as _, TestAppContext};
 use gpui_component::Root;
 
-use super::{Pane, Tab};
+use super::{DraggedTab, Pane, Tab};
 use crate::{document_view::RenderCache, library::LibraryStore, settings::SettingsStore};
 use glyphst_translation_ui::DocumentTranslationJobManager;
 
@@ -139,4 +139,45 @@ fn successful_document_preparation_replaces_the_loading_tab(cx: &mut TestAppCont
     });
 
     fs::remove_file(path).unwrap();
+}
+
+#[gpui::test]
+fn no_op_tab_drag_activates_the_dragged_tab(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        cx.set_global(SettingsStore::memory());
+        cx.set_global(LibraryStore::memory());
+        cx.set_global(RenderCache::new());
+    });
+    let jobs = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs.clone()));
+        Root::new(pane, window, cx)
+    });
+    let pane = root.read_with(cx, |root, _| {
+        root.view().clone().downcast::<Pane>().unwrap()
+    });
+    let source_pane = pane.clone();
+
+    pane.update_in(cx, |pane, window, cx| {
+        pane.open_new_tab(window, cx);
+        pane.open_new_tab(window, cx);
+        assert_eq!(pane.active_tab_ix(), 1);
+
+        let dragged_tab = DraggedTab {
+            source_window: window.window_handle().downcast::<Root>().unwrap(),
+            source_pane: source_pane.clone(),
+            ix: 0,
+            tab_id: Pane::tab_entity_id(&pane.tabs[0]),
+            label: "First tab".into(),
+        };
+
+        pane.move_dragged_tab(&dragged_tab, 0, window, cx);
+        assert_eq!(pane.active_tab_ix(), 0);
+
+        pane.activate_tab(1, window, cx);
+        pane.activate_dragged_tab(&dragged_tab, window, cx);
+        assert_eq!(pane.active_tab_ix(), 0);
+    });
 }

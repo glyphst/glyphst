@@ -1,7 +1,37 @@
 use super::helpers::*;
 use super::*;
 use glyphst_core::{PageIndex, PageRegion};
-use gpui::TestAppContext;
+use gpui::{TestAppContext, point, px};
+use gpui_component::Root;
+
+#[derive(Clone, Copy)]
+struct EmptyAiContextProvider;
+
+impl AiContextProvider for EmptyAiContextProvider {
+    fn context(&self, _: bool, _: &App) -> Option<AiContext> {
+        Some(AiContext::default())
+    }
+
+    fn page_state(&self, _: &App) -> Option<AiPageState> {
+        Some(AiPageState::default())
+    }
+
+    fn resolve_page_references(
+        &self,
+        _: Vec<MentionReference>,
+        _: &App,
+    ) -> Task<Result<Vec<ResolvedPageContext>>> {
+        Task::ready(Ok(Vec::new()))
+    }
+
+    fn resolve_region_references(
+        &self,
+        _: Vec<RegionImageReference>,
+        _: &App,
+    ) -> Task<Result<Vec<ResolvedRegionContext>>> {
+        Task::ready(Ok(Vec::new()))
+    }
+}
 
 struct MessageScrollTestView {
     handle: ScrollHandle,
@@ -173,6 +203,57 @@ fn message_scrollbar_host_preserves_item_targeting() {
         message_scroll_item_offset(vec![px(100.0); 4], 1),
         px(-112.0)
     );
+}
+
+#[gpui::test]
+fn clicking_outside_an_edited_user_message_cancels_editing(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        install_test_settings(cx);
+        cx.set_global(LibraryStore::memory());
+    });
+
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let previous_focus_handle = cx.focus_handle();
+        let panel = cx.new(|cx| {
+            AiPanel::new(
+                previous_focus_handle,
+                EmptyAiContextProvider,
+                PathBuf::from("/tmp/editing-test.pdf"),
+                AiPageState {
+                    page_count: 1,
+                    current_page: 1,
+                },
+                AI_PANEL_WIDTH,
+                window,
+                cx,
+            )
+        });
+        panel.update(cx, |panel, cx| {
+            let message = ChatMessage::user_text("Edit me".to_string());
+            panel
+                .markdown_views
+                .push(cx.new(|cx| Markdown::new(message.display_text().into(), cx)));
+            panel.messages.push(message);
+            panel.start_editing_message(0, window, cx);
+        });
+        Root::new(panel, window, cx)
+    });
+    let panel = root.read_with(cx, |root, _| {
+        root.view().clone().downcast::<AiPanel>().unwrap()
+    });
+
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    panel.read_with(cx, |panel, _| {
+        assert!(panel.editing_turn.is_some());
+    });
+
+    cx.simulate_click(point(px(8.0), px(8.0)), gpui::Modifiers::default());
+
+    panel.read_with(cx, |panel, _| {
+        assert!(panel.editing_turn.is_none());
+    });
 }
 
 #[test]

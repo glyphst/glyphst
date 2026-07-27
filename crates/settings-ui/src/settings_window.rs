@@ -23,7 +23,6 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, Root, Sizable as _, Size, TitleBar, WindowExt as _,
-    button::Button,
     group_box::GroupBoxVariant,
     notification::Notification,
     setting::{SelectIndex, Settings as ComponentSettings},
@@ -836,6 +835,8 @@ impl Render for SettingsWindow {
             .pages(self.setting_pages(cx));
         let background_activity =
             ActivityCenter::try_global(cx).and_then(|center| center.read(cx).render_activity());
+        let show_footer =
+            background_activity.is_some() || self.status.is_some() || self.save_error.is_some();
         div()
             .key_context("SettingsPanel")
             .track_focus(&self.focus_handle)
@@ -874,42 +875,28 @@ impl Render for SettingsWindow {
                 ),
             )
             .child(div().flex_1().min_h_0().child(settings))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_none()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .child(div().when_some(background_activity, |this, activity| {
-                                this.child(activity)
-                            }))
-                            .child(
-                                Button::new("settings-export")
-                                    .label(crate::fl!("export"))
-                                    .outline()
-                                    .small()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.export(window, cx);
-                                    })),
-                            ),
-                    )
-                    .when_some(self.status.clone(), |this, status| {
-                        this.child(div().text_color(cx.theme().success).child(status))
-                    })
-                    .when_some(self.save_error.clone(), |this, error| {
-                        this.child(div().text_color(cx.theme().danger).child(error))
-                    }),
-            )
+            .when(show_footer, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_none()
+                        .gap_2()
+                        .px_4()
+                        .py_3()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .when_some(background_activity, |this, activity| {
+                            this.child(div().flex().items_center().child(activity))
+                        })
+                        .when_some(self.status.clone(), |this, status| {
+                            this.child(div().text_color(cx.theme().success).child(status))
+                        })
+                        .when_some(self.save_error.clone(), |this, error| {
+                            this.child(div().text_color(cx.theme().danger).child(error))
+                        }),
+                )
+            })
             .children(root_overlays)
     }
 }

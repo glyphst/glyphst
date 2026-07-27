@@ -26,7 +26,7 @@ impl DocumentView {
         cx: &mut Context<Self>,
     ) -> Entity<ResizableState> {
         let left_sidebar = self.active_left_sidebar();
-        let ai_panel_open = self.ai_panel.is_some();
+        let ai_panel_open = self.ai_panel_visible;
 
         let Some(state) = self.sidebar_resizable_state.clone() else {
             let state = cx.new(|_| ResizableState::default());
@@ -34,7 +34,7 @@ impl DocumentView {
                 let sizes = state.read(cx).sizes().clone();
                 this.apply_resized_sidebar_widths(
                     this.active_left_sidebar(),
-                    this.ai_panel.is_some(),
+                    this.ai_panel_visible,
                     &sizes,
                     cx,
                 );

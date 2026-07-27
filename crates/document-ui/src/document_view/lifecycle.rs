@@ -175,6 +175,7 @@ impl DocumentView {
             target_scroll_y_doc: 0.0,
             document_scroll: ManualScrollHandle::new(),
             ai_panel: None,
+            ai_panel_visible: false,
             quick_ask: None,
             quick_ask_visible: false,
             search_bar: None,

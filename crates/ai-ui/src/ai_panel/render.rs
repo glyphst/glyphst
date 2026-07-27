@@ -309,7 +309,6 @@ impl Render for AiPanel {
                                 } else {
                                     theme.foreground
                                 },
-                                theme,
                                 |this, window, cx| this.new_session(window, cx),
                                 cx,
                             ))
@@ -326,7 +325,6 @@ impl Render for AiPanel {
                                 } else {
                                     theme.muted_foreground
                                 },
-                                theme,
                                 |this, window, cx| {
                                     if this.view == AiPanelView::Sessions {
                                         this.show_chat(cx);
@@ -341,7 +339,6 @@ impl Render for AiPanel {
                                 IconName::X,
                                 tr("ai-close-panel"),
                                 theme.muted_foreground,
-                                theme,
                                 |this, window, cx| this.dismiss(window, cx),
                                 cx,
                             )),
@@ -393,7 +390,6 @@ impl Render for AiPanel {
                                         IconName::ChevronDown,
                                         tr("ai-scroll-bottom"),
                                         theme.muted_foreground,
-                                        theme,
                                         |this, _, cx| this.scroll_to_bottom(cx),
                                         cx,
                                     )

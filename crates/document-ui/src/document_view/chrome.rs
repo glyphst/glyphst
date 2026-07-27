@@ -155,7 +155,9 @@ impl DocumentView {
             ),
         );
 
-        if let Some(panel) = self.ai_panel.clone() {
+        if self.ai_panel_visible
+            && let Some(panel) = self.ai_panel.clone()
+        {
             panels.push(
                 resizable_panel()
                     .size(px(self.ai_panel_width))

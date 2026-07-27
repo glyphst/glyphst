@@ -165,7 +165,7 @@ impl DocumentView {
         if self.notes_sidebar_open {
             sidebar_total += self.notes_sidebar_width + 1.0;
         }
-        if self.ai_panel.is_some() {
+        if self.ai_panel_visible {
             sidebar_total += self.ai_panel_width + 1.0;
         }
         (window_width - sidebar_total).max(0.0)

@@ -229,7 +229,6 @@ impl AiPanel {
                         IconName::Stop,
                         tr("ai-stop-generation"),
                         theme.danger,
-                        theme,
                         |this, _, cx| {
                             this.stop_generation(cx);
                         },
@@ -307,7 +306,6 @@ impl AiPanel {
                                         } else {
                                             theme.muted_foreground
                                         },
-                                        theme,
                                         move |this, _, cx| this.copy_message(index, cx),
                                         cx,
                                     )
@@ -353,13 +351,11 @@ impl AiPanel {
         icon: IconName,
         tooltip: String,
         icon_color: Hsla,
-        theme: Theme,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> Button {
         toolbar_icon_button(id, icon)
             .text_color(icon_color)
-            .hover(move |style| style.bg(theme.list_hover))
             .tooltip(tooltip)
             .on_click(cx.listener(move |this, _, window, cx| {
                 handler(this, window, cx);
@@ -402,6 +398,7 @@ impl AiPanel {
         let has_later_messages = message_index + 1 < self.messages.len();
         let copied = self.copied_target == Some(CopyFeedbackTarget::Message(message_index));
         let row_width = (panel_width - 24.0).max(160.0);
+        let edit_panel = entity.clone();
 
         let message_entity = entity.clone();
         let message_content = MarkdownElement::new(
@@ -436,7 +433,6 @@ impl AiPanel {
             } else {
                 theme.muted_foreground
             },
-            theme,
             move |this, _, cx| this.copy_message(message_index, cx),
             cx,
         );
@@ -451,7 +447,6 @@ impl AiPanel {
                     IconName::X,
                     tr("cancel"),
                     theme.danger,
-                    theme,
                     |this, window, cx| {
                         this.cancel_editing(window, cx);
                     },
@@ -462,7 +457,6 @@ impl AiPanel {
                     IconName::Return,
                     tr("ai-submit-edit"),
                     theme.muted_foreground,
-                    theme,
                     |this, window, cx| this.submit_edited_message(window, cx),
                     cx,
                 ))
@@ -479,7 +473,6 @@ impl AiPanel {
                         IconName::Pencil,
                         tr("edit"),
                         theme.muted_foreground,
-                        theme,
                         move |this, window, cx| {
                             this.start_editing_message(message_index, window, cx)
                         },
@@ -494,7 +487,6 @@ impl AiPanel {
                             tr("ai-regenerate-from-message")
                         },
                         theme.muted_foreground,
-                        theme,
                         move |this, window, cx| {
                             this.regenerate_from_user(message_index, window, cx)
                         },
@@ -510,7 +502,6 @@ impl AiPanel {
                         tr("ai-retry-response")
                     },
                     theme.muted_foreground,
-                    theme,
                     move |this, window, cx| this.retry_assistant(message_index, window, cx),
                     cx,
                 ));
@@ -546,6 +537,13 @@ impl AiPanel {
                         );
                     }),
                 )
+            })
+            .when(is_editing, |this| {
+                this.on_mouse_down_out(move |_, window, cx| {
+                    edit_panel.update(cx, |this, cx| {
+                        this.cancel_editing(window, cx);
+                    });
+                })
             })
             .when(is_user && can_mutate && !blocked, |this| {
                 this.on_double_click(cx.listener(move |this, _, window, cx| {
@@ -667,7 +665,6 @@ impl AiPanel {
                         } else {
                             theme.muted_foreground
                         },
-                        theme,
                         |this, _, cx| this.copy_generation_error(cx),
                         cx,
                     ))
@@ -676,7 +673,6 @@ impl AiPanel {
                         IconName::RotateCcw,
                         tr("ai-retry-response"),
                         theme.muted_foreground,
-                        theme,
                         move |this, window, cx| this.retry_assistant(assistant_index, window, cx),
                         cx,
                     ))
@@ -685,7 +681,6 @@ impl AiPanel {
                         IconName::X,
                         tr("ai-dismiss-error"),
                         theme.muted_foreground,
-                        theme,
                         |this, _, cx| this.dismiss_generation_error(cx),
                         cx,
                     )),
@@ -753,7 +748,6 @@ impl AiPanel {
                 } else {
                     theme.muted_foreground
                 },
-                theme,
                 move |this, _, cx| this.copy_message(assistant_index, cx),
                 cx,
             ))
@@ -762,7 +756,6 @@ impl AiPanel {
                 IconName::Return,
                 tr("ai-scroll-latest-user"),
                 theme.muted_foreground,
-                theme,
                 |this, _, cx| this.scroll_to_latest_user(cx),
                 cx,
             ))
@@ -771,7 +764,6 @@ impl AiPanel {
                 IconName::ArrowUp,
                 tr("ai-scroll-top"),
                 theme.muted_foreground,
-                theme,
                 |this, _, cx| this.scroll_to_top(cx),
                 cx,
             ))

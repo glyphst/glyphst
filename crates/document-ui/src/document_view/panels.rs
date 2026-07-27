@@ -112,8 +112,16 @@ impl DocumentView {
     }
 
     pub(super) fn toggle_ai_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.ai_panel.is_some() {
-            self.close_ai_panel(window, cx);
+        if let Some(panel) = self.ai_panel.clone() {
+            if self.ai_panel_visible {
+                self.close_ai_panel(window, cx);
+            } else {
+                self.close_all_overlays(window, cx);
+                self.clamp_ai_panel_width(window, cx);
+                self.ai_panel_visible = true;
+                panel.focus_handle(cx).focus(window, cx);
+                cx.notify();
+            }
             return;
         }
 
@@ -150,12 +158,16 @@ impl DocumentView {
 
         panel.focus_handle(cx).focus(window, cx);
         self.ai_panel = Some(panel);
+        self.ai_panel_visible = true;
         cx.notify();
     }
 
     fn close_ai_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(panel) = self.ai_panel.take() {
-            panel.update(cx, |panel, cx| panel.save_current_session(cx));
+        if self.ai_panel_visible {
+            if let Some(panel) = &self.ai_panel {
+                panel.update(cx, |panel, cx| panel.save_current_session(cx));
+            }
+            self.ai_panel_visible = false;
             self.focus_handle.focus(window, cx);
             cx.notify();
         }

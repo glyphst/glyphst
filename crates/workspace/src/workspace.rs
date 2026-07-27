@@ -1040,13 +1040,17 @@ impl Workspace {
             && matches!(target, PaneDropTarget::Tab(_) | PaneDropTarget::Append)
         {
             let to = self.drop_index(target_pane, &target, cx);
-            target_pane.update(cx, |pane, cx| pane.move_dragged_tab(dragged_tab, to, cx));
+            target_pane.update(cx, |pane, cx| {
+                pane.move_dragged_tab(dragged_tab, to, window, cx)
+            });
             return;
         }
         if dragged_tab.source_pane == *target_pane
             && matches!(target, PaneDropTarget::Content(None))
         {
-            target_pane.update(cx, |pane, cx| pane.focus(window, cx));
+            target_pane.update(cx, |pane, cx| {
+                pane.activate_dragged_tab(dragged_tab, window, cx)
+            });
             return;
         }
 

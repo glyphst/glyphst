@@ -16,6 +16,24 @@ impl SettingsWindow {
         let view = cx.entity();
         let defaults = Settings::default();
 
+        let export_settings = SettingItem::new(
+            crate::fl!("settings-export"),
+            SettingField::render({
+                let view = view.clone();
+                move |options, _, _| {
+                    let view = view.clone();
+                    Button::new("settings-export")
+                        .label(crate::fl!("export"))
+                        .outline()
+                        .with_size(options.size)
+                        .on_click(move |_, window, cx| {
+                            view.update(cx, |this, cx| this.export(window, cx));
+                        })
+                }
+            }),
+        )
+        .description(crate::fl!("settings-export-description"));
+
         let language = SettingItem::new(
             crate::fl!("settings-language"),
             SettingField::dropdown(
@@ -460,6 +478,9 @@ impl SettingsWindow {
                 SettingGroup::new()
                     .title(crate::fl!("settings-section-tabs"))
                     .item(tab_bar),
+                SettingGroup::new()
+                    .title(crate::fl!("settings-section-general"))
+                    .item(export_settings),
             ])
     }
 

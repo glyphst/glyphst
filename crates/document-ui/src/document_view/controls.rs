@@ -93,7 +93,7 @@ impl DocumentView {
         Self::render_footbar_icon_button(
             "footbar-ai",
             IconName::Bot,
-            self.ai_panel.is_some(),
+            self.ai_panel_visible,
             |this, window, cx| this.toggle_ai_panel(window, cx),
             cx,
         )
