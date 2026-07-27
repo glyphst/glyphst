@@ -141,6 +141,7 @@ pub(crate) enum PaneDropTarget {
 #[derive(Clone)]
 pub(crate) enum PaneEvent {
     Activate,
+    OpenFile,
     OpenDocument {
         path: PathBuf,
         position: Option<DocumentPosition>,
@@ -807,12 +808,16 @@ impl Pane {
                 if !pane.has_tab_id(new_tab_id) {
                     return;
                 }
-                let NewTabEvent::OpenDocument(path) = event;
-                cx.emit(PaneEvent::OpenDocument {
-                    path: path.clone(),
-                    position: None,
-                    replace_active_new_tab: true,
-                });
+                match event {
+                    NewTabEvent::OpenFile => cx.emit(PaneEvent::OpenFile),
+                    NewTabEvent::OpenDocument(path) => {
+                        cx.emit(PaneEvent::OpenDocument {
+                            path: path.clone(),
+                            position: None,
+                            replace_active_new_tab: true,
+                        });
+                    }
+                }
             },
         )
         .detach();

@@ -286,6 +286,10 @@ impl Workspace {
                         cx.notify();
                     }
                 }
+                PaneEvent::OpenFile => {
+                    this.active_pane = pane_for_events.clone();
+                    this.open_file(window, cx);
+                }
                 PaneEvent::OpenDocument {
                     path,
                     position,

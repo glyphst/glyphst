@@ -101,6 +101,33 @@ fn removes_missing_history_entries() {
 }
 
 #[test]
+fn removing_history_entries_never_deletes_document_files() {
+    let database_path = temp_library_path("remove-history-only");
+    let document_path = temp_library_path("recent-document").with_extension("pdf");
+    fs::write(&document_path, b"%PDF-1.4\n").unwrap();
+
+    {
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        store.record_history(&document_path, position(1));
+        assert_eq!(
+            store
+                .remove_history_entries(std::slice::from_ref(&document_path))
+                .unwrap(),
+            1
+        );
+        assert!(store.history_entries().is_empty());
+        assert!(document_path.is_file());
+    }
+
+    let reopened = LibraryStore::open(database_path.clone()).unwrap();
+    assert!(reopened.history_entries().is_empty());
+    assert!(document_path.is_file());
+
+    let _ = fs::remove_file(database_path);
+    let _ = fs::remove_file(document_path);
+}
+
+#[test]
 fn persists_history_bookmarks_and_highlights() {
     let path = temp_library_path("round-trip");
     let document_path = Path::new("/tmp/a.pdf");

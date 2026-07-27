@@ -7,6 +7,7 @@ pub struct Settings {
     pub font: FontSettings,
     pub window: WindowSettings,
     pub tab_bar_visibility: TabBarVisibility,
+    pub new_tab: NewTabSettings,
     pub language: AppLanguage,
     pub ai: AiSettings,
     pub translation: TranslationSettings,
@@ -166,6 +167,15 @@ impl Settings {
                 .and_then(TabBarVisibility::from_str)
         {
             settings.tab_bar_visibility = value;
+        }
+
+        if let Some(new_tab) = document.get("new_tab").and_then(KdlNode::children)
+            && let Some(value) = new_tab
+                .get_arg("view_mode")
+                .and_then(KdlValue::as_string)
+                .and_then(NewTabViewMode::from_str)
+        {
+            settings.new_tab.view_mode = value;
         }
 
         if let Some(ai) = document.get("ai").and_then(KdlNode::children) {
@@ -543,6 +553,15 @@ impl Settings {
             self.tab_bar_visibility.as_str(),
         );
         document.nodes_mut().push(tabs);
+
+        let mut new_tab = KdlNode::new("new_tab");
+        let new_tab_children = new_tab.ensure_children();
+        push_value_node(
+            new_tab_children,
+            "view_mode",
+            self.new_tab.view_mode.as_str(),
+        );
+        document.nodes_mut().push(new_tab);
 
         if self.ai != AiSettings::default() {
             let mut ai = KdlNode::new("ai");

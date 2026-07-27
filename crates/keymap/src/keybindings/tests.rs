@@ -269,3 +269,38 @@ fn vim_ctrl_r_still_dispatches_reload() {
         Reload::name_for_type()
     );
 }
+
+#[test]
+fn new_tab_navigation_uses_native_and_vim_defaults() {
+    let modern = preset_keymap(KeymapPreset::Modern);
+    assert_eq!(
+        first_action_for(&modern, "down", &["NewTab"]),
+        CursorDown::name_for_type()
+    );
+    assert_eq!(
+        first_action_for(&modern, "shift-down", &["NewTab"]),
+        ExtendSelectionDown::name_for_type()
+    );
+    assert_eq!(
+        first_action_for(&modern, "enter", &["NewTab"]),
+        ActivateFocused::name_for_type()
+    );
+    assert_eq!(
+        first_action_for(&modern, "primary-a", &["NewTab"]),
+        NewTabSelectAll::name_for_type()
+    );
+
+    let vim = preset_keymap(KeymapPreset::Vim);
+    assert_eq!(
+        first_action_for(&vim, "j", &["NewTab"]),
+        CursorDown::name_for_type()
+    );
+    assert_eq!(
+        first_action_for(&vim, "g g", &["NewTab"]),
+        CursorFirst::name_for_type()
+    );
+    assert_eq!(
+        first_action_for(&vim, "shift-g", &["NewTab"]),
+        CursorLast::name_for_type()
+    );
+}

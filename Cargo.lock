@@ -2873,6 +2873,7 @@ name = "glyphst-workspace"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "glyphst-actions",
  "glyphst-core",
  "glyphst-document-ui",

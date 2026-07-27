@@ -294,13 +294,24 @@ language-simplified-chinese = 简体中文
 ## New tab
 
 new-tab-title = 新标签页
-new-tab-empty-title = 无最近 PDF
-new-tab-empty-description = 打开 PDF 后会添加到历史记录。
+new-tab-empty-title = 无最近文档
+new-tab-empty-description = 打开文档后会添加到历史记录。
+new-tab-open-file = 打开文件
 new-tab-last-read = 上次阅读：第 { $page } 页
 new-tab-last-read-progress = 上次阅读：{ $progress }%
+new-tab-progress-page = 第 { $page } 页
 new-tab-preview-unavailable = 预览不可用
 new-tab-recent-pdfs = 最近的文档
 new-tab-rendering-preview = 正在渲染预览…
+new-tab-view-grid = 网格
+new-tab-view-list = 列表
+new-tab-view-details = 详细信息
+new-tab-column-name = 名称
+new-tab-column-location = 位置
+new-tab-column-format-size = 格式 / 大小
+new-tab-column-last-opened = 上次打开
+new-tab-column-progress = 阅读进度
+new-tab-remove-from-recents = 从最近记录中移除
 
 ## Notes
 
@@ -474,8 +485,23 @@ keybinding-command-page-overview-grid-overview-confirm = 打开选中页面
 keybinding-command-page-overview-toggle-grid-overview = 关闭页面概览
 keybinding-command-new-tab-scroll-line-down = 向下滚动一行
 keybinding-command-new-tab-scroll-line-up = 向上滚动一行
+keybinding-command-new-tab-cursor-up = 向上移动焦点
+keybinding-command-new-tab-cursor-down = 向下移动焦点
+keybinding-command-new-tab-cursor-left = 向左移动焦点
+keybinding-command-new-tab-cursor-right = 向右移动焦点
+keybinding-command-new-tab-cursor-first = 将焦点移到第一项
+keybinding-command-new-tab-cursor-last = 将焦点移到最后一项
+keybinding-command-new-tab-extend-selection-up = 向上扩展选择
+keybinding-command-new-tab-extend-selection-down = 向下扩展选择
+keybinding-command-new-tab-extend-selection-left = 向左扩展选择
+keybinding-command-new-tab-extend-selection-right = 向右扩展选择
+keybinding-command-new-tab-extend-selection-first = 将选择扩展到第一项
+keybinding-command-new-tab-extend-selection-last = 将选择扩展到最后一项
+keybinding-command-new-tab-activate-focused = 打开焦点项
+keybinding-command-new-tab-toggle-focused = 切换焦点项的选择
+keybinding-command-new-tab-select-all = 选择所有最近文档
 keybinding-command-new-tab-next-half-page = 下半页
 keybinding-command-new-tab-previous-half-page = 上半页
 keybinding-command-new-tab-enter-select = 进入选择模式
 keybinding-command-new-tab-cancel-select = 取消选择
-keybinding-command-new-tab-delete-selected = 删除所选项
+keybinding-command-new-tab-delete-selected = 从最近记录中移除所选项

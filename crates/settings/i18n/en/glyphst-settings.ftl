@@ -314,13 +314,24 @@ language-simplified-chinese = Simplified Chinese
 ## New tab
 
 new-tab-title = New Tab
-new-tab-empty-title = No recent PDFs
-new-tab-empty-description = Open a PDF to add it to history.
+new-tab-empty-title = No recent documents
+new-tab-empty-description = Open a document to add it to history.
+new-tab-open-file = Open File
 new-tab-last-read = Last read: p. { $page }
 new-tab-last-read-progress = Last read: { $progress }%
+new-tab-progress-page = p. { $page }
 new-tab-preview-unavailable = Preview unavailable
 new-tab-recent-pdfs = Recent Documents
 new-tab-rendering-preview = Rendering preview…
+new-tab-view-grid = Grid
+new-tab-view-list = List
+new-tab-view-details = Details
+new-tab-column-name = Name
+new-tab-column-location = Location
+new-tab-column-format-size = Format / Size
+new-tab-column-last-opened = Last Opened
+new-tab-column-progress = Progress
+new-tab-remove-from-recents = Remove from Recents
 
 ## Notes
 
@@ -498,8 +509,23 @@ keybinding-command-page-overview-grid-overview-confirm = Open Selected Page
 keybinding-command-page-overview-toggle-grid-overview = Close Page Overview
 keybinding-command-new-tab-scroll-line-down = Scroll Line Down
 keybinding-command-new-tab-scroll-line-up = Scroll Line Up
+keybinding-command-new-tab-cursor-up = Move Focus Up
+keybinding-command-new-tab-cursor-down = Move Focus Down
+keybinding-command-new-tab-cursor-left = Move Focus Left
+keybinding-command-new-tab-cursor-right = Move Focus Right
+keybinding-command-new-tab-cursor-first = Move Focus to First Item
+keybinding-command-new-tab-cursor-last = Move Focus to Last Item
+keybinding-command-new-tab-extend-selection-up = Extend Selection Up
+keybinding-command-new-tab-extend-selection-down = Extend Selection Down
+keybinding-command-new-tab-extend-selection-left = Extend Selection Left
+keybinding-command-new-tab-extend-selection-right = Extend Selection Right
+keybinding-command-new-tab-extend-selection-first = Extend Selection to First Item
+keybinding-command-new-tab-extend-selection-last = Extend Selection to Last Item
+keybinding-command-new-tab-activate-focused = Open Focused Item
+keybinding-command-new-tab-toggle-focused = Toggle Focused Item
+keybinding-command-new-tab-select-all = Select All Recent Documents
 keybinding-command-new-tab-next-half-page = Next Half Page
 keybinding-command-new-tab-previous-half-page = Previous Half Page
 keybinding-command-new-tab-enter-select = Enter Selection Mode
 keybinding-command-new-tab-cancel-select = Cancel Selection
-keybinding-command-new-tab-delete-selected = Delete Selected
+keybinding-command-new-tab-delete-selected = Remove Selected from Recents

@@ -31,6 +31,7 @@ anyhow = "1"
 arboard = { version = "3", features = ["wayland-data-control"] }
 base64 = "0.22"
 bincode = "1.3"
+chrono = "0.4"
 dirs = "6"
 futures = "0.3"
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", default-features = false, features = [

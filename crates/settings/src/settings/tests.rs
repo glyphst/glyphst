@@ -214,6 +214,47 @@ tabs {
 }
 
 #[test]
+fn parses_and_exports_new_tab_view_mode() {
+    for (value, expected) in [
+        ("grid", NewTabViewMode::Grid),
+        ("list", NewTabViewMode::List),
+        ("details", NewTabViewMode::Details),
+    ] {
+        let settings = parse_settings(&format!(
+            r#"
+new_tab {{
+    view_mode "{value}"
+}}
+"#
+        ))
+        .unwrap();
+
+        assert_eq!(settings.new_tab.view_mode, expected);
+        assert_eq!(
+            parse_settings(&settings.to_kdl_string())
+                .unwrap()
+                .new_tab
+                .view_mode,
+            expected
+        );
+    }
+}
+
+#[test]
+fn invalid_new_tab_view_mode_uses_grid_default() {
+    let settings = parse_settings(
+        r#"
+new_tab {
+    view_mode "unsupported"
+}
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(settings.new_tab.view_mode, NewTabViewMode::Grid);
+}
+
+#[test]
 fn parses_and_exports_font_settings() {
     let settings = parse_settings(
         r##"

@@ -6,7 +6,29 @@ pub mod menu {
     gpui::actions!(menu, [Confirm, Cancel, SelectNext, SelectPrev, Remove]);
 }
 pub mod new_tab {
-    gpui::actions!(new_tab, [EnterSelect, CancelSelect, DeleteSelected]);
+    gpui::actions!(
+        new_tab,
+        [
+            ActivateFocused,
+            CancelSelect,
+            CursorDown,
+            CursorFirst,
+            CursorLast,
+            CursorLeft,
+            CursorRight,
+            CursorUp,
+            DeleteSelected,
+            EnterSelect,
+            ExtendSelectionDown,
+            ExtendSelectionFirst,
+            ExtendSelectionLast,
+            ExtendSelectionLeft,
+            ExtendSelectionRight,
+            ExtendSelectionUp,
+            SelectAll,
+            ToggleFocused,
+        ]
+    );
 }
 pub mod note_editor {
     gpui::actions!(note_editor, [NoteCancel]);

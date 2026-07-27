@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 glyphst-actions = { path = "../actions" }
 glyphst-core = { path = "../core" }
 glyphst-keymap = { path = "../keymap" }

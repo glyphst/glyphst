@@ -4,6 +4,38 @@ pub fn ui_rems(px: f32) -> gpui::Rems {
     gpui::rems(px / DEFAULT_UI_FONT_SIZE)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NewTabViewMode {
+    #[default]
+    Grid,
+    List,
+    Details,
+}
+
+impl NewTabViewMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::List => "list",
+            Self::Details => "details",
+        }
+    }
+
+    pub(super) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "grid" => Some(Self::Grid),
+            "list" | "line" => Some(Self::List),
+            "details" | "detailed" | "detailed_list" => Some(Self::Details),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NewTabSettings {
+    pub view_mode: NewTabViewMode,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BehaviorSettings {
     pub default_zoom: f32,
