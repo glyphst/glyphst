@@ -2983,7 +2983,6 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+ssh://gitea@10.126.126.2/glyphst/gpui-component.git?rev=c793cd6db28ca98472700e86db09cf8491d5b705#c793cd6db28ca98472700e86db09cf8491d5b705"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3031,7 +3030,6 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+ssh://gitea@10.126.126.2/glyphst/gpui-component.git?rev=c793cd6db28ca98472700e86db09cf8491d5b705#c793cd6db28ca98472700e86db09cf8491d5b705"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3045,7 +3043,6 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+ssh://gitea@10.126.126.2/glyphst/gpui-component.git?rev=c793cd6db28ca98472700e86db09cf8491d5b705#c793cd6db28ca98472700e86db09cf8491d5b705"
 dependencies = [
  "proc-macro2",
  "quote",

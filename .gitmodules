@@ -8,11 +8,6 @@
 	url = https://github.com/CherryHQ/cherry-studio.git
 	branch = main
 	shallow = true
-[submodule "references/gpui-component"]
-	path = references/gpui-component
-	url = https://github.com/longbridge/gpui-component.git
-	branch = main
-	shallow = true
 [submodule "references/lucide"]
 	path = references/lucide
 	url = https://github.com/lucide-icons/lucide.git
@@ -48,3 +43,7 @@
 	url = https://github.com/zed-industries/zed.git
 	branch = main
 	shallow = true
+[submodule "dependencies/gpui-component"]
+	path = dependencies/gpui-component
+	url = ../gpui-component.git
+	branch = glyphst/main

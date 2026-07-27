@@ -2,6 +2,7 @@
   lib,
   stdenv,
   rustPlatform,
+  gpuiComponent,
   pkg-config,
   clang,
   libclang,
@@ -57,6 +58,11 @@ in
         ../crates
       ];
     };
+
+    postUnpack = ''
+      mkdir -p "$sourceRoot/dependencies"
+      cp -R ${gpuiComponent} "$sourceRoot/dependencies/gpui-component"
+    '';
 
     cargoLock = {
       lockFile = ../Cargo.lock;

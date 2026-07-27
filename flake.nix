@@ -2,6 +2,11 @@
   description = "A GPUI-based PDF viewer";
 
   inputs = {
+    gpuiComponent = {
+      url = "git+ssh://gitea@10.126.126.2/glyphst/gpui-component.git?ref=glyphst/main";
+      flake = false;
+    };
+
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     rust-overlay = {
@@ -11,7 +16,12 @@
   };
 
   outputs =
-    { nixpkgs, rust-overlay, ... }:
+    {
+      gpuiComponent,
+      nixpkgs,
+      rust-overlay,
+      ...
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -44,7 +54,9 @@
             cargo = rustToolchain;
             rustc = rustToolchain;
           };
-          glyphst = pkgs.callPackage ./nix/package.nix { inherit rustPlatform; };
+          glyphst = pkgs.callPackage ./nix/package.nix {
+            inherit gpuiComponent rustPlatform;
+          };
         in
         {
           inherit glyphst;

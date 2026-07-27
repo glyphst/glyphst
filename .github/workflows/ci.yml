@@ -3,23 +3,29 @@ name: CI
 on:
   push:
     paths:
+      - ".gitmodules"
       - ".cargo/audit.toml"
       - ".github/workflows/ci.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/**"
+      - "dependencies/**"
       - "flake.lock"
       - "flake.nix"
+      - "nix/**"
       - "prek.toml"
   pull_request:
     paths:
+      - ".gitmodules"
       - ".cargo/audit.toml"
       - ".github/workflows/ci.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/**"
+      - "dependencies/**"
       - "flake.lock"
       - "flake.nix"
+      - "nix/**"
       - "prek.toml"
   schedule:
     - cron: "0 7 * * 1"
@@ -38,6 +44,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Initialize gpui-component dependency
+        run: git submodule update --init dependencies/gpui-component
+
+      - name: Verify gpui-component pins
+        run: |
+          test "$(git rev-parse HEAD:dependencies/gpui-component)" = \
+            "$(jq -r '.nodes.gpuiComponent.locked.rev' flake.lock)"
 
       - name: Install Linux dependencies
         run: |
@@ -78,7 +92,7 @@ jobs:
           cache-workspaces: "."
 
       - name: Format
-        run: cargo fmt --all -- --check
+        run: cargo fmt --check
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -96,6 +110,9 @@ jobs:
         os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Initialize gpui-component dependency
+        run: git submodule update --init dependencies/gpui-component
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -117,6 +134,9 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Initialize gpui-component dependency
+        run: git submodule update --init dependencies/gpui-component
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1

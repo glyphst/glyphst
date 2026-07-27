@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "gpuiComponent": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1785115539,
+        "narHash": "sha256-RATAv+zxpn3sHfFnwY9+RgyzCqLxZ5RouakS5Iz1Vxc=",
+        "ref": "glyphst/main",
+        "rev": "c793cd6db28ca98472700e86db09cf8491d5b705",
+        "revCount": 1968,
+        "type": "git",
+        "url": "ssh://gitea@10.126.126.2/glyphst/gpui-component.git"
+      },
+      "original": {
+        "ref": "glyphst/main",
+        "type": "git",
+        "url": "ssh://gitea@10.126.126.2/glyphst/gpui-component.git"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1777954456,
@@ -18,6 +35,7 @@
     },
     "root": {
       "inputs": {
+        "gpuiComponent": "gpuiComponent",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay"
       }

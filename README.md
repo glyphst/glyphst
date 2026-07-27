@@ -25,6 +25,9 @@ repository** so it can be used from the **Use this template** button.
 ## Getting started
 
 ```sh
+# Initialize the active gpui-component dependency
+git submodule update --init dependencies/gpui-component
+
 # Optional: enter the dev shell
 nix develop
 
@@ -56,7 +59,7 @@ performance characteristics. Profiling instrumentation is a no-op unless the
 ## Development workflow
 
 ```sh
-cargo fmt --all
+cargo fmt
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 cargo audit
@@ -81,6 +84,8 @@ Clippy, and `cargo audit`; see `prek.toml`.
 ├── .github/workflows/ci.yml
 ├── Cargo.toml              Cargo workspace
 ├── crates/app              Starter GPUI application
+├── dependencies/gpui-component
+│                           Maintained GPUI component fork
 ├── flake.nix               Optional Nix development shell
 └── prek.toml               Pre-commit hook configuration
 ```
