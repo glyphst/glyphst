@@ -43,6 +43,11 @@
 	url = https://github.com/zed-industries/zed.git
 	branch = main
 	shallow = true
+[submodule "references/yazi"]
+	path = references/yazi
+	url = git@github.com:sxyazi/yazi.git
+	branch = main
+	shallow = true
 [submodule "dependencies/gpui-component"]
 	path = dependencies/gpui-component
 	url = ../gpui-component.git

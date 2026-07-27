@@ -13,8 +13,8 @@ translation workflows, themes, and configurable keybindings.
 
 ### Glyphst Files
 
-An early GPUI file application shell. Its initial window demonstrates the shared Glyphst UI
-foundation without loading Reader settings or persisted state.
+A lightweight, read-only file navigator with Yazi-inspired parent, current-directory, and preview
+panes. It supports Vim-style keyboard navigation and line-oriented UTF-8 text previews.
 
 ## Development
 
@@ -25,7 +25,7 @@ requires MuPDF. On Linux, the Nix development shell provides the required librar
 git submodule update --init dependencies/gpui-component
 nix develop
 cargo run -p glyphst-reader --release -- /path/to/document.pdf
-cargo run -p glyphst-files
+cargo run -p glyphst-files -- /path/to/start
 ```
 
 Without Nix, install the platform packages listed in
