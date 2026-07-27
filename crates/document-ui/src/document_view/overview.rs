@@ -572,13 +572,13 @@ impl DocumentView {
                                 ),
                             )
                             .track_scroll(&scroll_handle)
-                            .with_decoration(uniform_list_scrollbar_for(
-                                &scroll_handle,
-                                "thumbnail-sidebar-scrollbar",
-                                window,
-                                cx,
-                            ))
                             .size_full(),
+                        )
+                        .vertical_scrollbar_for_with_id(
+                            &scroll_handle,
+                            "thumbnail-sidebar-scrollbar",
+                            window,
+                            cx,
                         )
                     }),
             );
@@ -968,13 +968,13 @@ impl DocumentView {
                             }),
                         )
                         .track_scroll(&scroll_handle)
-                        .with_decoration(uniform_list_scrollbar_for(
-                            &scroll_handle,
-                            "grid-overview-scrollbar",
-                            window,
-                            cx,
-                        ))
                         .size_full(),
+                    )
+                    .vertical_scrollbar_for_with_id(
+                        &scroll_handle,
+                        "grid-overview-scrollbar",
+                        window,
+                        cx,
                     ),
             )
     }

@@ -10,7 +10,7 @@ use crate::{
     icons::{Icon, IconName},
     keybindings::{self, EditableKeyBinding, KeyBindingCategory},
     keystroke_recorder::{KeystrokeRecorder, KeystrokeRecorderEvent},
-    scrollbar::Scrollbar,
+    scrollbar::WithScrollbar as _,
     settings::{Settings, SettingsStore, ui_rems},
 };
 use glyphst_ui::tooltip::text_tooltip;
@@ -814,7 +814,7 @@ impl Focusable for KeymapEditor {
 }
 
 impl Render for KeymapEditor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let settings = cx.global::<SettingsStore>().settings.clone();
         let rows = self.filtered_bindings(&settings);
@@ -929,8 +929,11 @@ impl Render for KeymapEditor {
                                 .track_scroll(&scroll_handle)
                                 .size_full(),
                             )
-                            .child(
-                                Scrollbar::vertical(&scroll_handle).id("keymap-editor-scrollbar"),
+                            .vertical_scrollbar_for_with_id(
+                                &scroll_handle,
+                                "keymap-editor-scrollbar",
+                                window,
+                                cx,
                             ),
                     ),
             )

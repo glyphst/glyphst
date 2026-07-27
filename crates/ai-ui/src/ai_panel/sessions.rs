@@ -338,12 +338,22 @@ impl AiPanel {
         }
 
         div()
-            .id("ai-panel-sessions")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(scroll_handle)
-            .child(list)
-            .vertical_scrollbar_for(scroll_handle, window, cx)
+            .overflow_hidden()
+            .child(
+                div()
+                    .id("ai-panel-sessions")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(scroll_handle)
+                    .child(list),
+            )
+            .vertical_scrollbar_for_with_id(
+                scroll_handle,
+                "ai-panel-sessions-scrollbar",
+                window,
+                cx,
+            )
     }
 }

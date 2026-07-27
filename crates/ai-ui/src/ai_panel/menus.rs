@@ -417,16 +417,24 @@ impl AiPanel {
                 .collect::<Vec<_>>();
             menu = menu.child(
                 div()
-                    .id("ai-model-menu-list")
-                    .track_scroll(&scroll_handle)
-                    .max_h(px(300.0))
-                    .pb_1()
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                    .children(rows)
-                    .vertical_scrollbar_for(&scroll_handle, window, cx),
+                    .child(
+                        div()
+                            .id("ai-model-menu-list")
+                            .track_scroll(&scroll_handle)
+                            .max_h(px(300.0))
+                            .pb_1()
+                            .flex()
+                            .flex_col()
+                            .overflow_y_scroll()
+                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                            .children(rows),
+                    )
+                    .vertical_scrollbar_for_with_id(
+                        &scroll_handle,
+                        "ai-model-menu-scrollbar",
+                        window,
+                        cx,
+                    ),
             );
         }
 

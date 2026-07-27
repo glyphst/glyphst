@@ -350,13 +350,13 @@ impl DocumentView {
                         }),
                     )
                     .track_scroll(&scroll_handle)
-                    .with_decoration(uniform_list_scrollbar_for(
-                        &scroll_handle,
-                        "toc-sidebar-scrollbar",
-                        window,
-                        cx,
-                    ))
                     .size_full(),
+                )
+                .vertical_scrollbar_for_with_id(
+                    &scroll_handle,
+                    "toc-sidebar-scrollbar",
+                    window,
+                    cx,
                 )
             });
 
@@ -480,13 +480,13 @@ impl DocumentView {
                         }),
                     )
                     .track_scroll(&scroll_handle)
-                    .with_decoration(uniform_list_scrollbar_for(
-                        &scroll_handle,
-                        "notes-sidebar-scrollbar",
-                        window,
-                        cx,
-                    ))
                     .size_full(),
+                )
+                .vertical_scrollbar_for_with_id(
+                    &scroll_handle,
+                    "notes-sidebar-scrollbar",
+                    window,
+                    cx,
                 )
             });
 

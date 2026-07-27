@@ -16,6 +16,7 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     label::Label,
     popover::{Popover, PopoverState},
+    scroll::ScrollableElement as _,
     setting::{RenderOptions, SettingField, SettingItem},
     tag::Tag,
     v_flex,
@@ -428,7 +429,7 @@ impl SettingsWindow {
                     )))
                     .w_full()
                     .max_h(px(260.0))
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .px_3()
                     .py_2()
                     .when(!catalog_cached && !catalog_loading, |this| {

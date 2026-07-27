@@ -26,7 +26,7 @@ pub use glyphst_actions::new_tab::{CancelSelect, DeleteSelected, EnterSelect};
 use crate::{
     document_view::{NextHalfPage, PreviousHalfPage, ScrollLineDown, ScrollLineUp},
     library::{HistoryEntry, LibraryStore},
-    scrollbar::{Scrollbar, ScrollbarHandle as _},
+    scrollbar::{ScrollbarHandle as _, WithScrollbar as _},
     settings::{SettingsStore, ui_rems},
 };
 
@@ -584,7 +584,7 @@ impl NewTabEntry {
 impl EventEmitter<NewTabEvent> for NewTab {}
 
 impl Render for NewTab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let cols = self.cols.max(1);
         let rows = self.entries.len().div_ceil(cols);
@@ -721,7 +721,12 @@ impl Render for NewTab {
                             .track_scroll(&scroll_handle)
                             .size_full(),
                         )
-                        .child(Scrollbar::vertical(&scroll_handle).id("new-tab-scrollbar")),
+                        .vertical_scrollbar_for_with_id(
+                            &scroll_handle,
+                            "new-tab-scrollbar",
+                            window,
+                            cx,
+                        ),
                 )
                 .into_any_element()
         };
