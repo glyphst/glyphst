@@ -24,9 +24,9 @@ pub mod pane;
 pub mod theme_selector;
 pub mod workspace;
 
+pub use glyphst_document_ui::document_view;
 pub use glyphst_keymap::{KeymapEditor, keybindings};
 pub use glyphst_library as library;
-pub use glyphst_pdf_ui::pdf_view;
 pub use glyphst_settings::{self as settings, localize, theme};
 pub use glyphst_ui::{icons, picker, scrollbar, style};
 pub use new_tab::NewTab;

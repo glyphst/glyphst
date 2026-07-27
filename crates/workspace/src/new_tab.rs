@@ -24,8 +24,8 @@ use smallvec::smallvec;
 pub use glyphst_actions::new_tab::{CancelSelect, DeleteSelected, EnterSelect};
 
 use crate::{
+    document_view::{NextHalfPage, PreviousHalfPage, ScrollLineDown, ScrollLineUp},
     library::{HistoryEntry, LibraryStore},
-    pdf_view::{NextHalfPage, PreviousHalfPage, ScrollLineDown, ScrollLineUp},
     scrollbar::{Scrollbar, ScrollbarHandle as _},
     settings::{SettingsStore, ui_rems},
 };

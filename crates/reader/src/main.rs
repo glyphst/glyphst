@@ -11,15 +11,16 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+mod fonts;
 mod instance;
 
+use glyphst_document_ui::document_view::RenderCache;
 use glyphst_keymap::keybindings;
 use glyphst_library::{DocumentPosition, LibraryStore};
 use glyphst_pdf_translation_app::{PdfTranslationService, run_typst_worker_if_requested};
-use glyphst_pdf_ui::pdf_view::RenderCache;
 use glyphst_settings::{SettingsStore, localize, sync_component_theme};
 use glyphst_translation::TranslationService;
-use glyphst_ui::{activity, assets, fonts, prompt};
+use glyphst_ui::assets;
 use glyphst_workspace::{
     NewTab, Workspace, WorkspaceCallbacks, WorkspaceWindowHandle, WorkspaceWindowRequest,
 };
@@ -53,7 +54,7 @@ fn main() {
     application()
         .with_assets(assets::Assets::default())
         .run(move |cx: &mut App| {
-            gpui_component::init(cx);
+            glyphst_ui::init(cx);
             keybindings::install_input_compatibility_bindings(cx);
             keybindings::capture_framework_bindings(cx);
 
@@ -67,8 +68,6 @@ fn main() {
             localize::select_language(settings_store.settings.language);
             cx.set_global(settings_store);
             sync_component_theme(cx);
-            prompt::init(cx);
-            activity::init(cx);
             cx.set_global(LibraryStore::load());
             cx.set_global(RenderCache::new());
             match TranslationService::new() {

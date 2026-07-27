@@ -27,10 +27,13 @@ pub use glyphst_actions::pane::{
 
 use crate::{
     KeymapEditor,
+    document_view::{
+        DocumentAnnotations, DocumentOpenOptions, DocumentView, DocumentViewEvent,
+        PreparedDocumentOpen,
+    },
     icons::{Icon, IconName},
     library::{DocumentPosition, LibraryStore, normalize_path},
     new_tab::{NewTab, NewTabEvent},
-    pdf_view::{PdfAnnotations, PdfOpenOptions, PdfView, PdfViewEvent, PreparedPdfOpen},
     settings::{SettingsStore, TabBarVisibility, ui_rems},
 };
 
@@ -48,7 +51,7 @@ const RESIZE_STEP: f32 = 80.0;
 pub(crate) enum Tab {
     NewTab(Entity<NewTab>),
     LoadingDocument(Entity<LoadingDocumentView>),
-    Document(Entity<PdfView>),
+    Document(Entity<DocumentView>),
     Keymap(Entity<KeymapEditor>),
 }
 
@@ -233,11 +236,11 @@ impl Pane {
 
     pub(crate) fn active_document_state(&self, cx: &App) -> Option<(PathBuf, DocumentPosition)> {
         match self.tabs.get(self.active_tab) {
-            Some(Tab::Document(pdf_view)) => {
-                let pdf_view = pdf_view.read(cx);
+            Some(Tab::Document(document_view)) => {
+                let document_view = document_view.read(cx);
                 Some((
-                    pdf_view.path().to_path_buf(),
-                    pdf_view.current_document_position(),
+                    document_view.path().to_path_buf(),
+                    document_view.current_document_position(),
                 ))
             }
             Some(Tab::NewTab(_)) | Some(Tab::LoadingDocument(_)) | Some(Tab::Keymap(_)) | None => {
@@ -246,9 +249,9 @@ impl Pane {
         }
     }
 
-    pub(crate) fn active_pdf_view(&self) -> Option<Entity<PdfView>> {
+    pub(crate) fn active_document_view(&self) -> Option<Entity<DocumentView>> {
         match self.tabs.get(self.active_tab) {
-            Some(Tab::Document(pdf_view)) => Some(pdf_view.clone()),
+            Some(Tab::Document(document_view)) => Some(document_view.clone()),
             Some(Tab::NewTab(_)) | Some(Tab::LoadingDocument(_)) | Some(Tab::Keymap(_)) | None => {
                 None
             }
@@ -269,7 +272,7 @@ impl Pane {
     pub(crate) fn document_tab_ix(&self, path: &Path, cx: &App) -> Option<usize> {
         let path = normalize_path(path);
         self.tabs.iter().position(|tab| match tab {
-            Tab::Document(pdf_view) => pdf_view.read(cx).path() == path.as_path(),
+            Tab::Document(document_view) => document_view.read(cx).path() == path.as_path(),
             Tab::LoadingDocument(loading) => loading.read(cx).path == path,
             Tab::NewTab(_) | Tab::Keymap(_) => false,
         })
@@ -301,10 +304,10 @@ impl Pane {
         }
 
         if let Some(position) = position
-            && let Some(Tab::Document(pdf_view)) = self.tabs.get(self.active_tab)
+            && let Some(Tab::Document(document_view)) = self.tabs.get(self.active_tab)
         {
-            pdf_view.update(cx, |pdf_view, cx| {
-                pdf_view.navigate_to_document_position(position, cx);
+            document_view.update(cx, |document_view, cx| {
+                document_view.navigate_to_document_position(position, cx);
             });
         }
 
@@ -400,7 +403,7 @@ impl Pane {
         let initial_position = position
             .or_else(|| cx.global::<LibraryStore>().history_position(&path))
             .unwrap_or_else(|| DocumentPosition::fixed(0.0, 0.0, behavior.default_zoom, 1));
-        let annotations = PdfAnnotations {
+        let annotations = DocumentAnnotations {
             highlights: cx.global::<LibraryStore>().highlights_for(&path),
             notes: cx.global::<LibraryStore>().notes_for(&path),
         };
@@ -420,7 +423,7 @@ impl Pane {
             .epub_reader_preferences(&path)
             .unwrap_or_else(|| cx.global::<SettingsStore>().settings.reading);
         let rotation = cx.global::<LibraryStore>().document_rotation(&path);
-        let options = PdfOpenOptions {
+        let options = DocumentOpenOptions {
             initial_position: Some(initial_position.clone()),
             sidebar_widths,
             annotations,
@@ -457,7 +460,7 @@ impl Pane {
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    PdfView::prepare_open(
+                    DocumentView::prepare_open(
                         prepare_path,
                         prepare_preferences,
                         document_theme.page_gap,
@@ -610,10 +613,10 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         self.flush_active_tab(cx);
-        if let Tab::Document(pdf_view) = &transfer.tab {
+        if let Tab::Document(document_view) = &transfer.tab {
             let jobs = self.document_translation_jobs.clone();
-            pdf_view.update(cx, |pdf_view, cx| {
-                pdf_view.set_document_translation_jobs(jobs, cx);
+            document_view.update(cx, |document_view, cx| {
+                document_view.set_document_translation_jobs(jobs, cx);
             });
         }
         self.subscribe_to_tab(&transfer.tab, window, cx);
@@ -658,9 +661,9 @@ impl Pane {
 
     pub(crate) fn stage_all_tab_positions(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
-            if let Tab::Document(pdf_view) = tab {
-                pdf_view.update(cx, |pdf_view, cx| {
-                    pdf_view.stage_current_history_position(cx);
+            if let Tab::Document(document_view) = tab {
+                document_view.update(cx, |document_view, cx| {
+                    document_view.stage_current_history_position(cx);
                 });
             }
         }
@@ -674,8 +677,8 @@ impl Pane {
         initial_position: DocumentPosition,
         behavior: glyphst_settings::BehaviorSettings,
         window_settings: glyphst_settings::WindowSettings,
-        options: PdfOpenOptions,
-        result: std::result::Result<PreparedPdfOpen, String>,
+        options: DocumentOpenOptions,
+        result: std::result::Result<PreparedDocumentOpen, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -705,14 +708,14 @@ impl Pane {
                 return;
             }
         };
-        let mut pdf_view = match PdfView::from_prepared(
+        let mut document_view = match DocumentView::from_prepared(
             prepared,
             self.focus_handle.clone(),
             behavior,
             window_settings,
             options,
         ) {
-            Ok(pdf_view) => pdf_view,
+            Ok(document_view) => document_view,
             Err(error) => {
                 for job_id in job_ids.iter().copied() {
                     cx.emit(PaneEvent::DocumentOpenFinished {
@@ -730,14 +733,14 @@ impl Pane {
                 return;
             }
         };
-        let pdf_view = cx.new(|cx| {
-            pdf_view.register_cache_eviction(cx);
-            pdf_view.start_loading(window, cx);
-            pdf_view
+        let document_view = cx.new(|cx| {
+            document_view.register_cache_eviction(cx);
+            document_view.start_loading(window, cx);
+            document_view
         });
-        self.subscribe_to_pdf_view(&pdf_view, window, cx);
+        self.subscribe_to_document_view(&document_view, window, cx);
 
-        let tab = Tab::Document(pdf_view);
+        let tab = Tab::Document(document_view);
         let replaced_tab = std::mem::replace(&mut self.tabs[tab_ix], tab.clone());
         self.remove_tab_focus_handle(&replaced_tab);
         self.register_tab_focus_handle(&tab, self.focus_handle.clone());
@@ -798,37 +801,37 @@ impl Pane {
         .detach();
     }
 
-    fn subscribe_to_pdf_view(
+    fn subscribe_to_document_view(
         &self,
-        pdf_view: &Entity<PdfView>,
+        document_view: &Entity<DocumentView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pdf_view_id = pdf_view.entity_id();
+        let document_view_id = document_view.entity_id();
         cx.subscribe_in(
-            pdf_view,
+            document_view,
             window,
-            move |pane, _pdf_view, event: &PdfViewEvent, _, cx| {
-                if !pane.has_tab_id(pdf_view_id) {
+            move |pane, _document_view, event: &DocumentViewEvent, _, cx| {
+                if !pane.has_tab_id(document_view_id) {
                     return;
                 }
                 match event {
-                    PdfViewEvent::OpenDocument { path, position } => {
+                    DocumentViewEvent::OpenDocument { path, position } => {
                         cx.emit(PaneEvent::OpenDocument {
                             path: path.clone(),
                             position: position.clone(),
                             replace_active_new_tab: false,
                         });
                     }
-                    PdfViewEvent::OpenSettings => cx.emit(PaneEvent::OpenSettings),
-                    PdfViewEvent::ViewportChanged(_)
-                    | PdfViewEvent::BlockHovered(_)
-                    | PdfViewEvent::BlockSelected(_) => {}
+                    DocumentViewEvent::OpenSettings => cx.emit(PaneEvent::OpenSettings),
+                    DocumentViewEvent::ViewportChanged(_)
+                    | DocumentViewEvent::BlockHovered(_)
+                    | DocumentViewEvent::BlockSelected(_) => {}
                 }
             },
         )
         .detach();
-        cx.observe(pdf_view, |_, _, cx| cx.notify()).detach();
+        cx.observe(document_view, |_, _, cx| cx.notify()).detach();
     }
 
     fn subscribe_to_tab(&self, tab: &Tab, window: &mut Window, cx: &mut Context<Self>) {
@@ -837,7 +840,9 @@ impl Pane {
             Tab::LoadingDocument(loading) => {
                 cx.observe(loading, |_, _, cx| cx.notify()).detach();
             }
-            Tab::Document(pdf_view) => self.subscribe_to_pdf_view(pdf_view, window, cx),
+            Tab::Document(document_view) => {
+                self.subscribe_to_document_view(document_view, window, cx)
+            }
             Tab::Keymap(_) => {}
         }
     }
@@ -883,9 +888,9 @@ impl Pane {
     }
 
     fn flush_tab(&mut self, tab_ix: usize, cx: &mut Context<Self>) {
-        if let Some(Tab::Document(pdf_view)) = self.tabs.get(tab_ix) {
-            pdf_view.update(cx, |pdf_view, cx| {
-                pdf_view.flush_current_history_position(cx);
+        if let Some(Tab::Document(document_view)) = self.tabs.get(tab_ix) {
+            document_view.update(cx, |document_view, cx| {
+                document_view.flush_current_history_position(cx);
             });
         }
     }
@@ -899,7 +904,7 @@ impl Pane {
 
     fn tab_label(&self, tab_ix: usize, cx: &App) -> SharedString {
         match self.tabs.get(tab_ix) {
-            Some(Tab::Document(pdf_view)) => pdf_view.read(cx).file_name(),
+            Some(Tab::Document(document_view)) => document_view.read(cx).file_name(),
             Some(Tab::LoadingDocument(loading)) => loading
                 .read(cx)
                 .path
@@ -915,10 +920,10 @@ impl Pane {
 
     fn tab_is_draggable(&self, tab_ix: usize, cx: &App) -> bool {
         match self.tabs.get(tab_ix) {
-            Some(Tab::Document(pdf_view)) => !self
+            Some(Tab::Document(document_view)) => !self
                 .document_translation_jobs
                 .read(cx)
-                .has_job_for_source(pdf_view.read(cx).path()),
+                .has_job_for_source(document_view.read(cx).path()),
             Some(Tab::NewTab(_)) => true,
             Some(Tab::LoadingDocument(_)) | Some(Tab::Keymap(_)) | None => false,
         }
@@ -928,14 +933,14 @@ impl Pane {
         match tab {
             Tab::NewTab(new_tab) => new_tab.entity_id(),
             Tab::LoadingDocument(loading) => loading.entity_id(),
-            Tab::Document(pdf_view) => pdf_view.entity_id(),
+            Tab::Document(document_view) => document_view.entity_id(),
             Tab::Keymap(keymap_editor) => keymap_editor.entity_id(),
         }
     }
 
     fn active_tab_content(&self) -> AnyElement {
         match self.tabs.get(self.active_tab) {
-            Some(Tab::Document(pdf_view)) => pdf_view.clone().into_any_element(),
+            Some(Tab::Document(document_view)) => document_view.clone().into_any_element(),
             Some(Tab::LoadingDocument(loading)) => loading.clone().into_any_element(),
             Some(Tab::NewTab(new_tab)) => new_tab.clone().into_any_element(),
             Some(Tab::Keymap(keymap_editor)) => keymap_editor.clone().into_any_element(),

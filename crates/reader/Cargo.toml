@@ -14,7 +14,7 @@ glyphst-core = { path = "../core" }
 glyphst-keymap = { path = "../keymap" }
 glyphst-library = { path = "../library" }
 glyphst-pdf-translation-app = { path = "../pdf-translation-app" }
-glyphst-pdf-ui = { path = "../pdf-ui" }
+glyphst-document-ui = { path = "../document-ui" }
 glyphst-settings = { path = "../settings" }
 glyphst-settings-ui = { path = "../settings-ui" }
 glyphst-translation = { path = "../translation" }

@@ -27,14 +27,14 @@ pub use glyphst_actions::workspace::{
 
 use crate::{
     command_palette::{CommandPalette, CommandPaletteDelegate},
+    document_view::{
+        CloseTab, DocumentView, DocumentViewEvent, OpenFile, OpenKeybindings, OpenNewTab,
+        OpenSettings, ToggleCommandPalette,
+    },
     library::{DocumentPosition, normalize_path},
     pane::{
         DraggedTab, Pane, PaneDropTarget, PaneEvent, PaneGroup, SplitDirection, SplitDown,
         SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical, TabTransfer,
-    },
-    pdf_view::{
-        CloseTab, OpenFile, OpenKeybindings, OpenNewTab, OpenSettings, PdfView, PdfViewEvent,
-        ToggleCommandPalette,
     },
     picker::{Picker, PickerEvent},
     settings::{SettingsStore, setup_ui_font, sync_component_theme},
@@ -75,7 +75,7 @@ enum PendingTranslationSplitStage {
         source_pane: Entity<Pane>,
     },
     OpeningTranslated {
-        original: Entity<PdfView>,
+        original: Entity<DocumentView>,
         translated_pane: Entity<Pane>,
     },
 }
@@ -633,7 +633,7 @@ impl Workspace {
             source_pane.update(cx, |pane, cx| {
                 pane.activate_existing_document(tab_ix, None, false, window, cx);
             });
-            let Some(original) = source_pane.read(cx).active_pdf_view() else {
+            let Some(original) = source_pane.read(cx).active_document_view() else {
                 return Err(anyhow::anyhow!(
                     "translation source is still opening; retry when it is ready"
                 ));
@@ -679,7 +679,7 @@ impl Workspace {
     fn start_translated_split_open(
         &mut self,
         job_id: DocumentTranslationJobId,
-        original: Entity<PdfView>,
+        original: Entity<DocumentView>,
         translated_path: PathBuf,
         source_pane: Entity<Pane>,
         window: &mut Window,
@@ -761,7 +761,7 @@ impl Workspace {
                         });
                         source_pane
                             .read(cx)
-                            .active_pdf_view()
+                            .active_document_view()
                             .map(|original| (original, source_pane))
                     })
                     .ok_or_else(|| anyhow::anyhow!("translation source did not finish opening"))
@@ -785,7 +785,7 @@ impl Workspace {
                 original,
                 translated_pane,
             } => {
-                let Some(translated) = translated_pane.read(cx).active_pdf_view() else {
+                let Some(translated) = translated_pane.read(cx).active_document_view() else {
                     self.remove_pane(&translated_pane, window, cx);
                     self.document_translation_jobs.update(cx, |jobs, cx| {
                         jobs.finish_open(
@@ -809,8 +809,8 @@ impl Workspace {
 
     fn link_translation_views(
         &self,
-        original: Entity<PdfView>,
-        translated: Entity<PdfView>,
+        original: Entity<DocumentView>,
+        translated: Entity<DocumentView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -818,29 +818,29 @@ impl Workspace {
         cx.subscribe_in(
             &original,
             window,
-            move |_, _, event: &PdfViewEvent, _, cx| match event {
-                PdfViewEvent::ViewportChanged(viewport) => {
+            move |_, _, event: &DocumentViewEvent, _, cx| match event {
+                DocumentViewEvent::ViewportChanged(viewport) => {
                     if let Some(translated_target) = translated_target.upgrade() {
                         translated_target.update(cx, |view, cx| {
                             view.apply_linked_viewport(*viewport, cx);
                         });
                     }
                 }
-                PdfViewEvent::BlockHovered(block_id) => {
+                DocumentViewEvent::BlockHovered(block_id) => {
                     if let Some(translated_target) = translated_target.upgrade() {
                         translated_target.update(cx, |view, cx| {
                             view.apply_linked_hover(*block_id, cx);
                         });
                     }
                 }
-                PdfViewEvent::BlockSelected(selection) => {
+                DocumentViewEvent::BlockSelected(selection) => {
                     if let Some(translated_target) = translated_target.upgrade() {
                         translated_target.update(cx, |view, cx| {
                             view.apply_linked_selection(*selection, cx);
                         });
                     }
                 }
-                PdfViewEvent::OpenDocument { .. } | PdfViewEvent::OpenSettings => {}
+                DocumentViewEvent::OpenDocument { .. } | DocumentViewEvent::OpenSettings => {}
             },
         )
         .detach();
@@ -849,29 +849,29 @@ impl Workspace {
         cx.subscribe_in(
             &translated,
             window,
-            move |_, _, event: &PdfViewEvent, _, cx| match event {
-                PdfViewEvent::ViewportChanged(viewport) => {
+            move |_, _, event: &DocumentViewEvent, _, cx| match event {
+                DocumentViewEvent::ViewportChanged(viewport) => {
                     if let Some(original_target) = original_target.upgrade() {
                         original_target.update(cx, |view, cx| {
                             view.apply_linked_viewport(*viewport, cx);
                         });
                     }
                 }
-                PdfViewEvent::BlockHovered(block_id) => {
+                DocumentViewEvent::BlockHovered(block_id) => {
                     if let Some(original_target) = original_target.upgrade() {
                         original_target.update(cx, |view, cx| {
                             view.apply_linked_hover(*block_id, cx);
                         });
                     }
                 }
-                PdfViewEvent::BlockSelected(selection) => {
+                DocumentViewEvent::BlockSelected(selection) => {
                     if let Some(original_target) = original_target.upgrade() {
                         original_target.update(cx, |view, cx| {
                             view.apply_linked_selection(*selection, cx);
                         });
                     }
                 }
-                PdfViewEvent::OpenDocument { .. } | PdfViewEvent::OpenSettings => {}
+                DocumentViewEvent::OpenDocument { .. } | DocumentViewEvent::OpenSettings => {}
             },
         )
         .detach();
@@ -991,22 +991,22 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let active_pdf_view = self.active_pane.read(cx).active_pdf_view();
-        if let Some(active_pdf_view) = active_pdf_view.clone()
-            && active_pdf_view.read(cx).is_presentation_mode()
+        let active_document_view = self.active_pane.read(cx).active_document_view();
+        if let Some(active_document_view) = active_document_view.clone()
+            && active_document_view.read(cx).is_presentation_mode()
         {
-            return active_pdf_view.into_any_element();
+            return active_document_view.into_any_element();
         }
 
         let center =
             self.pane_group
                 .render(&self.active_pane, theme, dim_inactive_panes, window, cx);
 
-        if let Some(active_pdf_view) = active_pdf_view {
-            let has_global_chrome = active_pdf_view.read(cx).has_global_chrome();
+        if let Some(active_document_view) = active_document_view {
+            let has_global_chrome = active_document_view.read(cx).has_global_chrome();
             if has_global_chrome {
-                return active_pdf_view.update(cx, |pdf_view, cx| {
-                    pdf_view.render_workspace_body_with_chrome(center, theme, window, cx)
+                return active_document_view.update(cx, |document_view, cx| {
+                    document_view.render_workspace_body_with_chrome(center, theme, window, cx)
                 });
             }
         }
@@ -1531,8 +1531,8 @@ impl Render for Workspace {
         let active_pdf_is_presentation = self
             .active_pane
             .read(cx)
-            .active_pdf_view()
-            .is_some_and(|pdf_view| pdf_view.read(cx).is_presentation_mode());
+            .active_document_view()
+            .is_some_and(|document_view| document_view.read(cx).is_presentation_mode());
         let title_bar = (!active_pdf_is_presentation).then(|| {
             WorkspaceTitleBar::new(
                 cx.entity(),
@@ -1705,7 +1705,7 @@ mod tests {
     use super::{
         Workspace, WorkspaceCallbacks, WorkspaceMenu, WorkspaceWindowHandle, WorkspaceWindowRequest,
     };
-    use crate::{library::LibraryStore, pdf_view::RenderCache, settings::SettingsStore};
+    use crate::{document_view::RenderCache, library::LibraryStore, settings::SettingsStore};
 
     fn unavailable_workspace_window(
         _: WorkspaceWindowRequest,

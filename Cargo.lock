@@ -2642,6 +2642,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "glyphst-document-ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "dirs",
+ "futures",
+ "glyphst-actions",
+ "glyphst-ai",
+ "glyphst-ai-ui",
+ "glyphst-core",
+ "glyphst-library",
+ "glyphst-pdf",
+ "glyphst-pdf-translation-app",
+ "glyphst-settings",
+ "glyphst-translation",
+ "glyphst-translation-ui",
+ "glyphst-ui",
+ "gpui",
+ "gpui-component",
+ "image",
+ "mupdf",
+ "smallvec",
+ "tracing",
+ "ztracing",
+]
+
+[[package]]
+name = "glyphst-files"
+version = "0.1.0"
+dependencies = [
+ "glyphst-ui",
+ "gpui",
+ "gpui-component",
+ "gpui_platform",
+]
+
+[[package]]
 name = "glyphst-keymap"
 version = "0.1.0"
 dependencies = [
@@ -2710,34 +2748,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glyphst-pdf-ui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "dirs",
- "futures",
- "glyphst-actions",
- "glyphst-ai",
- "glyphst-ai-ui",
- "glyphst-core",
- "glyphst-library",
- "glyphst-pdf",
- "glyphst-pdf-translation-app",
- "glyphst-settings",
- "glyphst-translation",
- "glyphst-translation-ui",
- "glyphst-ui",
- "gpui",
- "gpui-component",
- "image",
- "mupdf",
- "smallvec",
- "tracing",
- "ztracing",
-]
-
-[[package]]
 name = "glyphst-reader"
 version = "0.1.0"
 dependencies = [
@@ -2745,10 +2755,10 @@ dependencies = [
  "dirs",
  "futures",
  "glyphst-core",
+ "glyphst-document-ui",
  "glyphst-keymap",
  "glyphst-library",
  "glyphst-pdf-translation-app",
- "glyphst-pdf-ui",
  "glyphst-settings",
  "glyphst-settings-ui",
  "glyphst-translation",
@@ -2847,10 +2857,10 @@ dependencies = [
  "anyhow",
  "glyphst-actions",
  "glyphst-core",
+ "glyphst-document-ui",
  "glyphst-keymap",
  "glyphst-library",
  "glyphst-pdf",
- "glyphst-pdf-ui",
  "glyphst-settings",
  "glyphst-settings-ui",
  "glyphst-translation-ui",

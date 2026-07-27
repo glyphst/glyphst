@@ -14,7 +14,7 @@ where
             .collect::<Vec<_>>();
         assert_eq!(specs.len(), 1, "alias `{alias}` should resolve once");
         assert_eq!((specs[0].build)().name(), expected);
-        assert_eq!(specs[0].category, KeyBindingCategory::PdfView);
+        assert_eq!(specs[0].category, KeyBindingCategory::DocumentView);
     }
 }
 
@@ -51,30 +51,44 @@ fn rotate_aliases_resolve_to_rotate_actions() {
 fn rotate_and_reload_bindings_do_not_collide() {
     for preset in [KeymapPreset::Modern, KeymapPreset::Vim] {
         let rows = editable_bindings(preset, &[]);
-        let pdf_binding = |action| {
+        let document_binding = |action| {
             rows.iter()
-                .find(|row| row.action == action && row.category == KeyBindingCategory::PdfView)
-                .expect("PDF command binding should exist")
+                .find(|row| {
+                    row.action == action && row.category == KeyBindingCategory::DocumentView
+                })
+                .expect("document command binding should exist")
         };
 
         assert_eq!(
-            pdf_binding("rotate-clockwise").keystrokes,
+            document_binding("rotate-clockwise").keystrokes,
             vec!["r".to_string()]
         );
         assert_eq!(
-            pdf_binding("rotate-counterclockwise").keystrokes,
+            document_binding("rotate-counterclockwise").keystrokes,
             vec!["shift-r".to_string()]
         );
-        assert_eq!(pdf_binding("reload").keystrokes, vec!["ctrl-r".to_string()]);
+        assert_eq!(
+            document_binding("reload").keystrokes,
+            vec!["ctrl-r".to_string()]
+        );
     }
 }
 
 #[test]
 fn categories_hide_raw_predicates() {
-    assert_eq!(KeyBindingCategory::PdfView.label(), "Document Reader");
-    let predicate = KeyBindingCategory::PdfView.predicate();
-    assert!(predicate.starts_with("PdfView && !GridOverview"));
+    assert_eq!(KeyBindingCategory::DocumentView.label(), "Document Reader");
+    let predicate = KeyBindingCategory::DocumentView.predicate();
+    assert!(predicate.starts_with("DocumentView && !GridOverview"));
     assert!(predicate.contains("!Search"));
+}
+
+#[test]
+fn document_view_category_uses_canonical_id() {
+    assert_eq!(KeyBindingCategory::DocumentView.id(), "document_view");
+    assert_eq!(
+        KeyBindingCategory::from_id("document_view"),
+        Some(KeyBindingCategory::DocumentView)
+    );
 }
 
 #[test]
@@ -99,7 +113,7 @@ fn action_can_have_multiple_categories() {
         .collect::<Vec<_>>();
     assert!(
         rows.iter()
-            .any(|row| row.category == KeyBindingCategory::PdfView)
+            .any(|row| row.category == KeyBindingCategory::DocumentView)
     );
     assert!(
         rows.iter()
@@ -208,7 +222,7 @@ fn first_action_for(keymap: &Keymap, keystrokes: &str, contexts: &[&str]) -> &'s
 }
 
 #[test]
-fn pdf_undo_redo_defaults() {
+fn document_undo_redo_defaults() {
     let undo_keystrokes = vec![expand_platform_keystroke("primary-z")];
     let mut redo_keystrokes = vec![expand_platform_keystroke("primary-shift-z")];
     if !cfg!(target_os = "macos") {
@@ -217,28 +231,30 @@ fn pdf_undo_redo_defaults() {
 
     for preset in [KeymapPreset::Modern, KeymapPreset::Vim] {
         let rows = editable_bindings(preset, &[]);
-        let pdf_binding = |action| {
+        let document_binding = |action| {
             rows.iter()
-                .find(|row| row.action == action && row.category == KeyBindingCategory::PdfView)
-                .expect("PDF command binding should exist")
+                .find(|row| {
+                    row.action == action && row.category == KeyBindingCategory::DocumentView
+                })
+                .expect("document command binding should exist")
         };
 
-        assert_eq!(pdf_binding("undo").keystrokes, undo_keystrokes);
-        assert_eq!(pdf_binding("redo").keystrokes, redo_keystrokes);
+        assert_eq!(document_binding("undo").keystrokes, undo_keystrokes);
+        assert_eq!(document_binding("redo").keystrokes, redo_keystrokes);
 
         let keymap = preset_keymap(preset);
         assert_eq!(
-            first_action_for(&keymap, "primary-z", &["PdfView"]),
+            first_action_for(&keymap, "primary-z", &["DocumentView"]),
             Undo::name_for_type()
         );
         assert_eq!(
-            first_action_for(&keymap, "primary-shift-z", &["PdfView"]),
+            first_action_for(&keymap, "primary-shift-z", &["DocumentView"]),
             Redo::name_for_type()
         );
         #[cfg(not(target_os = "macos"))]
         {
             assert_eq!(
-                first_action_for(&keymap, "ctrl-y", &["PdfView"]),
+                first_action_for(&keymap, "ctrl-y", &["DocumentView"]),
                 Redo::name_for_type()
             );
         }
@@ -249,7 +265,7 @@ fn pdf_undo_redo_defaults() {
 fn vim_ctrl_r_still_dispatches_reload() {
     let keymap = preset_keymap(KeymapPreset::Vim);
     assert_eq!(
-        first_action_for(&keymap, "ctrl-r", &["PdfView"]),
+        first_action_for(&keymap, "ctrl-r", &["DocumentView"]),
         Reload::name_for_type()
     );
 }

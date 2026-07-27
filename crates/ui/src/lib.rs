@@ -1,8 +1,9 @@
 use std::time::Duration;
 
+use gpui::App;
+
 pub mod activity;
 pub mod assets;
-pub mod fonts;
 pub mod icons;
 pub mod markdown;
 pub mod picker;
@@ -16,6 +17,13 @@ pub mod tooltip;
 pub use glyphst_actions::menu;
 pub use glyphst_settings as settings;
 pub use glyphst_settings::theme;
+
+/// Initialize the shared Glyphst UI services for an application.
+pub fn init(cx: &mut App) {
+    gpui_component::init(cx);
+    prompt::init(cx);
+    activity::init(cx);
+}
 
 /// Shared lifetime for brief, non-blocking UI feedback.
 pub const TRANSIENT_FEEDBACK_DURATION: Duration = Duration::from_secs(2);

@@ -1,0 +1,10 @@
+[package]
+name = "glyphst-files"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glyphst-ui = { path = "../ui" }
+gpui.workspace = true
+gpui_component.workspace = true
+gpui_platform.workspace = true

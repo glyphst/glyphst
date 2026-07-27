@@ -36,9 +36,9 @@ pub mod search {
     );
 }
 
-pub mod pdf_viewer {
+pub mod document_viewer {
     gpui::actions!(
-        pdf_viewer,
+        document_viewer,
         [
             CopySelection,
             Undo,

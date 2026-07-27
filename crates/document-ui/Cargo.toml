@@ -1,0 +1,28 @@
+[package]
+name = "glyphst-document-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arboard.workspace = true
+dirs.workspace = true
+futures.workspace = true
+glyphst-actions = { path = "../actions" }
+glyphst-ai = { path = "../ai" }
+glyphst-ai-ui = { path = "../ai-ui" }
+glyphst-core = { path = "../core" }
+glyphst-library = { path = "../library" }
+glyphst-pdf = { path = "../pdf" }
+glyphst-pdf-translation-app = { path = "../pdf-translation-app" }
+glyphst-settings = { path = "../settings" }
+glyphst-translation = { path = "../translation" }
+glyphst-translation-ui = { path = "../translation-ui" }
+glyphst-ui = { path = "../ui" }
+gpui.workspace = true
+gpui_component.workspace = true
+image.workspace = true
+mupdf.workspace = true
+smallvec.workspace = true
+tracing.workspace = true
+ztracing.workspace = true

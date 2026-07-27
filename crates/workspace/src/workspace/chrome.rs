@@ -9,9 +9,9 @@ use gpui_component::{
 };
 
 use crate::{
+    document_view::{CloseTab, OpenFile, OpenNewTab, OpenSettings},
     icons::IconName,
     pane::{SplitDown, SplitRight},
-    pdf_view::{CloseTab, OpenFile, OpenNewTab, OpenSettings},
 };
 
 use super::Workspace;

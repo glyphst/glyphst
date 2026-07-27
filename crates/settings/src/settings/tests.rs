@@ -174,7 +174,7 @@ fn parses_and_exports_contextual_keybindings() {
         r##"
 keybindings {
     next-search-result keys="ctrl-g" context="search_results"
-    next-page keys="" context="pdf_view"
+    next-page keys="" context="document_view"
 }
 "##,
     )
@@ -191,7 +191,7 @@ keybindings {
             KeyBindingOverride {
                 action: "next-page".to_string(),
                 keystrokes: String::new(),
-                context: Some("pdf_view".to_string()),
+                context: Some("document_view".to_string()),
             },
         ]
     );

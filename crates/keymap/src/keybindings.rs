@@ -2,11 +2,7 @@ use std::{rc::Rc, sync::OnceLock};
 
 use glyphst_actions::{
     ai_panel::AiPanelClose,
-    menu,
-    new_tab::{CancelSelect, DeleteSelected, EnterSelect},
-    note_editor::NoteCancel,
-    pane::{SplitDown, SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical},
-    pdf_viewer::{
+    document_viewer::{
         AddBookmark, CancelDocumentTranslation, CancelRegionSelection, CloseTab, CopySelection,
         GoToBeginning, GoToEnd, GridCursorDown, GridCursorLeft, GridCursorRight, GridCursorUp,
         GridOverviewConfirm, JumpBackward, JumpForward, NextHalfPage, NextPage, NextSearchResult,
@@ -19,6 +15,10 @@ use glyphst_actions::{
         ToggleThumbnailSidebar, ToggleToc, ToggleTransparency, TranslateDocument,
         TranslateSelection, Undo, ZoomIn, ZoomOut,
     },
+    menu,
+    new_tab::{CancelSelect, DeleteSelected, EnterSelect},
+    note_editor::NoteCancel,
+    pane::{SplitDown, SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical},
     search::{SearchInputCancel, SearchInputConfirm, SearchInputPrevious},
     settings_panel::PanelClose,
     workspace::{
@@ -88,7 +88,7 @@ const OVERLAY_CONTEXTS: &[&str] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyBindingCategory {
     Workspace,
-    PdfView,
+    DocumentView,
     PageOverview,
     NewTab,
     SearchResults,
@@ -98,7 +98,7 @@ impl KeyBindingCategory {
     pub fn id(self) -> &'static str {
         match self {
             Self::Workspace => "workspace",
-            Self::PdfView => "pdf_view",
+            Self::DocumentView => "document_view",
             Self::PageOverview => "page_overview",
             Self::NewTab => "new_tab",
             Self::SearchResults => "search_results",
@@ -108,7 +108,9 @@ impl KeyBindingCategory {
     pub fn label(self) -> String {
         match self {
             Self::Workspace => glyphst_settings::localize::tr("keybinding-category-workspace"),
-            Self::PdfView => glyphst_settings::localize::tr("keybinding-category-pdf-view"),
+            Self::DocumentView => {
+                glyphst_settings::localize::tr("keybinding-category-document-view")
+            }
             Self::PageOverview => {
                 glyphst_settings::localize::tr("keybinding-category-page-overview")
             }
@@ -124,8 +126,8 @@ impl KeyBindingCategory {
             Self::Workspace => {
                 glyphst_settings::localize::tr("keybinding-category-workspace-description")
             }
-            Self::PdfView => {
-                glyphst_settings::localize::tr("keybinding-category-pdf-view-description")
+            Self::DocumentView => {
+                glyphst_settings::localize::tr("keybinding-category-document-view-description")
             }
             Self::PageOverview => {
                 glyphst_settings::localize::tr("keybinding-category-page-overview-description")
@@ -142,7 +144,7 @@ impl KeyBindingCategory {
     pub fn from_id(value: &str) -> Option<Self> {
         match value {
             "workspace" | "global" => Some(Self::Workspace),
-            "pdf_view" | "pdf" | "main_pdf_view" => Some(Self::PdfView),
+            "document_view" => Some(Self::DocumentView),
             "page_overview" | "grid_overview" | "overview" => Some(Self::PageOverview),
             "new_tab" | "newtab" => Some(Self::NewTab),
             "search_results" | "search" => Some(Self::SearchResults),
@@ -153,7 +155,7 @@ impl KeyBindingCategory {
     fn predicate(self) -> String {
         match self {
             Self::Workspace => context_without_overlays("Workspace"),
-            Self::PdfView => context_without_overlays("PdfView"),
+            Self::DocumentView => context_without_overlays("DocumentView"),
             Self::PageOverview => "GridOverview && !SettingsPanel".to_string(),
             Self::NewTab => context_without_overlays("NewTab"),
             Self::SearchResults => "Search".to_string(),
@@ -256,7 +258,7 @@ fn localized_spec_label(spec: &CommandSpec) -> String {
 pub fn editable_categories() -> &'static [KeyBindingCategory] {
     &[
         KeyBindingCategory::Workspace,
-        KeyBindingCategory::PdfView,
+        KeyBindingCategory::DocumentView,
         KeyBindingCategory::PageOverview,
         KeyBindingCategory::NewTab,
         KeyBindingCategory::SearchResults,
@@ -1012,7 +1014,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<CopySelection>(
                     "copy-selection",
                     "Copy Selection",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["primary-c"],
                     &["primary-c"],
                     &["copy"],
@@ -1021,7 +1023,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<Undo>(
                     "undo",
                     "Undo",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["primary-z"],
                     &["primary-z"],
                     &["undo"],
@@ -1030,7 +1032,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<Redo>(
                     "redo",
                     "Redo",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["primary-shift-z", "nonmac:ctrl-y"],
                     &["primary-shift-z", "nonmac:ctrl-y"],
                     &["redo"],
@@ -1039,7 +1041,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<TranslateSelection>(
                     "translate-selection",
                     "Translate Selection",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["primary-shift-l"],
                     &["primary-shift-l"],
                     &["translate", "translation"],
@@ -1048,7 +1050,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<TranslateDocument>(
                     "translate-document",
                     "Translate Document…",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &[],
                     &[],
                     &["translate", "translation", "document", "whole-document"],
@@ -1057,7 +1059,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<CancelDocumentTranslation>(
                     "cancel-document-translation",
                     "Cancel Document Translation",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &[],
                     &[],
                     &["cancel", "translation", "document"],
@@ -1066,7 +1068,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<ToggleRegionSelection>(
                     "toggle-region-selection",
                     "Toggle Region Selection",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &[],
                     &[],
                     &["region", "crop", "screenshot"],
@@ -1075,7 +1077,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<TogglePinnedTranslation>(
                     "toggle-pinned-translation",
                     "Toggle Pinned Translation",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &[],
                     &[],
                     &["pinned-translation"],
@@ -1084,7 +1086,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<OpenTranslationSplit>(
                     "open-translation-split",
                     "Open Translation Split",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &[],
                     &[],
                     &["translation-split", "translated-pane"],
@@ -1093,7 +1095,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<SelectAll>(
                     "select-all",
                     "Select All",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["primary-a"],
                     &["primary-a"],
                     &[],
@@ -1102,7 +1104,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<ZoomIn>(
                     "zoom-in",
                     "Zoom In",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["+", "shift-="],
                     &["+", "shift-="],
                     &[],
@@ -1111,7 +1113,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<ZoomOut>(
                     "zoom-out",
                     "Zoom Out",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["-"],
                     &["-"],
                     &[],
@@ -1120,7 +1122,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<ResetZoom>(
                     "reset-zoom",
                     "Reset Zoom",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["="],
                     &["="],
                     &[],
@@ -1129,7 +1131,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<RotateClockwise>(
                     "rotate-clockwise",
                     "Rotate Clockwise",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["r"],
                     &["r"],
                     &["rotate", "rotate-cw"],
@@ -1138,7 +1140,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<RotateCounterclockwise>(
                     "rotate-counterclockwise",
                     "Rotate Counterclockwise",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["shift-r"],
                     &["shift-r"],
                     &["rotate-ccw"],
@@ -1147,7 +1149,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<TogglePublisherStyles>(
                     "toggle-publisher-styles",
                     "Toggle EPUB Publisher Styles",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &[],
                     &[],
                     &["publisher-styles"],
@@ -1156,7 +1158,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<Reload>(
                     "reload",
                     "Reload Document",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["ctrl-r"],
                     &["ctrl-r"],
                     &["reload-document"],
@@ -1165,7 +1167,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<TogglePresentationMode>(
                     "toggle-presentation-mode",
                     "Toggle Presentation Mode",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["f5"],
                     &["f5"],
                     &["toggle-presentation", "presentation", "presentation-mode"],
@@ -1174,7 +1176,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<Search>(
                     "search",
                     "Search",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["primary-f", "/"],
                     &["/"],
                     &[],
@@ -1183,7 +1185,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<NextSearchResult>(
                     "next-search-result",
                     "Next Search Result",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["f3", "nonmac:ctrl-alt-g", "mac:cmd-g"],
                     &["n"],
                     &[
@@ -1197,7 +1199,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<PrevSearchResult>(
                     "prev-search-result",
                     "Previous Search Result",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["shift-f3", "nonmac:ctrl-alt-shift-g", "mac:cmd-shift-g"],
                     &["shift-n"],
                     &[
@@ -1233,7 +1235,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<NextPage>(
                     "next-page",
                     "Next Page",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["pagedown"],
                     &["ctrl-f"],
                     &[],
@@ -1242,7 +1244,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<PreviousPage>(
                     "previous-page",
                     "Previous Page",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["pageup"],
                     &["ctrl-b"],
                     &["prev-page"],
@@ -1251,7 +1253,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<NextHalfPage>(
                     "next-half-page",
                     "Next Half Page",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["shift-pagedown"],
                     &["ctrl-d"],
                     &[],
@@ -1260,7 +1262,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<PreviousHalfPage>(
                     "previous-half-page",
                     "Previous Half Page",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["shift-pageup"],
                     &["ctrl-u"],
                     &["prev-half-page"],
@@ -1269,7 +1271,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<ScrollLineDown>(
                     "scroll-line-down",
                     "Scroll Line Down",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["down"],
                     &["j", "down"],
                     &["scroll-down", "move-down", "move-visual-mark-down"],
@@ -1278,7 +1280,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<ScrollLineUp>(
                     "scroll-line-up",
                     "Scroll Line Up",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["up"],
                     &["k", "up"],
                     &["scroll-up", "move-up", "move-visual-mark-up"],
@@ -1287,7 +1289,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<GoToBeginning>(
                     "go-to-beginning",
                     "Go to Beginning",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["home", "ctrl-home", "alt-<"],
                     &["home", "ctrl-home", "alt-<", "g g"],
                     &[
@@ -1301,7 +1303,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<GoToEnd>(
                     "go-to-end",
                     "Go to End",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["end", "ctrl-end", "alt->"],
                     &["end", "ctrl-end", "alt->", "shift-g"],
                     &["go-to-bottom", "go-to-the-end", "end-of-document"],
@@ -1310,7 +1312,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<JumpBackward>(
                     "jump-backward",
                     "Jump Backward",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &[],
                     &["ctrl-o"],
                     &["jump-back"],
@@ -1319,7 +1321,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<JumpForward>(
                     "jump-forward",
                     "Jump Forward",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &[],
                     &["ctrl-i"],
                     &[],
@@ -1328,7 +1330,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<Toc>(
                     "toc",
                     "Open Table of Contents",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &[],
                     &[],
                     &["goto-toc", "goto-table-of-contents"],
@@ -1337,7 +1339,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<OpenQuickAsk>(
                     "open-quick-ask",
                     "Open Quick Ask",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["tab"],
                     &["tab"],
                     &["quick-ask"],
@@ -1346,7 +1348,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<OpenGoToPage>(
                     "go-to-page",
                     "Go to Page",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &[],
                     &[":"],
                     &["goto-page", "open-go-to-page"],
@@ -1355,7 +1357,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<AddBookmark>(
                     "add-bookmark",
                     "Add Bookmark",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["ctrl-d"],
                     &["m"],
                     &["bookmark-page"],
@@ -1364,7 +1366,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<ToggleGridOverview>(
                     "toggle-grid-overview",
                     "Toggle Page Overview",
-                    KeyBindingCategory::PdfView,
+                    KeyBindingCategory::DocumentView,
                     &["ctrl-g"],
                     &["ctrl-g"],
                     &["grid-overview", "page-overview"],

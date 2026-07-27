@@ -4,7 +4,7 @@ use gpui::{AppContext as _, TestAppContext};
 use gpui_component::Root;
 
 use super::{Pane, Tab};
-use crate::{library::LibraryStore, pdf_view::RenderCache, settings::SettingsStore};
+use crate::{document_view::RenderCache, library::LibraryStore, settings::SettingsStore};
 use glyphst_translation_ui::DocumentTranslationJobManager;
 
 fn temporary_pdf_path(label: &str) -> std::path::PathBuf {
