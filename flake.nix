@@ -1,5 +1,5 @@
 {
-  description = "A GPUI-based PDF viewer";
+  description = "A GPUI-based PDF and EPUB reader";
 
   inputs = {
     gpuiComponent = {
@@ -54,13 +54,13 @@
             cargo = rustToolchain;
             rustc = rustToolchain;
           };
-          glyphst = pkgs.callPackage ./nix/package.nix {
+          glyphstReader = pkgs.callPackage ./nix/package.nix {
             inherit gpuiComponent rustPlatform;
           };
         in
         {
-          inherit glyphst;
-          default = glyphst;
+          glyphst-reader = glyphstReader;
+          default = glyphstReader;
         }
       );
 

@@ -24,9 +24,15 @@ use glyphst_workspace::{
     NewTab, Workspace, WorkspaceCallbacks, WorkspaceWindowHandle, WorkspaceWindowRequest,
 };
 
+const APP_ID: &str = "glyphst-reader";
+
 fn main() {
     if let Some(exit_code) = run_typst_worker_if_requested() {
         std::process::exit(exit_code);
+    }
+
+    if let Err(error) = glyphst_core::paths::migrate_legacy_app_dirs() {
+        eprintln!("failed to migrate Glyphst Reader data: {error:#}");
     }
 
     let request = instance::parse_args();
@@ -191,7 +197,7 @@ fn open_keymap_in_active_workspace(cx: &mut App) {
 }
 
 fn open_settings_window(cx: &mut App) {
-    glyphst_settings_ui::open_settings_window(open_keymap_in_active_workspace, cx);
+    glyphst_settings_ui::open_settings_window(open_keymap_in_active_workspace, APP_ID, cx);
 }
 
 fn workspace_callbacks() -> WorkspaceCallbacks {
@@ -253,7 +259,7 @@ fn open_workspace_window_inner(
             ..Default::default()
         },
         move |window, cx| {
-            window.set_app_id("glyphst");
+            window.set_app_id(APP_ID);
             let workspace = cx.new(|cx| {
                 if empty {
                     Workspace::new_empty(workspace_callbacks(), window, cx)

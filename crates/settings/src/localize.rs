@@ -77,7 +77,7 @@ mod tests {
     fn loads_fallback_language() {
         assert_eq!(
             i18n_embed_fl::fl!(LANGUAGE_LOADER, "app-name"),
-            "Glyphst".to_string()
+            "Glyphst Reader".to_string()
         );
         assert_eq!(
             tr_with_number("ai-mention-preview-truncated", "limit", 4_000),

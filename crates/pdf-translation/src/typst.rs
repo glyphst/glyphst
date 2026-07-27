@@ -166,7 +166,7 @@ impl TypstCompiler {
         validate_compiler_assets(&self.config.assets_dir)?;
         let executable = std::env::current_exe().map_err(|error| {
             TypstError::process(format!(
-                "failed to locate the Glyphst executable for the Typst worker: {error}"
+                "failed to locate the Glyphst Reader executable for the Typst worker: {error}"
             ))
         })?;
         let mut child = Command::new(&executable)
@@ -180,7 +180,7 @@ impl TypstCompiler {
             .spawn()
             .map_err(|error| {
                 TypstError::process(format!(
-                    "failed to start the Glyphst Typst worker {}: {error}",
+                    "failed to start the Glyphst Reader Typst worker {}: {error}",
                     executable.display()
                 ))
             })?;
@@ -206,7 +206,7 @@ impl TypstCompiler {
                     let _ = stderr_reader.join();
                     let _ = fs::remove_file(output_path.with_extension("pdf.part"));
                     return Err(TypstError::process(format!(
-                        "failed while waiting for the Glyphst Typst worker: {error}"
+                        "failed while waiting for the Glyphst Reader Typst worker: {error}"
                     )));
                 }
             }
@@ -224,7 +224,7 @@ impl TypstCompiler {
             })?;
         if response.protocol_version != TYPST_WORKER_PROTOCOL_VERSION {
             return Err(TypstError::process(format!(
-                "unsupported Glyphst Typst worker protocol version {}",
+                "unsupported Glyphst Reader Typst worker protocol version {}",
                 response.protocol_version
             )));
         }
@@ -256,7 +256,7 @@ struct TypstWorkerResponse {
     error: Option<TypstError>,
 }
 
-/// Handles Glyphst's private Typst worker invocation before the desktop
+/// Handles Glyphst Reader's private Typst worker invocation before the desktop
 /// application initializes. Returns `None` for normal application invocations.
 pub fn run_typst_worker_if_requested() -> Option<i32> {
     let mut arguments = std::env::args_os();
@@ -445,7 +445,7 @@ impl FileLoader for RestrictedFileLoader {
                 CMARKER_PACKAGE => self.cmarker.load(id.vpath()),
                 MITEX_PACKAGE => self.mitex.load(id.vpath()),
                 _ => Err(FileError::Other(Some(
-                    format!("package {package} is not bundled with Glyphst").into(),
+                    format!("package {package} is not bundled with Glyphst Reader").into(),
                 ))),
             },
         }
@@ -566,7 +566,7 @@ pub fn resolve_translation_assets_dir() -> PathBuf {
     if let Ok(executable) = std::env::current_exe()
         && let Some(prefix) = executable.parent().and_then(Path::parent)
     {
-        let packaged = prefix.join("share/glyphst/pdf-translation");
+        let packaged = prefix.join("share/glyphst-reader/pdf-translation");
         if packaged.is_dir() {
             return packaged;
         }

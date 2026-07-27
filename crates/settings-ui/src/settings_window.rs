@@ -38,7 +38,7 @@ use std::{
     time::Duration,
 };
 
-pub fn open_settings_window(open_keymap: fn(&mut App), cx: &mut App) {
+pub fn open_settings_window(open_keymap: fn(&mut App), app_id: &'static str, cx: &mut App) {
     if let Some(existing_window) = cx
         .windows()
         .into_iter()
@@ -61,12 +61,12 @@ pub fn open_settings_window(open_keymap: fn(&mut App), cx: &mut App) {
             titlebar: Some(TitleBar::title_bar_options()),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_background: window_settings.background_appearance(transparency_enabled),
-            app_id: Some("glyphst".to_string()),
+            app_id: Some(app_id.to_string()),
             window_min_size: Some(size(px(720.0), px(420.0))),
             ..Default::default()
         },
         move |window, cx| {
-            window.set_app_id("glyphst");
+            window.set_app_id(app_id);
             let settings = cx.new(|cx| SettingsWindow::new(open_keymap, cx));
             cx.new(|cx| Root::new(settings, window, cx))
         },
@@ -829,7 +829,7 @@ impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root_overlays = render_overlays(window, cx);
         let ui_font = setup_ui_font(window, cx);
-        let settings = ComponentSettings::new("glyphst-settings")
+        let settings = ComponentSettings::new("glyphst-reader-settings")
             .with_size(Size::Small)
             .with_group_variant(GroupBoxVariant::Outline)
             .default_selected_index(self.initial_selection)

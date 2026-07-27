@@ -50,7 +50,7 @@ impl SettingsWindow {
             )
             .default_value(defaults.language.as_str().to_string()),
         )
-        .description("Choose the interface language used by Glyphst.");
+        .description("Choose the interface language used by Glyphst Reader.");
 
         let default_zoom = SettingItem::new(
             "Default zoom",

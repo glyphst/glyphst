@@ -1,5 +1,5 @@
 [package]
-name = "glyphst"
+name = "glyphst-reader"
 version.workspace = true
 edition.workspace = true
 

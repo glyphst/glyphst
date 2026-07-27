@@ -120,7 +120,7 @@ fn hex_value(byte: u8) -> Option<u8> {
 fn socket_path() -> PathBuf {
     dirs::runtime_dir()
         .unwrap_or_else(glyphst_core::paths::state_dir)
-        .join("glyphst.sock")
+        .join("glyphst-reader.sock")
 }
 
 fn remove_stale_socket(path: &Path) -> Result<()> {

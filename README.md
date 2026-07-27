@@ -1,6 +1,6 @@
-# Glyphst
+# Glyphst Reader
 
-Glyphst is a desktop PDF and EPUB reader built with Rust and
+Glyphst Reader is a desktop PDF and EPUB reader built with Rust and
 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 
 ## Highlights
@@ -19,7 +19,7 @@ development shell provides the required libraries and tools.
 ```sh
 git submodule update --init dependencies/gpui-component
 nix develop
-cargo run --release -- /path/to/document.pdf
+cargo run -p glyphst-reader --release -- /path/to/document.pdf
 ```
 
 Without Nix, install the platform packages listed in
@@ -41,9 +41,9 @@ Install the configured pre-commit hooks with `prek install`.
 Start Tracy and run:
 
 ```sh
-ZTRACING=1 cargo run -p glyphst --features tracy --release
+ZTRACING=1 cargo run -p glyphst-reader --features tracy --release
 ```
 
 ## License
 
-Glyphst is licensed under [AGPL-3.0-only](LICENSE).
+Glyphst Reader is licensed under [AGPL-3.0-only](LICENSE).

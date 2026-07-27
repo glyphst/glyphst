@@ -156,7 +156,7 @@ impl SettingsWindow {
             )
             .default_value(defaults.theme.light.clone()),
         )
-        .description("Theme used whenever Glyphst is in light appearance.");
+        .description("Theme used whenever Glyphst Reader is in light appearance.");
 
         let dark_theme = SettingItem::new(
             crate::fl!("settings-dark-theme"),
@@ -181,7 +181,7 @@ impl SettingsWindow {
             )
             .default_value(defaults.theme.dark.clone()),
         )
-        .description("Theme used whenever Glyphst is in dark appearance.");
+        .description("Theme used whenever Glyphst Reader is in dark appearance.");
 
         let themes_directory = user_themes_dir();
         let themes_directory_label = themes_directory.display().to_string();
@@ -198,7 +198,7 @@ impl SettingsWindow {
         )
         .description(format!(
             "Place gpui-components ThemeSet JSON files in {themes_directory_label}. \
-             Glyphst loads them at startup and merges them into both theme catalogs."
+             Glyphst Reader loads them at startup and merges them into both theme catalogs."
         ));
 
         let font_options = self
@@ -346,7 +346,7 @@ impl SettingsWindow {
 
         SettingPage::new(crate::fl!("settings-tab-appearance"))
             .description(
-                "Choose component themes first, then apply optional Glyphst-specific semantic overrides.",
+                "Choose component themes first, then apply optional Glyphst Reader-specific semantic overrides.",
             )
             .groups([
                 SettingGroup::new()
@@ -364,11 +364,11 @@ impl SettingsWindow {
                     .items(document_colors),
                 SettingGroup::new()
                     .title("Window chrome")
-                    .description("Glyphst-specific footer, panel, border, and tab semantics.")
+                    .description("Glyphst Reader-specific footer, panel, border, and tab semantics.")
                     .items(chrome_colors),
                 SettingGroup::new()
                     .title("Text and controls")
-                    .description("Glyphst-specific text, state, and control semantics.")
+                    .description("Glyphst Reader-specific text, state, and control semantics.")
                     .items(control_colors),
             ])
     }

@@ -87,7 +87,7 @@ impl SettingsWindow {
             },
         );
         let api_key = SettingItem::new(crate::fl!("settings-api-key"), api_key_field)
-            .description("Stored locally in Glyphst's settings file.");
+            .description("Stored locally in Glyphst Reader's settings file.");
 
         let default_base_url = provider
             .default_base_url()

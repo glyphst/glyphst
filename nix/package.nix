@@ -46,7 +46,7 @@
   };
 in
   rustPlatform.buildRustPackage {
-    pname = "glyphst";
+    pname = "glyphst-reader";
     version = workspaceCargo.workspace.package.version;
 
     src = lib.fileset.toSource {
@@ -71,7 +71,7 @@ in
 
     cargoBuildFlags = [
       "-p"
-      "glyphst"
+      "glyphst-reader"
     ];
 
     nativeBuildInputs = [
@@ -115,18 +115,18 @@ in
     doCheck = false;
 
     postInstall = ''
-      mkdir -p $out/share/glyphst/pdf-translation
-      cp -R crates/pdf-translation/assets/. $out/share/glyphst/pdf-translation/
-      wrapProgram $out/bin/glyphst \
+      mkdir -p $out/share/glyphst-reader/pdf-translation
+      cp -R crates/pdf-translation/assets/. $out/share/glyphst-reader/pdf-translation/
+      wrapProgram $out/bin/glyphst-reader \
         --set FONTCONFIG_FILE ${fontsConf} \
-        --set GLYPHST_PDF_TRANSLATION_ASSETS $out/share/glyphst/pdf-translation
-      install -Dm644 crates/app/glyphst.desktop $out/share/applications/glyphst.desktop
+        --set GLYPHST_PDF_TRANSLATION_ASSETS $out/share/glyphst-reader/pdf-translation
+      install -Dm644 crates/reader/glyphst-reader.desktop $out/share/applications/glyphst-reader.desktop
     '';
 
     meta = {
-      description = "A GPUI-based PDF viewer";
+      description = "A GPUI-based PDF and EPUB reader";
       license = lib.licenses.agpl3Only;
-      mainProgram = "glyphst";
+      mainProgram = "glyphst-reader";
       platforms = lib.platforms.linux;
     };
   }

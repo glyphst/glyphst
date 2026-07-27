@@ -1,4 +1,4 @@
-# Glyphst PDF translation engine
+# Glyphst Reader PDF translation engine
 
 `glyphst-pdf-translation` is the application-independent PDF translation engine. It owns:
 
@@ -7,8 +7,9 @@
 - semantic translation units and protected inline style markers;
 - source-derived layout, overflow policy, Typst rendering, and PDF composition.
 
-It intentionally does not depend on GPUI, Glyphst settings, or Glyphst's provider service. The
-`glyphst-pdf-translation-app` crate is the thin application adapter for those concerns.
+It intentionally does not depend on GPUI, Glyphst Reader settings, or Glyphst Reader's provider
+service. The `glyphst-pdf-translation-app` crate is the thin application adapter for those
+concerns.
 
 ## Local sample gate
 
@@ -33,6 +34,6 @@ overflow. Structural and searchable-text validation reject incomplete output.
 ## Design reference
 
 The implementation is informed by the layout-preserving approach in the
-`references/retain-pdf` submodule. Glyphst keeps its own document model, protected-region policy,
-translation validation, and application adapter so its viewer workflow and sample-specific
+`references/retain-pdf` submodule. Glyphst Reader keeps its own document model, protected-region
+policy, translation validation, and application adapter so its viewer workflow and sample-specific
 regressions remain first-class requirements.

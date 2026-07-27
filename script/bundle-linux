@@ -6,7 +6,7 @@ usage() {
     cat <<'EOF'
 Usage: script/bundle-linux
 
-Build a portable Glyphst archive for the current Linux architecture.
+Build a portable Glyphst Reader archive for the current Linux architecture.
 
 Run this script natively on Ubuntu 20.04 to produce binaries compatible with
 glibc 2.31 and newer. Supported architectures are x86_64 and aarch64.
@@ -81,16 +81,16 @@ if [[ "$target_root" != /* ]]; then
 fi
 
 release_dir="$target_root/$target_triple/release"
-built_binary="$release_dir/glyphst"
+built_binary="$release_dir/glyphst-reader"
 archive_dir="$target_root/release"
-archive="$archive_dir/glyphst-linux-$archive_arch.tar.gz"
+archive="$archive_dir/glyphst-reader-linux-$archive_arch.tar.gz"
 rpath_link_args='-Wl,--disable-new-dtags,-rpath,$ORIGIN/../lib'
 
 cargo rustc \
     --release \
     --target "$target_triple" \
-    --package glyphst \
-    --bin glyphst \
+    --package glyphst-reader \
+    --bin glyphst-reader \
     -- \
     -C "link-args=$rpath_link_args"
 
@@ -104,11 +104,11 @@ fi
 temp_dir="$(mktemp -d)"
 trap 'rm -rf "$temp_dir"' EXIT
 
-bundle_dir="$temp_dir/glyphst.app"
+bundle_dir="$temp_dir/glyphst-reader.app"
 binary_dir="$bundle_dir/bin"
 library_dir="$bundle_dir/lib"
 desktop_dir="$bundle_dir/share/applications"
-packaged_binary="$binary_dir/glyphst"
+packaged_binary="$binary_dir/glyphst-reader"
 
 mkdir -p "$binary_dir" "$library_dir" "$desktop_dir"
 cp "$built_binary" "$packaged_binary"
@@ -153,11 +153,11 @@ while IFS= read -r line; do
     fi
 done <<<"$ldd_output"
 
-cp "$workspace_dir/crates/app/glyphst.desktop" "$desktop_dir/glyphst.desktop"
+cp "$workspace_dir/crates/reader/glyphst-reader.desktop" "$desktop_dir/glyphst-reader.desktop"
 cp "$workspace_dir/LICENSE" "$bundle_dir/LICENSE"
 
 mkdir -p "$archive_dir"
 rm -f "$archive"
-tar -czf "$archive" -C "$temp_dir" glyphst.app
+tar -czf "$archive" -C "$temp_dir" glyphst-reader.app
 
 printf 'Created %s\n' "$archive"

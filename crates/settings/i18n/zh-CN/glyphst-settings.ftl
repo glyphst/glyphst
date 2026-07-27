@@ -1,4 +1,4 @@
-app-name = Glyphst
+app-name = Glyphst Reader
 
 ## Common
 
@@ -155,7 +155,7 @@ mention-region-image-description = 将选中的 PDF 区域作为图像附加
 ## Settings
 
 settings-title = 设置
-settings-window-title = Glyphst 设置
+settings-window-title = Glyphst Reader 设置
 settings-tab-general = 常规
 settings-tab-keymap = 键位
 settings-tab-appearance = 外观
@@ -304,12 +304,12 @@ untitled-note = 未命名笔记
 
 ## Toolbar
 
-toolbar-menu-glyphst = Glyphst
+toolbar-menu-glyphst = Glyphst Reader
 toolbar-menu-file = 文件
 toolbar-menu-tab = 标签页
 toolbar-show-menus = 显示应用菜单
 toolbar-open-settings = 打开设置
-toolbar-quit-glyphst = 退出 Glyphst
+toolbar-quit-glyphst = 退出 Glyphst Reader
 toolbar-open-file = 打开文件
 toolbar-new-tab = 新建标签页
 toolbar-close-tab = 关闭标签页

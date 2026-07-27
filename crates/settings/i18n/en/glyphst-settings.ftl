@@ -1,4 +1,4 @@
-app-name = Glyphst
+app-name = Glyphst Reader
 
 ## Common
 
@@ -163,7 +163,7 @@ mention-region-image-description = Attach the selected PDF region as an image
 ## Settings
 
 settings-title = Settings
-settings-window-title = Glyphst Settings
+settings-window-title = Glyphst Reader Settings
 settings-tab-general = General
 settings-tab-keymap = Keymap
 settings-tab-appearance = Appearance
@@ -324,12 +324,12 @@ untitled-note = Untitled note
 
 ## Toolbar
 
-toolbar-menu-glyphst = Glyphst
+toolbar-menu-glyphst = Glyphst Reader
 toolbar-menu-file = File
 toolbar-menu-tab = Tabs
 toolbar-show-menus = Show application menus
 toolbar-open-settings = Open Settings
-toolbar-quit-glyphst = Quit Glyphst
+toolbar-quit-glyphst = Quit Glyphst Reader
 toolbar-open-file = Open File
 toolbar-new-tab = New Tab
 toolbar-close-tab = Close Tab

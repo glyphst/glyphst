@@ -943,8 +943,11 @@ fn loads_user_theme_from_themes_directory() {
 #[test]
 fn unmanaged_settings_persist_to_state_without_creating_config() {
     let root = unique_test_dir();
-    let config_path = root.join("config").join("glyphst").join("config.kdl");
-    let state_path = root.join("state").join("glyphst").join("config.kdl");
+    let config_path = root
+        .join("config")
+        .join("glyphst-reader")
+        .join("config.kdl");
+    let state_path = root.join("state").join("glyphst-reader").join("config.kdl");
     let settings = Settings {
         behavior: BehaviorSettings {
             default_zoom: 1.5,
@@ -973,8 +976,11 @@ fn unmanaged_settings_persist_to_state_without_creating_config() {
 #[test]
 fn managed_settings_persist_to_config_without_touching_state_file() {
     let root = unique_test_dir();
-    let config_path = root.join("config").join("glyphst").join("config.kdl");
-    let state_path = root.join("state").join("glyphst").join("config.kdl");
+    let config_path = root
+        .join("config")
+        .join("glyphst-reader")
+        .join("config.kdl");
+    let state_path = root.join("state").join("glyphst-reader").join("config.kdl");
     let settings = Settings {
         overrides: PartialTheme {
             page_gap: Some(48.0),
@@ -1033,11 +1039,13 @@ fn persisted_settings_are_private() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let root = unique_test_dir();
-    let state_path = root.join("state").join("glyphst").join("config.kdl");
+    let state_path = root.join("state").join("glyphst-reader").join("config.kdl");
     let mut store = test_store(
         Settings::default(),
         false,
-        root.join("config").join("glyphst").join("config.kdl"),
+        root.join("config")
+            .join("glyphst-reader")
+            .join("config.kdl"),
         state_path.clone(),
     );
 

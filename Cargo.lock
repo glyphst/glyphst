@@ -2593,33 +2593,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glyphst"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "futures",
- "glyphst-core",
- "glyphst-keymap",
- "glyphst-library",
- "glyphst-pdf-translation-app",
- "glyphst-pdf-ui",
- "glyphst-settings",
- "glyphst-settings-ui",
- "glyphst-translation",
- "glyphst-ui",
- "glyphst-workspace",
- "gpui",
- "gpui-component",
- "gpui_platform",
- "serde",
- "serde_json",
- "tikv-jemalloc-sys",
- "tikv-jemallocator",
- "ztracing",
-]
-
-[[package]]
 name = "glyphst-actions"
 version = "0.1.0"
 dependencies = [
@@ -2761,6 +2734,33 @@ dependencies = [
  "mupdf",
  "smallvec",
  "tracing",
+ "ztracing",
+]
+
+[[package]]
+name = "glyphst-reader"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "futures",
+ "glyphst-core",
+ "glyphst-keymap",
+ "glyphst-library",
+ "glyphst-pdf-translation-app",
+ "glyphst-pdf-ui",
+ "glyphst-settings",
+ "glyphst-settings-ui",
+ "glyphst-translation",
+ "glyphst-ui",
+ "glyphst-workspace",
+ "gpui",
+ "gpui-component",
+ "gpui_platform",
+ "serde",
+ "serde_json",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
  "ztracing",
 ]
 

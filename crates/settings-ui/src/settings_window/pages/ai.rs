@@ -284,7 +284,9 @@ impl SettingsWindow {
         );
 
         SettingPage::new("AI")
-            .description("Configure models and document context shared by Glyphst's AI features.")
+            .description(
+                "Configure models and document context shared by Glyphst Reader's AI features.",
+            )
             .groups([
                 SettingGroup::new()
                     .title(crate::fl!("settings-default-models"))
@@ -374,7 +376,7 @@ impl SettingsWindow {
                 },
             );
             let api_key = SettingItem::new(crate::fl!("settings-api-key"), api_key_field)
-                .description("Stored locally in Glyphst's settings file.");
+                .description("Stored locally in Glyphst Reader's settings file.");
 
             let base_url_field = Self::bound_text_field(
                 format!("provider-base-url-{}", provider.as_str()),
