@@ -286,6 +286,24 @@ pub struct DocumentId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PageIndex(pub usize);
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SelectedPagesReference {
+    pub pages: Vec<PageIndex>,
+}
+
+impl SelectedPagesReference {
+    pub fn new(pages: impl IntoIterator<Item = PageIndex>) -> Self {
+        let mut pages = pages.into_iter().collect::<Vec<_>>();
+        pages.sort_by_key(|page| page.0);
+        pages.dedup();
+        Self { pages }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PageRegion {
     pub page: PageIndex,

@@ -747,6 +747,14 @@ fn loads_v1_ai_sessions_and_migrates_them_without_references() {
                 .unwrap()
                 .is_some()
         );
+        assert!(
+            read_txn
+                .open_table(STORAGE_MIGRATIONS_TABLE)
+                .unwrap()
+                .get(AI_SESSIONS_V4_MIGRATION_KEY)
+                .unwrap()
+                .is_some()
+        );
         let v1_value = read_txn
             .open_table(AI_SESSIONS_V1_TABLE)
             .unwrap()
@@ -781,6 +789,19 @@ fn loads_v1_ai_sessions_and_migrates_them_without_references() {
             .unwrap();
         assert!(
             decode::<StoredAiSessionV3>(v3_value.value())
+                .unwrap()
+                .messages[0]
+                .occurrences
+                .is_empty()
+        );
+        let v4_value = read_txn
+            .open_table(AI_SESSIONS_V4_TABLE)
+            .unwrap()
+            .get(stored_session.id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            decode::<StoredAiSessionV4>(v4_value.value())
                 .unwrap()
                 .messages[0]
                 .occurrences
@@ -1005,6 +1026,71 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].messages[0].occurrences, occurrences);
         assert_eq!(sessions[0].messages[0].references.len(), 2);
+    }
+
+    let _ = fs::remove_file(database_path);
+}
+
+#[test]
+fn round_trips_v4_selected_page_snapshots() {
+    let database_path = temp_library_path("ai-session-v4-selected-pages");
+    let document_path = PathBuf::from("/tmp/v4-selected-pages.pdf");
+    let occurrences = vec![
+        AiMentionOccurrence {
+            start: 0,
+            end: 20,
+            reference: AiMentionReference::SelectedPagesText {
+                pages: vec![0, 2, 5],
+            },
+        },
+        AiMentionOccurrence {
+            start: 25,
+            end: 46,
+            reference: AiMentionReference::SelectedPagesImage { pages: vec![1, 4] },
+        },
+    ];
+
+    let session_id = {
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let session_id = store.next_ai_session_id();
+        store
+            .save_ai_session(AiSession {
+                id: session_id,
+                path: document_path.clone(),
+                title: "Selected pages".to_string(),
+                page: 1,
+                messages: vec![AiSessionMessage {
+                    role: AiSessionRole::User,
+                    content: "@selected-pages-text and @selected-pages-image".to_string(),
+                    request_content: Some("Compare the attached pages".to_string()),
+                    references: Vec::new(),
+                    occurrences: occurrences.clone(),
+                }],
+                created: 35,
+                updated: 36,
+            })
+            .unwrap();
+        session_id
+    };
+
+    {
+        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let sessions = store.ai_sessions_for(&document_path);
+        assert_eq!(sessions[0].messages[0].occurrences, occurrences);
+    }
+
+    {
+        let database = Database::open(&database_path).unwrap();
+        let read_txn = database.begin_read().unwrap();
+        let stored = read_txn
+            .open_table(AI_SESSIONS_V4_TABLE)
+            .unwrap()
+            .get(session_id)
+            .unwrap()
+            .unwrap();
+        let stored = decode::<StoredAiSessionV4>(stored.value()).unwrap();
+        assert_eq!(stored.version, AI_SESSIONS_V4_VERSION);
+        assert_eq!(stored.messages[0].occurrences, occurrences);
     }
 
     let _ = fs::remove_file(database_path);

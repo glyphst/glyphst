@@ -72,6 +72,8 @@ fn mention_labels_are_canonical_lowercase_keywords() {
         [
             "page",
             "page-image",
+            "selected-pages-text",
+            "selected-pages-image",
             "selection",
             "document",
             "document-image",
@@ -80,6 +82,8 @@ fn mention_labels_are_canonical_lowercase_keywords() {
     );
     assert!(!MentionKind::Page.is_image());
     assert!(MentionKind::PageImage.is_image());
+    assert!(!MentionKind::SelectedPagesText.is_image());
+    assert!(MentionKind::SelectedPagesImage.is_image());
     assert!(MentionKind::DocumentImage.is_image());
     assert!(MentionKind::RegionImage.is_image());
 }
@@ -92,6 +96,37 @@ fn mention_completion_matches_new_page_names() {
         MentionKind::PageImage,
         "page-image "
     ));
+    assert!(mention_matches_query(
+        MentionKind::SelectedPagesText,
+        "selected"
+    ));
+    assert_eq!(
+        mentioned_references("Compare @selected-pages-text with @selected-pages-image."),
+        vec![
+            MentionReference::new(MentionKind::SelectedPagesText, None),
+            MentionReference::new(MentionKind::SelectedPagesImage, None),
+        ]
+    );
+}
+
+#[test]
+fn mention_occurrence_retains_selected_page_snapshot() {
+    let selected_pages =
+        SelectedPagesReference::new([glyphst_core::PageIndex(4), glyphst_core::PageIndex(1)]);
+    let occurrence = MentionOccurrence::new(
+        0..20,
+        MentionReference::new(MentionKind::SelectedPagesText, None),
+    )
+    .with_selected_pages_reference(selected_pages.clone());
+
+    assert_eq!(
+        occurrence.selected_pages_reference(),
+        Some(&SelectedPagesReference::new([
+            glyphst_core::PageIndex(1),
+            glyphst_core::PageIndex(4),
+        ]))
+    );
+    assert_eq!(occurrence.selected_pages_reference(), Some(&selected_pages));
 }
 
 #[test]
@@ -150,6 +185,77 @@ fn configures_native_thinking_for_supported_models() {
         AiThinkingLevel::High,
     );
     assert!(unsupported_body.get("reasoning_effort").is_none());
+
+    let mut responses_body = json!({});
+    apply_responses_reasoning(&mut responses_body, AiThinkingLevel::Max);
+    assert_eq!(responses_body["reasoning"]["effort"], "max");
+    assert_eq!(responses_body["reasoning"]["summary"], "auto");
+}
+
+#[test]
+fn responses_payload_uses_typed_text_and_image_parts() {
+    let parts = vec![
+        RequestPart::Text("question".to_string()),
+        RequestPart::Image(ImageContext::new(
+            MentionKind::SelectedPagesImage,
+            Some(2),
+            "image/jpeg",
+            vec![1, 2, 3],
+        )),
+    ];
+    let user = responses_message_content(Role::User, &parts);
+    assert_eq!(user[0], json!({"type": "input_text", "text": "question"}));
+    assert_eq!(user[1]["type"], "input_image");
+    assert!(
+        user[1]["image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/jpeg;base64,")
+    );
+
+    let assistant =
+        responses_message_content(Role::Assistant, &[RequestPart::Text("answer".to_string())]);
+    assert_eq!(assistant[0]["type"], "output_text");
+    assert_eq!(assistant[0]["annotations"], json!([]));
+}
+
+#[test]
+fn responses_stream_events_emit_text_and_finish() {
+    let mut deltas = Vec::new();
+    let mut send = |event| {
+        if let AiStreamEvent::Delta(delta) = event {
+            deltas.push(delta);
+        }
+        Ok(())
+    };
+    assert!(
+        !process_sse_line(
+            AiApiStyle::OpenAiResponses,
+            r#"data: {"type":"response.output_text.delta","delta":"hello"}"#,
+            &mut send,
+        )
+        .unwrap()
+    );
+    assert!(
+        process_sse_line(
+            AiApiStyle::OpenAiResponses,
+            r#"data: {"type":"response.completed"}"#,
+            &mut send,
+        )
+        .unwrap()
+    );
+    assert!(
+        process_sse_line(
+            AiApiStyle::OpenAiResponses,
+            r#"data: {"type":"response.failed","response":{"error":{"message":"denied"}}}"#,
+            &mut send,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("denied")
+    );
+    drop(send);
+    assert_eq!(deltas, ["hello"]);
 }
 
 #[test]

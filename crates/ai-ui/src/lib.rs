@@ -4,7 +4,7 @@ pub mod ai_panel;
 
 use anyhow::Result;
 use glyphst_ai::ai_chat::{ContextBlock, ImageContext, MentionReference};
-use glyphst_core::RegionImageReference;
+use glyphst_core::{RegionImageReference, SelectedPagesReference};
 
 pub use ai_panel::{AI_PANEL_WIDTH, AiPanel, AiPanelEvent};
 
@@ -17,6 +17,7 @@ pub struct AiContext {
     pub current_page: usize,
     pub selected_text: Option<String>,
     pub selected_region: Option<RegionImageReference>,
+    pub selected_pages: Option<SelectedPagesReference>,
     pub document_text: Option<String>,
 }
 

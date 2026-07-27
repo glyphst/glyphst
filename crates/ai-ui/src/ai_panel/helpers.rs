@@ -58,10 +58,14 @@ pub(super) fn mention_is_available(
     page_count: usize,
     has_selection: bool,
     has_region: bool,
+    has_selected_pages: bool,
 ) -> bool {
     match mention {
         MentionKind::Selection => has_selection,
         MentionKind::RegionImage => has_region,
+        MentionKind::SelectedPagesText | MentionKind::SelectedPagesImage => {
+            page_count > 0 && has_selected_pages
+        }
         MentionKind::Page | MentionKind::PageImage | MentionKind::DocumentImage => page_count > 0,
         MentionKind::DocumentText => true,
     }
@@ -83,6 +87,7 @@ fn composer_mention_from_occurrence(
     range: Range<usize>,
     reference: MentionReference,
     region_reference: Option<RegionImageReference>,
+    selected_pages_reference: Option<SelectedPagesReference>,
     region_references: &mut Vec<RegionImageReference>,
     contexts: &mut Vec<ContextBlock>,
 ) -> Option<ComposerMention> {
@@ -93,6 +98,16 @@ fn composer_mention_from_occurrence(
             reference,
             range,
             captured: Some(CapturedMention::Region(region_reference)),
+        });
+    }
+    if matches!(
+        reference.kind,
+        MentionKind::SelectedPagesText | MentionKind::SelectedPagesImage
+    ) {
+        return Some(ComposerMention {
+            reference,
+            range,
+            captured: Some(CapturedMention::Pages(selected_pages_reference?)),
         });
     }
 
@@ -107,6 +122,8 @@ fn composer_mention_from_occurrence(
             .map(|context| CapturedMention::Text(context.text.clone())),
         MentionKind::Page
         | MentionKind::PageImage
+        | MentionKind::SelectedPagesText
+        | MentionKind::SelectedPagesImage
         | MentionKind::DocumentImage
         | MentionKind::RegionImage => None,
     };
@@ -148,6 +165,7 @@ pub(super) fn composer_mentions_for_message(
                 occurrence.range.clone(),
                 occurrence.reference,
                 occurrence.region_reference.clone(),
+                occurrence.selected_pages_reference.clone(),
                 &mut region_references,
                 &mut contexts,
             ) else {
@@ -197,6 +215,7 @@ pub(super) fn composer_mentions_for_message(
                 range,
                 reference,
                 None,
+                None,
                 &mut region_references,
                 &mut contexts,
             ) else {
@@ -215,6 +234,7 @@ pub(super) fn composer_mentions_for_message(
         let Some(mention) = composer_mention_from_occurrence(
             range,
             reference,
+            None,
             None,
             &mut region_references,
             &mut contexts,
@@ -270,7 +290,12 @@ pub(super) fn references_for_composer_mentions(
     mentions
         .iter()
         .filter_map(|mention| {
-            if mention.reference.kind == MentionKind::RegionImage {
+            if matches!(
+                mention.reference.kind,
+                MentionKind::RegionImage
+                    | MentionKind::SelectedPagesText
+                    | MentionKind::SelectedPagesImage
+            ) {
                 return None;
             }
             (mention.reference.kind == MentionKind::Selection || seen.insert(mention.reference))
@@ -338,6 +363,8 @@ fn resolve_mention_context(mention: MentionKind, context: Option<&AiContext>) ->
         ),
         MentionKind::Page
         | MentionKind::PageImage
+        | MentionKind::SelectedPagesText
+        | MentionKind::SelectedPagesImage
         | MentionKind::DocumentImage
         | MentionKind::RegionImage => missing_context_block(mention),
     }
@@ -362,6 +389,8 @@ pub(super) fn mention_preview_text(
         )),
         MentionKind::Page
         | MentionKind::PageImage
+        | MentionKind::SelectedPagesText
+        | MentionKind::SelectedPagesImage
         | MentionKind::DocumentImage
         | MentionKind::RegionImage => None,
     }
@@ -409,6 +438,33 @@ pub(super) fn preview_content_from_resolved(
         "No preview is available for {}.",
         reference.display_text()
     ))
+}
+
+pub(super) fn preview_content_from_selected_pages(
+    kind: MentionKind,
+    pages: &SelectedPagesReference,
+    resolved: &[ResolvedPageContext],
+) -> Result<MentionPreviewPayload, String> {
+    let mut sections = Vec::with_capacity(pages.pages.len());
+    for page in &pages.pages {
+        let page_number = page.0 + 1;
+        let text = resolved.iter().find_map(|context| match context {
+            ResolvedPageContext::Text(context)
+                if context.kind == kind && context.page == Some(page_number) =>
+            {
+                Some(context.text.as_str())
+            }
+            ResolvedPageContext::Text(_) | ResolvedPageContext::Image(_) => None,
+        });
+        let Some(text) = text else {
+            return Err(format!(
+                "No preview is available for {} page {page_number}.",
+                kind.token()
+            ));
+        };
+        sections.push(format!("## Page {page_number}\n\n{text}"));
+    }
+    Ok(MentionPreviewPayload::Text(sections.join("\n\n")))
 }
 
 pub(super) fn preview_content_from_resolved_region(
@@ -637,6 +693,8 @@ pub(super) fn validate_page_image_preflight<'a>(
                 image_count = image_count.saturating_add(page_count);
             }
             MentionKind::Page
+            | MentionKind::SelectedPagesText
+            | MentionKind::SelectedPagesImage
             | MentionKind::Selection
             | MentionKind::DocumentText
             | MentionKind::RegionImage => {}
@@ -647,6 +705,15 @@ pub(super) fn validate_page_image_preflight<'a>(
             .iter()
             .flat_map(|message| message.region_references())
             .map(|reference| reference.regions.len())
+            .sum::<usize>(),
+    );
+    image_count = image_count.saturating_add(
+        messages
+            .iter()
+            .flat_map(|message| message.mention_occurrences())
+            .filter(|occurrence| occurrence.reference.kind == MentionKind::SelectedPagesImage)
+            .filter_map(MentionOccurrence::selected_pages_reference)
+            .map(|reference| reference.pages.len())
             .sum::<usize>(),
     );
     if image_count > page_image_limit {
@@ -697,6 +764,25 @@ fn message_needs_resolved_reference(
     message: &ChatMessage,
     resolved_reference: MentionReference,
 ) -> bool {
+    if matches!(
+        resolved_reference.kind,
+        MentionKind::SelectedPagesText | MentionKind::SelectedPagesImage
+    ) {
+        let Some(page) = resolved_reference.page.filter(|page| *page > 0) else {
+            return false;
+        };
+        return message.mention_occurrences().iter().any(|occurrence| {
+            occurrence.reference.kind == resolved_reference.kind
+                && occurrence
+                    .selected_pages_reference()
+                    .is_some_and(|reference| {
+                        reference
+                            .pages
+                            .iter()
+                            .any(|candidate| candidate.0 + 1 == page)
+                    })
+        }) && !message.has_resolved_page_reference(resolved_reference);
+    }
     let requested = if resolved_reference.kind == MentionKind::DocumentImage {
         MentionReference::new(MentionKind::DocumentImage, None)
     } else {
@@ -711,16 +797,35 @@ pub(super) fn unresolved_page_references(
     page_count: usize,
 ) -> Vec<MentionReference> {
     let mut seen = HashSet::new();
-    messages
-        .iter()
-        .flat_map(|message| {
-            message.references().iter().copied().filter(|reference| {
-                reference.kind.is_page_reference()
-                    && !message_has_resolved_reference(message, *reference, page_count)
-            })
-        })
-        .filter(|reference| seen.insert(*reference))
-        .collect()
+    let mut unresolved = Vec::new();
+    for message in messages {
+        for reference in message.references().iter().copied().filter(|reference| {
+            reference.kind.is_page_reference()
+                && !message_has_resolved_reference(message, *reference, page_count)
+        }) {
+            if seen.insert(reference) {
+                unresolved.push(reference);
+            }
+        }
+        for occurrence in message.mention_occurrences() {
+            if !matches!(
+                occurrence.reference.kind,
+                MentionKind::SelectedPagesText | MentionKind::SelectedPagesImage
+            ) {
+                continue;
+            }
+            let Some(reference) = occurrence.selected_pages_reference() else {
+                continue;
+            };
+            for page in &reference.pages {
+                let reference = MentionReference::new(occurrence.reference.kind, Some(page.0 + 1));
+                if !message.has_resolved_page_reference(reference) && seen.insert(reference) {
+                    unresolved.push(reference);
+                }
+            }
+        }
+    }
+    unresolved
 }
 
 pub(super) fn unresolved_region_references(messages: &[ChatMessage]) -> Vec<RegionImageReference> {
@@ -795,27 +900,17 @@ pub(super) fn hydrate_page_contexts(
     resolved: &[ResolvedPageContext],
 ) {
     for message in messages {
-        let references = message.references().iter().copied().collect::<HashSet<_>>();
         for resolved in resolved {
             match resolved {
                 ResolvedPageContext::Text(context) => {
                     let reference = MentionReference::new(context.kind, context.page);
-                    if references.contains(&reference)
-                        && message_needs_resolved_reference(message, reference)
-                    {
+                    if message_needs_resolved_reference(message, reference) {
                         message.attach_context(context.clone());
                     }
                 }
                 ResolvedPageContext::Image(image) => {
                     let reference = MentionReference::new(image.kind, image.page);
-                    if (references.contains(&reference)
-                        || (reference.kind == MentionKind::DocumentImage
-                            && references.contains(&MentionReference::new(
-                                MentionKind::DocumentImage,
-                                None,
-                            ))))
-                        && message_needs_resolved_reference(message, reference)
-                    {
+                    if message_needs_resolved_reference(message, reference) {
                         message.attach_image(image.clone());
                     }
                 }
@@ -889,8 +984,10 @@ pub(super) fn ai_reference_to_library(reference: MentionReference) -> AiMentionR
             page: reference.page.unwrap_or(1),
         },
         MentionKind::DocumentImage => AiMentionReference::DocumentImage,
-        MentionKind::RegionImage => {
-            unreachable!("region references are persisted with their geometry")
+        MentionKind::RegionImage
+        | MentionKind::SelectedPagesText
+        | MentionKind::SelectedPagesImage => {
+            unreachable!("snapshot mentions are persisted with their occurrence payload")
         }
     }
 }
@@ -910,6 +1007,12 @@ pub(super) fn library_reference_to_ai(reference: &AiMentionReference) -> Option<
         AiMentionReference::DocumentImage => {
             Some(MentionReference::new(MentionKind::DocumentImage, None))
         }
+        AiMentionReference::SelectedPagesText { .. } => {
+            Some(MentionReference::new(MentionKind::SelectedPagesText, None))
+        }
+        AiMentionReference::SelectedPagesImage { .. } => {
+            Some(MentionReference::new(MentionKind::SelectedPagesImage, None))
+        }
         AiMentionReference::RegionImage { .. } => None,
     }
 }
@@ -923,17 +1026,32 @@ pub(super) fn library_reference_to_region(
         | AiMentionReference::DocumentText
         | AiMentionReference::Page { .. }
         | AiMentionReference::PageImage { .. }
-        | AiMentionReference::DocumentImage => None,
+        | AiMentionReference::DocumentImage
+        | AiMentionReference::SelectedPagesText { .. }
+        | AiMentionReference::SelectedPagesImage { .. } => None,
     }
 }
 
 fn ai_occurrence_to_library(occurrence: &MentionOccurrence) -> Option<AiMentionOccurrence> {
-    let reference = if occurrence.reference.kind == MentionKind::RegionImage {
-        AiMentionReference::RegionImage {
+    let reference = match occurrence.reference.kind {
+        MentionKind::RegionImage => AiMentionReference::RegionImage {
             reference: occurrence.region_reference.clone()?,
+        },
+        MentionKind::SelectedPagesText | MentionKind::SelectedPagesImage => {
+            let pages = occurrence
+                .selected_pages_reference
+                .as_ref()?
+                .pages
+                .iter()
+                .map(|page| page.0)
+                .collect();
+            if occurrence.reference.kind == MentionKind::SelectedPagesText {
+                AiMentionReference::SelectedPagesText { pages }
+            } else {
+                AiMentionReference::SelectedPagesImage { pages }
+            }
         }
-    } else {
-        ai_reference_to_library(occurrence.reference)
+        _ => ai_reference_to_library(occurrence.reference),
     };
     Some(AiMentionOccurrence {
         start: occurrence.range.start,
@@ -945,16 +1063,38 @@ fn ai_occurrence_to_library(occurrence: &MentionOccurrence) -> Option<AiMentionO
 pub(super) fn library_occurrence_to_ai(
     occurrence: &AiMentionOccurrence,
 ) -> Option<MentionOccurrence> {
-    let (reference, region_reference) = match &occurrence.reference {
+    let (reference, region_reference, selected_pages_reference) = match &occurrence.reference {
         AiMentionReference::RegionImage { reference } => (
             MentionReference::new(MentionKind::RegionImage, None),
             Some(reference.clone()),
+            None,
         ),
-        reference => (library_reference_to_ai(reference)?, None),
+        AiMentionReference::SelectedPagesText { pages } => (
+            MentionReference::new(MentionKind::SelectedPagesText, None),
+            None,
+            Some(SelectedPagesReference::new(
+                pages.iter().copied().map(glyphst_core::PageIndex),
+            )),
+        ),
+        AiMentionReference::SelectedPagesImage { pages } => (
+            MentionReference::new(MentionKind::SelectedPagesImage, None),
+            None,
+            Some(SelectedPagesReference::new(
+                pages.iter().copied().map(glyphst_core::PageIndex),
+            )),
+        ),
+        reference => (library_reference_to_ai(reference)?, None, None),
     };
+    if selected_pages_reference
+        .as_ref()
+        .is_some_and(SelectedPagesReference::is_empty)
+    {
+        return None;
+    }
     Some(MentionOccurrence {
         range: occurrence.start..occurrence.end,
         reference,
         region_reference,
+        selected_pages_reference,
     })
 }

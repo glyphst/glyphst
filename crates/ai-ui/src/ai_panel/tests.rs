@@ -420,14 +420,14 @@ fn completion_uses_canonical_order_and_fuzzy_label_matching() {
             .into_iter()
             .map(|candidate| candidate.kind)
             .collect::<Vec<_>>(),
-        vec![MentionKind::PageImage]
+        vec![MentionKind::PageImage, MentionKind::SelectedPagesImage,]
     );
     assert_eq!(
         mention_matches("di")
             .into_iter()
             .map(|candidate| candidate.kind)
             .collect::<Vec<_>>(),
-        vec![MentionKind::DocumentImage]
+        vec![MentionKind::DocumentImage, MentionKind::SelectedPagesImage,]
     );
 }
 
@@ -437,26 +437,62 @@ fn selection_mentions_are_available_only_with_selected_text() {
         MentionKind::Selection,
         10,
         false,
+        false,
         false
     ));
-    assert!(mention_is_available(MentionKind::Selection, 0, true, false));
+    assert!(mention_is_available(
+        MentionKind::Selection,
+        0,
+        true,
+        false,
+        false
+    ));
     assert!(!mention_is_available(
         MentionKind::RegionImage,
         10,
         false,
+        false,
         false
     ));
     assert!(mention_is_available(
         MentionKind::RegionImage,
         10,
         false,
+        true,
+        false
+    ));
+    assert!(!mention_is_available(
+        MentionKind::SelectedPagesText,
+        10,
+        false,
+        false,
+        false
+    ));
+    assert!(mention_is_available(
+        MentionKind::SelectedPagesImage,
+        10,
+        false,
+        false,
         true
     ));
-    assert!(!mention_is_available(MentionKind::Page, 0, true, true));
-    assert!(mention_is_available(MentionKind::Page, 1, false, false));
+    assert!(!mention_is_available(
+        MentionKind::Page,
+        0,
+        true,
+        true,
+        true
+    ));
+    assert!(mention_is_available(
+        MentionKind::Page,
+        1,
+        false,
+        false,
+        false
+    ));
     assert!(mention_is_available(
         MentionKind::DocumentText,
         0,
+        false,
         false,
         false
     ));
@@ -685,6 +721,60 @@ fn hydration_preserves_existing_page_contexts() {
 }
 
 #[test]
+fn selected_page_snapshots_expand_hydrate_and_persist() {
+    let pages = SelectedPagesReference::new([
+        glyphst_core::PageIndex(3),
+        glyphst_core::PageIndex(0),
+        glyphst_core::PageIndex(3),
+    ]);
+    let reference = MentionReference::new(MentionKind::SelectedPagesText, None);
+    let occurrence =
+        MentionOccurrence::new(0..20, reference).with_selected_pages_reference(pages.clone());
+    let mut message = ChatMessage::user(
+        "@selected-pages-text".to_string(),
+        String::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .with_mention_occurrences(vec![occurrence]);
+
+    assert_eq!(
+        unresolved_page_references(std::slice::from_ref(&message), 4),
+        vec![
+            MentionReference::new(MentionKind::SelectedPagesText, Some(1)),
+            MentionReference::new(MentionKind::SelectedPagesText, Some(4)),
+        ]
+    );
+
+    hydrate_page_contexts(
+        std::slice::from_mut(&mut message),
+        &[
+            ResolvedPageContext::Text(ContextBlock::new(
+                MentionKind::SelectedPagesText,
+                Some(1),
+                "First page".to_string(),
+            )),
+            ResolvedPageContext::Text(ContextBlock::new(
+                MentionKind::SelectedPagesText,
+                Some(4),
+                "Fourth page".to_string(),
+            )),
+        ],
+    );
+    assert!(unresolved_page_references(std::slice::from_ref(&message), 4).is_empty());
+    assert!(message.request_text().contains("First page"));
+    assert!(message.request_text().contains("Fourth page"));
+
+    let persisted = persisted_session_messages(std::slice::from_ref(&message), None);
+    assert_eq!(
+        persisted[0].occurrences[0].reference,
+        AiMentionReference::SelectedPagesText { pages: vec![0, 3] }
+    );
+    let restored = library_occurrence_to_ai(&persisted[0].occurrences[0]).unwrap();
+    assert_eq!(restored.selected_pages_reference(), Some(&pages));
+}
+
+#[test]
 fn image_preflight_counts_full_history_and_document_pages() {
     let history = ChatMessage::user(
         "@page-image(2)".to_string(),
@@ -721,6 +811,30 @@ fn image_preflight_counts_region_images() {
 
     assert!(validate_page_image_preflight([&message], 2, 1).is_err());
     assert!(validate_page_image_preflight([&message], 2, 2).is_ok());
+}
+
+#[test]
+fn image_preflight_counts_selected_page_snapshots() {
+    let message = ChatMessage::user(
+        "@selected-pages-image".to_string(),
+        String::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .with_mention_occurrences(vec![
+        MentionOccurrence::new(
+            0..21,
+            MentionReference::new(MentionKind::SelectedPagesImage, None),
+        )
+        .with_selected_pages_reference(SelectedPagesReference::new([
+            glyphst_core::PageIndex(0),
+            glyphst_core::PageIndex(2),
+            glyphst_core::PageIndex(4),
+        ])),
+    ]);
+
+    assert!(validate_page_image_preflight([&message], 5, 2).is_err());
+    assert!(validate_page_image_preflight([&message], 5, 3).is_ok());
 }
 
 #[test]

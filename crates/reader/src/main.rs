@@ -67,6 +67,7 @@ fn main() {
             }
             localize::select_language(settings_store.settings.language);
             cx.set_global(settings_store);
+            glyphst_ai::chatgpt_subscription::init(cx);
             sync_component_theme(cx);
             cx.set_global(LibraryStore::load());
             cx.set_global(RenderCache::new());

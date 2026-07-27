@@ -136,7 +136,12 @@ impl DocumentView {
 
             let markdown = page_references
                 .iter()
-                .any(|reference| reference.kind == MentionKind::Page)
+                .any(|reference| {
+                    matches!(
+                        reference.kind,
+                        MentionKind::Page | MentionKind::SelectedPagesText
+                    )
+                })
                 .then(|| Self::extract_page_markdown(&display_list, text_format))
                 .transpose()
                 .with_context(|| format!("failed to extract text from PDF page {page_number}"))?;
@@ -167,14 +172,16 @@ impl DocumentView {
 
             for reference in page_references {
                 match reference.kind {
-                    MentionKind::Page => {
+                    MentionKind::Page | MentionKind::SelectedPagesText => {
                         resolved.push(ResolvedPageContext::Text(ContextBlock::new(
-                            MentionKind::Page,
+                            reference.kind,
                             Some(page_number),
                             markdown.clone().unwrap_or_default(),
                         )));
                     }
-                    MentionKind::PageImage | MentionKind::DocumentImage => {
+                    MentionKind::PageImage
+                    | MentionKind::SelectedPagesImage
+                    | MentionKind::DocumentImage => {
                         resolved.push(ResolvedPageContext::Image(ImageContext::new(
                             reference.kind,
                             Some(page_number),

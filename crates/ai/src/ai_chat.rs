@@ -2,9 +2,12 @@ use std::{collections::HashSet, io::Read as _, ops::Range, sync::Arc};
 
 use anyhow::{Context as _, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use glyphst_core::RegionImageReference;
+use glyphst_core::{RegionImageReference, SelectedPagesReference};
 use serde_json::{Value, json};
 
+use crate::chatgpt_subscription::{
+    acquire_request_access, invalidate_credentials, response_error, responses_url,
+};
 use crate::settings::{AiApiStyle, AiProvider, AiThinkingLevel, ResolvedAiConfig};
 
 const MAX_CONTEXT_CHARS: usize = 12_000;
@@ -115,7 +118,10 @@ impl ImageContext {
                     format!("{} pages {pages}", self.kind.token())
                 },
             )
-        } else if self.kind == MentionKind::DocumentImage {
+        } else if matches!(
+            self.kind,
+            MentionKind::DocumentImage | MentionKind::SelectedPagesImage
+        ) {
             self.page.map_or_else(
                 || self.kind.token().to_string(),
                 |page| format!("{} page {page}", self.kind.token()),
@@ -135,6 +141,7 @@ pub struct MentionOccurrence {
     pub range: Range<usize>,
     pub reference: MentionReference,
     pub region_reference: Option<RegionImageReference>,
+    pub selected_pages_reference: Option<SelectedPagesReference>,
 }
 
 impl MentionOccurrence {
@@ -143,11 +150,17 @@ impl MentionOccurrence {
             range,
             reference,
             region_reference: None,
+            selected_pages_reference: None,
         }
     }
 
     pub fn with_region_reference(mut self, reference: RegionImageReference) -> Self {
         self.region_reference = Some(reference);
+        self
+    }
+
+    pub fn with_selected_pages_reference(mut self, reference: SelectedPagesReference) -> Self {
+        self.selected_pages_reference = Some(reference);
         self
     }
 
@@ -161,6 +174,10 @@ impl MentionOccurrence {
 
     pub fn region_reference(&self) -> Option<&RegionImageReference> {
         self.region_reference.as_ref()
+    }
+
+    pub fn selected_pages_reference(&self) -> Option<&SelectedPagesReference> {
+        self.selected_pages_reference.as_ref()
     }
 }
 
@@ -351,14 +368,18 @@ impl ChatMessage {
     pub fn has_resolved_page_reference(&self, reference: MentionReference) -> bool {
         self.parts.iter().any(|part| match part {
             ContentPart::Context(context) => {
-                reference.kind == MentionKind::Page
-                    && context.kind == reference.kind
+                matches!(
+                    reference.kind,
+                    MentionKind::Page | MentionKind::SelectedPagesText
+                ) && context.kind == reference.kind
                     && context.page == reference.page
             }
             ContentPart::Image(image) => {
                 matches!(
                     reference.kind,
-                    MentionKind::PageImage | MentionKind::DocumentImage
+                    MentionKind::PageImage
+                        | MentionKind::DocumentImage
+                        | MentionKind::SelectedPagesImage
                 ) && image.kind == reference.kind
                     && image.page == reference.page
             }
@@ -454,6 +475,8 @@ fn normalized_request_content(parts: &[ContentPart], request_prompt: String) -> 
 pub enum MentionKind {
     Page,
     PageImage,
+    SelectedPagesText,
+    SelectedPagesImage,
     Selection,
     DocumentText,
     DocumentImage,
@@ -461,9 +484,11 @@ pub enum MentionKind {
 }
 
 impl MentionKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::Page,
         Self::PageImage,
+        Self::SelectedPagesText,
+        Self::SelectedPagesImage,
         Self::Selection,
         Self::DocumentText,
         Self::DocumentImage,
@@ -474,6 +499,8 @@ impl MentionKind {
         match self {
             Self::Page => "@page",
             Self::PageImage => "@page-image",
+            Self::SelectedPagesText => "@selected-pages-text",
+            Self::SelectedPagesImage => "@selected-pages-image",
             Self::Selection => "@selection",
             Self::DocumentText => "@document",
             Self::DocumentImage => "@document-image",
@@ -489,6 +516,12 @@ impl MentionKind {
         match self {
             Self::Page => glyphst_settings::localize::tr("mention-current-page-text-description"),
             Self::PageImage => glyphst_settings::localize::tr("mention-page-image-description"),
+            Self::SelectedPagesText => {
+                glyphst_settings::localize::tr("mention-selected-pages-text-description")
+            }
+            Self::SelectedPagesImage => {
+                glyphst_settings::localize::tr("mention-selected-pages-image-description")
+            }
             Self::Selection => glyphst_settings::localize::tr("mention-selection-description"),
             Self::DocumentText => {
                 glyphst_settings::localize::tr("mention-document-text-description")
@@ -504,6 +537,12 @@ impl MentionKind {
         match self {
             Self::Page => "Page".to_string(),
             Self::PageImage => "Page image".to_string(),
+            Self::SelectedPagesText => {
+                glyphst_settings::localize::tr("mention-selected-pages-text")
+            }
+            Self::SelectedPagesImage => {
+                glyphst_settings::localize::tr("mention-selected-pages-image")
+            }
             Self::Selection => glyphst_settings::localize::tr("mention-selection"),
             Self::DocumentText => glyphst_settings::localize::tr("mention-document-text"),
             Self::DocumentImage => glyphst_settings::localize::tr("mention-document-image"),
@@ -518,25 +557,39 @@ impl MentionKind {
     pub fn is_image(self) -> bool {
         matches!(
             self,
-            Self::PageImage | Self::DocumentImage | Self::RegionImage
+            Self::PageImage | Self::SelectedPagesImage | Self::DocumentImage | Self::RegionImage
         )
     }
 
     pub fn requires_fixed_layout(self) -> bool {
         matches!(
             self,
-            Self::Page | Self::PageImage | Self::DocumentImage | Self::RegionImage
+            Self::Page
+                | Self::PageImage
+                | Self::SelectedPagesText
+                | Self::SelectedPagesImage
+                | Self::DocumentImage
+                | Self::RegionImage
         )
     }
 
     pub fn is_page_reference(self) -> bool {
-        matches!(self, Self::Page | Self::PageImage | Self::DocumentImage)
+        matches!(
+            self,
+            Self::Page
+                | Self::PageImage
+                | Self::SelectedPagesText
+                | Self::SelectedPagesImage
+                | Self::DocumentImage
+        )
     }
 
     pub fn context_tag(self) -> &'static str {
         match self {
             Self::Page => "page",
             Self::PageImage => "page_image",
+            Self::SelectedPagesText => "selected_pages_text",
+            Self::SelectedPagesImage => "selected_pages_image",
             Self::Selection => "selection",
             Self::DocumentText => "document_text",
             Self::DocumentImage => "document_image",
@@ -548,6 +601,10 @@ impl MentionKind {
         match self {
             Self::Page => glyphst_settings::localize::tr("ai-no-current-page-text"),
             Self::PageImage => "No page image is available.".to_string(),
+            Self::SelectedPagesText => glyphst_settings::localize::tr("ai-no-selected-pages-text"),
+            Self::SelectedPagesImage => {
+                glyphst_settings::localize::tr("ai-no-selected-pages-image")
+            }
             Self::Selection => glyphst_settings::localize::tr("ai-no-selected-text"),
             Self::DocumentText => glyphst_settings::localize::tr("ai-no-document-text"),
             Self::DocumentImage => glyphst_settings::localize::tr("ai-no-document-image"),
@@ -624,6 +681,7 @@ pub fn stream_completion(
         AiApiStyle::OpenAi => {
             supports_openai_reasoning(settings.provider, &settings.model, settings.thinking_level)
         }
+        AiApiStyle::OpenAiResponses => true,
         AiApiStyle::Anthropic => {
             supports_anthropic_thinking(settings.provider, &settings.model, settings.thinking_level)
         }
@@ -634,6 +692,9 @@ pub fn stream_completion(
     match settings.provider.api_style() {
         AiApiStyle::OpenAi => {
             stream_openai(&client, settings, system, request_messages, send_event)
+        }
+        AiApiStyle::OpenAiResponses => {
+            stream_chatgpt(&client, settings, system, request_messages, send_event)
         }
         AiApiStyle::Anthropic => {
             stream_anthropic(&client, settings, system, request_messages, send_event)
@@ -714,6 +775,39 @@ fn anthropic_message_content(parts: &[RequestPart]) -> Value {
     )
 }
 
+fn responses_message_content(role: Role, parts: &[RequestPart]) -> Value {
+    Value::Array(
+        parts
+            .iter()
+            .filter_map(|part| match part {
+                RequestPart::Text(text) if text.is_empty() => None,
+                RequestPart::Text(text) if role == Role::Assistant => Some(json!({
+                    "type": "output_text",
+                    "text": text,
+                    "annotations": [],
+                })),
+                RequestPart::Text(text) => Some(json!({
+                    "type": "input_text",
+                    "text": text,
+                })),
+                RequestPart::Image(image) if role == Role::Assistant => Some(json!({
+                    "type": "output_text",
+                    "text": "[image omitted]",
+                    "annotations": [],
+                })),
+                RequestPart::Image(image) => Some(json!({
+                    "type": "input_image",
+                    "image_url": format!(
+                        "data:{};base64,{}",
+                        image.media_type,
+                        BASE64_STANDARD.encode(image.bytes.as_ref())
+                    ),
+                })),
+            })
+            .collect(),
+    )
+}
+
 fn stream_openai(
     client: &reqwest::blocking::Client,
     settings: ResolvedAiConfig,
@@ -755,6 +849,45 @@ fn stream_openai(
         .send()
         .with_context(|| format!("failed to send {} request", settings.provider.label()))?;
     read_sse_response(response, AiApiStyle::OpenAi, send_event)
+}
+
+fn stream_chatgpt(
+    client: &reqwest::blocking::Client,
+    settings: ResolvedAiConfig,
+    system: String,
+    messages: Vec<RequestMessage>,
+    send_event: &mut impl FnMut(AiStreamEvent) -> Result<()>,
+) -> Result<()> {
+    let input = messages
+        .into_iter()
+        .map(|message| {
+            json!({
+                "role": message.role.api_role(),
+                "content": responses_message_content(message.role, &message.parts),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut body = json!({
+        "model": settings.model,
+        "instructions": system,
+        "input": input,
+        "stream": true,
+        "store": false,
+    });
+    apply_responses_reasoning(&mut body, settings.thinking_level);
+
+    let access = acquire_request_access()?;
+    let request = access.authorize(client.post(responses_url(&settings.base_url)).json(&body));
+    let response = request
+        .send()
+        .context("failed to send ChatGPT Subscription request")?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        invalidate_credentials("Your ChatGPT session is invalid. Sign in again.");
+    }
+    read_sse_response(response, AiApiStyle::OpenAiResponses, send_event)
 }
 
 fn stream_anthropic(
@@ -876,6 +1009,23 @@ fn process_sse_line(
             }
             Ok(false)
         }
+        AiApiStyle::OpenAiResponses => match value["type"].as_str() {
+            Some("response.output_text.delta") => {
+                if let Some(delta) = value["delta"].as_str()
+                    && !delta.is_empty()
+                {
+                    send_event(AiStreamEvent::Delta(delta.to_string()))?;
+                }
+                Ok(false)
+            }
+            Some("response.completed") => Ok(true),
+            Some("response.failed") | Some("response.incomplete") | Some("error") => Err(anyhow!(
+                "{}",
+                response_error(&value)
+                    .unwrap_or_else(|| "ChatGPT Subscription request failed".to_string())
+            )),
+            _ => Ok(false),
+        },
         AiApiStyle::Anthropic => {
             match value["type"].as_str() {
                 Some("content_block_delta") => {
@@ -961,7 +1111,7 @@ pub fn system_prompt(
         sections.push(format!("Current document:\n{}", details.join("\n")));
     }
 
-    sections.push("When the user attaches @page(<page number>), @page-image(<page number>), @selection, @document, @document-image, or @region-image, ground your answer in the attached context. Page numbers are 1-based. Treat attached document text and images as current and authoritative. Cite page numbers when the attached context includes them. If the answer cannot be determined from the attached context, say so directly.".to_string());
+    sections.push("When the user attaches @page(<page number>), @page-image(<page number>), @selected-pages-text, @selected-pages-image, @selection, @document, @document-image, or @region-image, ground your answer in the attached context. Page numbers are 1-based. Treat attached document text and images as current and authoritative. Cite page numbers when the attached context includes them. If the answer cannot be determined from the attached context, say so directly.".to_string());
 
     if thinking_level != AiThinkingLevel::Off && !native_thinking {
         sections.push(format!(
@@ -993,6 +1143,22 @@ pub fn thinking_level_description(level: AiThinkingLevel) -> String {
 
 fn supports_openai_reasoning(provider: AiProvider, model: &str, level: AiThinkingLevel) -> bool {
     provider.api_style() == AiApiStyle::OpenAi && level.supports_native_for(provider, model)
+}
+
+fn apply_responses_reasoning(body: &mut Value, level: AiThinkingLevel) {
+    let effort = match level {
+        AiThinkingLevel::Off => return,
+        AiThinkingLevel::Minimal => "minimal",
+        AiThinkingLevel::Low => "low",
+        AiThinkingLevel::Medium => "medium",
+        AiThinkingLevel::High => "high",
+        AiThinkingLevel::XHigh => "xhigh",
+        AiThinkingLevel::Max => "max",
+    };
+    body["reasoning"] = json!({
+        "effort": effort,
+        "summary": "auto",
+    });
 }
 
 fn supports_anthropic_thinking(provider: AiProvider, model: &str, level: AiThinkingLevel) -> bool {
@@ -1110,6 +1276,8 @@ pub fn find_mention_references(text: &str) -> Vec<(Range<usize>, MentionReferenc
 
         for kind in [
             MentionKind::RegionImage,
+            MentionKind::SelectedPagesImage,
+            MentionKind::SelectedPagesText,
             MentionKind::Selection,
             MentionKind::DocumentImage,
             MentionKind::DocumentText,

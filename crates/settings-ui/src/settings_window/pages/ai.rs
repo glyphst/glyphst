@@ -1,10 +1,15 @@
 use super::super::SettingsWindow;
+use glyphst_ai::chatgpt_subscription::ChatGptSubscription;
 use glyphst_settings::{
     AiProvider, AiThinkingLevel, PageImageQuality, PageTextFormat, Settings, SettingsStore,
 };
-use gpui::{App, Axis, Context, SharedString};
-use gpui_component::setting::{
-    NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
+use gpui::{App, Axis, Context, SharedString, prelude::*};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Sizable as _,
+    button::Button,
+    label::Label,
+    setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage},
+    v_flex,
 };
 
 #[derive(Clone, Copy)]
@@ -327,6 +332,95 @@ impl SettingsWindow {
                 .default_value(defaults.enabled),
             )
             .description("Make this provider and its models available to AI features.");
+
+            if provider == AiProvider::ChatGptSubscription {
+                let account = SettingItem::new(
+                    "ChatGPT account",
+                    SettingField::render(move |options, _, cx| {
+                        let auth = ChatGptSubscription::global(cx);
+                        let snapshot = auth.as_ref().map(ChatGptSubscription::snapshot);
+                        let loading = snapshot.as_ref().is_some_and(|snapshot| snapshot.loading);
+                        let signing_in = snapshot
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.signing_in);
+                        let email = snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.email.clone());
+                        let error = snapshot.and_then(|snapshot| snapshot.error);
+                        let signed_in = email.is_some();
+
+                        v_flex()
+                            .items_end()
+                            .gap_1()
+                            .when_some(email, |this, email| {
+                                this.child(
+                                    Label::new(format!("Signed in as {email}"))
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                            })
+                            .child(
+                                Button::new("chatgpt-subscription-auth")
+                                    .label(if loading {
+                                        "Loading account…"
+                                    } else if signing_in {
+                                        "Signing in…"
+                                    } else if signed_in {
+                                        "Sign out"
+                                    } else {
+                                        "Sign in"
+                                    })
+                                    .outline()
+                                    .with_size(options.size)
+                                    .loading(loading || signing_in)
+                                    .disabled(loading || signing_in || auth.is_none())
+                                    .on_click(move |_, _, cx| {
+                                        let Some(auth) = ChatGptSubscription::global(cx) else {
+                                            return;
+                                        };
+                                        if auth.is_authenticated() {
+                                            auth.sign_out(cx);
+                                        } else {
+                                            auth.sign_in(cx);
+                                        }
+                                    }),
+                            )
+                            .when_some(error, |this, error| {
+                                this.child(
+                                    Label::new(error)
+                                        .text_xs()
+                                        .text_color(cx.theme().danger),
+                                )
+                            })
+                    }),
+                )
+                .layout(Axis::Vertical)
+                .description(
+                    "Sign in with a ChatGPT Plus or Pro subscription. Tokens are stored in the system keychain.",
+                );
+
+                let models = SettingItem::new(
+                    crate::fl!("settings-model-list"),
+                    SettingField::render(move |_, _, cx| {
+                        let muted = cx.theme().muted_foreground;
+                        v_flex().w_full().gap_2().children(
+                            provider.default_models().into_iter().map(|model| {
+                                v_flex()
+                                    .child(Label::new(model.name).text_sm())
+                                    .child(Label::new(model.id).text_xs().text_color(muted))
+                            }),
+                        )
+                    }),
+                )
+                .layout(Axis::Vertical)
+                .description(
+                    "This catalog mirrors the models supported by ChatGPT's Codex backend.",
+                );
+
+                return SettingGroup::new()
+                    .title(provider.label())
+                    .items([enabled, account, models]);
+            }
 
             let api_key_field = Self::bound_text_field(
                 format!("provider-api-key-{}", provider.as_str()),

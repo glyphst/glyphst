@@ -96,7 +96,10 @@ impl AiPanel {
             self.schedule_mention_preview_hide(window, cx);
             return;
         };
-        if mention.reference.kind == MentionKind::DocumentImage {
+        if matches!(
+            mention.reference.kind,
+            MentionKind::DocumentImage | MentionKind::SelectedPagesImage
+        ) {
             self.schedule_mention_preview_hide(window, cx);
             return;
         }
@@ -213,12 +216,26 @@ impl AiPanel {
             }));
             return;
         }
+        let selected_pages = mention.captured_pages().cloned();
+        let references = selected_pages.as_ref().map_or_else(
+            || vec![reference],
+            |pages| {
+                pages
+                    .pages
+                    .iter()
+                    .map(|page| MentionReference::new(reference.kind, Some(page.0 + 1)))
+                    .collect()
+            },
+        );
         let resolve_task = self
             .context_provider
-            .resolve_page_references(vec![reference], cx);
+            .resolve_page_references(references, cx);
         self.pending_mention_preview = Some(cx.spawn(async move |this, cx| {
             let result = match resolve_task.await {
-                Ok(resolved) => preview_content_from_resolved(reference, &resolved),
+                Ok(resolved) => selected_pages.as_ref().map_or_else(
+                    || preview_content_from_resolved(reference, &resolved),
+                    |pages| preview_content_from_selected_pages(reference.kind, pages, &resolved),
+                ),
                 Err(error) => Err(format!("{error:#}")),
             };
             let _ = this.update(cx, |this, cx| {
@@ -333,13 +350,20 @@ impl CompletionProvider for MentionCompletionProvider {
         }
 
         let query = &content[query_start..source_range.end];
-        let (has_selection, has_region) = panel.current_mention_availability(cx);
+        let (has_selection, has_region, has_selected_pages) =
+            panel.current_mention_availability(cx);
         let page_count = panel.page_count;
         let page = panel.current_page.clamp(1, page_count.max(1));
         let candidates = mention_matches(query)
             .into_iter()
             .filter(|candidate| {
-                mention_is_available(candidate.kind, page_count, has_selection, has_region)
+                mention_is_available(
+                    candidate.kind,
+                    page_count,
+                    has_selection,
+                    has_region,
+                    has_selected_pages,
+                )
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
@@ -414,7 +438,14 @@ impl AiPanel {
             .filter(|region| !region.is_empty())
     }
 
-    pub(super) fn current_mention_availability(&self, cx: &App) -> (bool, bool) {
+    fn current_selected_pages_snapshot(&self, cx: &App) -> Option<SelectedPagesReference> {
+        self.context_provider
+            .context(false, cx)
+            .and_then(|context| context.selected_pages)
+            .filter(|pages| !pages.is_empty())
+    }
+
+    pub(super) fn current_mention_availability(&self, cx: &App) -> (bool, bool, bool) {
         let context = self.context_provider.context(false, cx);
         (
             context
@@ -425,12 +456,22 @@ impl AiPanel {
                 .as_ref()
                 .and_then(|context| context.selected_region.as_ref())
                 .is_some_and(|region| !region.is_empty()),
+            context
+                .as_ref()
+                .and_then(|context| context.selected_pages.as_ref())
+                .is_some_and(|pages| !pages.is_empty()),
         )
     }
 
     pub(super) fn mention_is_available(&self, mention: MentionKind, cx: &App) -> bool {
-        let (has_selection, has_region) = self.current_mention_availability(cx);
-        mention_is_available(mention, self.page_count, has_selection, has_region)
+        let (has_selection, has_region, has_selected_pages) = self.current_mention_availability(cx);
+        mention_is_available(
+            mention,
+            self.page_count,
+            has_selection,
+            has_region,
+            has_selected_pages,
+        )
     }
 
     pub(super) fn apply_regular_edit(&mut self, range: Range<usize>, new_text: &str) {
@@ -462,11 +503,16 @@ impl AiPanel {
             cx.notify();
             return;
         }
-        if !matches!(mention, MentionKind::Selection | MentionKind::RegionImage)
-            && self
-                .composer_mentions
-                .iter()
-                .any(|composer_mention| composer_mention.reference.kind == mention)
+        if !matches!(
+            mention,
+            MentionKind::Selection
+                | MentionKind::RegionImage
+                | MentionKind::SelectedPagesText
+                | MentionKind::SelectedPagesImage
+        ) && self
+            .composer_mentions
+            .iter()
+            .any(|composer_mention| composer_mention.reference.kind == mention)
             && !mention.requires_page_number()
         {
             cx.notify();
@@ -503,6 +549,10 @@ impl AiPanel {
             MentionKind::RegionImage => self
                 .current_region_snapshot(cx)
                 .map(CapturedMention::Region)
+                .map(Some),
+            MentionKind::SelectedPagesText | MentionKind::SelectedPagesImage => self
+                .current_selected_pages_snapshot(cx)
+                .map(CapturedMention::Pages)
                 .map(Some),
             MentionKind::Page
             | MentionKind::PageImage

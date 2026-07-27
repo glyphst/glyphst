@@ -6,6 +6,9 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::chatgpt_subscription::{
+    acquire_request_access, invalidate_credentials, response_error, response_text, responses_url,
+};
 use crate::settings::{AiApiStyle, AiProvider, AiThinkingLevel, ResolvedAiConfig};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +102,7 @@ pub fn translate_batch_with_client(
     let system = translation_system_prompt(source_language, target_language);
     let response = match settings.provider.api_style() {
         AiApiStyle::OpenAi => request_openai(client, &settings, &system, texts),
+        AiApiStyle::OpenAiResponses => request_chatgpt(client, &settings, &system, texts),
         AiApiStyle::Anthropic => request_anthropic(client, &settings, &system, texts),
     }?;
     parse_translations(&response, texts.len()).map_err(invalid_response)
@@ -158,6 +162,7 @@ When uncertain, choose translate=false. Return only valid JSON in this exact sha
 reason\"}]}. Omit locked and already-confident blocks.";
     let response = match settings.provider.api_style() {
         AiApiStyle::OpenAi => request_openai_payload(client, &settings, system, page_map),
+        AiApiStyle::OpenAiResponses => request_chatgpt_payload(client, &settings, system, page_map),
         AiApiStyle::Anthropic => request_anthropic_payload(client, &settings, system, page_map),
     }?;
     parse_policy_review_decisions(&response).map_err(invalid_response)
@@ -200,6 +205,7 @@ exactly once and do not add IDs."
         .map_err(|error| configuration_error(format!("failed to encode request: {error}")))?;
     let response = match settings.provider.api_style() {
         AiApiStyle::OpenAi => request_openai_payload(client, &settings, &system, payload),
+        AiApiStyle::OpenAiResponses => request_chatgpt_payload(client, &settings, &system, payload),
         AiApiStyle::Anthropic => request_anthropic_payload(client, &settings, &system, payload),
     }?;
     parse_semantic_translations(&response, units).map_err(invalid_response)
@@ -301,6 +307,53 @@ fn request_openai_payload_inner(
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| invalid_response_message(settings.provider.label()))
+}
+
+fn request_chatgpt(
+    client: &reqwest::blocking::Client,
+    settings: &ResolvedAiConfig,
+    system: &str,
+    texts: &[String],
+) -> std::result::Result<String, AiTranslationError> {
+    let payload = serde_json::to_value(texts)
+        .map_err(|error| configuration_error(format!("failed to encode request: {error}")))?;
+    request_chatgpt_payload(client, settings, system, payload)
+}
+
+fn request_chatgpt_payload(
+    client: &reqwest::blocking::Client,
+    settings: &ResolvedAiConfig,
+    system: &str,
+    payload: Value,
+) -> std::result::Result<String, AiTranslationError> {
+    let content = serde_json::to_string(&payload)
+        .map_err(|error| configuration_error(format!("failed to encode request: {error}")))?;
+    let body = json!({
+        "model": settings.model,
+        "instructions": system,
+        "input": [{
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": content,
+            }],
+        }],
+        "store": false,
+    });
+    let access =
+        acquire_request_access().map_err(|error| authentication_error(format!("{error:#}")))?;
+    let request = access.authorize(client.post(responses_url(&settings.base_url)).json(&body));
+    let value = send_json(request, settings.provider.label()).map_err(|error| {
+        if matches!(error.status, Some(401 | 403)) {
+            invalidate_credentials("Your ChatGPT session is invalid. Sign in again.");
+        }
+        error
+    })?;
+    response_text(&value).ok_or_else(|| {
+        response_error(&value)
+            .map(|message| invalid_response(anyhow!(message)))
+            .unwrap_or_else(|| invalid_response_message(settings.provider.label()))
+    })
 }
 
 fn apply_translation_thinking_mode(body: &mut Value, settings: &ResolvedAiConfig) {
@@ -500,6 +553,16 @@ fn request_error(provider: &str, error: reqwest::Error) -> AiTranslationError {
 fn configuration_error(message: String) -> AiTranslationError {
     AiTranslationError {
         category: AiTranslationErrorCategory::InvalidRequest,
+        message,
+        status: None,
+        retryable: false,
+        retry_after: None,
+    }
+}
+
+fn authentication_error(message: String) -> AiTranslationError {
+    AiTranslationError {
+        category: AiTranslationErrorCategory::Authentication,
         message,
         status: None,
         retryable: false,

@@ -47,7 +47,8 @@ use glyphst_ai_ui::{
 };
 use glyphst_core::{
     DocumentCapabilities, DocumentFormat, DocumentLayout, DocumentRotation, EpubReaderPreferences,
-    EpubTheme, PageIndex, PageRegion, RegionImageReference, SemanticTextAnchor,
+    EpubTheme, PageIndex, PageRegion, RegionImageReference, SelectedPagesReference,
+    SemanticTextAnchor,
 };
 use glyphst_pdf::{
     DocumentRenderSession, DocumentSnapshot, ReloadCoordinator, ReloadDisposition,
@@ -1162,6 +1163,7 @@ impl AiContextProvider for DocumentViewAiContextProvider {
                 },
                 selected_text: document_view.selected_text(),
                 selected_region: document_view.selected_region.clone(),
+                selected_pages: document_view.selected_pages_for_ai(),
                 document_text: include_document_text
                     .then(|| document_view.document_text())
                     .flatten(),

@@ -31,6 +31,10 @@ impl AiPanel {
                     Some(CapturedMention::Region(reference)) => Some(reference.clone()),
                     _ => None,
                 },
+                selected_pages_reference: match mention.captured.as_ref() {
+                    Some(CapturedMention::Pages(reference)) => Some(reference.clone()),
+                    _ => None,
+                },
             })
             .collect();
         let user_message =

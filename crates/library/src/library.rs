@@ -56,6 +56,9 @@ const AI_SESSIONS_V2_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("
 const AI_SESSIONS_V3_MIGRATION_KEY: &str = "ai_sessions_v3";
 const AI_SESSIONS_V3_VERSION: u8 = 3;
 const AI_SESSIONS_V3_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v3");
+const AI_SESSIONS_V4_MIGRATION_KEY: &str = "ai_sessions_v4";
+const AI_SESSIONS_V4_VERSION: u8 = 4;
+const AI_SESSIONS_V4_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v4");
 const SIDEBAR_WIDTHS_KEY: &str = "sidebar_widths";
 const MAX_AI_SESSIONS: usize = 200;
 
@@ -650,6 +653,56 @@ impl StoredAiSessionV3 {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredAiSessionV4 {
+    version: u8,
+    id: u64,
+    path: StoredPathV1,
+    title: String,
+    page: usize,
+    messages: Vec<StoredAiSessionMessageV3>,
+    created: u64,
+    updated: u64,
+}
+
+impl From<&AiSession> for StoredAiSessionV4 {
+    fn from(session: &AiSession) -> Self {
+        Self {
+            version: AI_SESSIONS_V4_VERSION,
+            id: session.id,
+            path: StoredPathV1::from_path(&session.path),
+            title: session.title.clone(),
+            page: session.page,
+            messages: session
+                .messages
+                .iter()
+                .map(StoredAiSessionMessageV3::from)
+                .collect(),
+            created: session.created,
+            updated: session.updated,
+        }
+    }
+}
+
+impl StoredAiSessionV4 {
+    fn into_domain(self) -> Result<AiSession> {
+        require_storage_version(self.version, AI_SESSIONS_V4_VERSION)?;
+        Ok(AiSession {
+            id: self.id,
+            path: self.path.into_path()?,
+            title: self.title,
+            page: self.page,
+            messages: self
+                .messages
+                .into_iter()
+                .map(AiSessionMessage::from)
+                .collect(),
+            created: self.created,
+            updated: self.updated,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct StoredSidebarWidthsV1 {
     version: u8,
@@ -1112,6 +1165,8 @@ pub enum AiMentionReference {
     PageImage { page: usize },
     DocumentImage,
     RegionImage { reference: RegionImageReference },
+    SelectedPagesText { pages: Vec<usize> },
+    SelectedPagesImage { pages: Vec<usize> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

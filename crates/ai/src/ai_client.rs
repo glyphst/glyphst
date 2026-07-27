@@ -1,6 +1,7 @@
 use anyhow::{Context as _, Result, anyhow};
 use serde_json::Value;
 
+use crate::chatgpt_subscription::acquire_request_access;
 use crate::settings::{AiApiStyle, ResolvedAiConfig};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11,6 +12,10 @@ pub struct AiModelInfo {
 }
 
 pub fn test_ai_connection(config: ResolvedAiConfig) -> Result<()> {
+    if config.provider.api_style() == AiApiStyle::OpenAiResponses {
+        acquire_request_access()?;
+        return Ok(());
+    }
     list_ai_models(config).map(|_| ())
 }
 
@@ -25,6 +30,16 @@ pub fn list_ai_models(config: ResolvedAiConfig) -> Result<Vec<AiModelInfo>> {
 
     match config.provider.api_style() {
         AiApiStyle::OpenAi => list_openai_compatible_models(&client, config),
+        AiApiStyle::OpenAiResponses => Ok(config
+            .provider
+            .default_models()
+            .into_iter()
+            .map(|model| AiModelInfo {
+                id: model.id,
+                label: model.name,
+                owned_by: Some(model.group),
+            })
+            .collect()),
         AiApiStyle::Anthropic => list_anthropic_models(&client, config),
     }
 }

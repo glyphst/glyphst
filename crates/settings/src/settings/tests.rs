@@ -330,6 +330,88 @@ ai {
 }
 
 #[test]
+fn chatgpt_subscription_uses_a_fixed_keyless_catalog() {
+    let settings = parse_settings(
+        r##"
+ai {
+    main_model "openai-subscribed" "gpt-5.5"
+    providers {
+        openai-subscribed {
+            enabled #true
+            api_key "must-not-be-stored"
+            base_url "https://example.test/"
+            models {
+                model "custom-model" "Custom" "Custom"
+            }
+        }
+    }
+}
+"##,
+    )
+    .unwrap();
+
+    let config = settings.ai.provider_config(AiProvider::ChatGptSubscription);
+    assert!(config.enabled);
+    assert!(config.api_key.is_empty());
+    assert!(config.base_url.is_none());
+    assert_eq!(
+        config.models,
+        AiProvider::ChatGptSubscription.default_models()
+    );
+    let resolved = settings.ai.resolved_main();
+    assert_eq!(resolved.provider, AiProvider::ChatGptSubscription);
+    assert_eq!(resolved.model, "gpt-5.5");
+    assert!(resolved.can_request());
+    assert_eq!(resolved.base_url, "https://chatgpt.com/backend-api/codex");
+    let exported = settings.to_kdl_string();
+    assert!(!exported.contains("must-not-be-stored"));
+    assert!(!exported.contains("https://example.test"));
+    assert_eq!(parse_settings(&exported).unwrap(), settings);
+}
+
+#[test]
+fn chatgpt_subscription_replaces_stale_model_references() {
+    let settings = parse_settings(
+        r##"
+ai {
+    main_model "openai-subscribed" "retired-main-model"
+    title_model "openai-subscribed" "retired-title-model"
+    translation_model "openai-subscribed" "retired-translation-model"
+    providers {
+        openai-subscribed {
+            enabled #true
+        }
+    }
+}
+"##,
+    )
+    .unwrap();
+
+    assert_eq!(
+        settings.ai.main_model,
+        Some(ModelRef::new(
+            AiProvider::ChatGptSubscription,
+            AiProvider::ChatGptSubscription.default_model(),
+        ))
+    );
+    assert_eq!(
+        settings.ai.title_model,
+        Some(ModelRef::new(
+            AiProvider::ChatGptSubscription,
+            AiProvider::ChatGptSubscription.default_title_model(),
+        ))
+    );
+    assert_eq!(settings.ai.translation_model, settings.ai.main_model);
+    assert_eq!(
+        settings
+            .ai
+            .provider_config(AiProvider::ChatGptSubscription)
+            .models,
+        AiProvider::ChatGptSubscription.default_models(),
+    );
+}
+
+#[test]
 fn parses_and_exports_ai_thinking_level() {
     let settings = parse_settings(
         r##"
@@ -821,6 +903,18 @@ fn thinking_levels_are_provider_specific() {
     );
     assert_eq!(
         AiThinkingLevel::Max.clamp_for(AiProvider::OpenRouter, "openai/gpt-5.5"),
+        AiThinkingLevel::XHigh
+    );
+    assert!(
+        AiThinkingLevel::supported_for(AiProvider::ChatGptSubscription, "gpt-5.6-sol")
+            .contains(&AiThinkingLevel::Max)
+    );
+    assert!(
+        !AiThinkingLevel::supported_for(AiProvider::ChatGptSubscription, "gpt-5.5")
+            .contains(&AiThinkingLevel::Max)
+    );
+    assert_eq!(
+        AiThinkingLevel::Max.clamp_for(AiProvider::ChatGptSubscription, "gpt-5.5"),
         AiThinkingLevel::XHigh
     );
 }

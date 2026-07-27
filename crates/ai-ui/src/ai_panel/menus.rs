@@ -203,14 +203,20 @@ impl AiPanel {
         page_count: usize,
         has_selection: bool,
         has_region: bool,
+        has_selected_pages: bool,
         panel: Entity<Self>,
     ) -> PopupMenu {
         menu = menu.min_w(px(260.0)).max_w(px(320.0));
 
-        for mention in MentionKind::ALL
-            .into_iter()
-            .filter(|mention| mention_is_available(*mention, page_count, has_selection, has_region))
-        {
+        for mention in MentionKind::ALL.into_iter().filter(|mention| {
+            mention_is_available(
+                *mention,
+                page_count,
+                has_selection,
+                has_region,
+                has_selected_pages,
+            )
+        }) {
             menu = menu.item(
                 PopupMenuItem::element(move |_, cx| {
                     let theme = cx.theme().colors;

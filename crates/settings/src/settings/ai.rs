@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AiApiStyle {
     OpenAi,
+    OpenAiResponses,
     Anthropic,
 }
 
@@ -28,6 +29,16 @@ impl AiThinkingLevel {
         Self::High,
         Self::XHigh,
     ];
+    const CHATGPT_56_REASONING: [Self; 6] = [
+        Self::Off,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+    const CHATGPT_55_REASONING: [Self; 5] =
+        [Self::Off, Self::Low, Self::Medium, Self::High, Self::XHigh];
     const ANTHROPIC_THINKING: [Self; 5] =
         [Self::Off, Self::Low, Self::Medium, Self::High, Self::Max];
 
@@ -60,6 +71,10 @@ impl AiThinkingLevel {
             AiApiStyle::OpenAi if Self::openai_supports_native_thinking(model) => {
                 &Self::OPENAI_REASONING
             }
+            AiApiStyle::OpenAiResponses if model.starts_with("gpt-5.6-") => {
+                &Self::CHATGPT_56_REASONING
+            }
+            AiApiStyle::OpenAiResponses => &Self::CHATGPT_55_REASONING,
             AiApiStyle::Anthropic if Self::anthropic_supports_native_thinking(model) => {
                 &Self::ANTHROPIC_THINKING
             }
@@ -95,6 +110,7 @@ impl AiThinkingLevel {
         self != Self::Off
             && match provider.api_style() {
                 AiApiStyle::OpenAi => Self::openai_supports_native_thinking(model),
+                AiApiStyle::OpenAiResponses => true,
                 AiApiStyle::Anthropic => Self::anthropic_supports_native_thinking(model),
             }
     }
@@ -210,6 +226,7 @@ impl PageImageQuality {
 pub enum AiProvider {
     #[default]
     OpenAi,
+    ChatGptSubscription,
     Anthropic,
     DeepSeek,
     OpenRouter,
@@ -235,8 +252,9 @@ pub enum AiProvider {
 }
 
 impl AiProvider {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::OpenAi,
+        Self::ChatGptSubscription,
         Self::Anthropic,
         Self::DeepSeek,
         Self::OpenRouter,
@@ -264,6 +282,7 @@ impl AiProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OpenAi => "openai",
+            Self::ChatGptSubscription => "openai-subscribed",
             Self::Anthropic => "anthropic",
             Self::DeepSeek => "deepseek",
             Self::OpenRouter => "openrouter",
@@ -292,6 +311,7 @@ impl AiProvider {
     pub fn label(self) -> &'static str {
         match self {
             Self::OpenAi => "OpenAI",
+            Self::ChatGptSubscription => "ChatGPT Subscription",
             Self::Anthropic => "Anthropic",
             Self::DeepSeek => "DeepSeek",
             Self::OpenRouter => "OpenRouter",
@@ -320,6 +340,11 @@ impl AiProvider {
     pub(super) fn from_str(value: &str) -> Option<Self> {
         match value {
             "openai" | "open-ai" | "open_ai" => Some(Self::OpenAi),
+            "openai-subscribed"
+            | "openai_subscribed"
+            | "chatgpt"
+            | "chatgpt-subscription"
+            | "chatgpt_subscription" => Some(Self::ChatGptSubscription),
             "anthropic" | "claude" => Some(Self::Anthropic),
             "deepseek" | "deep-seek" | "deep_seek" => Some(Self::DeepSeek),
             "openrouter" | "open-router" | "open_router" => Some(Self::OpenRouter),
@@ -349,6 +374,7 @@ impl AiProvider {
     pub fn default_model(self) -> &'static str {
         match self {
             Self::OpenAi => "gpt-4o",
+            Self::ChatGptSubscription => "gpt-5.5",
             Self::Anthropic => "claude-3-5-sonnet-latest",
             Self::DeepSeek => "deepseek-chat",
             Self::OpenRouter => "openai/gpt-4o",
@@ -377,6 +403,7 @@ impl AiProvider {
     pub fn default_title_model(self) -> &'static str {
         match self {
             Self::OpenAi => "gpt-4o-mini",
+            Self::ChatGptSubscription => "gpt-5.6-luna",
             Self::Anthropic => "claude-3-5-haiku-latest",
             Self::DeepSeek => "deepseek-chat",
             Self::OpenRouter => "openai/gpt-4o-mini",
@@ -405,6 +432,7 @@ impl AiProvider {
     pub fn default_base_url(self) -> &'static str {
         match self {
             Self::OpenAi => "https://api.openai.com",
+            Self::ChatGptSubscription => "https://chatgpt.com/backend-api/codex",
             Self::Anthropic => "https://api.anthropic.com",
             Self::DeepSeek => "https://api.deepseek.com",
             Self::OpenRouter => "https://openrouter.ai/api/v1",
@@ -433,6 +461,7 @@ impl AiProvider {
     pub fn api_style(self) -> AiApiStyle {
         match self {
             Self::Anthropic => AiApiStyle::Anthropic,
+            Self::ChatGptSubscription => AiApiStyle::OpenAiResponses,
             Self::OpenAi
             | Self::DeepSeek
             | Self::OpenRouter
@@ -473,6 +502,14 @@ impl AiProvider {
                 ("o3", "o3", "OpenAI"),
                 ("o4-mini", "o4 mini", "OpenAI"),
             ][..],
+            Self::ChatGptSubscription => &[
+                ("gpt-5.6-sol", "GPT-5.6 Sol", "ChatGPT"),
+                ("gpt-5.6-terra", "GPT-5.6 Terra", "ChatGPT"),
+                ("gpt-5.6-luna", "GPT-5.6 Luna", "ChatGPT"),
+                ("gpt-5.5", "GPT-5.5", "ChatGPT"),
+                ("gpt-5.4", "GPT-5.4", "ChatGPT"),
+                ("gpt-5.4-mini", "GPT-5.4 Mini", "ChatGPT"),
+            ],
             Self::Anthropic => &[
                 ("claude-3-5-sonnet-latest", "Claude 3.5 Sonnet", "Claude"),
                 ("claude-3-5-haiku-latest", "Claude 3.5 Haiku", "Claude"),
@@ -706,6 +743,28 @@ impl ModelRef {
     }
 }
 
+fn sanitize_fixed_provider_model(model_ref: &mut Option<ModelRef>, title: bool) {
+    let Some(model_ref) = model_ref.as_mut() else {
+        return;
+    };
+    if model_ref.provider != AiProvider::ChatGptSubscription {
+        return;
+    }
+    let provider = model_ref.provider;
+    if !provider
+        .default_models()
+        .iter()
+        .any(|model| model.id == model_ref.id.trim())
+    {
+        model_ref.id = if title {
+            provider.default_title_model()
+        } else {
+            provider.default_model()
+        }
+        .to_string();
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiProviderConfig {
     pub enabled: bool,
@@ -716,6 +775,12 @@ pub struct AiProviderConfig {
 
 impl AiProviderConfig {
     pub(super) fn sanitize(&mut self, provider: AiProvider) {
+        if provider == AiProvider::ChatGptSubscription {
+            self.api_key.clear();
+            self.base_url = None;
+            self.models = provider.default_models();
+            return;
+        }
         self.api_key = self.api_key.trim().to_string();
         self.base_url = self
             .base_url
@@ -820,6 +885,7 @@ impl ResolvedAiConfig {
                     || self.base_url_overridden
                     || self.provider.allows_keyless_requests()
             }
+            AiApiStyle::OpenAiResponses => true,
             AiApiStyle::Anthropic => !self.api_key.is_empty(),
         }
     }
@@ -830,6 +896,10 @@ impl ResolvedAiConfig {
                 "missing {} API key, or set a custom base URL for an OpenAI-compatible server",
                 self.provider.label()
             ),
+            AiApiStyle::OpenAiResponses => {
+                "sign in to ChatGPT Subscription in Settings > AI before making requests"
+                    .to_string()
+            }
             AiApiStyle::Anthropic => format!("missing {} API key", self.provider.label()),
         }
     }
@@ -915,6 +985,9 @@ impl AiSettings {
         for (provider, config) in self.providers.iter_mut() {
             config.sanitize(*provider);
         }
+        sanitize_fixed_provider_model(&mut self.main_model, false);
+        sanitize_fixed_provider_model(&mut self.title_model, true);
+        sanitize_fixed_provider_model(&mut self.translation_model, false);
 
         if self.main_model.is_none() {
             self.main_model = self.first_model_ref(false);

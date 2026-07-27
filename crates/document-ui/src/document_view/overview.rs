@@ -1,6 +1,22 @@
 use super::*;
 
 impl DocumentView {
+    pub(super) fn selected_pages_for_ai(&self) -> Option<SelectedPagesReference> {
+        let pages = self
+            .grid_overview_open
+            .then_some(&self.grid_overview_selection)
+            .into_iter()
+            .chain(
+                self.thumbnail_sidebar_open
+                    .then_some(&self.thumbnail_sidebar_selection),
+            )
+            .flat_map(|selection| selection.iter().copied())
+            .filter(|page_idx| *page_idx < self.pages.len())
+            .map(PageIndex);
+        let reference = SelectedPagesReference::new(pages);
+        (!reference.is_empty()).then_some(reference)
+    }
+
     pub(super) fn selected_page_indices(&self, source: PageSelectionSource) -> Vec<usize> {
         let selection = match source {
             PageSelectionSource::GridOverview => &self.grid_overview_selection,

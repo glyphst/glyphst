@@ -10,6 +10,7 @@ tracy = ["ztracing/tracy"]
 anyhow.workspace = true
 dirs.workspace = true
 futures.workspace = true
+glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
 glyphst-keymap = { path = "../keymap" }
 glyphst-library = { path = "../library" }

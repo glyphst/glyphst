@@ -15,7 +15,7 @@ use glyphst_ai::ai_chat::{
     TITLE_GENERATION_PROMPT, find_mention_references, session_title_for_prompt, stream_completion,
     thinking_level_description, title_from_response,
 };
-use glyphst_core::RegionImageReference;
+use glyphst_core::{RegionImageReference, SelectedPagesReference};
 use glyphst_library::{
     AiMentionOccurrence, AiMentionReference, AiSession, AiSessionMessage, AiSessionRole,
     LibraryStore, current_timestamp,
@@ -111,20 +111,28 @@ struct ComposerMention {
 enum CapturedMention {
     Text(String),
     Region(RegionImageReference),
+    Pages(SelectedPagesReference),
 }
 
 impl ComposerMention {
     fn captured_text(&self) -> Option<&str> {
         match self.captured.as_ref()? {
             CapturedMention::Text(text) => Some(text),
-            CapturedMention::Region(_) => None,
+            CapturedMention::Region(_) | CapturedMention::Pages(_) => None,
         }
     }
 
     fn captured_region(&self) -> Option<&RegionImageReference> {
         match self.captured.as_ref()? {
             CapturedMention::Region(region) => Some(region),
-            CapturedMention::Text(_) => None,
+            CapturedMention::Text(_) | CapturedMention::Pages(_) => None,
+        }
+    }
+
+    fn captured_pages(&self) -> Option<&SelectedPagesReference> {
+        match self.captured.as_ref()? {
+            CapturedMention::Pages(pages) => Some(pages),
+            CapturedMention::Text(_) | CapturedMention::Region(_) => None,
         }
     }
 }

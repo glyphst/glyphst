@@ -690,12 +690,16 @@ fn rotated_region_compositor_swaps_crop_dimensions() {
 fn page_reference_validation_rejects_invalid_pages_and_deduplicates_exact_refs() {
     let page = MentionReference::new(MentionKind::Page, Some(2));
     let image = MentionReference::new(MentionKind::PageImage, Some(2));
+    let selected_text = MentionReference::new(MentionKind::SelectedPagesText, Some(1));
+    let selected_image = MentionReference::new(MentionKind::SelectedPagesImage, Some(3));
     let document_image = MentionReference::new(MentionKind::DocumentImage, None);
     let references = DocumentView::prepare_page_references(
         vec![
             MentionReference::new(MentionKind::Selection, None),
             page,
             image,
+            selected_text,
+            selected_image,
             document_image,
             page,
             document_image,
@@ -709,6 +713,8 @@ fn page_reference_validation_rejects_invalid_pages_and_deduplicates_exact_refs()
         vec![
             page,
             image,
+            selected_text,
+            selected_image,
             MentionReference::new(MentionKind::DocumentImage, Some(1)),
             MentionReference::new(MentionKind::DocumentImage, Some(2)),
             MentionReference::new(MentionKind::DocumentImage, Some(3)),

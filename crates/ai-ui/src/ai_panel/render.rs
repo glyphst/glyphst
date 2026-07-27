@@ -51,7 +51,8 @@ impl Render for AiPanel {
             .unwrap_or_else(|| selected_model.clone());
         let model_search_query = self.model_search_query.clone();
         let model_menu_scroll = self.model_menu_scroll.clone();
-        let (has_current_selection, has_current_region) = self.current_mention_availability(cx);
+        let (has_current_selection, has_current_region, has_selected_pages) =
+            self.current_mention_availability(cx);
         let sessions = self.sessions.clone();
         let current_session_id = self.session_id;
         let session_title = self.session_title.clone();
@@ -126,6 +127,7 @@ impl Render for AiPanel {
                         page_count,
                         has_current_selection,
                         has_current_region,
+                        has_selected_pages,
                         panel.clone(),
                     )
                 })

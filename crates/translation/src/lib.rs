@@ -1780,6 +1780,8 @@ fn normalized_ai_endpoint(settings: &glyphst_settings::ResolvedAiConfig) -> Stri
         AiApiStyle::OpenAi if base.ends_with("/chat/completions") => base,
         AiApiStyle::OpenAi if base_url_has_version(&base) => format!("{base}/chat/completions"),
         AiApiStyle::OpenAi => format!("{base}/v1/chat/completions"),
+        AiApiStyle::OpenAiResponses if base.ends_with("/responses") => base,
+        AiApiStyle::OpenAiResponses => format!("{base}/responses"),
         AiApiStyle::Anthropic if base.ends_with("/v1/messages") => base,
         AiApiStyle::Anthropic if base.ends_with("/v1") => format!("{base}/messages"),
         AiApiStyle::Anthropic => format!("{base}/v1/messages"),

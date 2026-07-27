@@ -224,8 +224,8 @@ impl LibraryStore {
         };
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(AI_SESSIONS_V3_TABLE)?;
-            let encoded = encode(&StoredAiSessionV3::from(session))?;
+            let mut table = write_txn.open_table(AI_SESSIONS_V4_TABLE)?;
+            let encoded = encode(&StoredAiSessionV4::from(session))?;
             table.insert(session.id, encoded.as_slice())?;
             for id in removed_ids {
                 table.remove(*id)?;
@@ -247,7 +247,7 @@ impl LibraryStore {
             .collect::<HashSet<_>>();
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(AI_SESSIONS_V3_TABLE)?;
+            let mut table = write_txn.open_table(AI_SESSIONS_V4_TABLE)?;
             let stale_ids = table
                 .iter()?
                 .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
