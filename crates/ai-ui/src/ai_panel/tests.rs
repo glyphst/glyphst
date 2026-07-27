@@ -298,6 +298,7 @@ fn non_selection_references_remain_deduplicated() {
 #[test]
 fn mention_trigger_requires_a_boundary() {
     assert_eq!(active_mention_range("ask @pa", 7, &[]), Some(4..7));
+    assert_eq!(active_mention_range("@ ", 1, &[]), Some(0..1));
     assert_eq!(active_mention_range("mail@example", 12, &[]), None);
     assert_eq!(active_mention_range("(@page", 6, &[]), Some(1..6));
     assert_eq!(active_mention_range("ask @pa now", 11, &[]), None);
@@ -307,6 +308,8 @@ fn mention_trigger_requires_a_boundary() {
 #[test]
 fn mention_trigger_accepts_an_explicit_mention_boundary() {
     let selection = parse_composer_mentions("@selection");
+    assert_eq!(active_mention_range("@selection", 5, &selection), None);
+    assert_eq!(active_mention_range("@selection", 10, &selection), None);
     assert_eq!(
         active_mention_range("@selection@", 11, &selection),
         Some(10..11)

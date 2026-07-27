@@ -498,6 +498,7 @@ impl Render for AiPanel {
                                     theme,
                                     base_text_style,
                                 },
+                                window,
                                 cx,
                             )),
                     )

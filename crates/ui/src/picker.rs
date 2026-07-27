@@ -143,7 +143,7 @@ impl<D: PickerDelegate> Picker<D> {
         let list = cx.new(|cx| {
             ListState::new(
                 PickerListDelegate {
-                    picker,
+                    picker: picker.clone(),
                     selected_ix: None,
                 },
                 window,
@@ -157,6 +157,12 @@ impl<D: PickerDelegate> Picker<D> {
         }
 
         let _input_subscription = cx.subscribe_in(&input, window, Self::on_input_event);
+        let focus_handle = input.focus_handle(cx);
+        window.defer(cx, move |window, cx| {
+            if picker.upgrade().is_some() {
+                focus_handle.focus(window, cx);
+            }
+        });
 
         Self {
             previous_focus_handle,
@@ -560,6 +566,113 @@ pub fn normalize_query(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestAppContext;
+    use gpui_component::Root;
+
+    struct EmptyPickerDelegate;
+
+    impl PickerDelegate for EmptyPickerDelegate {
+        fn key_context(&self) -> &'static str {
+            "PickerFocusTest"
+        }
+
+        fn placeholder(&self) -> SharedString {
+            "Search".into()
+        }
+
+        fn empty_message(&self) -> SharedString {
+            "Empty".into()
+        }
+
+        fn width(&self) -> f32 {
+            240.0
+        }
+
+        fn row_height(&self) -> f32 {
+            32.0
+        }
+
+        fn max_visible_matches(&self) -> usize {
+            4
+        }
+
+        fn match_count(&self) -> usize {
+            0
+        }
+
+        fn update_matches(&mut self, _: &str) {}
+
+        fn render_match(&self, _: usize, _: ThemeColor, _: &FocusHandle, _: &Window) -> AnyElement {
+            div().into_any_element()
+        }
+
+        fn confirm(
+            &mut self,
+            _: usize,
+            _: &FocusHandle,
+            _: &mut Window,
+            _: &mut Context<Picker<Self>>,
+        ) {
+        }
+    }
+
+    struct PickerFocusHost {
+        picker: Entity<Picker<EmptyPickerDelegate>>,
+        previous_focus_handle: FocusHandle,
+    }
+
+    impl PickerFocusHost {
+        fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+            let previous_focus_handle = cx.focus_handle();
+            previous_focus_handle.focus(window, cx);
+            let picker = cx.new(|cx| {
+                Picker::new(
+                    previous_focus_handle.clone(),
+                    EmptyPickerDelegate,
+                    window,
+                    cx,
+                )
+            });
+            Self {
+                picker,
+                previous_focus_handle,
+            }
+        }
+    }
+
+    impl Render for PickerFocusHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .track_focus(&self.previous_focus_handle)
+                .child(self.picker.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn picker_defers_focus_and_restores_the_previous_focus(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let host = cx.new(|cx| PickerFocusHost::new(window, cx));
+            Root::new(host, window, cx)
+        });
+        let host = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<PickerFocusHost>().unwrap()
+        });
+        let (picker, previous_focus_handle) = host.read_with(cx, |host, _| {
+            (host.picker.clone(), host.previous_focus_handle.clone())
+        });
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            assert!(picker.focus_handle(cx).is_focused(window));
+        });
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.dismiss(window, cx));
+            assert!(previous_focus_handle.is_focused(window));
+        });
+    }
 
     #[test]
     fn fuzzy_match_returns_utf8_ranges() {

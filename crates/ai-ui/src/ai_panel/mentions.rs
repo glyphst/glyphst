@@ -269,8 +269,7 @@ impl AiPanel {
             Anchor::BottomLeft => position.y.as_f32() - MENTION_PREVIEW_WINDOW_MARGIN,
             _ => viewport_height - MENTION_PREVIEW_WINDOW_MARGIN * 2.0,
         };
-        let max_height =
-            (available - MENTION_PREVIEW_HEADER_HEIGHT - MENTION_PREVIEW_BRIDGE_HEIGHT).max(0.0);
+        let max_height = (available - MENTION_PREVIEW_BRIDGE_HEIGHT).max(0.0);
         Self::mention_preview_image_size(max_width, max_height, image.width, image.height)
     }
 
@@ -317,7 +316,6 @@ impl CompletionProvider for MentionCompletionProvider {
         cx: &mut Context<InputState>,
     ) -> Task<Result<CompletionResponse>> {
         let Some(panel) = self.panel.upgrade() else {
-            self.triggered.set(false);
             return empty_completions();
         };
         let panel = panel.read(cx);
@@ -327,12 +325,10 @@ impl CompletionProvider for MentionCompletionProvider {
             offset.min(content.len()),
             &panel.composer_mentions,
         ) else {
-            self.triggered.set(false);
             return empty_completions();
         };
         let query_start = source_range.start + '@'.len_utf8();
         if query_start > source_range.end {
-            self.triggered.set(false);
             return empty_completions();
         }
 
@@ -386,11 +382,27 @@ impl CompletionProvider for MentionCompletionProvider {
         Task::ready(Ok(CompletionResponse::Array(items)))
     }
 
-    fn is_completion_trigger(&self, _: usize, new_text: &str, _: &mut Context<InputState>) -> bool {
-        if new_text.contains('@') {
-            self.triggered.set(true);
+    fn completion_trigger_range(
+        &self,
+        text: &Rope,
+        cursor: usize,
+        _: CompletionTriggerEvent<'_>,
+        cx: &mut Context<InputState>,
+    ) -> Option<Range<usize>> {
+        let panel = self.panel.upgrade()?;
+        let panel = panel.read(cx);
+        active_mention_range(
+            &text.to_string(),
+            cursor.min(text.len()),
+            &panel.composer_mentions,
+        )
+    }
+
+    fn completion_menu_options(&self) -> CompletionMenuOptions {
+        CompletionMenuOptions {
+            min_width: px(MENTION_COMPLETION_MIN_WIDTH),
+            max_width: px(MENTION_COMPLETION_MAX_WIDTH),
         }
-        self.triggered.get()
     }
 }
 

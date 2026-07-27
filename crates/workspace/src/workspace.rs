@@ -1332,7 +1332,6 @@ impl Workspace {
         })
         .detach();
 
-        palette.focus_handle(cx).focus(window, cx);
         self.command_palette_previous_focus_handle = Some(previous_focus_handle);
         self.command_palette = Some(palette);
         cx.notify();
@@ -1394,10 +1393,6 @@ impl Workspace {
         })
         .detach();
 
-        let focus_handle = selector.focus_handle(cx);
-        window.defer(cx, move |window, cx| {
-            focus_handle.focus(window, cx);
-        });
         self.theme_selector_previous_focus_handle = Some(previous_focus_handle);
         self.theme_selector = Some(selector);
         cx.notify();

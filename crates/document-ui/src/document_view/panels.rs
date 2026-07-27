@@ -267,7 +267,6 @@ impl DocumentView {
         })
         .detach();
 
-        palette.focus_handle(cx).focus(window, cx);
         self.toc_palette = Some(palette);
         cx.notify();
     }
@@ -333,7 +332,6 @@ impl DocumentView {
         })
         .detach();
 
-        palette.focus_handle(cx).focus(window, cx);
         self.notes_palette = Some(palette);
         cx.notify();
     }
@@ -377,7 +375,6 @@ impl DocumentView {
         })
         .detach();
 
-        palette.focus_handle(cx).focus(window, cx);
         self.history_palette = Some(palette);
         cx.notify();
     }
@@ -408,7 +405,6 @@ impl DocumentView {
         })
         .detach();
 
-        palette.focus_handle(cx).focus(window, cx);
         self.bookmark_palette = Some(palette);
         cx.notify();
     }
@@ -447,7 +443,6 @@ impl DocumentView {
         })
         .detach();
 
-        prompt.focus_handle(cx).focus(window, cx);
         self.bookmark_prompt = Some(prompt);
         cx.notify();
     }
@@ -488,7 +483,6 @@ impl DocumentView {
         })
         .detach();
 
-        prompt.focus_handle(cx).focus(window, cx);
         self.go_to_page_prompt = Some(prompt);
         cx.notify();
     }

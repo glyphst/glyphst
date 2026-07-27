@@ -45,13 +45,12 @@ use gpui_component::{
     alert::Alert,
     button::{Button, ButtonGroup, ButtonVariants as _},
     input::{
-        CompletionProvider, Escape as InputEscape, Input, InputEvent, InputSpan, InputState, Rope,
-        RopeExt,
+        CompletionMenuOptions, CompletionProvider, CompletionTriggerEvent, Escape as InputEscape,
+        Input, InputEvent, InputSpan, InputState, Rope, RopeExt,
     },
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
     popover::{Popover, PopoverState},
-    scroll::ScrollableElement as _,
 };
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionResponse, CompletionTextEdit, Range as LspRange,
@@ -62,10 +61,11 @@ pub const AI_PANEL_WIDTH: f32 = 360.0;
 const MENTION_PREVIEW_HIDE_DELAY: Duration = Duration::from_millis(150);
 const MENTION_PREVIEW_MAX_CHARS: usize = 4_000;
 const MENTION_PREVIEW_WIDTH: f32 = 320.0;
-const MENTION_PREVIEW_TEXT_MAX_HEIGHT: f32 = 240.0;
+const MENTION_PREVIEW_TEXT_MAX_HEIGHT: f32 = 274.0;
 const MENTION_PREVIEW_WINDOW_MARGIN: f32 = 8.0;
 const MENTION_PREVIEW_BRIDGE_HEIGHT: f32 = 6.0;
-const MENTION_PREVIEW_HEADER_HEIGHT: f32 = 34.0;
+const MENTION_COMPLETION_MIN_WIDTH: f32 = 280.0;
+const MENTION_COMPLETION_MAX_WIDTH: f32 = 540.0;
 
 struct AiValidationNotification;
 
@@ -300,7 +300,6 @@ enum CopyFeedbackTarget {
 
 struct MentionCompletionProvider {
     panel: WeakEntity<AiPanel>,
-    triggered: Cell<bool>,
 }
 
 pub struct AiPanel {
@@ -446,12 +445,8 @@ impl AiPanel {
         let panel = cx.weak_entity();
         let composer_provider = Rc::new(MentionCompletionProvider {
             panel: panel.clone(),
-            triggered: Cell::new(false),
         });
-        let edit_provider = Rc::new(MentionCompletionProvider {
-            panel,
-            triggered: Cell::new(false),
-        });
+        let edit_provider = Rc::new(MentionCompletionProvider { panel });
         let composer_input = cx.new(|cx| {
             let mut input = InputState::new(window, cx)
                 .auto_grow(min_rows, max_rows)

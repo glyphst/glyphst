@@ -4,6 +4,7 @@ impl AiPanel {
     pub(super) fn render_mention_preview(
         preview: MentionPreview,
         options: MentionPreviewRenderOptions,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let MentionPreviewRenderOptions {
@@ -32,40 +33,49 @@ impl AiPanel {
                 markdown,
                 truncated,
             }) => div()
-                .id(("ai-mention-preview-text", generation))
-                .relative()
-                .track_scroll(&scroll_handle)
                 .w_full()
                 .min_w_0()
-                .max_h(px(MENTION_PREVIEW_TEXT_MAX_HEIGHT))
-                .flex()
-                .flex_col()
-                .overflow_y_scroll()
-                .p_3()
-                .cursor_text()
-                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                .child(MarkdownElement::new(
-                    markdown,
-                    MarkdownStyle::from_theme(theme, base_text_style),
-                ))
-                .when(truncated, |this| {
-                    this.child(
-                        div()
-                            .flex_none()
-                            .mt_3()
-                            .pt_2()
-                            .border_t(px(1.0))
-                            .border_color(theme.border)
-                            .text_size(ui_rems(10.0))
-                            .text_color(theme.muted_foreground)
-                            .child(tr_with_number(
-                                "ai-mention-preview-truncated",
-                                "limit",
-                                MENTION_PREVIEW_MAX_CHARS,
-                            )),
-                    )
-                })
-                .vertical_scrollbar(&scroll_handle)
+                .child(
+                    div()
+                        .id(("ai-mention-preview-text", generation))
+                        .track_scroll(&scroll_handle)
+                        .w_full()
+                        .min_w_0()
+                        .max_h(px(MENTION_PREVIEW_TEXT_MAX_HEIGHT))
+                        .flex()
+                        .flex_col()
+                        .overflow_y_scroll()
+                        .p_3()
+                        .cursor_text()
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        .child(MarkdownElement::new(
+                            markdown,
+                            MarkdownStyle::from_theme(theme, base_text_style),
+                        ))
+                        .when(truncated, |this| {
+                            this.child(
+                                div()
+                                    .flex_none()
+                                    .mt_3()
+                                    .pt_2()
+                                    .border_t(px(1.0))
+                                    .border_color(theme.border)
+                                    .text_size(ui_rems(10.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(tr_with_number(
+                                        "ai-mention-preview-truncated",
+                                        "limit",
+                                        MENTION_PREVIEW_MAX_CHARS,
+                                    )),
+                            )
+                        }),
+                )
+                .vertical_scrollbar_for_with_id(
+                    &scroll_handle,
+                    ("ai-mention-preview-scrollbar", generation),
+                    window,
+                    cx,
+                )
                 .into_any_element(),
             MentionPreviewStatus::Ready(MentionPreviewContent::Image(image)) => div()
                 .w_full()
@@ -85,7 +95,6 @@ impl AiPanel {
 
         let card = div()
             .id(("ai-mention-preview", generation))
-            .occlude()
             .w_full()
             .flex()
             .flex_col()
@@ -96,16 +105,6 @@ impl AiPanel {
             .overflow_hidden()
             .shadow_sm()
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .border_b(px(1.0))
-                    .border_color(theme.border)
-                    .text_size(ui_rems(11.0))
-                    .text_color(theme.muted_foreground)
-                    .child(preview.reference.display_text()),
-            )
             .child(body);
         let measure = canvas(
             move |measured_bounds, _window, _cx| {
@@ -121,6 +120,7 @@ impl AiPanel {
         div()
             .id(("ai-mention-preview-hover-region", generation))
             .relative()
+            .occlude()
             .w(px(width))
             .when(preview_anchor == Anchor::TopLeft, |this| {
                 this.pt(px(MENTION_PREVIEW_BRIDGE_HEIGHT))
@@ -340,6 +340,7 @@ impl AiPanel {
                                     theme,
                                     base_text_style,
                                 },
+                                window,
                                 cx,
                             )),
                     )

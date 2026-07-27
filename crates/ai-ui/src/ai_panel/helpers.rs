@@ -14,6 +14,12 @@ pub(super) fn active_mention_range(
     let line = &text[line_start..cursor];
     let at = line.rfind('@')?;
     let start = line_start + at;
+    if mentions
+        .iter()
+        .any(|mention| mention.range.start <= start && start < mention.range.end)
+    {
+        return None;
+    }
     let valid_boundary = start == 0
         || mentions.iter().any(|mention| mention.range.end == start)
         || text[..start]
