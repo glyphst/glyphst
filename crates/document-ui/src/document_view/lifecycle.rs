@@ -187,6 +187,9 @@ impl DocumentView {
             toc_sidebar_visible_entry_ixs: Vec::new(),
             toc_sidebar_entries_dirty: true,
             toc_sidebar_selected: None,
+            toc_sidebar_follow_current: true,
+            toc_sidebar_manual_scroll: Rc::new(Cell::new(false)),
+            toc_sidebar_last_scroll_offset: point(px(0.0), px(0.0)),
             notes_sidebar_scroll: UniformListScrollHandle::new(),
             notes_sidebar_entries: Vec::new(),
             notes_sidebar_selected: None,
@@ -525,12 +528,8 @@ impl DocumentView {
         self.toc = reload.toc;
         self.toc_collapsed
             .retain(|entry_ix| *entry_ix < self.toc.len());
-        if self
-            .toc_sidebar_selected
-            .is_some_and(|entry_ix| entry_ix >= self.toc.len())
-        {
-            self.toc_sidebar_selected = None;
-        }
+        self.toc_sidebar_selected = None;
+        self.toc_sidebar_manual_scroll.set(false);
         self.toc_sidebar_entries_dirty = true;
         self.pages = reload.loaded.pages;
         self.recompute_layout(cx.global::<SettingsStore>().resolved_theme.page_gap);

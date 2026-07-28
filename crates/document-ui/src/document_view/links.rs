@@ -4,7 +4,7 @@ impl DocumentView {
     pub(super) fn flatten_toc(outlines: Vec<mupdf::Outline>, page_count: usize) -> Vec<TocEntry> {
         let mut entries = Vec::new();
         for outline in outlines {
-            Self::push_toc_outline(outline, 0, page_count, &mut entries);
+            Self::push_toc_outline(outline, 0, None, page_count, &mut entries);
         }
         entries
     }
@@ -12,6 +12,7 @@ impl DocumentView {
     fn push_toc_outline(
         outline: mupdf::Outline,
         depth: usize,
+        parent_ix: Option<usize>,
         page_count: usize,
         entries: &mut Vec<TocEntry>,
     ) {
@@ -30,9 +31,11 @@ impl DocumentView {
             None => (0, None, None, false),
         };
 
+        let entry_ix = entries.len();
         entries.push(TocEntry {
             title: title.into(),
             depth,
+            parent_ix,
             has_children,
             page_idx,
             target_top,
@@ -41,7 +44,7 @@ impl DocumentView {
         });
 
         for child in down {
-            Self::push_toc_outline(child, depth + 1, page_count, entries);
+            Self::push_toc_outline(child, depth + 1, Some(entry_ix), page_count, entries);
         }
     }
 
@@ -372,5 +375,42 @@ impl DocumentView {
         }
 
         Ok(start..glyphs.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outline(title: &str, down: Vec<mupdf::Outline>) -> mupdf::Outline {
+        mupdf::Outline {
+            title: title.to_string(),
+            uri: None,
+            dest: None,
+            down,
+        }
+    }
+
+    #[test]
+    fn flatten_toc_records_direct_parent_indices() {
+        let toc = DocumentView::flatten_toc(
+            vec![outline(
+                "root",
+                vec![
+                    outline("first", vec![outline("grandchild", Vec::new())]),
+                    outline("second", Vec::new()),
+                ],
+            )],
+            1,
+        );
+
+        assert_eq!(toc.len(), 4);
+        assert_eq!(toc[0].parent_ix, None);
+        assert_eq!(toc[1].parent_ix, Some(0));
+        assert_eq!(toc[2].parent_ix, Some(1));
+        assert_eq!(toc[3].parent_ix, Some(0));
+        assert!(toc[0].has_children);
+        assert!(toc[1].has_children);
+        assert!(!toc[2].has_children);
     }
 }

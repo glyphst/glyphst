@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     ops::Range,
@@ -27,7 +27,7 @@ use crate::library::{
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
 use crate::notes::{NotePaletteEntry, NotesPalette, NotesPaletteDelegate};
 use crate::picker::{Picker, PickerEvent};
-use crate::scrollbar::{ManualScrollHandle, WithScrollbar as _};
+use crate::scrollbar::{ManualScrollHandle, ScrollbarHandle, WithScrollbar as _};
 use crate::search::{SearchBar, SearchBarSnapshot, SearchEvent};
 use crate::settings::{
     BehaviorSettings, CopyFormat, PageImageQuality, PageTextFormat, SettingsStore,
@@ -64,6 +64,7 @@ use glyphst_ui::{
     activity::ActivityCenter,
     icons::toolbar_icon_button,
     markdown::{Markdown, MarkdownElement, MarkdownStyle},
+    sticky_items::{StickyCandidate, sticky_items},
     tooltip::text_tooltip,
 };
 use gpui::{
@@ -72,11 +73,13 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render,
     RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement, Task, TextAlign, TextRun, TextStyle, UniformListScrollHandle,
-    Window, WrappedLine, anchored, canvas, deferred, div, fill, outline, point, prelude::*, px,
-    rgb, rgba, size, transparent_black, uniform_list,
+    Window, WrappedLine, anchored, canvas, deferred, div, fill, hsla, linear_color_stop,
+    linear_gradient, outline, point, prelude::*, px, rgb, rgba, size, transparent_black,
+    uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, IndexPath, Selectable as _, Sizable as _, StyledExt as _, ThemeColor,
+    ActiveTheme as _, Disableable as _, IndexPath, Selectable as _, Sizable as _, StyledExt as _,
+    ThemeColor,
     alert::Alert,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
@@ -90,7 +93,7 @@ use mupdf::{
     ColorParams, Colorspace, DestinationKind, Device, DisplayList, Image as PdfImage, Matrix,
     Pixmap, Quad, Rect, TextPageFlags,
 };
-use smallvec::smallvec;
+use smallvec::{SmallVec, smallvec};
 
 const INITIAL_SELECTION_TOLERANCE_PX: f32 = 24.0;
 const MIN_ZOOM: f32 = 0.25;
@@ -922,6 +925,7 @@ struct DocumentLink {
 struct TocEntry {
     title: SharedString,
     depth: usize,
+    parent_ix: Option<usize>,
     has_children: bool,
     page_idx: usize,
     target_top: Option<f32>,
@@ -1143,6 +1147,9 @@ pub struct DocumentView {
     toc_sidebar_visible_entry_ixs: Vec<usize>,
     toc_sidebar_entries_dirty: bool,
     toc_sidebar_selected: Option<usize>,
+    toc_sidebar_follow_current: bool,
+    toc_sidebar_manual_scroll: Rc<Cell<bool>>,
+    toc_sidebar_last_scroll_offset: GpuiPoint<Pixels>,
     notes_sidebar_scroll: UniformListScrollHandle,
     notes_sidebar_entries: Vec<NotePaletteEntry>,
     notes_sidebar_selected: Option<u64>,

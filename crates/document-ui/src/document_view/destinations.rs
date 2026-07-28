@@ -8,9 +8,9 @@ impl DocumentView {
         target_left: Option<f32>,
         cx: &mut Context<Self>,
     ) {
-        let Some(page) = self.pages.get(page_idx) else {
+        if self.pages.get(page_idx).is_none() {
             return;
-        };
+        }
 
         if self.is_presentation_mode() {
             let current_position = self.current_jump_position();
@@ -21,6 +21,26 @@ impl DocumentView {
             return;
         }
 
+        let Some((scroll_x_doc, scroll_y_doc)) =
+            self.pdf_destination_scroll_position(page_idx, target_top, target_left)
+        else {
+            return;
+        };
+
+        let current_position = self.current_jump_position();
+        Self::push_jump_position(&mut self.jump_back, current_position);
+        self.jump_forward.clear();
+        self.mark_manual_navigation();
+        self.set_scroll_doc(scroll_x_doc, scroll_y_doc, cx);
+    }
+
+    pub(super) fn pdf_destination_scroll_position(
+        &self,
+        page_idx: usize,
+        target_top: Option<f32>,
+        target_left: Option<f32>,
+    ) -> Option<(f32, f32)> {
+        let page = self.pages.get(page_idx)?;
         let (page_width, _) = self.page_dimensions(page_idx);
         let target_point = Self::pdf_point_to_view(
             page.bounds,
@@ -44,11 +64,18 @@ impl DocumentView {
                 self.scroll_x_doc
             };
 
-        let current_position = self.current_jump_position();
-        Self::push_jump_position(&mut self.jump_back, current_position);
-        self.jump_forward.clear();
-        self.mark_manual_navigation();
-        self.set_scroll_doc(scroll_x_doc, scroll_y_doc, cx);
+        Some((
+            if scroll_x_doc.is_finite() {
+                scroll_x_doc
+            } else {
+                self.scroll_x_doc
+            },
+            if scroll_y_doc.is_finite() {
+                scroll_y_doc
+            } else {
+                page.offset_y
+            },
+        ))
     }
 
     pub(crate) fn navigate_to_page_number(&mut self, page_number: usize, cx: &mut Context<Self>) {

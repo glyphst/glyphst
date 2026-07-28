@@ -11,6 +11,7 @@ pub mod prompt;
 pub mod root;
 pub mod scrollbar;
 pub mod smooth_scroll;
+pub mod sticky_items;
 pub mod style;
 pub mod tooltip;
 
