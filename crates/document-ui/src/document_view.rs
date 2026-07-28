@@ -67,13 +67,13 @@ use glyphst_ui::{
     tooltip::text_tooltip,
 };
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, AsyncApp, BorderStyle, Bounds, ClickEvent,
-    ClipboardItem, Context, Corners, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    Font, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement, Task, TextAlign, TextRun,
-    TextStyle, UniformListScrollHandle, Window, WrappedLine, anchored, canvas, deferred, div, fill,
-    outline, point, prelude::*, px, rgb, rgba, size, transparent_black, uniform_list,
+    Anchor, AnyElement, AsyncApp, BorderStyle, Bounds, ClickEvent, ClipboardItem, Context, Corners,
+    DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Font, FontWeight, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render,
+    RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement, Task, TextAlign, TextRun, TextStyle, UniformListScrollHandle,
+    Window, WrappedLine, anchored, canvas, deferred, div, fill, outline, point, prelude::*, px,
+    rgb, rgba, size, transparent_black, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, IndexPath, Selectable as _, Sizable as _, StyledExt as _, ThemeColor,
@@ -1078,11 +1078,8 @@ pub struct DocumentView {
     transparency_enabled: bool,
     window_settings: WindowSettings,
     search: SearchState,
-    loading: bool,
-    loading_error: Option<String>,
     pending_initial_position: Option<DocumentPosition>,
     pending_semantic_position: Option<DocumentPosition>,
-    loading_task: Option<Task<()>>,
     reflow_resize_task: Option<Task<()>>,
     file_watch_task: Option<Task<()>>,
     reload_task: Option<Task<()>>,

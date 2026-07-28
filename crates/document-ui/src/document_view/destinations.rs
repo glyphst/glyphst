@@ -64,11 +64,6 @@ impl DocumentView {
         position: DocumentPosition,
         cx: &mut Context<Self>,
     ) {
-        if self.loading {
-            self.pending_initial_position = Some(position);
-            return;
-        }
-
         let current_position = self.current_jump_position();
         Self::push_jump_position(&mut self.jump_back, current_position);
         self.jump_forward.clear();

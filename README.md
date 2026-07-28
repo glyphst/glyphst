@@ -31,6 +31,15 @@ cargo run -p glyphst-files -- /path/to/start
 Without Nix, install the platform packages listed in
 [CI](.github/workflows/ci.yml) before running Cargo.
 
+To inspect the file-open animation, exit any running Reader and start a debug build with a minimum
+loader duration in milliseconds:
+
+```sh
+GLYPHST_DEBUG_FILE_OPEN_MIN_MS=3000 cargo run -p glyphst-reader -- /path/to/document.pdf
+```
+
+Release builds ignore this variable.
+
 Run the standard checks with:
 
 ```sh

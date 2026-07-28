@@ -17,9 +17,6 @@ impl Render for DocumentView {
             );
         }
         let opacity = window_settings.effective_opacity(self.transparency_enabled);
-        if self.loading || self.loading_error.is_some() {
-            return self.render_loading_state(ui_theme, opacity, cx);
-        }
 
         if !self.diff_flashes.is_empty() {
             window.request_animation_frame();

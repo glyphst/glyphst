@@ -1,9 +1,12 @@
-use std::fs;
+use std::{fs, path::PathBuf, time::Duration};
 
 use gpui::{AppContext as _, TestAppContext};
 use gpui_component::Root;
 
-use super::{DraggedTab, Pane, Tab};
+use super::{
+    DraggedTab, LoadingDocumentView, Pane, Tab, loading_grid_opacity,
+    parse_debug_file_open_min_duration, remaining_file_open_min_duration,
+};
 use crate::{document_view::RenderCache, library::LibraryStore, settings::SettingsStore};
 use glyphst_translation_ui::DocumentTranslationJobManager;
 
@@ -45,6 +48,97 @@ fn write_minimal_pdf(path: &std::path::Path) {
         .as_bytes(),
     );
     fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn loading_grid_opacity_spans_the_expected_wave() {
+    assert!((loading_grid_opacity(0.0, 0.0) - 0.2).abs() < f32::EPSILON);
+    assert!((loading_grid_opacity(0.5, 0.0) - 1.0).abs() < f32::EPSILON);
+
+    for phase in super::LOADING_GRID_PHASES {
+        for step in 0..=100 {
+            let opacity = loading_grid_opacity(step as f32 / 100.0, phase);
+            assert!((0.2..=1.0).contains(&opacity));
+        }
+    }
+}
+
+#[test]
+fn debug_file_open_min_duration_is_parsed_as_positive_milliseconds() {
+    assert_eq!(
+        parse_debug_file_open_min_duration("3000"),
+        Some(Duration::from_secs(3))
+    );
+    assert_eq!(
+        parse_debug_file_open_min_duration(" 42 "),
+        Some(Duration::from_millis(42))
+    );
+    assert_eq!(parse_debug_file_open_min_duration("0"), None);
+    assert_eq!(parse_debug_file_open_min_duration("-1"), None);
+    assert_eq!(parse_debug_file_open_min_duration("invalid"), None);
+}
+
+#[test]
+fn file_open_min_duration_only_waits_for_the_remaining_time() {
+    let minimum = Some(Duration::from_secs(3));
+
+    assert_eq!(
+        remaining_file_open_min_duration(minimum, Duration::from_secs(1)),
+        Some(Duration::from_secs(2))
+    );
+    assert_eq!(
+        remaining_file_open_min_duration(minimum, Duration::from_secs(3)),
+        None
+    );
+    assert_eq!(
+        remaining_file_open_min_duration(minimum, Duration::from_secs(4)),
+        None
+    );
+    assert_eq!(remaining_file_open_min_duration(None, Duration::ZERO), None);
+}
+
+#[gpui::test]
+fn loading_document_view_switches_from_animated_grid_to_error(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        cx.set_global(SettingsStore::memory());
+    });
+
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let loading = cx.new(|cx| LoadingDocumentView {
+            path: PathBuf::from("/tmp/example.pdf"),
+            focus_handle: cx.focus_handle(),
+            job_ids: Vec::new(),
+            error: None,
+            _task: None,
+        });
+        Root::new(loading, window, cx)
+    });
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+
+    assert!(cx.debug_bounds("document-open-loading").is_some());
+    assert!(cx.debug_bounds("document-open-loading-grid").is_some());
+    assert!(cx.debug_bounds("document-open-loading-error").is_none());
+
+    let loading = root.read_with(cx, |root, _| {
+        root.view()
+            .clone()
+            .downcast::<LoadingDocumentView>()
+            .unwrap()
+    });
+    loading.update(cx, |loading, cx| {
+        loading.error = Some("failed".into());
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+
+    assert!(cx.debug_bounds("document-open-loading").is_none());
+    assert!(cx.debug_bounds("document-open-loading-grid").is_none());
+    assert!(cx.debug_bounds("document-open-loading-error").is_some());
 }
 
 #[gpui::test]

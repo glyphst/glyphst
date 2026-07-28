@@ -15,18 +15,7 @@ impl DocumentView {
 
     pub fn stage_current_history_position(&mut self, cx: &mut Context<Self>) {
         self.position_save_task.take();
-        if self.loading_error.is_some() {
-            return;
-        }
-
-        let position = if self.loading {
-            self.pending_semantic_position
-                .clone()
-                .or_else(|| self.pending_initial_position.clone())
-                .unwrap_or_else(|| self.current_document_position())
-        } else {
-            self.current_document_position()
-        };
+        let position = self.current_document_position();
         cx.global_mut::<LibraryStore>()
             .record_history(&self.path, position);
     }

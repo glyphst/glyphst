@@ -226,11 +226,8 @@ impl DocumentView {
             transparency_enabled: window_settings.transparency_enabled_by_default(),
             window_settings,
             search: SearchState::default(),
-            loading: false,
-            loading_error: None,
             pending_initial_position: options.initial_position,
             pending_semantic_position: None,
-            loading_task: None,
             reflow_resize_task: None,
             file_watch_task: None,
             reload_task: None,
@@ -359,39 +356,9 @@ impl DocumentView {
         self.pinned_translation_language_select = Some(pinned);
     }
 
-    pub fn start_loading(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn initialize_runtime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.initialize_translation_selects(window, cx);
-        if self.loading_task.is_some() {
-            return;
-        }
-
         self.start_file_watch(cx);
-        if !self.loading {
-            return;
-        }
-
-        let snapshot = self.document_snapshot.clone();
-        let document_layout = self.document_layout;
-        let page_count = self.page_count;
-        let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
-
-        self.loading_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    let (loaded_page_count, loaded) =
-                        Self::load_document_pages(&snapshot, document_layout, page_gap)
-                            .map_err(|error| format!("{error:#}"))?;
-                    if loaded_page_count != page_count {
-                        return Err(format!(
-                            "document page count changed while loading: expected {page_count}, got {loaded_page_count}"
-                        ));
-                    }
-                    Ok(loaded)
-                })
-                .await;
-
-            Self::finish_loading(this, cx, result);
-        }));
     }
 
     fn file_signature(path: &Path) -> Option<FileSignature> {
@@ -558,7 +525,6 @@ impl DocumentView {
         };
 
         self.evict_previous_document(cx);
-        self.loading_task = None;
         self.text_indexing_task = None;
         self.pending_renders.clear();
         self.diff_flash_clear_task = None;
@@ -602,8 +568,6 @@ impl DocumentView {
         self.hovered_link = None;
         self.pending_link = None;
         self.page_image_bounds = (0..self.pages.len()).map(|_| None).collect();
-        self.loading = false;
-        self.loading_error = None;
         self.text_index_state = TextIndexState::Pending;
         self.search.cancel_reveal_after_indexing();
         self.diff_pending_pages = diff_pending_pages;
@@ -675,44 +639,6 @@ impl DocumentView {
                 eprintln!("failed to evict previous PDF render cache: {error:#}");
             }
         }));
-    }
-
-    fn finish_loading(
-        this: gpui::WeakEntity<Self>,
-        cx: &mut AsyncApp,
-        result: std::result::Result<LoadedPages, String>,
-    ) {
-        let update_result = this.update(cx, |this, cx| {
-            this.loading_task = None;
-            match result {
-                Ok(loaded) => this.apply_loaded_pages(loaded, cx),
-                Err(error) => this.apply_loading_error(error, cx),
-            }
-            if let Some(generation) = this.reload_coordinator.finish_initial_load() {
-                this.start_reload(generation, cx);
-            }
-        });
-        if let Err(error) = update_result
-            && error.to_string() != "entity released"
-        {
-            eprintln!("failed to update loaded PDF: {error:#}");
-        }
-    }
-
-    #[ztracing::instrument(skip_all)]
-    fn load_document_pages(
-        snapshot: &DocumentSnapshot,
-        document_layout: DocumentLayout,
-        page_gap: f32,
-    ) -> Result<(usize, LoadedPages)> {
-        let document = snapshot.open_with_layout(document_layout)?.into_inner();
-        let page_count = document.page_count()?;
-        if page_count <= 0 {
-            bail!("document has no readable content");
-        }
-        let page_count = page_count as usize;
-        let loaded = Self::load_pages_from_document(&document, page_count, page_gap)?;
-        Ok((page_count, loaded))
     }
 
     fn load_pages_from_document(
@@ -816,52 +742,5 @@ impl DocumentView {
             max_page_width,
             content_height_doc,
         })
-    }
-
-    fn apply_loaded_pages(&mut self, loaded: LoadedPages, cx: &mut Context<Self>) {
-        self.pages = loaded.pages;
-        self.recompute_layout(cx.global::<SettingsStore>().resolved_theme.page_gap);
-        self.region_tool_active = false;
-        self.region_drag = None;
-        self.selected_region = None;
-        self.glyphs.clear();
-        self.text_blocks.clear();
-        self.text_lines.clear();
-        self.page_line_ranges = vec![0..0; self.pages.len()];
-        self.page_block_ranges = vec![0..0; self.pages.len()];
-        self.replace_translation_document();
-        self.links.clear();
-        self.search.matches.clear();
-        self.search.active = None;
-        self.selection = None;
-        self.pending_selection_anchor = None;
-        self.hovered_link = None;
-        self.pending_link = None;
-        self.page_image_bounds = (0..self.pages.len()).map(|_| None).collect();
-        self.loading = false;
-        self.loading_error = None;
-        self.text_index_state = TextIndexState::Pending;
-        if let Some(page_idx) = self.presentation_page.as_mut() {
-            *page_idx = (*page_idx).min(self.pages.len().saturating_sub(1));
-        }
-
-        if let Some(position) = self.pending_initial_position.take() {
-            self.restore_position(position);
-        } else {
-            self.clamp_scroll();
-        }
-
-        cx.notify();
-    }
-
-    fn apply_loading_error(&mut self, error: String, cx: &mut Context<Self>) {
-        eprintln!("failed to load PDF pages: {error}");
-        self.loading = false;
-        self.text_index_state = TextIndexState::Failed;
-        self.search.cancel_reveal_after_indexing();
-        self.recompute_search();
-        self.loading_error = Some(error);
-        self.sync_search_bar(cx);
-        cx.notify();
     }
 }

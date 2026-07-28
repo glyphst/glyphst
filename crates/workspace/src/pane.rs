@@ -4,15 +4,20 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     rc::Rc,
+    time::{Duration, Instant},
 };
+
+#[cfg(all(debug_assertions, not(test)))]
+use std::sync::OnceLock;
 
 use anyhow::{Result, bail};
 use glyphst_core::DocumentFormat;
 use glyphst_translation_ui::{DocumentTranslationJobId, DocumentTranslationJobManager};
 use gpui::{
-    AnyElement, App, AppContext, Axis, Bounds, Context, DragMoveEvent, Entity, EntityId,
-    EventEmitter, FocusHandle, IntoElement, MouseDownEvent, ParentElement, Pixels, Point, Render,
-    SharedString, Styled, Task, Window, WindowHandle, div, point, prelude::*, px, relative,
+    Animation, AnimationExt, AnyElement, App, AppContext, Axis, Bounds, Context, DragMoveEvent,
+    Entity, EntityId, EventEmitter, FocusHandle, IntoElement, MouseDownEvent, ParentElement,
+    Pixels, Point, Render, SharedString, Styled, Task, Window, WindowHandle, div, point,
+    prelude::*, px, relative,
 };
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Root, Selectable as _, Sizable as _, ThemeColor as Theme,
@@ -45,6 +50,68 @@ const HORIZONTAL_MIN_SIZE: f32 = 120.0;
 const VERTICAL_MIN_SIZE: f32 = 140.0;
 const DROP_TARGET_SIZE: f32 = 0.25;
 const RESIZE_STEP: f32 = 80.0;
+const LOADING_GRID_SQUARE_SIZE: f32 = 18.0;
+const LOADING_GRID_GAP: f32 = 4.0;
+const LOADING_GRID_PHASES: [f32; 9] = [0.80, 0.05, 0.50, 0.30, 0.95, 0.15, 0.65, 0.40, 0.70];
+const LOADING_GRID_DURATION: Duration = Duration::from_millis(1200);
+
+#[cfg(all(debug_assertions, not(test)))]
+const DEBUG_FILE_OPEN_MIN_MS_ENV: &str = "GLYPHST_DEBUG_FILE_OPEN_MIN_MS";
+
+fn loading_grid_opacity(delta: f32, phase: f32) -> f32 {
+    let t = (delta + phase) % 1.0;
+    let wave = (1.0 - (std::f32::consts::TAU * t).cos()) / 2.0;
+    0.2 + 0.8 * wave
+}
+
+#[cfg(any(debug_assertions, test))]
+fn parse_debug_file_open_min_duration(value: &str) -> Option<Duration> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|milliseconds| *milliseconds > 0)
+        .map(Duration::from_millis)
+}
+
+#[cfg(all(debug_assertions, not(test)))]
+fn debug_file_open_min_duration() -> Option<Duration> {
+    static DURATION: OnceLock<Option<Duration>> = OnceLock::new();
+
+    *DURATION.get_or_init(|| match std::env::var(DEBUG_FILE_OPEN_MIN_MS_ENV) {
+        Ok(value) if value.trim().is_empty() || value.trim() == "0" => None,
+        Ok(value) => match parse_debug_file_open_min_duration(&value) {
+            Some(duration) => Some(duration),
+            None => {
+                eprintln!(
+                    "ignoring invalid {DEBUG_FILE_OPEN_MIN_MS_ENV} value {value:?}; expected positive milliseconds"
+                );
+                None
+            }
+        },
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            eprintln!(
+                "ignoring non-Unicode {DEBUG_FILE_OPEN_MIN_MS_ENV} value; expected positive milliseconds"
+            );
+            None
+        }
+    })
+}
+
+#[cfg(any(not(debug_assertions), test))]
+fn debug_file_open_min_duration() -> Option<Duration> {
+    None
+}
+
+fn remaining_file_open_min_duration(
+    minimum: Option<Duration>,
+    elapsed: Duration,
+) -> Option<Duration> {
+    minimum
+        .and_then(|minimum| minimum.checked_sub(elapsed))
+        .filter(|remaining| !remaining.is_zero())
+}
 
 #[derive(Clone)]
 #[allow(clippy::enum_variant_names)]
@@ -66,42 +133,75 @@ pub(crate) struct LoadingDocumentView {
 impl Render for LoadingDocumentView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let detail = self.error.clone().unwrap_or_else(|| {
-            format!(
-                "Loading {}…",
-                self.path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("document")
-            )
-            .into()
-        });
+        let content = if let Some(error) = self.error.clone() {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_color(theme.danger)
+                .debug_selector(|| "document-open-loading-error".to_string())
+                .child(
+                    Icon::new(IconName::TriangleAlert)
+                        .size(ui_rems(14.0))
+                        .text_color(theme.danger),
+                )
+                .child(error)
+                .into_any_element()
+        } else {
+            let file_name = self
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("document");
+
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .text_align(gpui::TextAlign::Center)
+                .debug_selector(|| "document-open-loading".to_string())
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(LOADING_GRID_GAP))
+                        .w(px(LOADING_GRID_SQUARE_SIZE * 3.0 + LOADING_GRID_GAP * 3.0))
+                        .items_center()
+                        .justify_center()
+                        .debug_selector(|| "document-open-loading-grid".to_string())
+                        .children((0..9).map(|index| {
+                            let phase = LOADING_GRID_PHASES[index];
+
+                            div()
+                                .w(px(LOADING_GRID_SQUARE_SIZE))
+                                .h(px(LOADING_GRID_SQUARE_SIZE))
+                                .bg(theme.primary)
+                                .with_animation(
+                                    ("document-open-loading-square", index),
+                                    Animation::new(LOADING_GRID_DURATION).repeat(),
+                                    move |element, delta| {
+                                        element.opacity(loading_grid_opacity(delta, phase))
+                                    },
+                                )
+                        })),
+                )
+                .child(
+                    div()
+                        .text_size(ui_rems(14.0))
+                        .text_color(theme.muted_foreground)
+                        .child(crate::fl!("pdf-loading", name = file_name)),
+                )
+                .into_any_element()
+        };
+
         div()
             .size_full()
             .flex()
             .items_center()
             .justify_center()
-            .gap_2()
             .bg(theme.background)
-            .text_color(if self.error.is_some() {
-                theme.danger
-            } else {
-                theme.muted_foreground
-            })
-            .child(
-                Icon::new(if self.error.is_some() {
-                    IconName::TriangleAlert
-                } else {
-                    IconName::Circle
-                })
-                .size(ui_rems(14.0))
-                .text_color(if self.error.is_some() {
-                    theme.danger
-                } else {
-                    theme.primary
-                }),
-            )
-            .child(detail)
+            .child(content)
     }
 }
 
@@ -454,6 +554,8 @@ impl Pane {
         }
         self.sync_active_focus_handle();
         self.focus(window, cx);
+        let loading_started_at = Instant::now();
+        let minimum_loading_duration = debug_file_open_min_duration();
         cx.notify();
 
         let prepare_path = path.clone();
@@ -469,6 +571,12 @@ impl Pane {
                     .map_err(|error| format!("{error:#}"))
                 })
                 .await;
+            if let Some(remaining) = remaining_file_open_min_duration(
+                minimum_loading_duration,
+                loading_started_at.elapsed(),
+            ) {
+                cx.background_executor().timer(remaining).await;
+            }
             _ = this.update_in(cx, |this, window, cx| {
                 this.finish_document_open(
                     loading_id,
@@ -753,7 +861,7 @@ impl Pane {
         };
         let document_view = cx.new(|cx| {
             document_view.register_cache_eviction(cx);
-            document_view.start_loading(window, cx);
+            document_view.initialize_runtime(window, cx);
             document_view
         });
         self.subscribe_to_document_view(&document_view, window, cx);
