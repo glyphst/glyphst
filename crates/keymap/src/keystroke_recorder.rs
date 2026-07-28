@@ -57,11 +57,11 @@ impl KeystrokeRecorder {
         self.recording_focus_handle.focus(window, cx);
     }
 
-    fn stop(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn stop(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
     }
 
-    fn clear(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
         self.keystrokes.clear();
         self.reset_cancel_sequence();
         cx.emit(KeystrokeRecorderEvent::Changed(Vec::new()));

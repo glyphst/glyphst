@@ -167,6 +167,7 @@ fn source_reflects_user_override_versus_default() {
     assert_eq!(sample.keystrokes, sample.default_keystrokes);
 
     let overrides = vec![KeyBindingOverride {
+        keymap: preset,
         action: sample.action.to_string(),
         keystrokes: "test-override".to_string(),
         context: Some(sample.category.id().to_string()),
@@ -181,6 +182,92 @@ fn source_reflects_user_override_versus_default() {
     assert_ne!(overridden.keystrokes, overridden.default_keystrokes);
     assert_eq!(overridden.keystrokes, vec!["test-override".to_string()]);
     assert_eq!(overridden.default_keystrokes, sample.default_keystrokes);
+}
+
+#[test]
+fn overrides_are_isolated_by_preset() {
+    let overrides = vec![
+        KeyBindingOverride {
+            keymap: KeymapPreset::Modern,
+            action: "reload".to_string(),
+            keystrokes: "ctrl-1".to_string(),
+            context: Some(KeyBindingCategory::DocumentView.id().to_string()),
+        },
+        KeyBindingOverride {
+            keymap: KeymapPreset::Vim,
+            action: "reload".to_string(),
+            keystrokes: "ctrl-2".to_string(),
+            context: Some(KeyBindingCategory::DocumentView.id().to_string()),
+        },
+    ];
+
+    let reload_keys = |preset| {
+        editable_bindings(preset, &overrides)
+            .into_iter()
+            .find(|binding| {
+                binding.action == "reload" && binding.category == KeyBindingCategory::DocumentView
+            })
+            .unwrap()
+            .keystrokes
+    };
+    assert_eq!(
+        reload_keys(KeymapPreset::Modern),
+        vec!["ctrl-1".to_string()]
+    );
+    assert_eq!(reload_keys(KeymapPreset::Vim), vec!["ctrl-2".to_string()]);
+}
+
+#[test]
+fn setting_and_resetting_overrides_only_changes_the_target_preset() {
+    let mut settings = Settings::default();
+    let category = KeyBindingCategory::DocumentView;
+
+    set_keybinding_overrides(
+        &mut settings,
+        KeymapPreset::Modern,
+        "reload".to_string(),
+        category,
+        vec!["ctrl-1".to_string(), "ctrl-2".to_string()],
+    );
+    set_keybinding_overrides(
+        &mut settings,
+        KeymapPreset::Vim,
+        "reload".to_string(),
+        category,
+        vec!["ctrl-r".to_string()],
+    );
+    set_keybinding_overrides(
+        &mut settings,
+        KeymapPreset::Modern,
+        "reload".to_string(),
+        category,
+        Vec::new(),
+    );
+
+    let modern = settings
+        .keybinding_overrides
+        .iter()
+        .filter(|binding| binding.keymap == KeymapPreset::Modern)
+        .collect::<Vec<_>>();
+    assert_eq!(modern.len(), 1);
+    assert!(modern[0].keystrokes.is_empty());
+    assert_eq!(
+        settings
+            .keybinding_overrides
+            .iter()
+            .filter(|binding| binding.keymap == KeymapPreset::Vim)
+            .map(|binding| binding.keystrokes.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ctrl-r"]
+    );
+
+    reset_keybinding_overrides(&mut settings, KeymapPreset::Modern, "reload", category);
+    assert!(
+        settings
+            .keybinding_overrides
+            .iter()
+            .all(|binding| binding.keymap == KeymapPreset::Vim)
+    );
 }
 
 fn preset_keymap(preset: KeymapPreset) -> Keymap {

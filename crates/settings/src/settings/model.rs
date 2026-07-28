@@ -434,11 +434,16 @@ impl Settings {
                 .nodes()
                 .iter()
                 .filter_map(|node| {
+                    let keymap = node
+                        .get("keymap")
+                        .and_then(KdlValue::as_string)
+                        .and_then(KeymapPreset::from_str)?;
                     let keystrokes = node
                         .get("keys")
                         .and_then(KdlValue::as_string)
                         .or_else(|| node.get(0).and_then(KdlValue::as_string))?;
                     Some(KeyBindingOverride {
+                        keymap,
                         action: node.name().value().to_string(),
                         keystrokes: keystrokes.to_string(),
                         context: node
@@ -750,6 +755,7 @@ impl Settings {
             for binding in &self.keybinding_overrides {
                 let mut node = KdlNode::new(binding.action.clone());
                 node.push(KdlEntry::new_prop("keys", binding.keystrokes.clone()));
+                node.push(KdlEntry::new_prop("keymap", binding.keymap.as_str()));
                 if let Some(context) = binding.context.as_ref() {
                     node.push(KdlEntry::new_prop("context", context.clone()));
                 }

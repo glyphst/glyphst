@@ -128,8 +128,8 @@ fn parses_and_exports_keymap_settings() {
         r##"
 keymap "vim"
 keybindings {
-    next-page "j"
-    jump-backward "ctrl-o"
+    next-page "j" keymap="vim"
+    jump-backward "ctrl-o" keymap="modern"
 }
 "##,
     )
@@ -140,11 +140,13 @@ keybindings {
         settings.keybinding_overrides,
         vec![
             KeyBindingOverride {
+                keymap: KeymapPreset::Vim,
                 action: "next-page".to_string(),
                 keystrokes: "j".to_string(),
                 context: None,
             },
             KeyBindingOverride {
+                keymap: KeymapPreset::Modern,
                 action: "jump-backward".to_string(),
                 keystrokes: "ctrl-o".to_string(),
                 context: None,
@@ -173,8 +175,8 @@ fn parses_and_exports_contextual_keybindings() {
     let settings = parse_settings(
         r##"
 keybindings {
-    next-search-result keys="ctrl-g" context="search_results"
-    next-page keys="" context="document_view"
+    next-search-result keys="ctrl-g" keymap="vim" context="search_results"
+    next-page keys="" keymap="modern" context="document_view"
 }
 "##,
     )
@@ -184,11 +186,13 @@ keybindings {
         settings.keybinding_overrides,
         vec![
             KeyBindingOverride {
+                keymap: KeymapPreset::Vim,
                 action: "next-search-result".to_string(),
                 keystrokes: "ctrl-g".to_string(),
                 context: Some("search_results".to_string()),
             },
             KeyBindingOverride {
+                keymap: KeymapPreset::Modern,
                 action: "next-page".to_string(),
                 keystrokes: String::new(),
                 context: Some("document_view".to_string()),
@@ -196,6 +200,30 @@ keybindings {
         ]
     );
     assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+}
+
+#[test]
+fn ignores_keybindings_without_a_valid_keymap() {
+    let settings = parse_settings(
+        r##"
+keybindings {
+    next-page keys="j" context="document_view"
+    previous-page keys="k" keymap="unknown" context="document_view"
+    reload keys="ctrl-r" keymap="vim" context="document_view"
+}
+"##,
+    )
+    .unwrap();
+
+    assert_eq!(
+        settings.keybinding_overrides,
+        vec![KeyBindingOverride {
+            keymap: KeymapPreset::Vim,
+            action: "reload".to_string(),
+            keystrokes: "ctrl-r".to_string(),
+            context: Some("document_view".to_string()),
+        }]
+    );
 }
 
 #[test]

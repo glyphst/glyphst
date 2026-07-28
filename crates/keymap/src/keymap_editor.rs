@@ -2,26 +2,29 @@ use std::{cmp::Ordering, ops::Range};
 
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement,
-    Keystroke, MouseButton, MouseDownEvent, ParentElement, Render, SharedString, Styled,
-    UniformListScrollHandle, Window, div, prelude::*, px, transparent_black, uniform_list,
+    Keystroke, MouseButton, MouseDownEvent, ParentElement, Render, ScrollStrategy, SharedString,
+    Styled, UniformListScrollHandle, Window, div, prelude::*, px, transparent_black, uniform_list,
 };
 
 use crate::{
-    icons::{Icon, IconName},
+    icons::IconName,
     keybindings::{self, EditableKeyBinding, KeyBindingCategory},
     keystroke_recorder::{KeystrokeRecorder, KeystrokeRecorderEvent},
     scrollbar::WithScrollbar as _,
-    settings::{Settings, SettingsStore, ui_rems},
+    settings::{KeymapPreset, Settings, SettingsStore, ui_rems},
 };
 use glyphst_ui::tooltip::text_tooltip;
 use gpui_component::{
-    ActiveTheme as _, Sizable as _, ThemeColor as Theme, WindowExt as _,
+    ActiveTheme as _, IndexPath, Sizable as _, ThemeColor as Theme, WindowExt as _,
     alert::Alert,
-    button::Button,
-    dialog::DialogButtonProps,
+    button::{Button, ButtonVariants as _},
+    dialog::{DialogAction, DialogClose, DialogFooter},
     input::{Input, InputEvent, InputState},
     kbd::Kbd,
     menu::{ContextMenuExt as _, PopupMenuItem},
+    scroll::ScrollableElement as _,
+    searchable_list::SearchableListItem,
+    select::{Select, SelectEvent, SelectState},
 };
 
 const ROW_HEIGHT: f32 = 36.0;
@@ -75,18 +78,82 @@ struct InputError {
     message: SharedString,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BindingInputMode {
+    Add,
+    Replace(usize),
+}
+
+#[derive(Clone)]
+struct KeymapOption {
+    preset: KeymapPreset,
+    label: SharedString,
+}
+
+impl SearchableListItem for KeymapOption {
+    type Value = KeymapPreset;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.preset
+    }
+}
+
 struct EditModal {
+    keymap: KeymapPreset,
     action: String,
     label: String,
     category: KeyBindingCategory,
-    append: bool,
+    defaults: Vec<String>,
+    draft: Vec<String>,
+    input_mode: Option<BindingInputMode>,
     input: Entity<KeystrokeRecorder>,
     error: Option<InputError>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DraftBindingError {
+    Duplicate,
+    MissingTarget,
+}
+
+fn stage_draft_binding(
+    draft: &mut Vec<String>,
+    mode: BindingInputMode,
+    candidate: String,
+) -> Result<(), DraftBindingError> {
+    let replacing = match mode {
+        BindingInputMode::Add => None,
+        BindingInputMode::Replace(index) => Some(index),
+    };
+    if draft
+        .iter()
+        .enumerate()
+        .any(|(index, binding)| Some(index) != replacing && binding == &candidate)
+    {
+        return Err(DraftBindingError::Duplicate);
+    }
+
+    match mode {
+        BindingInputMode::Add => draft.push(candidate),
+        BindingInputMode::Replace(index) => {
+            let Some(binding) = draft.get_mut(index) else {
+                return Err(DraftBindingError::MissingTarget);
+            };
+            *binding = candidate;
+        }
+    }
+    Ok(())
 }
 
 pub struct KeymapEditor {
     focus_handle: FocusHandle,
     filter_input: Entity<InputState>,
+    keymap_select: Entity<SelectState<Vec<KeymapOption>>>,
+    editing_preset: KeymapPreset,
     query: SharedString,
     scroll: UniformListScrollHandle,
     sort_column: SortColumn,
@@ -98,8 +165,32 @@ pub struct KeymapEditor {
 
 impl KeymapEditor {
     pub fn new(focus_handle: FocusHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let editing_preset = cx.global::<SettingsStore>().settings.keymap_preset;
         let filter_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(crate::fl!("keymap-search-placeholder"))
+        });
+        let keymap_options = vec![
+            KeymapOption {
+                preset: KeymapPreset::Modern,
+                label: KeymapPreset::Modern.label().into(),
+            },
+            KeymapOption {
+                preset: KeymapPreset::Vim,
+                label: KeymapPreset::Vim.label().into(),
+            },
+        ];
+        let selected_preset_index = if editing_preset == KeymapPreset::Vim {
+            1
+        } else {
+            0
+        };
+        let keymap_select = cx.new(|cx| {
+            SelectState::new(
+                keymap_options,
+                Some(IndexPath::new(selected_preset_index)),
+                window,
+                cx,
+            )
         });
         cx.subscribe(&filter_input, |this, input, event, cx| {
             if !matches!(event, InputEvent::Change) {
@@ -110,12 +201,21 @@ impl KeymapEditor {
             cx.notify();
         })
         .detach();
+        cx.subscribe_in(&keymap_select, window, |this, _, event, _, cx| {
+            let SelectEvent::Confirm(preset) = event;
+            if let Some(preset) = preset {
+                this.set_editing_preset(*preset, cx);
+            }
+        })
+        .detach();
         cx.observe_global::<SettingsStore>(|_, cx| cx.notify())
             .detach();
 
         Self {
             focus_handle,
             filter_input,
+            keymap_select,
+            editing_preset,
             query: SharedString::default(),
             scroll: UniformListScrollHandle::new(),
             sort_column: SortColumn::Category,
@@ -133,10 +233,20 @@ impl KeymapEditor {
         });
     }
 
+    fn set_editing_preset(&mut self, preset: KeymapPreset, cx: &mut Context<Self>) {
+        if self.editing_preset == preset {
+            return;
+        }
+        self.editing_preset = preset;
+        self.selected_index = None;
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        cx.notify();
+    }
+
     fn filtered_bindings(&self, settings: &Settings) -> Vec<EditableKeyBinding> {
         let query = self.query.trim().to_ascii_lowercase();
         let mut bindings =
-            keybindings::editable_bindings(settings.keymap_preset, &settings.keybinding_overrides)
+            keybindings::editable_bindings(self.editing_preset, &settings.keybinding_overrides)
                 .into_iter()
                 .filter(|binding| {
                     query.is_empty()
@@ -232,14 +342,23 @@ impl KeymapEditor {
         action: String,
         label: String,
         category: KeyBindingCategory,
-        append: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let keymap = self.editing_preset;
+        let settings = &cx.global::<SettingsStore>().settings;
+        let Some(binding) = keybindings::editable_bindings(keymap, &settings.keybinding_overrides)
+            .into_iter()
+            .find(|binding| binding.action == action && binding.category == category)
+        else {
+            return;
+        };
         let input = cx.new(KeystrokeRecorder::new);
         cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
-            KeystrokeRecorderEvent::Changed(keys) => {
-                let _ = keys.len();
+            KeystrokeRecorderEvent::Changed(_) => {
+                if let Some(editing) = this.editing.as_mut() {
+                    editing.error = None;
+                }
                 cx.notify();
             }
             KeystrokeRecorderEvent::Cancel => {
@@ -248,16 +367,14 @@ impl KeymapEditor {
             }
         })
         .detach();
-        let title = if append {
-            crate::fl!("keymap-add-keybinding")
-        } else {
-            crate::fl!("keymap-edit-keystroke")
-        };
         self.editing = Some(EditModal {
+            keymap,
             action,
             label,
             category,
-            append,
+            defaults: binding.default_keystrokes,
+            draft: binding.keystrokes,
+            input_mode: None,
             input: input.clone(),
             error: None,
         });
@@ -268,8 +385,8 @@ impl KeymapEditor {
         let close_editor = editor;
         window.open_dialog(cx, move |dialog, _, _| {
             dialog
-                .width(px(544.0))
-                .title(title.clone())
+                .width(px(600.0))
+                .title(crate::fl!("keymap-manage-keybindings"))
                 .content({
                     let editor = content_editor.clone();
                     move |content, window, cx| {
@@ -278,26 +395,33 @@ impl KeymapEditor {
                         content.child(body)
                     }
                 })
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text(crate::fl!("save"))
-                        .cancel_text(crate::fl!("cancel"))
-                        .show_cancel(true)
-                        .on_ok({
-                            let editor = save_editor.clone();
-                            move |_, _, cx| editor.update(cx, |this, cx| this.save_editing(cx))
-                        }),
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            DialogClose::new().child(
+                                Button::new("keymap-cancel-editing")
+                                    .label(crate::fl!("cancel"))
+                                    .outline(),
+                            ),
+                        )
+                        .child(
+                            DialogAction::new().child(
+                                Button::new("keymap-save-editing")
+                                    .label(crate::fl!("save"))
+                                    .primary(),
+                            ),
+                        ),
                 )
+                .on_ok({
+                    let editor = save_editor.clone();
+                    move |_, window, cx| editor.update(cx, |this, cx| this.save_editing(window, cx))
+                })
                 .on_close({
                     let editor = close_editor.clone();
                     move |_, _, cx| {
                         editor.update(cx, |this, cx| this.cancel_editing(cx));
                     }
                 })
-        });
-        let input_to_focus = input;
-        window.defer(cx, move |window, cx| {
-            input_to_focus.update(cx, |input, cx| input.focus(window, cx));
         });
         cx.notify();
     }
@@ -307,13 +431,49 @@ impl KeymapEditor {
         cx.notify();
     }
 
-    fn save_editing(&mut self, cx: &mut Context<Self>) -> bool {
+    fn begin_binding_input(
+        &mut self,
+        mode: BindingInputMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        editing.input_mode = Some(mode);
+        editing.error = None;
+        let input = editing.input.clone();
+        input.update(cx, |input, cx| input.clear(cx));
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx));
+        });
+        cx.notify();
+    }
+
+    fn cancel_binding_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        editing.input_mode = None;
+        editing.error = None;
+        let input = editing.input.clone();
+        input.update(cx, |input, cx| {
+            input.clear(cx);
+            input.stop(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn stage_binding_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(editing) = &self.editing else {
+            return true;
+        };
+        let Some(mode) = editing.input_mode else {
             return true;
         };
         let action = editing.action.clone();
         let category = editing.category;
-        let append = editing.append;
+        let input = editing.input.clone();
         let keys = editing
             .input
             .read(cx)
@@ -337,21 +497,85 @@ impl KeymapEditor {
             return false;
         }
 
-        let mut settings = cx.global::<SettingsStore>().settings.clone();
-        let mut keystrokes = if append {
-            keybindings::editable_bindings(settings.keymap_preset, &settings.keybinding_overrides)
-                .into_iter()
-                .find(|binding| binding.action == action && binding.category == category)
-                .map(|binding| binding.keystrokes)
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        keystrokes.push(keystroke);
-        keystrokes.sort();
-        keystrokes.dedup();
+        let result = self
+            .editing
+            .as_mut()
+            .map(|editing| stage_draft_binding(&mut editing.draft, mode, keystroke))
+            .unwrap_or(Ok(()));
+        if let Err(error) = result {
+            let message = match error {
+                DraftBindingError::Duplicate => crate::fl!("keymap-error-duplicate-binding"),
+                DraftBindingError::MissingTarget => crate::fl!("keymap-error-binding-changed"),
+            };
+            self.set_input_error(InputSeverity::Error, message.into(), cx);
+            return false;
+        }
 
-        keybindings::set_keybinding_overrides(&mut settings, action, category, keystrokes);
+        if let Some(editing) = self.editing.as_mut() {
+            editing.input_mode = None;
+            editing.error = None;
+        }
+        input.update(cx, |input, cx| {
+            input.clear(cx);
+            input.stop(window, cx);
+        });
+        cx.notify();
+        true
+    }
+
+    fn remove_draft_binding(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        if index >= editing.draft.len() {
+            return;
+        }
+        editing.draft.remove(index);
+        editing.input_mode = match editing.input_mode {
+            Some(BindingInputMode::Replace(replacing)) if replacing == index => None,
+            Some(BindingInputMode::Replace(replacing)) if replacing > index => {
+                Some(BindingInputMode::Replace(replacing - 1))
+            }
+            mode => mode,
+        };
+        editing.error = None;
+        cx.notify();
+    }
+
+    fn reset_draft_bindings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        editing.draft.clone_from(&editing.defaults);
+        editing.input_mode = None;
+        editing.error = None;
+        let input = editing.input.clone();
+        input.update(cx, |input, cx| {
+            input.clear(cx);
+            input.stop(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn save_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.stage_binding_input(window, cx) {
+            return false;
+        }
+        let Some(editing) = &self.editing else {
+            return true;
+        };
+        let keymap = editing.keymap;
+        let action = editing.action.clone();
+        let category = editing.category;
+        let defaults = editing.defaults.clone();
+        let draft = editing.draft.clone();
+
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        if draft == defaults {
+            keybindings::reset_keybinding_overrides(&mut settings, keymap, &action, category);
+        } else {
+            keybindings::set_keybinding_overrides(&mut settings, keymap, action, category, draft);
+        }
         self.editing = None;
         self.persist_settings(settings, cx);
         true
@@ -369,17 +593,6 @@ impl KeymapEditor {
         cx.notify();
     }
 
-    fn clear_binding(
-        &mut self,
-        action: String,
-        category: KeyBindingCategory,
-        cx: &mut Context<Self>,
-    ) {
-        let mut settings = cx.global::<SettingsStore>().settings.clone();
-        keybindings::set_keybinding_overrides(&mut settings, action, category, Vec::new());
-        self.persist_settings(settings, cx);
-    }
-
     fn reset_binding(
         &mut self,
         action: String,
@@ -387,13 +600,19 @@ impl KeymapEditor {
         cx: &mut Context<Self>,
     ) {
         let mut settings = cx.global::<SettingsStore>().settings.clone();
-        keybindings::reset_keybinding_overrides(&mut settings, &action, category);
+        keybindings::reset_keybinding_overrides(
+            &mut settings,
+            self.editing_preset,
+            &action,
+            category,
+        );
         self.persist_settings(settings, cx);
     }
 
     fn matching_bindings_count(
         &self,
         settings: &Settings,
+        preset: KeymapPreset,
         category: KeyBindingCategory,
         action: &str,
         keystroke: &str,
@@ -402,7 +621,7 @@ impl KeymapEditor {
             return 0;
         }
 
-        keybindings::editable_bindings(settings.keymap_preset, &settings.keybinding_overrides)
+        keybindings::editable_bindings(preset, &settings.keybinding_overrides)
             .into_iter()
             .filter(|binding| {
                 binding.category == category
@@ -503,15 +722,16 @@ impl KeymapEditor {
         let row_label = label.clone();
         let cell_label = label.clone();
         let editor = cx.entity();
+        let manage_button_editor = editor.clone();
         let edit_editor = editor.clone();
         let reset_editor = editor.clone();
-        let delete_editor = editor.clone();
         let copy_action_editor = editor.clone();
         let copy_context_editor = editor;
+        let manage_button_action = action.clone();
+        let manage_button_label = label.clone();
         let edit_action = action.clone();
         let edit_label = label.clone();
         let reset_action = action.clone();
-        let delete_action = action.clone();
         let copy_action = action;
         let context_label = category.label().to_string();
 
@@ -538,7 +758,6 @@ impl KeymapEditor {
                             row_action.clone(),
                             row_label.clone(),
                             category,
-                            false,
                             window,
                             cx,
                         );
@@ -559,18 +778,31 @@ impl KeymapEditor {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .when(!is_overridden, |this| {
+                    .when(!is_selected, |this| {
                         this.opacity(0.0)
                             .group_hover("keymap-row", |style| style.opacity(1.0))
                     })
                     .child(
-                        Icon::new(if is_overridden {
-                            IconName::Info
-                        } else {
-                            IconName::Pencil
-                        })
-                        .size(ui_rems(14.0))
-                        .text_color(theme.muted_foreground),
+                        Button::new(("keymap-manage-binding", index))
+                            .small()
+                            .compact()
+                            .ghost()
+                            .icon(IconName::Pencil)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(move |_, window, cx| {
+                                manage_button_editor.update(cx, |this, cx| {
+                                    this.start_editing(
+                                        manage_button_action.clone(),
+                                        manage_button_label.clone(),
+                                        category,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                                cx.stop_propagation();
+                            }),
                     ),
             )
             .child(
@@ -578,6 +810,7 @@ impl KeymapEditor {
                     .id(("keymap-action", index))
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
                     .px_2()
                     .truncate()
                     .tooltip(text_tooltip(tooltip_text))
@@ -628,7 +861,7 @@ impl KeymapEditor {
             )
             .context_menu(move |menu, _, _| {
                 menu.item(
-                    PopupMenuItem::new(crate::fl!("edit"))
+                    PopupMenuItem::new(crate::fl!("keymap-manage-keybindings"))
                         .icon(IconName::Pencil)
                         .on_click({
                             let editor = edit_editor.clone();
@@ -640,7 +873,6 @@ impl KeymapEditor {
                                         action.clone(),
                                         label.clone(),
                                         category,
-                                        false,
                                         window,
                                         cx,
                                     );
@@ -658,21 +890,6 @@ impl KeymapEditor {
                                 move |_, _, cx| {
                                     editor.update(cx, |this, cx| {
                                         this.reset_binding(action.clone(), category, cx);
-                                    });
-                                }
-                            }),
-                    )
-                })
-                .when(!is_unbound, |menu| {
-                    menu.item(
-                        PopupMenuItem::new(crate::fl!("delete"))
-                            .icon(IconName::Delete)
-                            .on_click({
-                                let editor = delete_editor.clone();
-                                let action = delete_action.clone();
-                                move |_, _, cx| {
-                                    editor.update(cx, |this, cx| {
-                                        this.clear_binding(action.clone(), category, cx);
                                     });
                                 }
                             }),
@@ -715,6 +932,7 @@ impl KeymapEditor {
         };
         let settings = &cx.global::<SettingsStore>().settings;
         let theme = cx.theme().colors;
+        let radius = cx.theme().radius;
         let keys = editing
             .input
             .read(cx)
@@ -723,9 +941,103 @@ impl KeymapEditor {
             .map(ToString::to_string)
             .collect::<Vec<_>>();
         let keystroke = keys.join(" ");
-        let matching_count =
-            self.matching_bindings_count(settings, editing.category, &editing.action, &keystroke);
+        let matching_count = self.matching_bindings_count(
+            settings,
+            editing.keymap,
+            editing.category,
+            &editing.action,
+            &keystroke,
+        );
         let view_keystroke = keystroke.clone();
+        let input_mode = editing.input_mode;
+        let editor = cx.entity();
+
+        let draft_rows = editing
+            .draft
+            .iter()
+            .enumerate()
+            .map(|(index, binding)| {
+                let replace_editor = editor.clone();
+                let remove_editor = editor.clone();
+                div()
+                    .id(("keymap-draft-binding", index))
+                    .min_h(px(40.0))
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .rounded(radius)
+                    .border_1()
+                    .border_color(theme.input)
+                    .bg(theme.popover)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(render_keybinding_sequence(binding)),
+                    )
+                    .when(input_mode.is_none(), |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    Button::new(("keymap-replace-binding", index))
+                                        .small()
+                                        .ghost()
+                                        .label(crate::fl!("keymap-replace-keybinding"))
+                                        .icon(IconName::Pencil)
+                                        .on_click(move |_, window, cx| {
+                                            replace_editor.update(cx, |this, cx| {
+                                                this.begin_binding_input(
+                                                    BindingInputMode::Replace(index),
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    Button::new(("keymap-remove-binding", index))
+                                        .small()
+                                        .ghost()
+                                        .label(crate::fl!("keymap-remove-keybinding"))
+                                        .icon(IconName::X)
+                                        .on_click(move |_, _, cx| {
+                                            remove_editor.update(cx, |this, cx| {
+                                                this.remove_draft_binding(index, cx);
+                                            });
+                                        }),
+                                ),
+                        )
+                    })
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        let input_title = match input_mode {
+            Some(BindingInputMode::Add) => crate::fl!("keymap-add-keybinding"),
+            Some(BindingInputMode::Replace(_)) => crate::fl!("keymap-replace-keybinding"),
+            None => String::new(),
+        };
+        let apply_label = match input_mode {
+            Some(BindingInputMode::Add) => crate::fl!("keymap-add"),
+            Some(BindingInputMode::Replace(_)) => crate::fl!("keymap-update"),
+            None => String::new(),
+        };
+        let replacing_binding = match input_mode {
+            Some(BindingInputMode::Replace(index)) => editing.draft.get(index).cloned(),
+            _ => None,
+        };
+        let add_editor = editor.clone();
+        let reset_editor = editor.clone();
+        let apply_editor = editor.clone();
+        let cancel_input_editor = editor;
 
         div()
             .flex()
@@ -736,9 +1048,10 @@ impl KeymapEditor {
                     .text_size(ui_rems(12.0))
                     .text_color(theme.muted_foreground)
                     .child(crate::fl!(
-                        "keymap-modal-subtitle",
+                        "keymap-manager-subtitle",
                         action = editing.label.as_str(),
-                        context = editing.category.label()
+                        context = editing.category.label(),
+                        keymap = editing.keymap.label()
                     )),
             )
             .child(
@@ -748,12 +1061,126 @@ impl KeymapEditor {
                     .gap_2()
                     .child(
                         div()
-                            .text_size(ui_rems(12.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .child(crate::fl!("keymap-edit-keystroke")),
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(ui_rems(12.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child(crate::fl!("keymap-current-bindings")),
+                            )
+                            .when(input_mode.is_none(), |this| {
+                                this.child(
+                                    Button::new("keymap-reset-draft-bindings")
+                                        .small()
+                                        .ghost()
+                                        .label(crate::fl!("keymap-reset-to-default"))
+                                        .icon(IconName::RotateCcw)
+                                        .on_click(move |_, window, cx| {
+                                            reset_editor.update(cx, |this, cx| {
+                                                this.reset_draft_bindings(window, cx);
+                                            });
+                                        }),
+                                )
+                            }),
                     )
-                    .child(editing.input.clone()),
+                    .child(
+                        div()
+                            .max_h(px(240.0))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .overflow_y_scrollbar()
+                            .when(editing.draft.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .px_3()
+                                        .py_4()
+                                        .rounded(radius)
+                                        .border_1()
+                                        .border_color(theme.input)
+                                        .text_size(ui_rems(12.0))
+                                        .text_color(theme.muted_foreground)
+                                        .child(crate::fl!("keymap-no-bindings")),
+                                )
+                            })
+                            .children(draft_rows),
+                    )
+                    .when(input_mode.is_none(), |this| {
+                        this.child(
+                            Button::new("keymap-add-draft-binding")
+                                .small()
+                                .outline()
+                                .label(crate::fl!("keymap-add-keybinding"))
+                                .icon(IconName::Plus)
+                                .on_click(move |_, window, cx| {
+                                    add_editor.update(cx, |this, cx| {
+                                        this.begin_binding_input(BindingInputMode::Add, window, cx);
+                                    });
+                                }),
+                        )
+                    }),
             )
+            .when(input_mode.is_some(), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .pt_3()
+                        .border_t(px(1.0))
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .text_size(ui_rems(12.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(input_title),
+                        )
+                        .when_some(replacing_binding, |this, binding| {
+                            this.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_size(ui_rems(12.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(crate::fl!("keymap-replacing"))
+                                    .child(render_keybinding_sequence(binding)),
+                            )
+                        })
+                        .child(editing.input.clone())
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("keymap-cancel-binding-input")
+                                        .small()
+                                        .outline()
+                                        .label(crate::fl!("cancel"))
+                                        .on_click(move |_, window, cx| {
+                                            cancel_input_editor.update(cx, |this, cx| {
+                                                this.cancel_binding_input(window, cx);
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    Button::new("keymap-apply-binding-input")
+                                        .small()
+                                        .primary()
+                                        .label(apply_label)
+                                        .on_click(move |_, window, cx| {
+                                            apply_editor.update(cx, |this, cx| {
+                                                this.stage_binding_input(window, cx);
+                                            });
+                                        }),
+                                ),
+                        ),
+                )
+            })
             .when(matching_count > 0 && !keystroke.is_empty(), |this| {
                 this.child(
                     div()
@@ -784,15 +1211,6 @@ impl KeymapEditor {
                         ),
                 )
             })
-            .child(
-                div()
-                    .text_size(ui_rems(12.0))
-                    .text_color(theme.muted_foreground)
-                    .child(crate::fl!(
-                        "keymap-context",
-                        context = editing.category.label()
-                    )),
-            )
             .when_some(editing.error.clone(), |this, error| {
                 this.child(match error.severity {
                     InputSeverity::Warning => {
@@ -850,8 +1268,23 @@ impl Render for KeymapEditor {
                     )
                     .child(
                         div()
-                            .w(px(300.0))
-                            .child(Input::new(&self.filter_input).small().w_full()),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Select::new(&self.keymap_select)
+                                    .title_prefix(format!(
+                                        "{} ",
+                                        crate::fl!("keymap-selector-label")
+                                    ))
+                                    .w(px(180.0))
+                                    .menu_width(px(180.0)),
+                            )
+                            .child(
+                                div()
+                                    .w(px(320.0))
+                                    .child(Input::new(&self.filter_input).w_full()),
+                            ),
                     ),
             )
             .child(
@@ -934,24 +1367,21 @@ impl Render for KeymapEditor {
                                 "keymap-editor-scrollbar",
                                 window,
                                 cx,
-                            ),
+                            )
+                            .when(row_count == 0, |this| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(theme.muted_foreground)
+                                        .child(crate::fl!("keymap-empty")),
+                                )
+                            }),
                     ),
             )
-            .when(row_count == 0, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top(px(116.0))
-                        .right_0()
-                        .bottom_0()
-                        .left_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(theme.muted_foreground)
-                        .child(crate::fl!("keymap-empty")),
-                )
-            })
             .when_some(self.save_error.clone(), |this, error| {
                 this.child(
                     Alert::error("keymap-save-error", error)
@@ -962,5 +1392,51 @@ impl Render for KeymapEditor {
                         .w(px(420.0)),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn draft_add_and_replace_preserve_binding_order() {
+        let mut draft = vec!["ctrl-a".to_string(), "ctrl-b".to_string()];
+
+        stage_draft_binding(
+            &mut draft,
+            BindingInputMode::Replace(0),
+            "ctrl-c".to_string(),
+        )
+        .unwrap();
+        stage_draft_binding(&mut draft, BindingInputMode::Add, "ctrl-d".to_string()).unwrap();
+
+        assert_eq!(draft, ["ctrl-c", "ctrl-b", "ctrl-d"]);
+    }
+
+    #[test]
+    fn draft_rejects_duplicates_except_the_binding_being_replaced() {
+        let mut draft = vec!["ctrl-a".to_string(), "ctrl-b".to_string()];
+
+        assert_eq!(
+            stage_draft_binding(&mut draft, BindingInputMode::Add, "ctrl-a".to_string(),),
+            Err(DraftBindingError::Duplicate)
+        );
+        assert_eq!(
+            stage_draft_binding(
+                &mut draft,
+                BindingInputMode::Replace(1),
+                "ctrl-a".to_string(),
+            ),
+            Err(DraftBindingError::Duplicate)
+        );
+        assert_eq!(
+            stage_draft_binding(
+                &mut draft,
+                BindingInputMode::Replace(1),
+                "ctrl-b".to_string(),
+            ),
+            Ok(())
+        );
     }
 }

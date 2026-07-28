@@ -360,12 +360,23 @@ toolbar-split-down = Split Down
 ## Keymap
 
 keymap-title = Keymap
+keymap-selector-label = Keymap:
+keymap-manage-keybindings = Manage Keybindings
 keymap-add-keybinding = Add Keybinding
+keymap-replace-keybinding = Replace
+keymap-remove-keybinding = Remove
+keymap-add = Add
+keymap-update = Update
+keymap-current-bindings = Current Keybindings
+keymap-no-bindings = This action has no keybindings.
+keymap-replacing = Replacing:
 keymap-copy-action = Copy Action
 keymap-copy-context = Copy Context
 keymap-edit-keystroke = Edit Keystroke
 keymap-empty = No keybindings found
 keymap-error-press-shortcut = Press a shortcut before saving.
+keymap-error-duplicate-binding = This shortcut is already bound to the action.
+keymap-error-binding-changed = The keybinding being replaced no longer exists.
 keymap-header-action = Action
 keymap-header-context = Context
 keymap-header-keystrokes = Keystrokes
@@ -376,6 +387,7 @@ keymap-source-default = Default
 keymap-source-user = User
 keymap-unbound = Unbound
 keymap-modal-subtitle = { $action } · { $context }
+keymap-manager-subtitle = { $action } · { $context } · { $keymap }
 keymap-conflicting-bindings =
     { $count ->
         [one] There is { $count } binding with the same keystrokes.

@@ -211,6 +211,9 @@ pub fn apply(cx: &mut App, preset: KeymapPreset, overrides: &[KeyBindingOverride
     add_internal_bindings(cx, &mut bindings);
 
     for binding in overrides {
+        if binding.keymap != preset {
+            continue;
+        }
         if command_specs()
             .iter()
             .any(|spec| override_applies_to_spec(binding, spec))
@@ -327,12 +330,13 @@ pub fn expand_platform_keystroke(keystrokes: &str) -> String {
 
 pub fn remove_keybinding_overrides(
     overrides: &mut Vec<KeyBindingOverride>,
+    preset: KeymapPreset,
     action: &str,
     category: KeyBindingCategory,
 ) {
     let normalized = normalize_action_key(action);
     overrides.retain(|binding| {
-        if normalize_action_key(&binding.action) != normalized {
+        if binding.keymap != preset || normalize_action_key(&binding.action) != normalized {
             return true;
         }
         match binding.context.as_deref() {
@@ -344,13 +348,20 @@ pub fn remove_keybinding_overrides(
 
 pub fn set_keybinding_overrides(
     settings: &mut Settings,
+    preset: KeymapPreset,
     action: String,
     category: KeyBindingCategory,
     keystrokes: Vec<String>,
 ) {
-    remove_keybinding_overrides(&mut settings.keybinding_overrides, &action, category);
+    remove_keybinding_overrides(
+        &mut settings.keybinding_overrides,
+        preset,
+        &action,
+        category,
+    );
     if keystrokes.is_empty() {
         settings.keybinding_overrides.push(KeyBindingOverride {
+            keymap: preset,
             action,
             keystrokes: String::new(),
             context: Some(category.id().to_string()),
@@ -358,6 +369,7 @@ pub fn set_keybinding_overrides(
     } else {
         for keystrokes in keystrokes {
             settings.keybinding_overrides.push(KeyBindingOverride {
+                keymap: preset,
                 action: action.clone(),
                 keystrokes,
                 context: Some(category.id().to_string()),
@@ -368,10 +380,11 @@ pub fn set_keybinding_overrides(
 
 pub fn reset_keybinding_overrides(
     settings: &mut Settings,
+    preset: KeymapPreset,
     action: &str,
     category: KeyBindingCategory,
 ) {
-    remove_keybinding_overrides(&mut settings.keybinding_overrides, action, category);
+    remove_keybinding_overrides(&mut settings.keybinding_overrides, preset, action, category);
 }
 
 #[cfg(target_os = "macos")]
@@ -427,7 +440,7 @@ fn effective_keystrokes(
 ) -> Vec<String> {
     let matches = overrides
         .iter()
-        .filter(|binding| override_applies_to_spec(binding, spec))
+        .filter(|binding| binding.keymap == preset && override_applies_to_spec(binding, spec))
         .collect::<Vec<_>>();
 
     if matches.is_empty() {

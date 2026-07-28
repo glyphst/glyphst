@@ -321,6 +321,7 @@ impl KeymapPreset {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyBindingOverride {
+    pub keymap: KeymapPreset,
     pub action: String,
     pub keystrokes: String,
     pub context: Option<String>,
