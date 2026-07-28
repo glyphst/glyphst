@@ -94,8 +94,41 @@ impl DocumentView {
         (highlights, active_highlights)
     }
 
+    pub(super) fn search_highlight_rects_by_page(
+        page_count: usize,
+        glyphs: &[Glyph],
+        matches: &[SearchMatch],
+        active_match: Option<usize>,
+    ) -> Vec<Vec<SearchHighlightRect>> {
+        let mut highlights_by_page = vec![Vec::new(); page_count];
+
+        for (match_ix, search_match) in matches.iter().enumerate() {
+            for rect in Self::highlight_rects_for_glyph_range(glyphs, search_match.range.clone())
+                .into_iter()
+                .filter(|rect| rect.page_idx == search_match.page_idx)
+            {
+                let Some(page_highlights) = highlights_by_page.get_mut(rect.page_idx) else {
+                    continue;
+                };
+                page_highlights.push(SearchHighlightRect {
+                    rect,
+                    active: active_match == Some(match_ix),
+                });
+            }
+        }
+
+        highlights_by_page
+    }
+
     pub(super) fn highlight_rects_for_range(&self, range: Range<usize>) -> Vec<HighlightRect> {
-        if range.start >= range.end || range.end > self.glyphs.len() {
+        Self::highlight_rects_for_glyph_range(&self.glyphs, range)
+    }
+
+    fn highlight_rects_for_glyph_range(
+        glyphs: &[Glyph],
+        range: Range<usize>,
+    ) -> Vec<HighlightRect> {
+        if range.start >= range.end || range.end > glyphs.len() {
             return Vec::new();
         }
 
@@ -104,7 +137,7 @@ impl DocumentView {
         let mut current_line = None;
         let mut current_rect = None;
 
-        for glyph in &self.glyphs[range] {
+        for glyph in &glyphs[range] {
             let rect = Self::glyph_line_rect(glyph);
 
             match (current_page, current_line, current_rect) {
@@ -203,10 +236,26 @@ impl DocumentView {
         image_bounds: Bounds<Pixels>,
     ) -> Bounds<Pixels> {
         let page = &self.pages[page_idx];
-        let (page_width, page_height) = self.page_dimensions(page_idx);
+        Self::pdf_rect_to_image_bounds(
+            page.bounds,
+            self.rotation,
+            self.page_dimensions(page_idx),
+            rect,
+            image_bounds,
+        )
+    }
+
+    pub(super) fn pdf_rect_to_image_bounds(
+        page_bounds: Rect,
+        rotation: DocumentRotation,
+        page_dimensions: (f32, f32),
+        rect: Rect,
+        image_bounds: Bounds<Pixels>,
+    ) -> Bounds<Pixels> {
+        let (page_width, page_height) = page_dimensions;
         let scale_x = image_bounds.size.width.as_f32() / page_width;
         let scale_y = image_bounds.size.height.as_f32() / page_height;
-        let rect = Self::pdf_rect_to_view(page.bounds, self.rotation, rect);
+        let rect = Self::pdf_rect_to_view(page_bounds, rotation, rect);
         let x0 = image_bounds.origin.x.as_f32() + rect.x0 * scale_x;
         let y0 = image_bounds.origin.y.as_f32() + rect.y0 * scale_y;
         let x1 = image_bounds.origin.x.as_f32() + rect.x1 * scale_x;

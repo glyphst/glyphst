@@ -200,7 +200,7 @@ impl DocumentView {
             .scroll_to_item(self.grid_overview_cursor_row(), strategy);
     }
 
-    fn set_grid_overview_cursor(
+    pub(super) fn set_grid_overview_cursor(
         &mut self,
         page_idx: usize,
         strategy: ScrollStrategy,

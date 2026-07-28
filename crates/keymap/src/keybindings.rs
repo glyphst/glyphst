@@ -161,7 +161,7 @@ impl KeyBindingCategory {
         match self {
             Self::Workspace => context_without_overlays("Workspace"),
             Self::DocumentView => context_without_overlays("DocumentView"),
-            Self::PageOverview => "GridOverview && !SettingsPanel".to_string(),
+            Self::PageOverview => context_without_overlays("GridOverview"),
             Self::NewTab => context_without_overlays("NewTab"),
             Self::SearchResults => "Search".to_string(),
         }
@@ -387,6 +387,9 @@ fn platform_primary_modifier() -> &'static str {
 fn context_without_overlays(base: &str) -> String {
     let mut predicate = base.to_string();
     for context in OVERLAY_CONTEXTS {
+        if *context == base {
+            continue;
+        }
         predicate.push_str(" && !");
         predicate.push_str(context);
     }
@@ -1376,6 +1379,47 @@ fn command_specs() -> &'static [CommandSpec] {
                     &["ctrl-g"],
                     &["grid-overview", "page-overview"],
                     true,
+                ),
+                spec::<Search>(
+                    "search",
+                    "Search",
+                    KeyBindingCategory::PageOverview,
+                    &["primary-f", "/"],
+                    &["/"],
+                    &[],
+                    false,
+                ),
+                spec::<NextSearchResult>(
+                    "next-search-result",
+                    "Next Search Result",
+                    KeyBindingCategory::PageOverview,
+                    &["f3", "nonmac:ctrl-alt-g", "mac:cmd-g"],
+                    &["n"],
+                    &[
+                        "search-next",
+                        "search-next-result",
+                        "select-next-match",
+                        "search::SelectNextMatch",
+                    ],
+                    false,
+                ),
+                spec::<PrevSearchResult>(
+                    "prev-search-result",
+                    "Previous Search Result",
+                    KeyBindingCategory::PageOverview,
+                    &["shift-f3", "nonmac:ctrl-alt-shift-g", "mac:cmd-shift-g"],
+                    &["shift-n"],
+                    &[
+                        "previous-search-result",
+                        "search-prev",
+                        "search-previous",
+                        "search-previous-result",
+                        "select-prev-match",
+                        "select-previous-match",
+                        "search::SelectPrevMatch",
+                        "search::SelectPreviousMatch",
+                    ],
+                    false,
                 ),
                 spec::<ToggleCommandPalette>(
                     "toggle-command-palette",

@@ -2,8 +2,8 @@ use std::{collections::HashSet, sync::Arc};
 
 use super::{
     DocumentPage, DocumentView, Glyph, RegionDragState, RegionImageExport, RenderCache, RenderKey,
-    SearchState, TextChunk, TextFormatBlock, TextIndexState, TextLine, TranslationCardState,
-    TranslationStatus, clear_copied_region_selection,
+    SearchMatch, SearchState, TextChunk, TextFormatBlock, TextIndexState, TextLine,
+    TranslationCardState, TranslationStatus, clear_copied_region_selection,
     reset_translation_cards_for_document_replacement, retain_valid_annotation_id,
 };
 use glyphst_ai::ai_chat::{MentionKind, MentionReference};
@@ -11,7 +11,7 @@ use glyphst_core::{
     DocumentLayout, DocumentRotation, EpubLayout, PageIndex, PageRegion, RegionImageReference,
 };
 use glyphst_translation::LanguageCode;
-use gpui::{Modifiers, ScrollWheelEvent, point, px};
+use gpui::{Bounds, Modifiers, ScrollWheelEvent, point, px, size};
 use image::{Frame, GenericImageView, RgbaImage};
 use mupdf::{Point, Quad, Rect};
 use smallvec::smallvec;
@@ -92,6 +92,106 @@ fn empty_search_does_not_request_reveal_after_indexing() {
     search.update_reveal_after_indexing(true);
 
     assert!(!search.take_reveal_after_indexing());
+}
+
+#[test]
+fn grid_search_highlights_are_grouped_by_page_and_active_match() {
+    let mut glyphs = vec![
+        test_glyph('a', 0.0, 5.0),
+        test_glyph('b', 5.0, 10.0),
+        test_glyph('c', 0.0, 4.0),
+        test_glyph('d', 2.0, 8.0),
+    ];
+    glyphs[2].line_idx = 1;
+    glyphs[2].quad = Quad::new(
+        Point::new(0.0, 10.0),
+        Point::new(4.0, 10.0),
+        Point::new(0.0, 16.0),
+        Point::new(4.0, 16.0),
+    );
+    glyphs[2].line_rect = Rect::new(0.0, 10.0, 4.0, 16.0);
+    glyphs[3].page_idx = 1;
+
+    let matches = vec![
+        SearchMatch {
+            page_idx: 0,
+            range: 0..3,
+        },
+        SearchMatch {
+            page_idx: 0,
+            range: 1..2,
+        },
+        SearchMatch {
+            page_idx: 1,
+            range: 3..4,
+        },
+        SearchMatch {
+            page_idx: 1,
+            range: 4..99,
+        },
+        SearchMatch {
+            page_idx: 2,
+            range: 0..1,
+        },
+    ];
+
+    let highlights = DocumentView::search_highlight_rects_by_page(2, &glyphs, &matches, Some(0));
+
+    assert_eq!(highlights.len(), 2);
+    assert_eq!(highlights[0].len(), 3);
+    assert_eq!(highlights[1].len(), 1);
+    assert_eq!(
+        highlights[0][0].rect,
+        glyphst_library::HighlightRect {
+            page_idx: 0,
+            x0: 0.0,
+            y0: 0.0,
+            x1: 10.0,
+            y1: 6.0,
+        }
+    );
+    assert_eq!(
+        highlights[0]
+            .iter()
+            .filter(|highlight| highlight.active)
+            .count(),
+        2
+    );
+    assert!(!highlights[0][2].active);
+    assert!(!highlights[1][0].active);
+}
+
+#[test]
+fn thumbnail_search_bounds_follow_page_rotation_and_scale() {
+    let page_bounds = Rect::new(10.0, 20.0, 110.0, 220.0);
+    let rect = Rect::new(20.0, 40.0, 60.0, 100.0);
+    let origin = point(px(7.0), px(11.0));
+
+    for rotation in [
+        DocumentRotation::Degrees0,
+        DocumentRotation::Degrees90,
+        DocumentRotation::Degrees180,
+        DocumentRotation::Degrees270,
+    ] {
+        let page_dimensions = DocumentView::rotated_dimensions(100.0, 200.0, rotation);
+        let image_bounds = Bounds::new(
+            origin,
+            size(px(page_dimensions.0 / 2.0), px(page_dimensions.1 / 2.0)),
+        );
+        let actual = DocumentView::pdf_rect_to_image_bounds(
+            page_bounds,
+            rotation,
+            page_dimensions,
+            rect,
+            image_bounds,
+        );
+        let view_rect = DocumentView::pdf_rect_to_view(page_bounds, rotation, rect);
+
+        assert!((actual.origin.x.as_f32() - (7.0 + view_rect.x0 / 2.0)).abs() < 0.001);
+        assert!((actual.origin.y.as_f32() - (11.0 + view_rect.y0 / 2.0)).abs() < 0.001);
+        assert!((actual.size.width.as_f32() - (view_rect.x1 - view_rect.x0) / 2.0).abs() < 0.001);
+        assert!((actual.size.height.as_f32() - (view_rect.y1 - view_rect.y0) / 2.0).abs() < 0.001);
+    }
 }
 
 #[test]

@@ -836,6 +836,12 @@ struct SearchMatch {
     range: Range<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SearchHighlightRect {
+    rect: HighlightRect,
+    active: bool,
+}
+
 struct SearchState {
     query: SharedString,
     matches: Vec<SearchMatch>,

@@ -636,6 +636,16 @@ impl DocumentView {
         let scroll_handle = self.grid_overview_scroll.clone();
         let measure_view = cx.entity();
         let page_export = self.capabilities.page_export;
+        let search_highlights_by_page = if self.search.matches.is_empty() {
+            Vec::new()
+        } else {
+            Self::search_highlight_rects_by_page(
+                self.pages.len(),
+                &self.glyphs,
+                &self.search.matches,
+                self.search.active,
+            )
+        };
 
         let measure = canvas(
             {
@@ -822,6 +832,13 @@ impl DocumentView {
                                                 } else {
                                                     theme.muted_foreground
                                                 };
+                                                let page_bounds = this.pages[page_idx].bounds;
+                                                let page_dimensions = this.page_dimensions(page_idx);
+                                                let page_search_highlights =
+                                                    search_highlights_by_page
+                                                        .get(page_idx)
+                                                        .cloned()
+                                                        .unwrap_or_default();
                                                 let thumbnail_view = cx.entity();
                                                 let thumbnail = canvas(
                                                     {
@@ -853,6 +870,37 @@ impl DocumentView {
                                                                 0,
                                                                 false,
                                                             );
+                                                        }
+                                                        for highlight in &page_search_highlights {
+                                                            let rect = highlight.rect;
+                                                            let bounds =
+                                                                Self::pdf_rect_to_image_bounds(
+                                                                    page_bounds,
+                                                                    protect_rotation,
+                                                                    page_dimensions,
+                                                                    Rect::new(
+                                                                        rect.x0, rect.y0, rect.x1,
+                                                                        rect.y1,
+                                                                    ),
+                                                                    bounds,
+                                                                );
+                                                            if highlight.active {
+                                                                window.paint_quad(fill(
+                                                                    bounds,
+                                                                    theme.primary.opacity(
+                                                                        0x99 as f32 / 255.0,
+                                                                    ),
+                                                                ));
+                                                            } else {
+                                                                window.paint_quad(fill(
+                                                                    bounds,
+                                                                    rgba(Self::with_alpha(
+                                                                        document_theme
+                                                                            .match_highlight,
+                                                                        0x66,
+                                                                    )),
+                                                                ));
+                                                            }
                                                         }
                                                     },
                                                 )

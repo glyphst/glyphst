@@ -226,13 +226,29 @@ impl DocumentView {
         self.search.active = Some(next);
         self.sync_search_bar(cx);
         self.record_search_jump_origin();
-        self.scroll_to_search_match(next, cx);
+        self.reveal_search_match(next, cx);
         cx.notify();
     }
 
     pub(super) fn scroll_to_active_search_match(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.search.active {
-            self.scroll_to_search_match(active, cx);
+            self.reveal_search_match(active, cx);
+        }
+    }
+
+    fn reveal_search_match(&mut self, match_ix: usize, cx: &mut Context<Self>) {
+        let Some(page_idx) = self
+            .search
+            .matches
+            .get(match_ix)
+            .map(|search_match| search_match.page_idx)
+        else {
+            return;
+        };
+
+        self.scroll_to_search_match(match_ix, cx);
+        if self.grid_overview_open {
+            self.set_grid_overview_cursor(page_idx, ScrollStrategy::Center, cx);
         }
     }
 

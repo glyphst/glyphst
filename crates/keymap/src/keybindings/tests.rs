@@ -80,6 +80,10 @@ fn categories_hide_raw_predicates() {
     let predicate = KeyBindingCategory::DocumentView.predicate();
     assert!(predicate.starts_with("DocumentView && !GridOverview"));
     assert!(predicate.contains("!Search"));
+
+    let predicate = KeyBindingCategory::PageOverview.predicate();
+    assert!(predicate.starts_with("GridOverview && !CommandPalette"));
+    assert!(predicate.contains("!Search"));
 }
 
 #[test]
@@ -118,6 +122,10 @@ fn action_can_have_multiple_categories() {
     assert!(
         rows.iter()
             .any(|row| row.category == KeyBindingCategory::SearchResults)
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.category == KeyBindingCategory::PageOverview)
     );
 }
 
@@ -221,6 +229,25 @@ fn first_action_for(keymap: &Keymap, keystrokes: &str, contexts: &[&str]) -> &'s
         .name()
 }
 
+fn action_names_for(keymap: &Keymap, keystrokes: &str, contexts: &[&str]) -> Vec<String> {
+    let keystrokes = expand_platform_keystroke(keystrokes);
+    let keystrokes = keystrokes
+        .split_whitespace()
+        .map(|keystroke| Keystroke::parse(keystroke).unwrap())
+        .collect::<Vec<_>>();
+    let contexts = contexts
+        .iter()
+        .map(|context| KeyContext::parse(context).unwrap())
+        .collect::<Vec<_>>();
+
+    keymap
+        .bindings_for_input(&keystrokes, &contexts)
+        .0
+        .iter()
+        .map(|binding| binding.action().name().to_string())
+        .collect()
+}
+
 #[test]
 fn document_undo_redo_defaults() {
     let undo_keystrokes = vec![expand_platform_keystroke("primary-z")];
@@ -259,6 +286,64 @@ fn document_undo_redo_defaults() {
             );
         }
     }
+}
+
+#[test]
+fn page_overview_supports_search_and_result_navigation() {
+    for preset in [KeymapPreset::Modern, KeymapPreset::Vim] {
+        let keymap = preset_keymap(preset);
+
+        assert_eq!(
+            first_action_for(&keymap, "/", &["GridOverview"]),
+            Search::name_for_type()
+        );
+
+        let (next, previous) = match preset {
+            KeymapPreset::Modern => ("f3", "shift-f3"),
+            KeymapPreset::Vim => ("n", "shift-n"),
+        };
+        assert_eq!(
+            first_action_for(&keymap, next, &["GridOverview"]),
+            NextSearchResult::name_for_type()
+        );
+        assert_eq!(
+            first_action_for(&keymap, previous, &["GridOverview"]),
+            PrevSearchResult::name_for_type()
+        );
+
+        let (search_next, search_previous) = match preset {
+            KeymapPreset::Modern => ("primary-g", "primary-shift-g"),
+            KeymapPreset::Vim => ("ctrl-g", "ctrl-shift-g"),
+        };
+        assert_eq!(
+            first_action_for(&keymap, search_next, &["GridOverview", "Search"]),
+            NextSearchResult::name_for_type()
+        );
+        assert_eq!(
+            first_action_for(&keymap, search_previous, &["GridOverview", "Search"],),
+            PrevSearchResult::name_for_type()
+        );
+    }
+
+    let modern = preset_keymap(KeymapPreset::Modern);
+    assert_eq!(
+        first_action_for(&modern, "primary-f", &["GridOverview"]),
+        Search::name_for_type()
+    );
+    assert!(
+        action_names_for(&modern, "/", &["GridOverview", "Search"]).is_empty(),
+        "page-overview shortcuts must not intercept search input"
+    );
+
+    let vim = preset_keymap(KeymapPreset::Vim);
+    assert!(
+        action_names_for(&vim, "n", &["GridOverview", "Search"]).is_empty(),
+        "Vim result navigation must not intercept search input"
+    );
+    assert!(
+        action_names_for(&vim, "n", &["GridOverview", "CommandPalette"]).is_empty(),
+        "Vim result navigation must not intercept command-palette input"
+    );
 }
 
 #[test]
