@@ -289,17 +289,8 @@ impl Render for DocumentView {
             .on_action(cx.listener(|this, _: &Toc, window, cx| {
                 this.toggle_toc_palette(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleToc, window, cx| {
-                this.toggle_toc_sidebar(window, cx);
-            }))
             .on_action(cx.listener(|this, _: &OpenNotes, window, cx| {
                 this.toggle_notes_palette(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleNotes, window, cx| {
-                this.toggle_notes_sidebar(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleThumbnailSidebar, window, cx| {
-                this.toggle_thumbnail_sidebar(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleGridOverview, _, cx| {
                 this.toggle_grid_overview(cx);
@@ -318,9 +309,6 @@ impl Render for DocumentView {
             }))
             .on_action(cx.listener(|_, _: &OpenSettings, _, cx| {
                 cx.emit(DocumentViewEvent::OpenSettings);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleAiPanel, window, cx| {
-                this.toggle_ai_panel(window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenHistory, window, cx| {
                 this.toggle_history_palette(window, cx);

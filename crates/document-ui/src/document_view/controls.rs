@@ -46,35 +46,40 @@ impl DocumentView {
             }))
     }
 
-    pub(super) fn render_toc_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_toc_button(&self, open: bool, cx: &mut Context<Self>) -> impl IntoElement {
         Self::render_footbar_icon_button(
             "footbar-toc",
             IconName::TableOfContents,
-            self.toc_sidebar_open,
-            |this, window, cx| this.toggle_toc_sidebar(window, cx),
+            open,
+            |_, window, cx| window.dispatch_action(Box::new(ToggleToc), cx),
             cx,
         )
     }
 
-    pub(super) fn render_notes_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_notes_button(
+        &self,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         Self::render_footbar_icon_button(
             "footbar-notes",
             IconName::NotebookTabs,
-            self.notes_sidebar_open,
-            |this, window, cx| this.toggle_notes_sidebar(window, cx),
+            open,
+            |_, window, cx| window.dispatch_action(Box::new(ToggleNotes), cx),
             cx,
         )
     }
 
     pub(super) fn render_thumbnail_sidebar_button(
         &self,
+        open: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         Self::render_footbar_icon_button(
             "footbar-thumbnails",
             IconName::PanelLeft,
-            self.thumbnail_sidebar_open,
-            |this, window, cx| this.toggle_thumbnail_sidebar(window, cx),
+            open,
+            |_, window, cx| window.dispatch_action(Box::new(ToggleThumbnailSidebar), cx),
             cx,
         )
     }
@@ -89,12 +94,12 @@ impl DocumentView {
         )
     }
 
-    pub(super) fn render_ai_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_ai_button(&self, open: bool, cx: &mut Context<Self>) -> impl IntoElement {
         Self::render_footbar_icon_button(
             "footbar-ai",
             IconName::Bot,
-            self.ai_panel_visible,
-            |this, window, cx| this.toggle_ai_panel(window, cx),
+            open,
+            |_, window, cx| window.dispatch_action(Box::new(ToggleAiPanel), cx),
             cx,
         )
     }

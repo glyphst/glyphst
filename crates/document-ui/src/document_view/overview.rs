@@ -7,7 +7,7 @@ impl DocumentView {
             .then_some(&self.grid_overview_selection)
             .into_iter()
             .chain(
-                self.thumbnail_sidebar_open
+                (self.dock_snapshot.left_sidebar == Some(DocumentSidebar::Thumbnails))
                     .then_some(&self.thumbnail_sidebar_selection),
             )
             .flat_map(|selection| selection.iter().copied())
@@ -70,7 +70,7 @@ impl DocumentView {
         cx.notify();
     }
 
-    fn cancel_thumbnail_sidebar_selection(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn cancel_thumbnail_sidebar_selection(&mut self, cx: &mut Context<Self>) {
         let changed =
             self.thumbnail_sidebar_selecting || !self.thumbnail_sidebar_selection.is_empty();
         self.thumbnail_sidebar_selecting = false;
@@ -87,44 +87,8 @@ impl DocumentView {
         cx.notify();
     }
 
-    pub(super) fn set_thumbnail_sidebar_open(
-        &mut self,
-        open: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.thumbnail_sidebar_open == open {
-            return;
-        }
-
-        self.thumbnail_sidebar_open = open;
-        if open {
-            self.close_left_sidebars_except(LeftSidebar::Thumbnails);
-            let width = Self::clamp_sidebar_width_for_window(
-                self.thumbnail_sidebar_width,
-                THUMBNAIL_SIDEBAR_WIDTH,
-                window,
-            );
-            if (self.thumbnail_sidebar_width - width).abs() > f32::EPSILON {
-                self.thumbnail_sidebar_width = width;
-                self.schedule_sidebar_width_save(cx);
-            }
-            self.thumbnail_sidebar_current_page =
-                self.current_page_index().min(self.last_page_index());
-            if !self.pages.is_empty() {
-                self.thumbnail_sidebar_scroll
-                    .scroll_to_item(self.thumbnail_sidebar_current_page, ScrollStrategy::Center);
-            }
-        } else {
-            self.thumbnail_sidebar_selecting = false;
-            self.thumbnail_sidebar_selection.clear();
-        }
-        cx.notify();
-    }
-
     fn sync_thumbnail_sidebar_current_page(&mut self) {
-        if !self.thumbnail_sidebar_open || self.thumbnail_sidebar_selecting || self.pages.is_empty()
-        {
+        if self.thumbnail_sidebar_selecting || self.pages.is_empty() {
             return;
         }
 
@@ -171,20 +135,7 @@ impl DocumentView {
     /// eliminating the one-frame delay from the measure-canvas approach.
     fn available_content_width(&self, window: &Window) -> f32 {
         let window_width = window.bounds().size.width.as_f32();
-        let mut sidebar_total = 0.0f32;
-        if self.thumbnail_sidebar_open {
-            sidebar_total += self.thumbnail_sidebar_width + 1.0;
-        }
-        if self.toc_sidebar_open {
-            sidebar_total += self.toc_sidebar_width + 1.0;
-        }
-        if self.notes_sidebar_open {
-            sidebar_total += self.notes_sidebar_width + 1.0;
-        }
-        if self.ai_panel_visible {
-            sidebar_total += self.ai_panel_width + 1.0;
-        }
-        (window_width - sidebar_total).max(0.0)
+        (window_width - self.dock_snapshot.occupied_width()).max(0.0)
     }
 
     fn grid_overview_thumbnail_max_width(zoom: f32) -> f32 {
@@ -300,15 +251,15 @@ impl DocumentView {
             .count();
         let page_export = self.capabilities.page_export;
         let selecting = page_export && self.thumbnail_sidebar_selecting;
-        let zoom = Self::thumbnail_sidebar_zoom(self.thumbnail_sidebar_width);
-        let row_height = Self::thumbnail_sidebar_row_height(self.thumbnail_sidebar_width);
+        let sidebar_width = self.dock_snapshot.widths.thumbnails;
+        let zoom = Self::thumbnail_sidebar_zoom(sidebar_width);
+        let row_height = Self::thumbnail_sidebar_row_height(sidebar_width);
         let thumbnail_max_width = Self::grid_overview_thumbnail_max_width(zoom);
         let thumbnail_max_height = Self::grid_overview_thumbnail_max_height(zoom);
         let thumbnail_box_width = thumbnail_max_width + THUMBNAIL_SIDEBAR_THUMBNAIL_PADDING;
         let thumbnail_box_height = thumbnail_max_height + THUMBNAIL_SIDEBAR_THUMBNAIL_PADDING;
         let scroll_handle = self.thumbnail_sidebar_scroll.clone();
-        let compact_header =
-            selecting && self.thumbnail_sidebar_width < THUMBNAIL_SIDEBAR_COMPACT_HEADER_WIDTH;
+        let compact_header = selecting && sidebar_width < THUMBNAIL_SIDEBAR_COMPACT_HEADER_WIDTH;
         let title = if compact_header {
             String::new()
         } else {
@@ -379,6 +330,7 @@ impl DocumentView {
             .child(toolbar_actions);
 
         let content = div()
+            .debug_selector(|| "thumbnail-sidebar-content".to_string())
             .relative()
             .flex_1()
             .min_h_0()

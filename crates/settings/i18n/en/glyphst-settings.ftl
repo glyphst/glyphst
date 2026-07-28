@@ -65,6 +65,8 @@ toc-placeholder = Go to table of contents…
 toc-empty = No table of contents entries found
 table-of-contents-title = Table of Contents
 no-matching-models = No matching models
+sidebar-content-loading = Content will appear when the document finishes loading.
+sidebar-content-unavailable = This sidebar is not available for the active tab.
 
 ## PDF view
 

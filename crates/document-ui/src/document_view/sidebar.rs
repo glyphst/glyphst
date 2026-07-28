@@ -1,201 +1,45 @@
 use super::*;
 
 impl DocumentView {
-    pub(super) fn active_left_sidebar(&self) -> Option<LeftSidebar> {
-        if self.thumbnail_sidebar_open {
-            Some(LeftSidebar::Thumbnails)
-        } else if self.toc_sidebar_open {
-            Some(LeftSidebar::Toc)
-        } else if self.notes_sidebar_open {
-            Some(LeftSidebar::Notes)
-        } else {
-            None
-        }
-    }
-
-    fn left_sidebar_width(&self, sidebar: LeftSidebar) -> f32 {
-        match sidebar {
-            LeftSidebar::Thumbnails => self.thumbnail_sidebar_width,
-            LeftSidebar::Toc => self.toc_sidebar_width,
-            LeftSidebar::Notes => self.notes_sidebar_width,
-        }
-    }
-
-    pub(super) fn sync_sidebar_resizable_state(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Entity<ResizableState> {
-        let left_sidebar = self.active_left_sidebar();
-        let ai_panel_open = self.ai_panel_visible;
-
-        let Some(state) = self.sidebar_resizable_state.clone() else {
-            let state = cx.new(|_| ResizableState::default());
-            cx.subscribe(&state, |this, state, _: &ResizablePanelEvent, cx| {
-                let sizes = state.read(cx).sizes().clone();
-                this.apply_resized_sidebar_widths(
-                    this.active_left_sidebar(),
-                    this.ai_panel_visible,
-                    &sizes,
-                    cx,
-                );
-            })
-            .detach();
-            state.update(cx, |state, cx| {
-                state.insert_panel(None, None, cx);
-                if let Some(sidebar) = left_sidebar {
-                    state.insert_panel(Some(px(self.left_sidebar_width(sidebar))), Some(0), cx);
-                }
-                if ai_panel_open {
-                    state.insert_panel(Some(px(self.ai_panel_width)), None, cx);
-                }
-            });
-            self.resizable_left_sidebar = left_sidebar;
-            self.resizable_ai_panel_open = ai_panel_open;
-            self.sidebar_resizable_state = Some(state.clone());
-            return state;
-        };
-
-        if self.resizable_left_sidebar != left_sidebar {
-            let replacement_width =
-                left_sidebar.map(|sidebar| px(self.left_sidebar_width(sidebar)));
-            state.update(cx, |state, cx| {
-                match (self.resizable_left_sidebar, replacement_width) {
-                    (None, Some(width)) => state.insert_panel(Some(width), Some(0), cx),
-                    (Some(_), None) => state.remove_panel(0, cx),
-                    (Some(_), Some(width)) => {
-                        state.remove_panel(0, cx);
-                        state.insert_panel(Some(width), Some(0), cx);
-                    }
-                    (None, None) => {}
-                }
-            });
-            self.resizable_left_sidebar = left_sidebar;
-        }
-
-        if self.resizable_ai_panel_open != ai_panel_open {
-            state.update(cx, |state, cx| {
-                if ai_panel_open {
-                    state.insert_panel(Some(px(self.ai_panel_width)), None, cx);
-                } else if let Some(last_ix) = state.sizes().len().checked_sub(1) {
-                    state.remove_panel(last_ix, cx);
-                }
-            });
-            self.resizable_ai_panel_open = ai_panel_open;
-        }
-
-        state
-    }
-
-    pub(super) fn apply_resized_sidebar_widths(
-        &mut self,
-        left_sidebar: Option<LeftSidebar>,
-        ai_panel_open: bool,
-        sizes: &[Pixels],
-        cx: &mut Context<Self>,
-    ) {
-        let mut panel_ix = 0;
-        let mut changed = false;
-        if let Some(sidebar) = left_sidebar {
-            if let Some(width) = sizes.get(panel_ix).map(|size| size.as_f32()) {
-                let target = match sidebar {
-                    LeftSidebar::Thumbnails => &mut self.thumbnail_sidebar_width,
-                    LeftSidebar::Toc => &mut self.toc_sidebar_width,
-                    LeftSidebar::Notes => &mut self.notes_sidebar_width,
-                };
-                changed |= (*target - width).abs() > f32::EPSILON;
-                *target = width;
-            }
-            panel_ix += 1;
-        }
-
-        panel_ix += 1;
-        if ai_panel_open && let Some(width) = sizes.get(panel_ix).map(|size| size.as_f32()) {
-            changed |= (self.ai_panel_width - width).abs() > f32::EPSILON;
-            self.ai_panel_width = width;
-            if let Some(panel) = &self.ai_panel {
-                panel.update(cx, |panel, cx| {
-                    panel.set_width(width);
-                    cx.notify();
-                });
-            }
-        }
-
-        if changed {
-            self.schedule_sidebar_width_save(cx);
-            cx.notify();
-        }
-    }
-
-    pub(super) fn default_sidebar_widths() -> SidebarWidths {
-        SidebarWidths {
-            thumbnails: THUMBNAIL_SIDEBAR_WIDTH,
-            toc: TOC_SIDEBAR_WIDTH,
-            notes: NOTES_SIDEBAR_WIDTH,
-            ai: AI_PANEL_WIDTH,
-        }
-    }
-
-    pub(super) fn sanitize_sidebar_widths(widths: SidebarWidths) -> SidebarWidths {
-        let sanitize = |width: f32, fallback: f32| {
-            if width.is_finite() {
-                width.max(SIDEBAR_MIN_WIDTH)
-            } else {
-                fallback
-            }
-        };
-
-        SidebarWidths {
-            thumbnails: sanitize(widths.thumbnails, THUMBNAIL_SIDEBAR_WIDTH),
-            toc: sanitize(widths.toc, TOC_SIDEBAR_WIDTH),
-            notes: sanitize(widths.notes, NOTES_SIDEBAR_WIDTH),
-            ai: sanitize(widths.ai, AI_PANEL_WIDTH),
-        }
-    }
-
-    fn max_sidebar_width_for_window(window: &Window) -> f32 {
-        (window.bounds().size.width.as_f32() * SIDEBAR_MAX_WIDTH_RATIO).max(SIDEBAR_MIN_WIDTH)
-    }
-
-    pub(super) fn clamp_sidebar_width_for_window(
-        width: f32,
-        fallback: f32,
-        window: &Window,
-    ) -> f32 {
-        let width = if width.is_finite() { width } else { fallback };
-        width.clamp(
-            SIDEBAR_MIN_WIDTH,
-            Self::max_sidebar_width_for_window(window),
-        )
-    }
-
-    pub(super) fn clamp_ai_panel_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let width =
-            Self::clamp_sidebar_width_for_window(self.ai_panel_width, AI_PANEL_WIDTH, window);
-        if (self.ai_panel_width - width).abs() <= f32::EPSILON {
-            return;
-        }
-
-        self.ai_panel_width = width;
+    pub fn set_dock_snapshot(&mut self, snapshot: DocumentDockSnapshot, cx: &mut Context<Self>) {
+        self.dock_snapshot = snapshot;
         if let Some(panel) = &self.ai_panel {
-            panel.update(cx, |panel, cx| {
-                panel.set_width(width);
-                cx.notify();
-            });
+            panel.update(cx, |panel, _| panel.set_width(snapshot.widths.ai));
         }
-        self.schedule_sidebar_width_save(cx);
     }
 
-    pub(super) fn close_left_sidebars_except(&mut self, keep_open: LeftSidebar) {
-        if keep_open != LeftSidebar::Thumbnails {
-            self.thumbnail_sidebar_open = false;
-            self.thumbnail_sidebar_selecting = false;
-            self.thumbnail_sidebar_selection.clear();
+    pub fn supports_sidebar(&self, sidebar: DocumentSidebar) -> bool {
+        match sidebar {
+            DocumentSidebar::Thumbnails => self.capabilities.page_overview,
+            DocumentSidebar::Toc | DocumentSidebar::Notes => true,
         }
-        if keep_open != LeftSidebar::Toc {
-            self.toc_sidebar_open = false;
+    }
+
+    pub fn render_sidebar(
+        &mut self,
+        sidebar: DocumentSidebar,
+        theme: ThemeColor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match sidebar {
+            DocumentSidebar::Thumbnails => self
+                .render_thumbnail_sidebar(theme, window, cx)
+                .into_any_element(),
+            DocumentSidebar::Toc => self
+                .render_toc_sidebar(theme, window, cx)
+                .into_any_element(),
+            DocumentSidebar::Notes => {
+                self.refresh_notes_sidebar_entries();
+                self.render_notes_sidebar(theme, window, cx)
+                    .into_any_element()
+            }
         }
-        if keep_open != LeftSidebar::Notes {
-            self.notes_sidebar_open = false;
+    }
+
+    pub fn close_sidebar(&mut self, sidebar: DocumentSidebar, cx: &mut Context<Self>) {
+        if sidebar == DocumentSidebar::Thumbnails {
+            self.cancel_thumbnail_sidebar_selection(cx);
         }
     }
 
@@ -211,6 +55,7 @@ impl DocumentView {
 
         let content = div()
             .id("toc-sidebar-content")
+            .debug_selector(|| "toc-sidebar-content".to_string())
             .flex_1()
             .min_h_0()
             .overflow_hidden()
@@ -380,6 +225,7 @@ impl DocumentView {
         let scroll_handle = self.notes_sidebar_scroll.clone();
         let content = div()
             .id("notes-sidebar-content")
+            .debug_selector(|| "notes-sidebar-content".to_string())
             .flex_1()
             .min_h_0()
             .overflow_hidden()

@@ -100,11 +100,6 @@ impl DocumentView {
             options.rotation
         };
         let page_image_bounds = (0..pages.len()).map(|_| None).collect();
-        let sidebar_widths = options
-            .sidebar_widths
-            .map(Self::sanitize_sidebar_widths)
-            .unwrap_or_else(Self::default_sidebar_widths);
-
         let mut view = Self {
             doc_id: next_document_id(),
             path,
@@ -175,7 +170,6 @@ impl DocumentView {
             target_scroll_y_doc: 0.0,
             document_scroll: ManualScrollHandle::new(),
             ai_panel: None,
-            ai_panel_visible: false,
             quick_ask: None,
             quick_ask_visible: false,
             search_bar: None,
@@ -189,28 +183,18 @@ impl DocumentView {
             note_target: None,
             toc,
             toc_collapsed: HashSet::new(),
-            toc_sidebar_open: false,
-            toc_sidebar_width: sidebar_widths.toc,
             toc_sidebar_scroll: UniformListScrollHandle::new(),
             toc_sidebar_visible_entry_ixs: Vec::new(),
             toc_sidebar_entries_dirty: true,
             toc_sidebar_selected: None,
-            notes_sidebar_open: false,
-            notes_sidebar_width: sidebar_widths.notes,
             notes_sidebar_scroll: UniformListScrollHandle::new(),
             notes_sidebar_entries: Vec::new(),
             notes_sidebar_selected: None,
-            thumbnail_sidebar_open: false,
-            thumbnail_sidebar_width: sidebar_widths.thumbnails,
             thumbnail_sidebar_scroll: UniformListScrollHandle::new(),
             thumbnail_sidebar_current_page: 0,
             thumbnail_sidebar_selecting: false,
             thumbnail_sidebar_selection: BTreeSet::new(),
-            ai_panel_width: sidebar_widths.ai,
-            sidebar_resizable_state: None,
-            resizable_left_sidebar: None,
-            resizable_ai_panel_open: false,
-            sidebar_width_save_task: None,
+            dock_snapshot: DocumentDockSnapshot::default(),
             grid_overview_open: false,
             grid_overview_scroll: UniformListScrollHandle::new(),
             grid_overview_zoom: GRID_OVERVIEW_DEFAULT_ZOOM,

@@ -81,7 +81,6 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
-    resizable::{ResizablePanelEvent, ResizablePanelGroup, ResizableState, resizable_panel},
     searchable_list::SearchableVec,
     select::{Select, SelectEvent, SelectState},
 };
@@ -120,8 +119,8 @@ const THUMBNAIL_SIDEBAR_ROW_PADDING_Y: f32 = 12.0;
 const THUMBNAIL_SIDEBAR_MIN_THUMBNAIL_WIDTH: f32 = 96.0;
 const THUMBNAIL_SIDEBAR_MAX_THUMBNAIL_WIDTH: f32 = 220.0;
 const THUMBNAIL_SIDEBAR_COMPACT_HEADER_WIDTH: f32 = 300.0;
-const SIDEBAR_MIN_WIDTH: f32 = 150.0;
-const SIDEBAR_MAX_WIDTH_RATIO: f32 = 0.5;
+pub const SIDEBAR_MIN_WIDTH: f32 = 150.0;
+pub const SIDEBAR_MAX_WIDTH_RATIO: f32 = 0.5;
 const GRID_OVERVIEW_DEFAULT_ZOOM: f32 = 1.0;
 const GRID_OVERVIEW_MIN_ZOOM: f32 = 0.25;
 const GRID_OVERVIEW_MAX_ZOOM: f32 = 4.0;
@@ -796,7 +795,6 @@ pub struct DocumentAnnotations {
 
 pub struct DocumentOpenOptions {
     pub initial_position: Option<DocumentPosition>,
-    pub sidebar_widths: Option<SidebarWidths>,
     pub annotations: DocumentAnnotations,
     pub target_language: String,
     pub epub_preferences: EpubReaderPreferences,
@@ -826,6 +824,7 @@ pub enum DocumentViewEvent {
         position: Option<DocumentPosition>,
     },
     OpenSettings,
+    AiPanelDismissed,
     ViewportChanged(LinkedViewport),
     BlockHovered(Option<LinkedBlockAnchor>),
     BlockSelected(Option<LinkedBlockSelection>),
@@ -944,10 +943,104 @@ struct JumpPosition {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LeftSidebar {
+pub enum DocumentSidebar {
     Thumbnails,
     Toc,
     Notes,
+}
+
+impl DocumentSidebar {
+    pub fn width(self, widths: SidebarWidths) -> f32 {
+        match self {
+            Self::Thumbnails => widths.thumbnails,
+            Self::Toc => widths.toc,
+            Self::Notes => widths.notes,
+        }
+    }
+
+    pub fn set_width(self, widths: &mut SidebarWidths, width: f32) {
+        match self {
+            Self::Thumbnails => widths.thumbnails = width,
+            Self::Toc => widths.toc = width,
+            Self::Notes => widths.notes = width,
+        }
+    }
+
+    fn default_width(self) -> f32 {
+        match self {
+            Self::Thumbnails => THUMBNAIL_SIDEBAR_WIDTH,
+            Self::Toc => TOC_SIDEBAR_WIDTH,
+            Self::Notes => NOTES_SIDEBAR_WIDTH,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DocumentDockSnapshot {
+    pub left_sidebar: Option<DocumentSidebar>,
+    pub ai_panel_open: bool,
+    pub widths: SidebarWidths,
+}
+
+impl Default for DocumentDockSnapshot {
+    fn default() -> Self {
+        Self {
+            left_sidebar: None,
+            ai_panel_open: false,
+            widths: default_sidebar_widths(),
+        }
+    }
+}
+
+impl DocumentDockSnapshot {
+    pub fn occupied_width(self) -> f32 {
+        let left = self
+            .left_sidebar
+            .map(|sidebar| sidebar.width(self.widths) + 1.0)
+            .unwrap_or_default();
+        let right = if self.ai_panel_open {
+            self.widths.ai + 1.0
+        } else {
+            0.0
+        };
+        left + right
+    }
+}
+
+pub fn default_sidebar_widths() -> SidebarWidths {
+    SidebarWidths {
+        thumbnails: THUMBNAIL_SIDEBAR_WIDTH,
+        toc: TOC_SIDEBAR_WIDTH,
+        notes: NOTES_SIDEBAR_WIDTH,
+        ai: AI_PANEL_WIDTH,
+    }
+}
+
+pub fn sanitize_sidebar_widths(widths: SidebarWidths) -> SidebarWidths {
+    let sanitize = |width: f32, fallback: f32| {
+        if width.is_finite() {
+            width.max(SIDEBAR_MIN_WIDTH)
+        } else {
+            fallback
+        }
+    };
+
+    SidebarWidths {
+        thumbnails: sanitize(widths.thumbnails, THUMBNAIL_SIDEBAR_WIDTH),
+        toc: sanitize(widths.toc, TOC_SIDEBAR_WIDTH),
+        notes: sanitize(widths.notes, NOTES_SIDEBAR_WIDTH),
+        ai: sanitize(widths.ai, AI_PANEL_WIDTH),
+    }
+}
+
+pub fn clamp_sidebar_width(sidebar: Option<DocumentSidebar>, width: f32, window: &Window) -> f32 {
+    let fallback = sidebar
+        .map(DocumentSidebar::default_width)
+        .unwrap_or(AI_PANEL_WIDTH);
+    let width = if width.is_finite() { width } else { fallback };
+    let max_width =
+        (window.bounds().size.width.as_f32() * SIDEBAR_MAX_WIDTH_RATIO).max(SIDEBAR_MIN_WIDTH);
+    width.clamp(SIDEBAR_MIN_WIDTH, max_width)
 }
 
 #[derive(Clone, Copy)]
@@ -1033,7 +1126,6 @@ pub struct DocumentView {
     target_scroll_y_doc: f32,
     document_scroll: ManualScrollHandle,
     ai_panel: Option<Entity<AiPanel>>,
-    ai_panel_visible: bool,
     quick_ask: Option<Entity<AiPanel>>,
     quick_ask_visible: bool,
     search_bar: Option<Entity<SearchBar>>,
@@ -1047,28 +1139,18 @@ pub struct DocumentView {
     note_target: Option<NoteTarget>,
     toc: Vec<TocEntry>,
     toc_collapsed: HashSet<usize>,
-    toc_sidebar_open: bool,
-    toc_sidebar_width: f32,
     toc_sidebar_scroll: UniformListScrollHandle,
     toc_sidebar_visible_entry_ixs: Vec<usize>,
     toc_sidebar_entries_dirty: bool,
     toc_sidebar_selected: Option<usize>,
-    notes_sidebar_open: bool,
-    notes_sidebar_width: f32,
     notes_sidebar_scroll: UniformListScrollHandle,
     notes_sidebar_entries: Vec<NotePaletteEntry>,
     notes_sidebar_selected: Option<u64>,
-    thumbnail_sidebar_open: bool,
-    thumbnail_sidebar_width: f32,
     thumbnail_sidebar_scroll: UniformListScrollHandle,
     thumbnail_sidebar_current_page: usize,
     thumbnail_sidebar_selecting: bool,
     thumbnail_sidebar_selection: BTreeSet<usize>,
-    ai_panel_width: f32,
-    sidebar_resizable_state: Option<Entity<ResizableState>>,
-    resizable_left_sidebar: Option<LeftSidebar>,
-    resizable_ai_panel_open: bool,
-    sidebar_width_save_task: Option<Task<()>>,
+    dock_snapshot: DocumentDockSnapshot,
     grid_overview_open: bool,
     grid_overview_scroll: UniformListScrollHandle,
     grid_overview_zoom: f32,

@@ -48,29 +48,6 @@ impl DocumentView {
         }));
     }
 
-    fn current_sidebar_widths(&self) -> SidebarWidths {
-        SidebarWidths {
-            thumbnails: self.thumbnail_sidebar_width,
-            toc: self.toc_sidebar_width,
-            notes: self.notes_sidebar_width,
-            ai: self.ai_panel_width,
-        }
-    }
-
-    pub(super) fn schedule_sidebar_width_save(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_width_save_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(300))
-                .await;
-            _ = this.update(cx, |this, cx| {
-                let widths = Self::sanitize_sidebar_widths(this.current_sidebar_widths());
-                if let Err(error) = cx.global_mut::<LibraryStore>().set_sidebar_widths(widths) {
-                    eprintln!("failed to save sidebar widths: {error:#}");
-                }
-            });
-        }));
-    }
-
     pub(super) fn current_jump_position(&self) -> JumpPosition {
         if let Some(page_idx) = self.presentation_page_index() {
             return JumpPosition {

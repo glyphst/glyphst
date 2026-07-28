@@ -57,6 +57,8 @@ toc-placeholder = 转到目录…
 toc-empty = 未找到目录条目
 table-of-contents-title = 目录
 no-matching-models = 无匹配模型
+sidebar-content-loading = 文档加载完成后将显示内容。
+sidebar-content-unavailable = 当前标签页不支持此侧边栏。
 
 ## PDF view
 

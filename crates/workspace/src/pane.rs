@@ -252,6 +252,7 @@ pub(crate) enum PaneEvent {
         result: std::result::Result<(), SharedString>,
     },
     OpenSettings,
+    AiPanelDismissed(EntityId),
     TabDrop {
         dragged_tab: Box<DraggedTab>,
         target: PaneDropTarget,
@@ -357,6 +358,23 @@ impl Pane {
                 None
             }
         }
+    }
+
+    pub(crate) fn active_tab_is_loading(&self) -> bool {
+        matches!(
+            self.tabs.get(self.active_tab),
+            Some(Tab::LoadingDocument(_))
+        )
+    }
+
+    pub(crate) fn document_views(&self) -> Vec<Entity<DocumentView>> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| match tab {
+                Tab::Document(document_view) => Some(document_view.clone()),
+                Tab::NewTab(_) | Tab::LoadingDocument(_) | Tab::Keymap(_) => None,
+            })
+            .collect()
     }
 
     pub(crate) fn set_force_show_tab_bar(
@@ -508,7 +526,6 @@ impl Pane {
             highlights: cx.global::<LibraryStore>().highlights_for(&path),
             notes: cx.global::<LibraryStore>().notes_for(&path),
         };
-        let sidebar_widths = cx.global::<LibraryStore>().sidebar_widths();
         let target_language = cx
             .global::<LibraryStore>()
             .document_target_language(&path)
@@ -526,7 +543,6 @@ impl Pane {
         let rotation = cx.global::<LibraryStore>().document_rotation(&path);
         let options = DocumentOpenOptions {
             initial_position: Some(initial_position.clone()),
-            sidebar_widths,
             annotations,
             target_language,
             epub_preferences,
@@ -954,6 +970,9 @@ impl Pane {
                         });
                     }
                     DocumentViewEvent::OpenSettings => cx.emit(PaneEvent::OpenSettings),
+                    DocumentViewEvent::AiPanelDismissed => {
+                        cx.emit(PaneEvent::AiPanelDismissed(document_view_id))
+                    }
                     DocumentViewEvent::ViewportChanged(_)
                     | DocumentViewEvent::BlockHovered(_)
                     | DocumentViewEvent::BlockSelected(_) => {}

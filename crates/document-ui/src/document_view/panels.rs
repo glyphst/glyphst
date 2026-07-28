@@ -111,22 +111,23 @@ impl DocumentView {
         cx.notify();
     }
 
-    pub(super) fn toggle_ai_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(panel) = self.ai_panel.clone() {
-            if self.ai_panel_visible {
-                self.close_ai_panel(window, cx);
-            } else {
-                self.close_all_overlays(window, cx);
-                self.clamp_ai_panel_width(window, cx);
-                self.ai_panel_visible = true;
-                panel.focus_handle(cx).focus(window, cx);
-                cx.notify();
-            }
-            return;
+    pub fn ensure_ai_panel(
+        &mut self,
+        width: f32,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<AiPanel> {
+        if focus {
+            self.close_all_overlays(window, cx);
         }
-
-        self.close_all_overlays(window, cx);
-        self.clamp_ai_panel_width(window, cx);
+        if let Some(panel) = self.ai_panel.clone() {
+            panel.update(cx, |panel, _| panel.set_width(width));
+            if focus {
+                panel.focus_handle(cx).focus(window, cx);
+            }
+            return panel;
+        }
 
         let previous_focus_handle = self.focus_handle.clone();
         let document_path = self.path.clone();
@@ -140,7 +141,7 @@ impl DocumentView {
                 context_provider.clone(),
                 document_path.clone(),
                 page_state,
-                self.ai_panel_width,
+                width,
                 window,
                 cx,
             )
@@ -149,27 +150,24 @@ impl DocumentView {
         cx.subscribe_in(
             &panel,
             window,
-            |this, _, event: &AiPanelEvent, window, cx| match event {
-                AiPanelEvent::Dismissed => this.close_ai_panel(window, cx),
+            |_, _, event: &AiPanelEvent, _, cx| match event {
+                AiPanelEvent::Dismissed => cx.emit(DocumentViewEvent::AiPanelDismissed),
                 AiPanelEvent::Changed => {}
             },
         )
         .detach();
 
-        panel.focus_handle(cx).focus(window, cx);
+        if focus {
+            panel.focus_handle(cx).focus(window, cx);
+        }
         self.ai_panel = Some(panel);
-        self.ai_panel_visible = true;
         cx.notify();
+        self.ai_panel.clone().unwrap()
     }
 
-    fn close_ai_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.ai_panel_visible {
-            if let Some(panel) = &self.ai_panel {
-                panel.update(cx, |panel, cx| panel.save_current_session(cx));
-            }
-            self.ai_panel_visible = false;
-            self.focus_handle.focus(window, cx);
-            cx.notify();
+    pub fn save_ai_panel_session(&mut self, cx: &mut Context<Self>) {
+        if let Some(panel) = &self.ai_panel {
+            panel.update(cx, |panel, cx| panel.save_current_session(cx));
         }
     }
 
@@ -234,24 +232,6 @@ impl DocumentView {
         }
     }
 
-    pub(super) fn toggle_toc_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.toc_sidebar_open {
-            self.toc_sidebar_open = false;
-            cx.notify();
-            return;
-        }
-
-        self.close_left_sidebars_except(LeftSidebar::Toc);
-        let width =
-            Self::clamp_sidebar_width_for_window(self.toc_sidebar_width, TOC_SIDEBAR_WIDTH, window);
-        if (self.toc_sidebar_width - width).abs() > f32::EPSILON {
-            self.toc_sidebar_width = width;
-            self.schedule_sidebar_width_save(cx);
-        }
-        self.toc_sidebar_open = true;
-        cx.notify();
-    }
-
     pub(super) fn toggle_toc_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.toc_palette.is_some() {
             self.close_toc_palette(window, cx);
@@ -288,35 +268,6 @@ impl DocumentView {
             self.focus_handle.focus(window, cx);
             cx.notify();
         }
-    }
-
-    pub(super) fn toggle_notes_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.notes_sidebar_open {
-            self.notes_sidebar_open = false;
-            cx.notify();
-            return;
-        }
-
-        self.close_left_sidebars_except(LeftSidebar::Notes);
-        self.refresh_notes_sidebar_entries();
-        let width = Self::clamp_sidebar_width_for_window(
-            self.notes_sidebar_width,
-            NOTES_SIDEBAR_WIDTH,
-            window,
-        );
-        if (self.notes_sidebar_width - width).abs() > f32::EPSILON {
-            self.notes_sidebar_width = width;
-            self.schedule_sidebar_width_save(cx);
-        }
-        self.notes_sidebar_open = true;
-        cx.notify();
-    }
-
-    pub(super) fn toggle_thumbnail_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.capabilities.page_overview {
-            return;
-        }
-        self.set_thumbnail_sidebar_open(!self.thumbnail_sidebar_open, window, cx);
     }
 
     pub(super) fn toggle_grid_overview(&mut self, cx: &mut Context<Self>) {
