@@ -100,7 +100,7 @@ pub fn translate_batch_with_client(
     }
 
     let system = translation_system_prompt(source_language, target_language);
-    let response = match settings.provider.api_style() {
+    let response = match settings.api_style {
         AiApiStyle::OpenAi => request_openai(client, &settings, &system, texts),
         AiApiStyle::OpenAiResponses => request_chatgpt(client, &settings, &system, texts),
         AiApiStyle::Anthropic => request_anthropic(client, &settings, &system, texts),
@@ -160,7 +160,7 @@ legends, and text associated with protected regions. Review only unlocked low-co
 When uncertain, choose translate=false. Return only valid JSON in this exact shape: \
 {\"decisions\":[{\"block_id\":\"id\",\"translate\":false,\"confidence\":0.0,\"reason\":\"short \
 reason\"}]}. Omit locked and already-confident blocks.";
-    let response = match settings.provider.api_style() {
+    let response = match settings.api_style {
         AiApiStyle::OpenAi => request_openai_payload(client, &settings, system, page_map),
         AiApiStyle::OpenAiResponses => request_chatgpt_payload(client, &settings, system, page_map),
         AiApiStyle::Anthropic => request_anthropic_payload(client, &settings, system, page_map),
@@ -203,7 +203,7 @@ exactly once and do not add IDs."
     );
     let payload = serde_json::to_value(units)
         .map_err(|error| configuration_error(format!("failed to encode request: {error}")))?;
-    let response = match settings.provider.api_style() {
+    let response = match settings.api_style {
         AiApiStyle::OpenAi => request_openai_payload(client, &settings, &system, payload),
         AiApiStyle::OpenAiResponses => request_chatgpt_payload(client, &settings, &system, payload),
         AiApiStyle::Anthropic => request_anthropic_payload(client, &settings, &system, payload),
@@ -301,12 +301,12 @@ fn request_openai_payload_inner(
         request = request.bearer_auth(&settings.api_key);
     }
 
-    let value = send_json(request, settings.provider.label())?;
+    let value = send_json(request, &settings.provider_name)?;
     value
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| invalid_response_message(settings.provider.label()))
+        .ok_or_else(|| invalid_response_message(&settings.provider_name))
 }
 
 fn request_chatgpt(
@@ -343,7 +343,7 @@ fn request_chatgpt_payload(
     let access =
         acquire_request_access().map_err(|error| authentication_error(format!("{error:#}")))?;
     let request = access.authorize(client.post(responses_url(&settings.base_url)).json(&body));
-    let value = send_json(request, settings.provider.label()).map_err(|error| {
+    let value = send_json(request, &settings.provider_name).map_err(|error| {
         if matches!(error.status, Some(401 | 403)) {
             invalidate_credentials("Your ChatGPT session is invalid. Sign in again.");
         }
@@ -352,7 +352,7 @@ fn request_chatgpt_payload(
     response_text(&value).ok_or_else(|| {
         response_error(&value)
             .map(|message| invalid_response(anyhow!(message)))
-            .unwrap_or_else(|| invalid_response_message(settings.provider.label()))
+            .unwrap_or_else(|| invalid_response_message(&settings.provider_name))
     })
 }
 
@@ -382,9 +382,8 @@ fn request_anthropic_payload(
 ) -> std::result::Result<String, AiTranslationError> {
     let url = anthropic_messages_url(&settings.base_url);
     let max_tokens = anthropic_max_tokens(&payload);
-    let response = client
+    let mut response = client
         .post(url)
-        .header("x-api-key", &settings.api_key)
         .header("anthropic-version", "2023-06-01")
         .json(&json!({
             "model": settings.model,
@@ -397,13 +396,16 @@ fn request_anthropic_payload(
             "max_tokens": max_tokens,
             "temperature": 0,
         }));
+    if !settings.api_key.is_empty() {
+        response = response.header("x-api-key", &settings.api_key);
+    }
 
-    let value = send_json(response, settings.provider.label())?;
+    let value = send_json(response, &settings.provider_name)?;
     value
         .pointer("/content/0/text")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| invalid_response_message(settings.provider.label()))
+        .ok_or_else(|| invalid_response_message(&settings.provider_name))
 }
 
 fn parse_semantic_translations(
@@ -815,6 +817,9 @@ mod tests {
     fn deepseek_translation_explicitly_disables_thinking() {
         let settings = ResolvedAiConfig {
             provider: AiProvider::DeepSeek,
+            provider_name: "DeepSeek".to_string(),
+            api_style: AiApiStyle::OpenAi,
+            enabled: true,
             model: "deepseek-v4-flash".to_string(),
             api_key: String::new(),
             base_url: "https://api.deepseek.com".to_string(),

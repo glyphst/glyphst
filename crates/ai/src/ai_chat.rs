@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::chatgpt_subscription::{
     acquire_request_access, invalidate_credentials, response_error, responses_url,
 };
-use crate::settings::{AiApiStyle, AiProvider, AiThinkingLevel, ResolvedAiConfig};
+use crate::settings::{AiApiStyle, AiThinkingLevel, ResolvedAiConfig};
 
 const MAX_CONTEXT_CHARS: usize = 12_000;
 const CONTEXT_ENVELOPE_HEADER: &str = "Attached document context from @ mentions:\n<context>\nThe following document context was attached by the user. It is current; do not ask to re-read it.\n";
@@ -677,19 +677,17 @@ pub fn stream_completion(
     let client = reqwest::blocking::Client::builder()
         .build()
         .context("failed to create HTTP client")?;
-    let native_thinking = match settings.provider.api_style() {
-        AiApiStyle::OpenAi => {
-            supports_openai_reasoning(settings.provider, &settings.model, settings.thinking_level)
-        }
+    let native_thinking = match settings.api_style {
+        AiApiStyle::OpenAi => supports_openai_reasoning(&settings.model, settings.thinking_level),
         AiApiStyle::OpenAiResponses => true,
         AiApiStyle::Anthropic => {
-            supports_anthropic_thinking(settings.provider, &settings.model, settings.thinking_level)
+            supports_anthropic_thinking(&settings.model, settings.thinking_level)
         }
     };
     let system = system_prompt(&document, settings.thinking_level, native_thinking);
     let request_messages = build_request_messages(messages);
 
-    match settings.provider.api_style() {
+    match settings.api_style {
         AiApiStyle::OpenAi => {
             stream_openai(&client, settings, system, request_messages, send_event)
         }
@@ -833,12 +831,7 @@ fn stream_openai(
         "messages": request_messages,
         "stream": true,
     });
-    apply_openai_thinking(
-        &mut body,
-        settings.provider,
-        &settings.model,
-        settings.thinking_level,
-    );
+    apply_openai_thinking(&mut body, &settings.model, settings.thinking_level);
 
     let mut request = client.post(url).json(&body);
     if !settings.api_key.is_empty() {
@@ -847,7 +840,7 @@ fn stream_openai(
 
     let response = request
         .send()
-        .with_context(|| format!("failed to send {} request", settings.provider.label()))?;
+        .with_context(|| format!("failed to send {} request", settings.provider_name))?;
     read_sse_response(response, AiApiStyle::OpenAi, send_event)
 }
 
@@ -923,20 +916,16 @@ fn stream_anthropic(
         "stream": true,
         "system": system,
     });
-    apply_anthropic_thinking(
-        &mut body,
-        settings.provider,
-        &settings.model,
-        settings.thinking_level,
-    );
+    apply_anthropic_thinking(&mut body, &settings.model, settings.thinking_level);
 
-    let response = client
+    let mut request = client
         .post(url)
-        .header("x-api-key", settings.api_key)
         .header("anthropic-version", "2023-06-01")
-        .json(&body)
-        .send()
-        .context("failed to send Anthropic request")?;
+        .json(&body);
+    if !settings.api_key.is_empty() {
+        request = request.header("x-api-key", settings.api_key);
+    }
+    let response = request.send().context("failed to send Anthropic request")?;
     read_sse_response(response, AiApiStyle::Anthropic, send_event)
 }
 
@@ -1141,8 +1130,8 @@ pub fn thinking_level_description(level: AiThinkingLevel) -> String {
     }
 }
 
-fn supports_openai_reasoning(provider: AiProvider, model: &str, level: AiThinkingLevel) -> bool {
-    provider.api_style() == AiApiStyle::OpenAi && level.supports_native_for(provider, model)
+fn supports_openai_reasoning(model: &str, level: AiThinkingLevel) -> bool {
+    level.supports_native_for_style(AiApiStyle::OpenAi, model)
 }
 
 fn apply_responses_reasoning(body: &mut Value, level: AiThinkingLevel) {
@@ -1161,21 +1150,16 @@ fn apply_responses_reasoning(body: &mut Value, level: AiThinkingLevel) {
     });
 }
 
-fn supports_anthropic_thinking(provider: AiProvider, model: &str, level: AiThinkingLevel) -> bool {
-    provider.api_style() == AiApiStyle::Anthropic && level.supports_native_for(provider, model)
+fn supports_anthropic_thinking(model: &str, level: AiThinkingLevel) -> bool {
+    level.supports_native_for_style(AiApiStyle::Anthropic, model)
 }
 
-fn apply_openai_thinking(
-    body: &mut Value,
-    provider: AiProvider,
-    model: &str,
-    level: AiThinkingLevel,
-) {
-    if !supports_openai_reasoning(provider, model, level) {
+fn apply_openai_thinking(body: &mut Value, model: &str, level: AiThinkingLevel) {
+    if !supports_openai_reasoning(model, level) {
         return;
     }
 
-    let level = level.clamp_for(provider, model);
+    let level = level.clamp_for_style(AiApiStyle::OpenAi, model);
     body["reasoning_effort"] = json!(match level {
         AiThinkingLevel::Off => return,
         AiThinkingLevel::Minimal => "minimal",
@@ -1186,17 +1170,12 @@ fn apply_openai_thinking(
     });
 }
 
-fn apply_anthropic_thinking(
-    body: &mut Value,
-    provider: AiProvider,
-    model: &str,
-    level: AiThinkingLevel,
-) {
-    if !supports_anthropic_thinking(provider, model, level) {
+fn apply_anthropic_thinking(body: &mut Value, model: &str, level: AiThinkingLevel) {
+    if !supports_anthropic_thinking(model, level) {
         return;
     }
 
-    let level = level.clamp_for(provider, model);
+    let level = level.clamp_for_style(AiApiStyle::Anthropic, model);
     body["thinking"] = json!({
         "type": "enabled",
         "budget_tokens": match level {

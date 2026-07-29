@@ -251,13 +251,13 @@ impl AiPanel {
 
     pub(super) fn build_thinking_menu(
         mut menu: PopupMenu,
-        selected_provider: AiProvider,
+        selected_api_style: AiApiStyle,
         selected_model: String,
         selected_level: AiThinkingLevel,
         panel: Entity<Self>,
     ) -> PopupMenu {
         menu = menu.min_w(px(280.0));
-        for level in AiThinkingLevel::supported_for(selected_provider, &selected_model) {
+        for level in AiThinkingLevel::supported_for_style(selected_api_style, &selected_model) {
             let level = *level;
             menu = menu.item(
                 PopupMenuItem::element(move |_, cx| {
@@ -300,7 +300,7 @@ impl AiPanel {
         let query = state.search_query.to_string();
         let query_lower = query.to_ascii_lowercase();
         let mut entries = Vec::new();
-        for (provider, models) in state.provider_models {
+        for (provider, provider_name, models) in state.provider_models {
             let mut provider_entries = models
                 .into_iter()
                 .filter(|model| {
@@ -308,12 +308,12 @@ impl AiPanel {
                         || model.id.to_ascii_lowercase().contains(&query_lower)
                         || model.name.to_ascii_lowercase().contains(&query_lower)
                         || model.group.to_ascii_lowercase().contains(&query_lower)
-                        || provider.label().to_ascii_lowercase().contains(&query_lower)
+                        || provider_name.to_ascii_lowercase().contains(&query_lower)
                 })
                 .map(move |model| ModelMenuEntry::Model(provider, model))
                 .collect::<Vec<_>>();
             if !provider_entries.is_empty() {
-                entries.push(ModelMenuEntry::Header(provider));
+                entries.push(ModelMenuEntry::Header(provider_name));
                 entries.append(&mut provider_entries);
             }
         }
@@ -329,7 +329,15 @@ impl AiPanel {
             .text_size(ui_rems(12.0));
 
         menu = menu
-            .child(Input::new(&search_input).w_full().mx_2().mt_2().mb_2())
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .px_2()
+                    .pt_2()
+                    .pb_2()
+                    .child(Input::new(&search_input).w_full().min_w_0()),
+            )
             .child(
                 div()
                     .mx_2()
@@ -362,14 +370,14 @@ impl AiPanel {
             let rows = entries
                 .into_iter()
                 .map(|entry| match entry {
-                    ModelMenuEntry::Header(provider) => div()
+                    ModelMenuEntry::Header(provider_name) => div()
                         .h(px(26.0))
                         .flex()
                         .items_center()
                         .px_2()
                         .text_size(ui_rems(11.0))
                         .text_color(theme.muted_foreground)
-                        .child(provider.label())
+                        .child(provider_name)
                         .into_any_element(),
                     ModelMenuEntry::Model(provider, model) => {
                         let selected = provider == selected_provider && model.id == selected_model;

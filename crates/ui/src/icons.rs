@@ -25,6 +25,7 @@ pub enum IconName {
     File,
     FileText,
     FolderOpen,
+    GripVertical,
     Image,
     Info,
     LayoutGrid,
@@ -46,6 +47,7 @@ pub enum IconName {
     Table2,
     TextUnwrap,
     TextWrap,
+    Trash2,
     TriangleAlert,
     X,
 }
@@ -69,6 +71,7 @@ impl IconName {
             Self::File => "file",
             Self::FileText => "file-text",
             Self::FolderOpen => "folder-open",
+            Self::GripVertical => "grip-vertical",
             Self::Image => "image",
             Self::Info => "info",
             Self::LayoutGrid => "layout-grid",
@@ -90,6 +93,7 @@ impl IconName {
             Self::Table2 => "table-2",
             Self::TextUnwrap => "text-unwrap",
             Self::TextWrap => "text-wrap",
+            Self::Trash2 => "trash-2",
             Self::TriangleAlert => "triangle-alert",
             Self::X => "x",
         };

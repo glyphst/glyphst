@@ -150,18 +150,12 @@ fn extracts_generated_title_from_first_response_line() {
 #[test]
 fn configures_native_thinking_for_supported_models() {
     let mut openai_body = json!({});
-    apply_openai_thinking(
-        &mut openai_body,
-        AiProvider::OpenAi,
-        "gpt-5",
-        AiThinkingLevel::XHigh,
-    );
+    apply_openai_thinking(&mut openai_body, "gpt-5", AiThinkingLevel::XHigh);
     assert_eq!(openai_body["reasoning_effort"], "xhigh");
 
     let mut anthropic_body = json!({});
     apply_anthropic_thinking(
         &mut anthropic_body,
-        AiProvider::Anthropic,
         "claude-sonnet-4-5-latest",
         AiThinkingLevel::Max,
     );
@@ -169,18 +163,12 @@ fn configures_native_thinking_for_supported_models() {
     assert_eq!(anthropic_body["output_config"]["effort"], "max");
 
     let mut unsupported_body = json!({});
-    apply_openai_thinking(
-        &mut unsupported_body,
-        AiProvider::OpenRouter,
-        "openai/gpt-5",
-        AiThinkingLevel::High,
-    );
+    apply_openai_thinking(&mut unsupported_body, "openai/gpt-5", AiThinkingLevel::High);
     assert_eq!(unsupported_body["reasoning_effort"], "high");
 
     let mut unsupported_body = json!({});
     apply_openai_thinking(
         &mut unsupported_body,
-        AiProvider::OpenRouter,
         "openai/gpt-4o",
         AiThinkingLevel::High,
     );
@@ -270,11 +258,7 @@ fn unsupported_thinking_uses_system_prompt_instruction() {
 
 #[test]
 fn openai_compatible_reasoning_avoids_system_prompt_fallback() {
-    let native_thinking = supports_openai_reasoning(
-        AiProvider::OpenRouter,
-        "openai/gpt-5.5",
-        AiThinkingLevel::Medium,
-    );
+    let native_thinking = supports_openai_reasoning("openai/gpt-5.5", AiThinkingLevel::Medium);
     let prompt = system_prompt(
         &DocumentContext::default(),
         AiThinkingLevel::Medium,

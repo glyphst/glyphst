@@ -18,8 +18,8 @@ use glyphst_ui::{
 };
 use gpui::{
     App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement, PromptButton,
-    PromptLevel, Render, SharedString, Task, Window, WindowBounds, WindowOptions, div, prelude::*,
-    px, size,
+    PromptLevel, Render, SharedString, Subscription, Task, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, size,
 };
 use gpui_component::{
     ActiveTheme as _, Root, Sizable as _, Size, TitleBar, WindowExt as _,
@@ -111,6 +111,12 @@ pub(super) struct ModelPickerState {
     selected: BTreeSet<String>,
 }
 
+pub(super) struct ProviderRenameState {
+    provider: AiProvider,
+    input: Entity<gpui_component::input::InputState>,
+    _subscription: Subscription,
+}
+
 #[derive(Clone)]
 pub(super) enum OcrConnectionResult {
     Testing,
@@ -194,6 +200,8 @@ pub struct SettingsWindow {
     pub(super) model_catalog_operation: ModelCatalogOperation,
     pub(super) model_picker: ModelPickerState,
     _model_catalog_task: Option<Task<()>>,
+    pub(super) provider_rename: Option<ProviderRenameState>,
+    pub(super) active_model_drag: Option<AiProvider>,
     pub(super) ocr_operation: Option<OcrOperation>,
     _ocr_task: Option<Task<()>>,
     pub(super) translation_data_clear_pending: bool,
@@ -229,6 +237,8 @@ impl SettingsWindow {
             model_catalog_operation: ModelCatalogOperation::default(),
             model_picker: ModelPickerState::default(),
             _model_catalog_task: None,
+            provider_rename: None,
+            active_model_drag: None,
             ocr_operation: None,
             _ocr_task: None,
             translation_data_clear_pending: false,
@@ -249,23 +259,21 @@ impl SettingsWindow {
 
     pub(super) fn parse_model_ref(value: &str) -> Option<ModelRef> {
         let (provider, id) = value.split_once("::")?;
-        let provider = AiProvider::ALL
-            .into_iter()
-            .find(|candidate| candidate.as_str() == provider)?;
+        let provider = AiProvider::from_str(provider)?;
         (!id.trim().is_empty()).then(|| ModelRef::new(provider, id))
     }
 
     pub(super) fn model_options(settings: &Settings) -> Vec<(SharedString, SharedString)> {
         let mut options = Vec::new();
-        for provider in AiProvider::ALL {
-            let config = settings.ai.provider_config(provider);
+        for provider in settings.ai.ordered_providers() {
+            let config = settings.ai.provider_config(*provider);
             if !config.enabled {
                 continue;
             }
             options.extend(config.models.into_iter().map(|model| {
                 Self::setting_option(
-                    Self::model_ref_key(&ModelRef::new(provider, model.id)),
-                    format!("{} — {}", provider.label(), model.name),
+                    Self::model_ref_key(&ModelRef::new(*provider, model.id)),
+                    format!("{} — {}", config.name, model.name),
                 )
             }));
         }
@@ -391,14 +399,19 @@ impl SettingsWindow {
             .first()
             .map(|model| model.id.clone())
             .unwrap_or_else(|| provider.default_model().to_string());
-        let base_url_overridden = config.base_url.is_some();
+        let base_url_overridden = provider.is_custom() && config.base_url.is_some();
         ResolvedAiConfig {
             provider,
+            provider_name: config.name,
+            api_style: config.api_style,
+            enabled: true,
             model,
             api_key: config.api_key,
-            base_url: config
-                .base_url
-                .unwrap_or_else(|| provider.default_base_url().to_string()),
+            base_url: if provider.is_custom() {
+                config.base_url.unwrap_or_default()
+            } else {
+                provider.default_base_url().to_string()
+            },
             base_url_overridden,
             thinking_level: AiThinkingLevel::Off,
         }
@@ -446,13 +459,11 @@ impl SettingsWindow {
             && self.model_catalog_operation.signature.as_ref() == Some(&signature);
         if !has_current_cache {
             self.model_catalogs.remove(&provider);
-            if !fetch_in_progress {
-                self.fetch_provider_models(provider, cx);
-            } else {
-                cx.notify();
-            }
-        } else {
+        }
+        if fetch_in_progress {
             cx.notify();
+        } else {
+            self.fetch_provider_models(provider, cx);
         }
     }
 
@@ -634,9 +645,7 @@ impl SettingsWindow {
             if !selected.contains(&model.id) {
                 continue;
             }
-            let group = model
-                .owned_by
-                .unwrap_or_else(|| provider.label().to_string());
+            let group = model.owned_by.unwrap_or_else(|| config.name.clone());
             let old_len = config.models.len();
             config.ensure_model(AiModel::new(model.id, model.label, group));
             added += usize::from(config.models.len() != old_len);
@@ -908,10 +917,15 @@ mod tests {
         test_ocr_connection_request,
     };
     use glyphst_ai::ai_client::AiModelInfo;
-    use glyphst_settings::{AiProvider, OcrSettings, SettingsStore, sync_component_theme};
-    use gpui::{AppContext as _, TestAppContext};
+    use glyphst_settings::{
+        AiApiStyle, AiModel, AiProvider, OcrSettings, SettingsStore, sync_component_theme,
+    };
+    use gpui::{
+        AppContext as _, Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext,
+        point, px, size,
+    };
     use gpui_component::{Root, setting::SelectIndex};
-    use std::collections::BTreeSet;
+    use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
     #[test]
     fn ocr_probe_rejects_missing_default_provider_credentials() {
@@ -927,6 +941,15 @@ mod tests {
         assert_eq!(parsed.provider, AiProvider::OpenAi);
         assert_eq!(parsed.id, "gpt-5");
         assert_eq!(SettingsWindow::model_ref_key(&parsed), "openai::gpt-5");
+        let custom = SettingsWindow::parse_model_ref(
+            "custom-00000000-0000-4000-8000-000000000001::private-model",
+        )
+        .unwrap();
+        assert!(custom.provider.is_custom());
+        assert_eq!(
+            SettingsWindow::model_ref_key(&custom),
+            "custom-00000000-0000-4000-8000-000000000001::private-model"
+        );
         assert!(SettingsWindow::parse_model_ref("missing-provider::model").is_none());
     }
 
@@ -973,14 +996,182 @@ mod tests {
     settings_page_render_test!(renders_ocr_page, 6, 1);
 
     #[gpui::test]
-    fn renders_cached_provider_model_picker(cx: &mut TestAppContext) {
+    fn renders_custom_provider_rows_and_models(cx: &mut TestAppContext) {
         initialize_ui_test(cx);
+        let provider = cx.update(|cx| {
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            let provider = settings.ai.add_custom_provider(
+                "Local Models",
+                AiApiStyle::OpenAi,
+                "http://127.0.0.1:1234/v1",
+                "",
+            );
+            settings
+                .ai
+                .provider_config_mut(provider)
+                .ensure_model(AiModel::new("local-model", "Local Model", "Local Models"));
+            settings.ai.provider_order = vec![provider];
+            cx.global_mut::<SettingsStore>()
+                .set_settings_in_memory(settings);
+            provider
+        });
+        let settings_view = Rc::new(RefCell::new(None));
+        let captured_settings_view = settings_view.clone();
         let (_, cx) = cx.add_window_view(|window, cx| {
             let settings = cx.new(|cx| {
                 let mut settings = SettingsWindow::new(|_| {}, cx);
                 settings.initial_selection = SelectIndex {
                     page_ix: 4,
-                    group_ix: Some(0),
+                    group_ix: Some(1),
+                };
+                settings
+            });
+            *captured_settings_view.borrow_mut() = Some(settings.clone());
+            Root::new(settings, window, cx)
+        });
+        cx.simulate_resize(size(px(2000.0), px(1200.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            _ = window.draw(cx);
+        });
+
+        let host = provider.as_str();
+        let api_host_row_selector: &'static str =
+            Box::leak(format!("provider-api-host-row-{host}").into_boxed_str());
+        let api_host_label_selector: &'static str =
+            Box::leak(format!("provider-api-host-label-{host}").into_boxed_str());
+        let api_host_selector: &'static str =
+            Box::leak(format!("provider-api-host-input-host-{host}").into_boxed_str());
+        let api_key_row_selector: &'static str =
+            Box::leak(format!("provider-api-key-row-{host}").into_boxed_str());
+        let api_key_label_selector: &'static str =
+            Box::leak(format!("provider-api-key-label-{host}").into_boxed_str());
+        let api_key_selector: &'static str =
+            Box::leak(format!("provider-api-key-input-host-{host}").into_boxed_str());
+        let compatibility_divider_selector: &'static str =
+            Box::leak(format!("provider-divider-{host}-compatibility").into_boxed_str());
+        let credential_divider_selector: &'static str =
+            Box::leak(format!("provider-divider-{host}-credentials").into_boxed_str());
+        let model_divider_selector: &'static str =
+            Box::leak(format!("provider-divider-{host}-models").into_boxed_str());
+        let chips_selector: &'static str =
+            Box::leak(format!("provider-model-chips-{host}").into_boxed_str());
+        let chip_selector: &'static str =
+            Box::leak(format!("provider-model-chip-{host}-local-model").into_boxed_str());
+        let trash_selector: &'static str =
+            Box::leak(format!("provider-model-trash-{host}").into_boxed_str());
+        let actions_selector: &'static str =
+            Box::leak(format!("provider-model-actions-{host}").into_boxed_str());
+        let api_host = cx
+            .debug_bounds(api_host_selector)
+            .expect("API Host input host");
+        let api_key = cx
+            .debug_bounds(api_key_selector)
+            .expect("API Key input host");
+        let api_host_row = cx
+            .debug_bounds(api_host_row_selector)
+            .expect("API Host row");
+        let api_host_label = cx
+            .debug_bounds(api_host_label_selector)
+            .expect("API Host label");
+        let api_key_row = cx.debug_bounds(api_key_row_selector).expect("API Key row");
+        let api_key_label = cx
+            .debug_bounds(api_key_label_selector)
+            .expect("API Key label");
+        assert_eq!(api_host.right(), api_host_row.right());
+        assert_eq!(api_key.right(), api_key_row.right());
+        assert!(api_host.left() > api_host_label.right());
+        assert!(api_key.left() > api_key_label.right());
+        assert!(api_host.size.width > api_host_row.size.width - px(160.0));
+        assert!(api_key.size.width > api_key_row.size.width - px(160.0));
+
+        let compatibility_divider = cx
+            .debug_bounds(compatibility_divider_selector)
+            .expect("Compatibility divider");
+        let credential_divider = cx
+            .debug_bounds(credential_divider_selector)
+            .expect("Credential divider");
+        let model_divider = cx
+            .debug_bounds(model_divider_selector)
+            .expect("Model divider");
+        for divider in [compatibility_divider, credential_divider, model_divider] {
+            assert_eq!(divider.size.height, px(1.0));
+            assert!(divider.size.width > px(400.0));
+        }
+
+        assert!(cx.debug_bounds(trash_selector).is_none());
+        let settings = settings_view
+            .borrow()
+            .as_ref()
+            .expect("settings view")
+            .clone();
+        let initial_chip = cx
+            .debug_bounds(chip_selector)
+            .expect("initial draggable model chip");
+        cx.simulate_event(ScrollWheelEvent {
+            position: initial_chip.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-160.0))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let chip = cx
+            .debug_bounds(chip_selector)
+            .expect("draggable model chip");
+        cx.simulate_mouse_down(chip.center(), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(chip.center().x + px(8.0), chip.center().y),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            _ = window.draw(cx);
+        });
+        assert_eq!(
+            settings.read_with(cx, |this, _| this.active_model_drag),
+            Some(provider)
+        );
+        let chips = cx.debug_bounds(chips_selector).expect("model chips");
+        let trash = cx.debug_bounds(trash_selector).expect("model trash target");
+        let actions = cx.debug_bounds(actions_selector).expect("model actions");
+        let active_model_divider = cx
+            .debug_bounds(model_divider_selector)
+            .expect("active Model divider");
+        assert_eq!(trash.size.height, px(48.0));
+        assert!(trash.size.width > px(400.0));
+        assert!(trash.top() >= chips.bottom());
+        assert!(active_model_divider.top() >= trash.bottom());
+        assert!(actions.top() >= active_model_divider.bottom());
+
+        cx.simulate_mouse_move(trash.center(), Some(MouseButton::Left), Modifiers::none());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        cx.simulate_mouse_up(trash.center(), MouseButton::Left, Modifiers::none());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds(trash_selector).is_none());
+    }
+
+    #[gpui::test]
+    fn renders_cached_provider_model_picker(cx: &mut TestAppContext) {
+        initialize_ui_test(cx);
+        cx.update(|cx| {
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            settings.ai.provider_order = vec![AiProvider::OpenAi];
+            cx.global_mut::<SettingsStore>()
+                .set_settings_in_memory(settings);
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let settings = cx.new(|cx| {
+                let mut settings = SettingsWindow::new(|_| {}, cx);
+                settings.initial_selection = SelectIndex {
+                    page_ix: 4,
+                    group_ix: Some(1),
                 };
                 let provider = AiProvider::OpenAi;
                 let signature = SettingsWindow::current_model_request_signature(provider, cx);
@@ -988,23 +1179,18 @@ mod tests {
                     provider,
                     CachedModelCatalog {
                         signature,
-                        models: vec![
-                            AiModelInfo {
-                                id: "remote-model-a".to_string(),
-                                label: "Remote Model A".to_string(),
+                        models: (0..120)
+                            .map(|ix| AiModelInfo {
+                                id: format!("remote-model-{ix:03}"),
+                                label: format!("Remote Model {ix:03}"),
                                 owned_by: Some("test".to_string()),
-                            },
-                            AiModelInfo {
-                                id: "remote-model-b".to_string(),
-                                label: "Remote Model B".to_string(),
-                                owned_by: Some("test".to_string()),
-                            },
-                        ],
+                            })
+                            .collect(),
                     },
                 );
                 settings.model_picker = ModelPickerState {
                     provider: Some(provider),
-                    selected: BTreeSet::from(["remote-model-a".to_string()]),
+                    selected: BTreeSet::from(["remote-model-000".to_string()]),
                 };
                 settings
             });
@@ -1014,5 +1200,49 @@ mod tests {
             _ = window.draw(cx);
             _ = window.draw(cx);
         });
+
+        let panel = cx
+            .debug_bounds("provider-model-picker-panel")
+            .expect("model picker panel");
+        let catalog = cx
+            .debug_bounds("provider-model-catalog-scroll")
+            .expect("model catalog scroll viewport");
+        let footer = cx
+            .debug_bounds("provider-model-picker-footer")
+            .expect("model picker footer");
+        let last_selector = "provider-model-catalog-option-openai-remote-model-119";
+        let last_before = cx
+            .debug_bounds(last_selector)
+            .expect("last catalog model")
+            .top();
+        assert!(panel.size.height <= px(520.0));
+        assert!(
+            catalog.size.height < panel.size.height,
+            "panel={panel:?}, catalog={catalog:?}, footer={footer:?}"
+        );
+        assert!(footer.bottom() <= panel.bottom());
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: catalog.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-240.0))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            _ = window.draw(cx);
+        });
+        let last_after = cx
+            .debug_bounds(last_selector)
+            .expect("last catalog model after scrolling")
+            .top();
+        let footer_after = cx
+            .debug_bounds("provider-model-picker-footer")
+            .expect("model picker footer after scrolling");
+        assert!(
+            last_after < last_before,
+            "panel={panel:?}, catalog={catalog:?}, footer={footer:?}, \
+             last_before={last_before:?}, last_after={last_after:?}"
+        );
+        assert_eq!(footer_after, footer);
     }
 }

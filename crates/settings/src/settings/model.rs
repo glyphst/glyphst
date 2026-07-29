@@ -230,17 +230,31 @@ impl Settings {
             }
 
             if let Some(providers) = ai.get("providers").and_then(KdlNode::children) {
+                let mut ordered_providers = Vec::new();
+                let mut has_ordered_provider_nodes = false;
                 for node in providers.nodes() {
-                    let Some(provider) = AiProvider::from_str(node.name().value()) else {
+                    let provider_name = if node.name().value() == "provider" {
+                        has_ordered_provider_nodes = true;
+                        node.get(0).and_then(KdlValue::as_string)
+                    } else {
+                        Some(node.name().value())
+                    };
+                    let Some(provider) = provider_name.and_then(AiProvider::from_str) else {
                         continue;
                     };
                     let Some(children) = node.children() else {
                         continue;
                     };
+                    if !ordered_providers.contains(&provider) {
+                        ordered_providers.push(provider);
+                    }
                     settings.ai.providers.insert(
                         provider,
                         AiProviderConfig::from_document(provider, children),
                     );
+                }
+                if has_ordered_provider_nodes {
+                    settings.ai.provider_order = ordered_providers;
                 }
             }
             if legacy_provider_set {
@@ -622,16 +636,14 @@ impl Settings {
 
             let mut providers = KdlNode::new("providers");
             let providers_children = providers.ensure_children();
-            for provider in AiProvider::ALL {
+            for provider in &self.ai.provider_order {
                 let Some(config) = self.ai.providers.get(&provider) else {
                     continue;
                 };
-                if config.is_default_for(provider) {
-                    continue;
-                }
 
-                let mut provider_node = KdlNode::new(provider.as_str());
-                config.write_to_document(provider_node.ensure_children());
+                let mut provider_node = KdlNode::new("provider");
+                provider_node.push(provider.as_str());
+                config.write_to_document(*provider, provider_node.ensure_children());
                 providers_children.nodes_mut().push(provider_node);
             }
             if !providers_children.nodes().is_empty() {

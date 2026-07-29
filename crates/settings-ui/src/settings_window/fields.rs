@@ -3,9 +3,13 @@ use glyphst_settings::{
     AiModel, AiProvider, SettingsStore,
     theme::{PartialTheme, Theme},
 };
+use glyphst_ui::{
+    icons::{Icon, IconName},
+    tooltip::text_tooltip,
+};
 use gpui::{
-    Anchor, AnyElement, App, AppContext, Entity, Hsla, IntoElement, SharedString, Subscription,
-    Window, div, prelude::*, px, rgb, rgba,
+    Anchor, AnyElement, App, AppContext, Context, Entity, Hsla, IntoElement, Render, SharedString,
+    Subscription, Window, div, prelude::*, px, rgb, rgba,
 };
 use gpui_component::{
     ActiveTheme as _, AxisExt as _, Disableable as _, Sizable as _, StyledExt as _,
@@ -30,6 +34,7 @@ struct BoundInputConfig {
     value: SharedString,
     placeholder: SharedString,
     masked: bool,
+    fill_width: bool,
     on_change: TextChangeHandler,
 }
 
@@ -52,6 +57,23 @@ struct ModelCatalogSearchState {
     _subscription: Subscription,
 }
 
+#[derive(Clone)]
+struct DraggedProviderModel {
+    provider: AiProvider,
+    id: String,
+    name: String,
+}
+
+impl Render for DraggedProviderModel {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Tag::secondary()
+            .outline()
+            .small()
+            .rounded_full()
+            .child(self.name.clone())
+    }
+}
+
 struct ColorPickerBinding {
     picker: Entity<ColorPickerState>,
     current: u32,
@@ -70,6 +92,15 @@ pub(super) struct ColorSetting {
 
 fn channel_to_u8(channel: f32) -> u32 {
     (channel.clamp(0.0, 1.0) * 255.0).round() as u32
+}
+
+fn fetched_model_display_name(label: &str, id: &str) -> String {
+    let label = label.trim();
+    if label.is_empty() {
+        id.to_string()
+    } else {
+        label.to_string()
+    }
 }
 
 pub(super) fn hsla_to_u32(color: Hsla, with_alpha: bool) -> u32 {
@@ -104,6 +135,7 @@ impl SettingsWindow {
             value,
             placeholder,
             masked,
+            fill_width,
             on_change,
         } = config;
         let initial_value = value.clone();
@@ -164,7 +196,9 @@ impl SettingsWindow {
             .with_size(options.size)
             .when(masked, |input| input.mask_toggle())
             .map(|input| {
-                if options.layout.is_horizontal() {
+                if fill_width {
+                    input.w_full().min_w_0()
+                } else if options.layout.is_horizontal() {
                     input.w_64()
                 } else {
                     input.w_full()
@@ -195,6 +229,7 @@ impl SettingsWindow {
                     value: value(cx),
                     placeholder: placeholder.clone(),
                     masked,
+                    fill_width: false,
                     on_change: set_value.clone(),
                 },
                 options,
@@ -204,11 +239,101 @@ impl SettingsWindow {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn bound_text_input<S>(
+        id: impl Into<SharedString>,
+        value: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+        masked: bool,
+        set_value: S,
+        options: &RenderOptions,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement
+    where
+        S: Fn(SharedString, &mut App) + 'static,
+    {
+        Self::bound_input(
+            BoundInputConfig {
+                id: id.into(),
+                value: value.into(),
+                placeholder: placeholder.into(),
+                masked,
+                fill_width: true,
+                on_change: Rc::new(set_value),
+            },
+            options,
+            window,
+            cx,
+        )
+    }
+
+    pub(super) fn provider_connection_field(
+        provider: AiProvider,
+        view: Entity<Self>,
+        options: &RenderOptions,
+        cx: &mut App,
+    ) -> AnyElement {
+        let (connection_loading, connection_status, connection_failed) = {
+            let connection = &view.read(cx).provider_operation;
+            if connection.provider == Some(provider) {
+                (
+                    connection.loading,
+                    connection.status.clone(),
+                    connection.failed,
+                )
+            } else {
+                (false, None, false)
+            }
+        };
+        let test_view = view;
+        let muted = cx.theme().muted_foreground;
+
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .min_w_0()
+                    .when_some(connection_status, |this, status| {
+                        this.child(
+                            Label::new(status)
+                                .text_xs()
+                                .text_color(if connection_failed {
+                                    cx.theme().danger
+                                } else {
+                                    muted
+                                }),
+                        )
+                    }),
+            )
+            .child(
+                Button::new(SharedString::from(format!(
+                    "test-provider-{}",
+                    provider.as_str()
+                )))
+                .label(crate::fl!("settings-test-connection"))
+                .outline()
+                .loading(connection_loading)
+                .with_size(options.size)
+                .disabled(options.disabled || connection_loading)
+                .on_click(move |_, _, cx| {
+                    test_view.update(cx, |this, cx| {
+                        this.test_provider_connection(provider, cx);
+                    });
+                }),
+            )
+            .into_any_element()
+    }
+
     fn provider_model_picker_panel(
         provider: AiProvider,
         view: Entity<Self>,
         search_input: Entity<InputState>,
         popover: Entity<PopoverState>,
+        window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
         let (catalog_loading, catalog_status, catalog_failed, catalog_cached, catalog, selected) = {
@@ -276,18 +401,24 @@ impl SettingsWindow {
             })
             .count();
         let muted = cx.theme().muted_foreground;
+        let provider_name = cx
+            .global::<SettingsStore>()
+            .settings
+            .ai
+            .provider_name(provider);
 
         let model_tags = filtered_models.into_iter().map(|model| {
             let model_id = model.id.clone();
+            let model_selector = format!(
+                "provider-model-catalog-option-{}-{model_id}",
+                provider.as_str()
+            );
             let is_added = existing.contains(&model_id);
             let is_selected = selected.contains(&model_id);
-            let label = if model.label == model.id {
-                model.id
-            } else {
-                format!("{} · {}", model.label, model.id)
-            };
+            let label = fetched_model_display_name(&model.label, &model.id);
             if is_added {
                 div()
+                    .debug_selector(move || model_selector.clone())
                     .child(
                         Tag::success()
                             .outline()
@@ -306,6 +437,7 @@ impl SettingsWindow {
                         "provider-model-option-{}-{model_id}",
                         provider.as_str()
                     )))
+                    .debug_selector(move || model_selector.clone())
                     .cursor_pointer()
                     .on_click(move |_, _, cx| {
                         view.update(cx, |this, cx| {
@@ -337,37 +469,39 @@ impl SettingsWindow {
         let clear_ids = selected.iter().cloned().collect::<Vec<_>>();
         let cancel_popover = popover.clone();
         let confirm_popover = popover;
+        let viewport = window.viewport_size();
+        let panel_width = px(480.0).min((viewport.width - px(32.0)).max(px(0.0)));
+        let panel_height = px(520.0).min((viewport.height - px(32.0)).max(px(0.0)));
 
         v_flex()
-            .w(px(480.0))
-            .max_w(px(480.0))
+            .debug_selector(|| "provider-model-picker-panel".to_string())
+            .w(panel_width)
+            .max_w(panel_width)
+            .h(panel_height)
+            .max_h(panel_height)
+            .overflow_hidden()
             .child(
-                v_flex()
-                    .gap_1()
-                    .px_3()
-                    .pt_3()
-                    .child(
-                        Label::new(crate::fl!(
-                            "settings-add-provider-models",
-                            provider = provider.label()
-                        ))
-                        .text_sm()
-                        .font_semibold(),
-                    )
-                    .child(
-                        Label::new(crate::fl!("settings-model-catalog-hint"))
-                            .text_xs()
-                            .text_color(muted),
-                    ),
+                v_flex().flex_none().gap_1().px_3().pt_3().child(
+                    Label::new(crate::fl!(
+                        "settings-add-provider-models",
+                        provider = provider_name
+                    ))
+                    .text_sm()
+                    .font_semibold(),
+                ),
             )
             .child(
                 div()
+                    .flex_none()
+                    .w_full()
+                    .min_w_0()
                     .px_3()
                     .pt_3()
-                    .child(Input::new(&search_input).small().w_full()),
+                    .child(Input::new(&search_input).small().w_full().min_w_0()),
             )
             .child(
                 h_flex()
+                    .flex_none()
                     .justify_between()
                     .gap_2()
                     .px_3()
@@ -422,62 +556,72 @@ impl SettingsWindow {
                     ),
             )
             .child(
-                v_flex()
-                    .id(SharedString::from(format!(
-                        "provider-model-catalog-{}",
-                        provider.as_str()
-                    )))
-                    .w_full()
-                    .max_h(px(260.0))
-                    .overflow_y_scrollbar()
-                    .px_3()
-                    .py_2()
-                    .when(!catalog_cached && !catalog_loading, |this| {
-                        this.child(
-                            Label::new(crate::fl!("settings-model-catalog-empty"))
-                                .text_sm()
-                                .text_color(muted),
-                        )
-                    })
-                    .when(catalog_cached && catalog.is_empty(), |this| {
-                        this.child(
-                            Label::new(crate::fl!("settings-no-models-returned"))
-                                .text_sm()
-                                .text_color(muted),
-                        )
-                    })
-                    .when(
-                        catalog_cached && !catalog.is_empty() && !has_filtered_models,
-                        |this| {
-                            this.child(
-                                Label::new(crate::fl!("settings-no-matching-models-period"))
-                                    .text_sm()
-                                    .text_color(muted),
-                            )
-                        },
-                    )
-                    .child(
-                        h_flex()
-                            .items_start()
-                            .flex_wrap()
-                            .gap_2()
-                            .children(model_tags),
-                    ),
+                v_flex().flex_1().min_h_0().overflow_hidden().child(
+                    div()
+                        .debug_selector(|| "provider-model-catalog-scroll".to_string())
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(
+                            v_flex()
+                                .id(SharedString::from(format!(
+                                    "provider-model-catalog-{}",
+                                    provider.as_str()
+                                )))
+                                .size_full()
+                                .overflow_y_scrollbar()
+                                .px_3()
+                                .py_2()
+                                .when(!catalog_cached && !catalog_loading, |this| {
+                                    this.child(
+                                        Label::new(crate::fl!("settings-model-catalog-empty"))
+                                            .text_sm()
+                                            .text_color(muted),
+                                    )
+                                })
+                                .when(catalog_cached && catalog.is_empty(), |this| {
+                                    this.child(
+                                        Label::new(crate::fl!("settings-no-models-returned"))
+                                            .text_sm()
+                                            .text_color(muted),
+                                    )
+                                })
+                                .when(
+                                    catalog_cached && !catalog.is_empty() && !has_filtered_models,
+                                    |this| {
+                                        this.child(
+                                            Label::new(crate::fl!(
+                                                "settings-no-matching-models-period"
+                                            ))
+                                            .text_sm()
+                                            .text_color(muted),
+                                        )
+                                    },
+                                )
+                                .child(
+                                    h_flex()
+                                        .items_start()
+                                        .flex_none()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .children(model_tags),
+                                ),
+                        ),
+                ),
             )
             .when_some(catalog_status, |this, status| {
-                this.child(
-                    div()
-                        .px_3()
-                        .pb_2()
-                        .child(Label::new(status).text_xs().text_color(if catalog_failed {
-                            cx.theme().danger
-                        } else {
-                            muted
-                        })),
-                )
+                this.child(div().flex_none().px_3().pb_2().child(
+                    Label::new(status).text_xs().text_color(if catalog_failed {
+                        cx.theme().danger
+                    } else {
+                        muted
+                    }),
+                ))
             })
             .child(
                 h_flex()
+                    .debug_selector(|| "provider-model-picker-footer".to_string())
+                    .flex_none()
                     .justify_between()
                     .gap_2()
                     .border_t_1()
@@ -547,13 +691,186 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    pub(super) fn provider_models_field(
+    pub(super) fn provider_model_list_field(
+        provider: AiProvider,
+        view: Entity<Self>,
+        options: &RenderOptions,
+        cx: &mut App,
+    ) -> AnyElement {
+        let fixed_catalog = provider == AiProvider::ChatGptSubscription;
+        let config = cx
+            .global::<SettingsStore>()
+            .settings
+            .ai
+            .provider_config(provider);
+        let muted = cx.theme().muted_foreground;
+        let primary = cx.theme().primary;
+        let danger = cx.theme().danger;
+        let active_model_drag =
+            view.read(cx).active_model_drag == Some(provider) && cx.has_active_drag();
+        let disabled = options.disabled;
+        let models_empty = config.models.is_empty();
+        let model_chips = config.models.into_iter().map(|model| {
+            let model_id = model.id.clone();
+            let model_name = model.name.clone();
+            let target_id = model.id.clone();
+            let drop_target_id = model.id.clone();
+            let drop_view = view.clone();
+            let drag_start_view = view.clone();
+            let drag = DraggedProviderModel {
+                provider,
+                id: model.id.clone(),
+                name: model.name.clone(),
+            };
+            let drag_preview = drag.clone();
+            div()
+                .id(SharedString::from(format!(
+                    "provider-model-chip-{}-{model_id}",
+                    provider.as_str()
+                )))
+                .debug_selector({
+                    let selector = format!("provider-model-chip-{}-{model_id}", provider.as_str());
+                    move || selector.clone()
+                })
+                .when(!disabled, |this| this.cursor_grab())
+                .tooltip(text_tooltip(model.id))
+                .when(!disabled, move |this| {
+                    this.drag_over::<DraggedProviderModel>(move |style, dragged, _, _| {
+                        if dragged.provider == provider && dragged.id != target_id {
+                            style.border_b(px(2.0)).border_color(primary)
+                        } else {
+                            style
+                        }
+                    })
+                    .on_drop(move |dragged: &DraggedProviderModel, _, cx| {
+                        if dragged.provider != provider {
+                            return;
+                        }
+                        drop_view.update(cx, |this, cx| {
+                            this.active_model_drag = None;
+                            cx.notify();
+                        });
+                        let dragged_id = dragged.id.clone();
+                        let target_id = drop_target_id.clone();
+                        Self::update_settings(&drop_view, cx, move |settings| {
+                            let config = settings.ai.provider_config_mut(provider);
+                            let Some(from) = config
+                                .models
+                                .iter()
+                                .position(|model| model.id == dragged_id)
+                            else {
+                                return;
+                            };
+                            let Some(to) =
+                                config.models.iter().position(|model| model.id == target_id)
+                            else {
+                                return;
+                            };
+                            config.move_model(from, to);
+                        });
+                    })
+                    .on_drag(drag, move |_, _, _, cx| {
+                        drag_start_view.update(cx, |this, cx| {
+                            this.active_model_drag = Some(provider);
+                            cx.notify();
+                        });
+                        cx.new(|_| drag_preview.clone())
+                    })
+                })
+                .child(
+                    Tag::secondary()
+                        .outline()
+                        .small()
+                        .rounded_full()
+                        .child(model_name),
+                )
+        });
+
+        v_flex()
+            .w_full()
+            .gap_2()
+            .when(models_empty, |this| {
+                this.child(
+                    Label::new(crate::fl!("settings-no-models-added"))
+                        .text_sm()
+                        .text_color(muted),
+                )
+            })
+            .child(
+                h_flex()
+                    .debug_selector({
+                        let selector = format!("provider-model-chips-{}", provider.as_str());
+                        move || selector.clone()
+                    })
+                    .w_full()
+                    .items_start()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(model_chips),
+            )
+            .when(!fixed_catalog && !disabled && active_model_drag, |this| {
+                let trash_view = view.clone();
+                this.child(
+                    h_flex()
+                        .id(SharedString::from(format!(
+                            "delete-provider-model-drop-target-{}",
+                            provider.as_str()
+                        )))
+                        .debug_selector({
+                            let selector = format!("provider-model-trash-{}", provider.as_str());
+                            move || selector.clone()
+                        })
+                        .h(px(48.0))
+                        .w_full()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_dashed()
+                        .border_color(danger.opacity(0.5))
+                        .text_color(danger)
+                        .occlude()
+                        .drag_over::<DraggedProviderModel>(move |style, dragged, _, _| {
+                            if dragged.provider == provider {
+                                style.border_color(danger).bg(danger.opacity(0.08))
+                            } else {
+                                style
+                            }
+                        })
+                        .on_drop(move |dragged: &DraggedProviderModel, _, cx| {
+                            if dragged.provider != provider {
+                                return;
+                            }
+                            cx.stop_propagation();
+                            let model_id = dragged.id.clone();
+                            trash_view.update(cx, |this, cx| {
+                                this.active_model_drag = None;
+                                cx.notify();
+                            });
+                            Self::update_settings(&trash_view, cx, move |settings| {
+                                settings
+                                    .ai
+                                    .provider_config_mut(provider)
+                                    .remove_model(&model_id);
+                            });
+                        })
+                        .child(Icon::new(IconName::Trash2).small())
+                        .child(Label::new(crate::fl!("settings-drop-model-to-delete")).text_sm()),
+                )
+            })
+            .into_any_element()
+    }
+
+    pub(super) fn provider_model_actions_field(
         provider: AiProvider,
         view: Entity<Self>,
         options: &RenderOptions,
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
+        debug_assert_ne!(provider, AiProvider::ChatGptSubscription);
         let state = window.use_keyed_state(
             SharedString::from(format!("provider-model-input-{}", provider.as_str())),
             cx,
@@ -582,8 +899,9 @@ impl SettingsWindow {
                             Self::update_settings(&view, cx, {
                                 let model_id = model_id.clone();
                                 move |settings| {
+                                    let provider_name = settings.ai.provider_name(provider);
                                     settings.ai.provider_config_mut(provider).ensure_model(
-                                        AiModel::new(model_id.clone(), model_id, provider.label()),
+                                        AiModel::new(model_id.clone(), model_id, provider_name),
                                     );
                                 }
                             });
@@ -632,78 +950,20 @@ impl SettingsWindow {
             .settings
             .ai
             .provider_config(provider);
-        let (connection_loading, connection_status, connection_failed, picker_open) = {
-            let this = view.read(cx);
-            let connection = &this.provider_operation;
-            let (connection_loading, connection_status, connection_failed) =
-                if connection.provider == Some(provider) {
-                    (
-                        connection.loading,
-                        connection.status.clone(),
-                        connection.failed,
-                    )
-                } else {
-                    (false, None, false)
-                };
-            (
-                connection_loading,
-                connection_status,
-                connection_failed,
-                this.model_picker.provider == Some(provider),
-            )
-        };
-        let muted = cx.theme().muted_foreground;
-
-        let models_empty = config.models.is_empty();
-        let model_rows = config.models.into_iter().map(|model| {
-            let model_id = model.id.clone();
-            let view = view.clone();
-            h_flex()
-                .w_full()
-                .justify_between()
-                .gap_2()
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .child(Label::new(model.name).text_sm())
-                        .child(Label::new(model.id).text_xs().text_color(muted)),
-                )
-                .child(
-                    Button::new(SharedString::from(format!(
-                        "remove-provider-model-{}-{model_id}",
-                        provider.as_str()
-                    )))
-                    .label(crate::fl!("remove"))
-                    .ghost()
-                    .xsmall()
-                    .disabled(options.disabled)
-                    .on_click(move |_, _, cx| {
-                        Self::update_settings(&view, cx, {
-                            let model_id = model_id.clone();
-                            move |settings| {
-                                settings
-                                    .ai
-                                    .provider_config_mut(provider)
-                                    .remove_model(&model_id);
-                            }
-                        });
-                    }),
-                )
-        });
-
+        let provider_name = config.name;
+        let picker_open = view.read(cx).model_picker.provider == Some(provider);
         let add_view = view.clone();
         let add_input = input.clone();
-        let test_view = view.clone();
         let picker_view = view.clone();
         let picker_panel_view = view.clone();
-        let picker_search = search_input.clone();
+        let picker_search = search_input;
 
         let picker = if options.disabled {
             Button::new(SharedString::from(format!(
                 "open-provider-model-picker-{}",
                 provider.as_str()
             )))
-            .label(crate::fl!("settings-add-models"))
+            .label(crate::fl!("settings-fetch-models"))
             .outline()
             .with_size(options.size)
             .disabled(true)
@@ -726,16 +986,17 @@ impl SettingsWindow {
                     "open-provider-model-picker-{}",
                     provider.as_str()
                 )))
-                .label(crate::fl!("settings-add-models"))
+                .label(crate::fl!("settings-fetch-models"))
                 .outline()
                 .with_size(options.size),
             )
-            .content(move |_, _, cx| {
+            .content(move |_, window, cx| {
                 Self::provider_model_picker_panel(
                     provider,
                     picker_panel_view.clone(),
                     picker_search.clone(),
                     cx.entity(),
+                    window,
                     cx,
                 )
             })
@@ -743,16 +1004,12 @@ impl SettingsWindow {
         };
 
         v_flex()
+            .debug_selector({
+                let selector = format!("provider-model-actions-{}", provider.as_str());
+                move || selector.clone()
+            })
             .w_full()
             .gap_2()
-            .when(models_empty, |this| {
-                this.child(
-                    Label::new(crate::fl!("settings-no-models-added"))
-                        .text_sm()
-                        .text_color(muted),
-                )
-            })
-            .children(model_rows)
             .child(
                 h_flex()
                     .w_full()
@@ -761,7 +1018,8 @@ impl SettingsWindow {
                         Input::new(&input)
                             .with_size(options.size)
                             .disabled(options.disabled)
-                            .flex_1(),
+                            .flex_1()
+                            .min_w_0(),
                     )
                     .child(
                         Button::new(SharedString::from(format!(
@@ -779,9 +1037,10 @@ impl SettingsWindow {
                             }
                             Self::update_settings(&add_view, cx, {
                                 let model_id = model_id.clone();
+                                let provider_name = provider_name.clone();
                                 move |settings| {
                                     settings.ai.provider_config_mut(provider).ensure_model(
-                                        AiModel::new(model_id.clone(), model_id, provider.label()),
+                                        AiModel::new(model_id.clone(), model_id, provider_name),
                                     );
                                 }
                             });
@@ -791,35 +1050,7 @@ impl SettingsWindow {
                         }),
                     ),
             )
-            .child(
-                h_flex().gap_2().child(picker).child(
-                    Button::new(SharedString::from(format!(
-                        "test-provider-{}",
-                        provider.as_str()
-                    )))
-                    .label(crate::fl!("settings-test-connection"))
-                    .outline()
-                    .loading(connection_loading)
-                    .with_size(options.size)
-                    .disabled(options.disabled)
-                    .on_click(move |_, _, cx| {
-                        test_view.update(cx, |this, cx| {
-                            this.test_provider_connection(provider, cx);
-                        });
-                    }),
-                ),
-            )
-            .when_some(connection_status, |this, status| {
-                this.child(
-                    Label::new(status)
-                        .text_xs()
-                        .text_color(if connection_failed {
-                            cx.theme().danger
-                        } else {
-                            muted
-                        }),
-                )
-            })
+            .child(h_flex().gap_2().child(picker))
             .into_any_element()
     }
 
@@ -910,11 +1141,23 @@ impl SettingsWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{hsla_to_u32, u32_to_hsla};
+    use super::{fetched_model_display_name, hsla_to_u32, u32_to_hsla};
 
     #[test]
     fn theme_color_conversion_preserves_rgb_and_rgba() {
         assert_eq!(hsla_to_u32(u32_to_hsla(0x12abef, false), false), 0x12abef);
         assert_eq!(hsla_to_u32(u32_to_hsla(0x12abef66, true), true), 0x12abef66);
+    }
+
+    #[test]
+    fn fetched_model_display_prefers_name_and_falls_back_to_id() {
+        assert_eq!(
+            fetched_model_display_name("OpenAI: GPT-5.6 Sol", "openai/gpt-5.6-sol"),
+            "OpenAI: GPT-5.6 Sol"
+        );
+        assert_eq!(
+            fetched_model_display_name("", "openai/gpt-5.6-sol"),
+            "openai/gpt-5.6-sol"
+        );
     }
 }

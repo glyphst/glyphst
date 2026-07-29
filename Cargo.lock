@@ -2805,6 +2805,7 @@ dependencies = [
  "kdl",
  "rust-embed",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

@@ -258,7 +258,7 @@ settings-no-enabled-provider-models = No enabled provider models
 settings-no-models-added = No models added yet.
 settings-no-models-returned = No models returned.
 settings-no-matching-models-period = No matching models.
-settings-add-models = Add Models…
+settings-fetch-models = Fetch Models
 settings-add-model-id = Add ID
 settings-add-provider-models = Add { $provider } Models
 settings-model-catalog-hint = Select one or more models. Provider catalogs are cached while this settings window remains open.
@@ -280,6 +280,13 @@ settings-added-models =
        *[other] Added { $count } models.
     }
 settings-model-list = Model List
+settings-drag-to-reorder = Drag to reorder
+settings-drop-model-to-delete = Drop to delete
+settings-account = Account
+settings-sign-in = Sign in
+settings-sign-out = Sign out
+settings-loading-account = Loading account…
+settings-signing-in = Signing in…
 settings-theme-mode = Theme Mode
 settings-mode = Mode
 settings-light-theme = Light Theme

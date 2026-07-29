@@ -12,23 +12,29 @@ pub struct AiModelInfo {
 }
 
 pub fn test_ai_connection(config: ResolvedAiConfig) -> Result<()> {
-    if config.provider.api_style() == AiApiStyle::OpenAiResponses {
+    if config.api_style == AiApiStyle::OpenAiResponses {
         acquire_request_access()?;
         return Ok(());
+    }
+    if config.base_url.trim().is_empty() {
+        return Err(anyhow!("missing {} API Host", config.provider_name));
+    }
+    if !config.provider.is_custom() && config.api_key.is_empty() {
+        return Err(anyhow!("missing {} API key", config.provider_name));
     }
     list_ai_models(config).map(|_| ())
 }
 
 pub fn list_ai_models(config: ResolvedAiConfig) -> Result<Vec<AiModelInfo>> {
-    if !config.can_request() {
-        return Err(anyhow!(config.missing_credentials_message()));
+    if config.base_url.trim().is_empty() {
+        return Err(anyhow!("missing {} API Host", config.provider_name));
     }
 
     let client = reqwest::blocking::Client::builder()
         .build()
         .context("failed to create HTTP client")?;
 
-    match config.provider.api_style() {
+    match config.api_style {
         AiApiStyle::OpenAi => list_openai_compatible_models(&client, config),
         AiApiStyle::OpenAiResponses => Ok(config
             .provider
@@ -53,7 +59,7 @@ fn list_openai_compatible_models(
         request = request.bearer_auth(config.api_key);
     }
 
-    let value = send_json(request, config.provider.label())?;
+    let value = send_json(request, &config.provider_name)?;
     parse_models_response(value)
 }
 
@@ -61,12 +67,14 @@ fn list_anthropic_models(
     client: &reqwest::blocking::Client,
     config: ResolvedAiConfig,
 ) -> Result<Vec<AiModelInfo>> {
-    let request = client
+    let mut request = client
         .get(anthropic_models_url(&config.base_url))
-        .header("x-api-key", config.api_key)
         .header("anthropic-version", "2023-06-01");
+    if !config.api_key.is_empty() {
+        request = request.header("x-api-key", config.api_key);
+    }
 
-    let value = send_json(request, config.provider.label())?;
+    let value = send_json(request, &config.provider_name)?;
     parse_models_response(value)
 }
 
@@ -155,14 +163,73 @@ fn parse_models_response(value: Value) -> Result<Vec<AiModelInfo>> {
         });
     }
 
-    models.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(models)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{AiProvider, AiThinkingLevel};
     use serde_json::json;
+    use std::{collections::BTreeMap, thread::JoinHandle, time::Duration};
+
+    struct CapturedModelRequest {
+        path: String,
+        headers: BTreeMap<String, String>,
+    }
+
+    fn start_model_server() -> (String, JoinHandle<CapturedModelRequest>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        let base_url = format!("http://{address}");
+        let task = std::thread::spawn(move || {
+            let request = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .expect("model list request did not arrive");
+            let path = request.url().to_string();
+            let headers = request
+                .headers()
+                .iter()
+                .map(|header| {
+                    (
+                        header.field.as_str().to_ascii_lowercase().to_string(),
+                        header.value.as_str().to_string(),
+                    )
+                })
+                .collect();
+            request
+                .respond(tiny_http::Response::from_string(
+                    r#"{"object":"list","data":[{"id":"remote-model","name":"Remote Model"}]}"#,
+                ))
+                .unwrap();
+            CapturedModelRequest { path, headers }
+        });
+        (base_url, task)
+    }
+
+    fn model_config(
+        provider: AiProvider,
+        api_style: AiApiStyle,
+        base_url: String,
+        api_key: impl Into<String>,
+    ) -> ResolvedAiConfig {
+        ResolvedAiConfig {
+            provider,
+            provider_name: if provider.is_custom() {
+                "Custom Provider".to_string()
+            } else {
+                provider.label().to_string()
+            },
+            api_style,
+            enabled: false,
+            model: String::new(),
+            api_key: api_key.into(),
+            base_url,
+            base_url_overridden: provider.is_custom(),
+            thinking_level: AiThinkingLevel::Off,
+        }
+    }
 
     #[test]
     fn builds_model_list_urls() {
@@ -190,14 +257,106 @@ mod tests {
             "data": [
                 {"id": "gpt-4o", "owned_by": "openai"},
                 {"id": "gpt-4o", "owned_by": "openai"},
-                {"id": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5"}
+                {
+                    "id": "claude-sonnet-4-5",
+                    "display_name": "Claude Sonnet 4.5",
+                    "name": "Ignored name"
+                },
+                {"id": "deepseek-chat", "name": "DeepSeek Chat"}
             ]
         }))
         .unwrap();
 
-        assert_eq!(models.len(), 2);
-        assert_eq!(models[0].id, "claude-sonnet-4-5");
-        assert_eq!(models[0].label, "Claude Sonnet 4.5");
-        assert_eq!(models[1].owned_by.as_deref(), Some("openai"));
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "gpt-4o");
+        assert_eq!(models[0].label, "gpt-4o");
+        assert_eq!(models[0].owned_by.as_deref(), Some("openai"));
+        assert_eq!(models[1].label, "Claude Sonnet 4.5");
+        assert_eq!(models[2].label, "DeepSeek Chat");
+    }
+
+    #[test]
+    fn model_catalog_fetch_does_not_require_enabled_model_or_api_key() {
+        let (base_url, task) = start_model_server();
+        let config = model_config(AiProvider::Custom(1), AiApiStyle::OpenAi, base_url, "");
+
+        let models = list_ai_models(config).unwrap();
+        let request = task.join().unwrap();
+
+        assert_eq!(models[0].id, "remote-model");
+        assert_eq!(request.path, "/v1/models");
+        assert!(!request.headers.contains_key("authorization"));
+    }
+
+    #[test]
+    fn fixed_provider_model_catalog_can_be_fetched_anonymously() {
+        let (base_url, task) = start_model_server();
+        let config = model_config(AiProvider::OpenRouter, AiApiStyle::OpenAi, base_url, "");
+
+        list_ai_models(config).unwrap();
+        let request = task.join().unwrap();
+
+        assert_eq!(request.path, "/v1/models");
+        assert!(!request.headers.contains_key("authorization"));
+    }
+
+    #[test]
+    fn model_catalog_fetch_attaches_configured_authentication() {
+        let (base_url, task) = start_model_server();
+        let config = model_config(
+            AiProvider::Custom(2),
+            AiApiStyle::Anthropic,
+            base_url,
+            "secret",
+        );
+
+        list_ai_models(config).unwrap();
+        let request = task.join().unwrap();
+
+        assert_eq!(request.path, "/v1/models");
+        assert_eq!(
+            request.headers.get("x-api-key").map(String::as_str),
+            Some("secret")
+        );
+        assert_eq!(
+            request.headers.get("anthropic-version").map(String::as_str),
+            Some("2023-06-01")
+        );
+    }
+
+    #[test]
+    fn connection_test_requires_fixed_provider_credentials_but_not_a_model() {
+        let fixed = model_config(
+            AiProvider::OpenRouter,
+            AiApiStyle::OpenAi,
+            "http://127.0.0.1:9".to_string(),
+            "",
+        );
+        assert_eq!(
+            test_ai_connection(fixed).unwrap_err().to_string(),
+            "missing OpenRouter API key"
+        );
+
+        let (base_url, task) = start_model_server();
+        let fixed = model_config(
+            AiProvider::OpenRouter,
+            AiApiStyle::OpenAi,
+            base_url,
+            "secret",
+        );
+        test_ai_connection(fixed).unwrap();
+        assert_eq!(
+            task.join()
+                .unwrap()
+                .headers
+                .get("authorization")
+                .map(String::as_str),
+            Some("Bearer secret")
+        );
+
+        let (base_url, task) = start_model_server();
+        let custom = model_config(AiProvider::Custom(3), AiApiStyle::OpenAi, base_url, "");
+        test_ai_connection(custom).unwrap();
+        task.join().unwrap();
     }
 }

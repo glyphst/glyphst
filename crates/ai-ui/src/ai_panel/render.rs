@@ -30,25 +30,33 @@ impl Render for AiPanel {
         let can_send = !self.loading
             && !editing
             && self.generation_failure.is_none()
+            && ai_settings.main_model.is_some()
             && !self.content.trim().is_empty();
         let resolved_main = ai_settings.resolved_main();
         let selected_provider = resolved_main.provider;
         let selected_model = resolved_main.model;
         let selected_thinking_level = ai_settings
             .thinking_level
-            .clamp_for(selected_provider, &selected_model);
-        let provider_models = AiProvider::ALL
-            .into_iter()
+            .clamp_for_style(resolved_main.api_style, &selected_model);
+        let selected_api_style = resolved_main.api_style;
+        let provider_models = ai_settings
+            .ordered_providers()
+            .iter()
+            .copied()
             .filter_map(|provider| {
                 let config = ai_settings.provider_config(provider);
-                (config.enabled && !config.models.is_empty()).then_some((provider, config.models))
+                (config.enabled && !config.models.is_empty()).then_some((
+                    provider,
+                    config.name,
+                    config.models,
+                ))
             })
             .collect::<Vec<_>>();
         let model_label = ai_settings
             .main_model
             .as_ref()
             .map(|model_ref| ai_settings.model_label(model_ref))
-            .unwrap_or_else(|| selected_model.clone());
+            .unwrap_or_else(|| tr("settings-no-enabled-provider-models"));
         let model_search_query = self.model_search_query.clone();
         let model_menu_scroll = self.model_menu_scroll.clone();
         let (has_current_selection, has_current_region, has_selected_pages) =
@@ -140,7 +148,7 @@ impl Render for AiPanel {
             .label(format!("Think {}", selected_thinking_level.label()))
             .dropdown_caret(true)
             .selected(selected_thinking_level != AiThinkingLevel::Off);
-        let thinking_control = if loading {
+        let thinking_control = if loading || selected_model.is_empty() {
             thinking_trigger.disabled(true).into_any_element()
         } else {
             let panel = entity.clone();
@@ -149,7 +157,7 @@ impl Render for AiPanel {
                 .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                     Self::build_thinking_menu(
                         menu,
-                        selected_provider,
+                        selected_api_style,
                         selected_model.clone(),
                         selected_thinking_level,
                         panel.clone(),
@@ -173,7 +181,7 @@ impl Render for AiPanel {
             .tooltip(model_label)
             .dropdown_caret(true)
             .max_w(px(120.0));
-        let model_control = if loading {
+        let model_control = if loading || provider_models.is_empty() {
             model_trigger.disabled(true).into_any_element()
         } else {
             let on_open_panel = entity.clone();

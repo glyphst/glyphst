@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
-use glyphst_settings::ModelRef;
+use glyphst_settings::{AiApiStyle, AiModel, ModelRef};
 
 #[test]
 fn language_code_normalizes_and_validates() {
@@ -640,19 +640,38 @@ fn semantic_cache_keys_separate_protocol_context_model_and_endpoint() {
 
     let mut changed_model = settings.clone();
     let ai_provider = changed_model.ai.resolved_translation().provider;
+    changed_model
+        .ai
+        .provider_config_mut(ai_provider)
+        .ensure_model(AiModel::new("other-model", "Other model", "Test"));
     changed_model.ai.translation_model = Some(ModelRef::new(ai_provider, "other-model"));
     assert_ne!(
         base_key,
         semantic_cache_key(&changed_model, provider, None, &target, &unit)
     );
 
-    let mut changed_endpoint = settings.clone();
+    let mut endpoint_base = settings.clone();
+    let custom_provider = endpoint_base.ai.add_custom_provider(
+        "Private endpoint",
+        AiApiStyle::OpenAi,
+        "https://translation-a.example.test/v1",
+        "",
+    );
+    {
+        let config = endpoint_base.ai.provider_config_mut(custom_provider);
+        config.enabled = true;
+        config.ensure_model(AiModel::new("private-model", "Private model", "Test"));
+    }
+    endpoint_base.ai.translation_model = Some(ModelRef::new(custom_provider, "private-model"));
+    let endpoint_key = semantic_cache_key(&endpoint_base, provider, None, &target, &unit);
+
+    let mut changed_endpoint = endpoint_base.clone();
     changed_endpoint
         .ai
-        .provider_config_mut(ai_provider)
-        .base_url = Some("https://translation.example.test/v1/".to_string());
+        .provider_config_mut(custom_provider)
+        .base_url = Some("https://translation-b.example.test/v1/".to_string());
     assert_ne!(
-        base_key,
+        endpoint_key,
         semantic_cache_key(&changed_endpoint, provider, None, &target, &unit)
     );
     assert!(base_key.starts_with("semantic-v5-"));

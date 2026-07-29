@@ -21,7 +21,7 @@ use glyphst_library::{
     LibraryStore, current_timestamp,
 };
 use glyphst_settings::{
-    AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore,
+    AiApiStyle, AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore,
     localize::{tr, tr_with_number},
     ui_rems,
 };
@@ -78,7 +78,7 @@ pub enum AiPanelEvent {
 struct ModelMenuRenderState {
     selected_provider: AiProvider,
     selected_model: String,
-    provider_models: Vec<(AiProvider, Vec<AiModel>)>,
+    provider_models: Vec<(AiProvider, String, Vec<AiModel>)>,
     search_query: SharedString,
     search_input: Entity<InputState>,
     scroll_handle: ScrollHandle,
@@ -88,7 +88,7 @@ struct ModelMenuRenderState {
 
 #[derive(Clone)]
 enum ModelMenuEntry {
-    Header(AiProvider),
+    Header(String),
     Model(AiProvider, AiModel),
 }
 

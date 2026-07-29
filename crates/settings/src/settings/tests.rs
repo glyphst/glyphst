@@ -349,7 +349,7 @@ ai {
     assert!(config.enabled);
     assert!(config.model("claude-3-5-sonnet-latest").is_some());
     assert_eq!(config.api_key, "test-key");
-    assert_eq!(config.base_url, Some("https://api.example.com".to_string()));
+    assert_eq!(config.base_url, None);
     assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
 }
 
@@ -388,13 +388,185 @@ ai {
     assert!(deepseek.enabled);
     assert!(deepseek.model("deepseek-chat").is_some());
     assert_eq!(deepseek.api_key, "deepseek-key");
-    assert_eq!(
-        deepseek.base_url,
-        Some("https://api.deepseek.com/v1".to_string())
-    );
+    assert_eq!(deepseek.base_url, None);
     let openrouter = settings.ai.provider_config(AiProvider::OpenRouter);
     assert!(openrouter.model("openai/gpt-4o-mini").is_some());
     assert_eq!(openrouter.api_key, "openrouter-key");
+    assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+}
+
+#[test]
+fn defaults_to_only_the_supported_model_providers_in_display_order() {
+    let settings = Settings::default();
+
+    assert_eq!(settings.ai.provider_order, AiProvider::BUILT_INS.to_vec());
+    assert_eq!(settings.ai.providers.len(), AiProvider::BUILT_INS.len());
+    for provider in AiProvider::BUILT_INS {
+        assert_eq!(
+            settings.ai.provider_config(provider).enabled,
+            provider == AiProvider::OpenAi
+        );
+    }
+    assert!(AiProvider::from_str("groq").is_none());
+    assert!(AiProvider::from_str("ollama").is_none());
+}
+
+#[test]
+fn custom_provider_metadata_order_and_models_round_trip() {
+    let mut settings = Settings::default();
+    let provider = settings.ai.add_custom_provider(
+        "  Private Claude  ",
+        AiApiStyle::Anthropic,
+        " https://ai.example.com/v1/ ",
+        "",
+    );
+    {
+        let config = settings.ai.provider_config_mut(provider);
+        config.enabled = true;
+        config.ensure_model(AiModel::new("model-b", "Model B", ""));
+        config.ensure_model(AiModel::new("model-a", "Model A", ""));
+    }
+    let custom_index = settings
+        .ai
+        .provider_order
+        .iter()
+        .position(|entry| *entry == provider)
+        .unwrap();
+    settings.ai.move_provider(custom_index, 0);
+    settings.ai.main_model = Some(ModelRef::new(provider, "model-b"));
+    settings.sanitize();
+
+    let config = settings.ai.provider_config(provider);
+    assert_eq!(config.name, "Private Claude");
+    assert_eq!(config.api_style, AiApiStyle::Anthropic);
+    assert_eq!(
+        config.base_url.as_deref(),
+        Some("https://ai.example.com/v1")
+    );
+    assert_eq!(
+        config
+            .models
+            .iter()
+            .map(|model| model.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Model B", "Model A"]
+    );
+    let resolved = settings.ai.resolved_main();
+    assert_eq!(resolved.provider_name, "Private Claude");
+    assert_eq!(resolved.api_style, AiApiStyle::Anthropic);
+    assert!(resolved.can_request());
+
+    let exported = settings.to_kdl_string();
+    assert!(exported.contains("api_style anthropic-compatible"));
+    assert!(exported.contains("api_host \"https://ai.example.com/v1\""));
+    assert_eq!(parse_settings(&exported).unwrap(), settings);
+}
+
+#[test]
+fn disabling_the_selected_provider_uses_ordered_fallback_without_restoring_it() {
+    let mut settings = Settings::default();
+    settings
+        .ai
+        .provider_config_mut(AiProvider::DeepSeek)
+        .enabled = true;
+    let deepseek_index = settings
+        .ai
+        .provider_order
+        .iter()
+        .position(|provider| *provider == AiProvider::DeepSeek)
+        .unwrap();
+    settings.ai.move_provider(deepseek_index, 0);
+
+    settings.ai.set_provider_enabled(AiProvider::OpenAi, false);
+    let fallback = ModelRef::new(
+        AiProvider::DeepSeek,
+        settings.ai.provider_config(AiProvider::DeepSeek).models[0]
+            .id
+            .clone(),
+    );
+    assert_eq!(settings.ai.main_model, Some(fallback.clone()));
+    assert_eq!(settings.ai.title_model, Some(fallback.clone()));
+    assert_eq!(settings.ai.translation_model, Some(fallback.clone()));
+
+    settings.ai.set_provider_enabled(AiProvider::OpenAi, true);
+    assert_eq!(settings.ai.main_model, Some(fallback));
+}
+
+#[test]
+fn removing_the_only_enabled_model_clears_model_references() {
+    let mut settings = Settings::default();
+    settings
+        .ai
+        .provider_config_mut(AiProvider::OpenAi)
+        .models
+        .clear();
+    settings.sanitize();
+
+    assert!(settings.ai.main_model.is_none());
+    assert!(settings.ai.title_model.is_none());
+    assert!(settings.ai.translation_model.is_none());
+    let resolved = settings.ai.resolved_main();
+    assert!(!resolved.enabled);
+    assert!(!resolved.can_request());
+    assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+}
+
+#[test]
+fn removed_provider_configs_and_builtin_host_overrides_are_dropped() {
+    let settings = parse_settings(
+        r##"
+ai {
+    providers {
+        groq {
+            enabled #true
+            api_key "removed-secret"
+            base_url "https://removed.example.com"
+        }
+        openai {
+            enabled #true
+            base_url "https://override.example.com/v1"
+        }
+    }
+}
+"##,
+    )
+    .unwrap();
+
+    assert_eq!(settings.ai.providers.len(), AiProvider::BUILT_INS.len());
+    assert_eq!(
+        settings.ai.provider_config(AiProvider::OpenAi).base_url,
+        None
+    );
+    let exported = settings.to_kdl_string();
+    assert!(!exported.contains("removed-secret"));
+    assert!(!exported.contains("override.example.com"));
+}
+
+#[test]
+fn chatgpt_catalog_reconciliation_preserves_user_model_order() {
+    let mut settings = Settings::default();
+    let config = settings
+        .ai
+        .provider_config_mut(AiProvider::ChatGptSubscription);
+    config.enabled = true;
+    assert!(config.move_model(0, 2));
+    let expected = config
+        .models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
+    settings.sanitize();
+
+    assert_eq!(
+        settings
+            .ai
+            .provider_config(AiProvider::ChatGptSubscription)
+            .models
+            .iter()
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
     assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
 }
 
@@ -620,7 +792,7 @@ ai {
     assert_eq!(resolved.provider, AiProvider::Anthropic);
     assert_eq!(resolved.model, "claude-3-5-haiku-latest");
     assert_eq!(resolved.api_key, "translation-key");
-    assert_eq!(resolved.base_url, "https://translation.example.com");
+    assert_eq!(resolved.base_url, AiProvider::Anthropic.default_base_url());
     assert_eq!(resolved.thinking_level, AiThinkingLevel::Off);
     assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
 }
@@ -904,10 +1076,7 @@ ai {
     assert_eq!(title_model.id, "gpt-4o-mini");
     let config = settings.ai.provider_config(AiProvider::OpenAi);
     assert_eq!(config.api_key, "title-key");
-    assert_eq!(
-        config.base_url,
-        Some("https://api.example.com/v1".to_string())
-    );
+    assert_eq!(config.base_url, None);
     assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
 }
 
@@ -938,9 +1107,9 @@ ai {
     let main = settings.ai.resolved_main();
     let title = settings.ai.resolved_title().unwrap();
     assert_eq!(main.api_key, "main-key");
-    assert_eq!(main.base_url, "https://main.example.com");
+    assert_eq!(main.base_url, AiProvider::OpenAi.default_base_url());
     assert_eq!(title.api_key, "main-key");
-    assert_eq!(title.base_url, "https://main.example.com");
+    assert_eq!(title.base_url, AiProvider::OpenAi.default_base_url());
     assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
 }
 
