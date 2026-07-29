@@ -123,7 +123,6 @@ const THUMBNAIL_SIDEBAR_MIN_THUMBNAIL_WIDTH: f32 = 96.0;
 const THUMBNAIL_SIDEBAR_MAX_THUMBNAIL_WIDTH: f32 = 220.0;
 const THUMBNAIL_SIDEBAR_COMPACT_HEADER_WIDTH: f32 = 300.0;
 pub const SIDEBAR_MIN_WIDTH: f32 = 150.0;
-pub const SIDEBAR_MAX_WIDTH_RATIO: f32 = 0.5;
 const GRID_OVERVIEW_DEFAULT_ZOOM: f32 = 1.0;
 const GRID_OVERVIEW_MIN_ZOOM: f32 = 0.25;
 const GRID_OVERVIEW_MAX_ZOOM: f32 = 4.0;
@@ -969,14 +968,6 @@ impl DocumentSidebar {
             Self::Notes => widths.notes = width,
         }
     }
-
-    fn default_width(self) -> f32 {
-        match self {
-            Self::Thumbnails => THUMBNAIL_SIDEBAR_WIDTH,
-            Self::Toc => TOC_SIDEBAR_WIDTH,
-            Self::Notes => NOTES_SIDEBAR_WIDTH,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1035,16 +1026,6 @@ pub fn sanitize_sidebar_widths(widths: SidebarWidths) -> SidebarWidths {
         notes: sanitize(widths.notes, NOTES_SIDEBAR_WIDTH),
         ai: sanitize(widths.ai, AI_PANEL_WIDTH),
     }
-}
-
-pub fn clamp_sidebar_width(sidebar: Option<DocumentSidebar>, width: f32, window: &Window) -> f32 {
-    let fallback = sidebar
-        .map(DocumentSidebar::default_width)
-        .unwrap_or(AI_PANEL_WIDTH);
-    let width = if width.is_finite() { width } else { fallback };
-    let max_width =
-        (window.bounds().size.width.as_f32() * SIDEBAR_MAX_WIDTH_RATIO).max(SIDEBAR_MIN_WIDTH);
-    width.clamp(SIDEBAR_MIN_WIDTH, max_width)
 }
 
 #[derive(Clone, Copy)]

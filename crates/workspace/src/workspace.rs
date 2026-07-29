@@ -172,7 +172,6 @@ impl Workspace {
         };
 
         workspace.subscribe_to_pane(&pane, window, cx);
-        workspace.observe_dock_resizing(cx);
         cx.observe(&document_translation_jobs, |_, _, cx| cx.notify())
             .detach();
         if let Some(activity_center) = ActivityCenter::try_global(cx) {
@@ -1694,7 +1693,9 @@ mod tests {
     use std::{fs, path::Path, time::SystemTime};
 
     use glyphst_translation_ui::DocumentTranslationOpenMode;
-    use gpui::{AppContext as _, Modifiers, TestAppContext};
+    use gpui::{
+        AppContext as _, Modifiers, MouseButton, MouseUpEvent, TestAppContext, point, px, size,
+    };
     use gpui_component::{Root, WindowExt as _};
 
     use super::{
@@ -1845,6 +1846,248 @@ mod tests {
             assert_eq!(workspace.docks.left_sidebar, None);
             assert!(!workspace.docks.ai_panel_open);
         });
+    }
+
+    #[gpui::test]
+    fn dock_widths_stay_fixed_across_window_resizes_and_restore_after_constraint(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.docks.preferred_widths.toc = 280.0;
+            workspace.docks.preferred_widths.ai = 360.0;
+            workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
+            workspace.toggle_ai_dock(window, cx);
+        });
+
+        cx.simulate_resize(size(px(800.0), px(700.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("workspace-left-dock").unwrap().size.width,
+            px(280.0)
+        );
+        assert_eq!(
+            cx.debug_bounds("workspace-ai-dock").unwrap().size.width,
+            px(360.0)
+        );
+
+        cx.simulate_resize(size(px(1_600.0), px(900.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("workspace-left-dock").unwrap().size.width,
+            px(280.0)
+        );
+        assert_eq!(
+            cx.debug_bounds("workspace-ai-dock").unwrap().size.width,
+            px(360.0)
+        );
+
+        cx.simulate_resize(size(px(500.0), px(700.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let constrained_left = cx
+            .debug_bounds("workspace-left-dock")
+            .unwrap()
+            .size
+            .width
+            .as_f32();
+        let constrained_right = cx
+            .debug_bounds("workspace-ai-dock")
+            .unwrap()
+            .size
+            .width
+            .as_f32();
+        assert!(constrained_left < 280.0);
+        assert!(constrained_right < 360.0);
+        assert!((constrained_left + constrained_right - 498.0).abs() < 0.1);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.docks.preferred_widths.toc, 280.0);
+            assert_eq!(workspace.docks.preferred_widths.ai, 360.0);
+        });
+
+        cx.simulate_resize(size(px(1_600.0), px(900.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("workspace-left-dock").unwrap().size.width,
+            px(280.0)
+        );
+        assert_eq!(
+            cx.debug_bounds("workspace-ai-dock").unwrap().size.width,
+            px(360.0)
+        );
+    }
+
+    #[gpui::test]
+    fn double_clicking_dock_handles_restores_each_default_width(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.docks.preferred_widths.toc = 420.0;
+            workspace.docks.preferred_widths.notes = 410.0;
+            workspace.docks.preferred_widths.ai = 520.0;
+            workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
+            workspace.toggle_ai_dock(window, cx);
+        });
+        cx.simulate_resize(size(px(1_200.0), px(800.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let left_handle = cx
+            .debug_bounds("workspace-left-dock-resize-handle")
+            .unwrap()
+            .center();
+        cx.simulate_event(MouseUpEvent {
+            position: left_handle,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.docks.preferred_widths.toc, 280.0);
+            assert_eq!(workspace.docks.preferred_widths.ai, 520.0);
+        });
+
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let right_handle = cx
+            .debug_bounds("workspace-ai-dock-resize-handle")
+            .unwrap()
+            .center();
+        cx.simulate_event(MouseUpEvent {
+            position: right_handle,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.docks.preferred_widths.toc, 280.0);
+            assert_eq!(workspace.docks.preferred_widths.ai, 360.0);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_left_sidebar(DocumentSidebar::Notes, window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("workspace-left-dock").unwrap().size.width,
+            px(410.0)
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("workspace-left-dock").unwrap().size.width,
+            px(280.0)
+        );
+    }
+
+    #[gpui::test]
+    fn dragging_a_dock_handle_can_exceed_half_the_window(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
+        });
+        cx.simulate_resize(size(px(1_000.0), px(700.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let handle = cx
+            .debug_bounds("workspace-left-dock-resize-handle")
+            .unwrap()
+            .center();
+        cx.simulate_mouse_down(handle, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(px(600.0), handle.y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(800.0), handle.y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(800.0), handle.y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.docks.preferred_widths.toc, 800.0);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("workspace-left-dock").unwrap().size.width,
+            px(800.0)
+        );
     }
 
     #[gpui::test]
