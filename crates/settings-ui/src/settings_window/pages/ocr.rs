@@ -3,7 +3,7 @@ use glyphst_settings::{
     DEFAULT_PADDLE_OCR_ENDPOINT, DEFAULT_PADDLE_OCR_MODEL, DEFAULT_UNLIMITED_OCR_ENDPOINT, OcrMode,
     OcrProvider, Settings, SettingsStore,
 };
-use gpui::{App, Axis, Context, Entity, SharedString, prelude::*};
+use gpui::{App, Context, Entity, SharedString, prelude::*};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
     button::Button,
@@ -11,6 +11,18 @@ use gpui_component::{
     setting::{SettingField, SettingGroup, SettingItem, SettingPage},
     v_flex,
 };
+
+fn ocr_mode_hint_id(mode: OcrMode) -> &'static str {
+    match mode {
+        OcrMode::Always => "settings-ocr-mode-always-hint",
+        OcrMode::Auto => "settings-ocr-mode-auto-hint",
+        OcrMode::Off => "settings-ocr-mode-off-hint",
+    }
+}
+
+fn ocr_mode_hint(mode: OcrMode) -> String {
+    glyphst_settings::localize::tr(ocr_mode_hint_id(mode))
+}
 
 impl SettingsWindow {
     fn clear_ocr_status(view: &Entity<Self>, cx: &mut App) {
@@ -21,12 +33,7 @@ impl SettingsWindow {
         });
     }
 
-    fn ocr_connection_item(
-        &self,
-        provider: OcrProvider,
-        description: impl Into<gpui_component::text::Text>,
-        cx: &mut Context<Self>,
-    ) -> SettingItem {
+    fn ocr_connection_item(&self, provider: OcrProvider, cx: &mut Context<Self>) -> SettingItem {
         let view = cx.entity();
         SettingItem::new(
             crate::fl!("settings-test-connection"),
@@ -95,12 +102,12 @@ impl SettingsWindow {
                     })
             }),
         )
-        .description(description)
     }
 
     pub(super) fn ocr_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
         let view = cx.entity();
         let defaults = Settings::default();
+        let current_mode = cx.global::<SettingsStore>().settings.ocr.mode;
 
         let mode = SettingItem::new(
             crate::fl!("settings-mode"),
@@ -144,7 +151,7 @@ impl SettingsWindow {
             )
             .default_value(defaults.ocr.mode.as_str().to_string()),
         )
-        .description(crate::fl!("settings-ocr-mode-hint"));
+        .description(ocr_mode_hint(current_mode));
 
         let provider = SettingItem::new(
             crate::fl!("settings-ocr-provider"),
@@ -318,8 +325,7 @@ impl SettingsWindow {
                     }
                 },
             ),
-        )
-        .layout(Axis::Vertical);
+        );
 
         let paddle_token = SettingItem::new(
             crate::fl!("settings-ocr-paddle-token"),
@@ -407,8 +413,7 @@ impl SettingsWindow {
                     }
                 },
             ),
-        )
-        .layout(Axis::Vertical);
+        );
 
         let paddle_model = SettingItem::new(
             crate::fl!("settings-ocr-model"),
@@ -452,16 +457,8 @@ impl SettingsWindow {
             ),
         );
 
-        let unlimited_test = self.ocr_connection_item(
-            OcrProvider::Unlimited,
-            crate::fl!("settings-ocr-unlimited-connection-hint"),
-            cx,
-        );
-        let paddle_test = self.ocr_connection_item(
-            OcrProvider::Paddle,
-            crate::fl!("settings-ocr-paddle-connection-hint"),
-            cx,
-        );
+        let unlimited_test = self.ocr_connection_item(OcrProvider::Unlimited, cx);
+        let paddle_test = self.ocr_connection_item(OcrProvider::Paddle, cx);
 
         SettingPage::new(crate::fl!("settings-tab-ocr"))
             .description("Configure when OCR runs and the credentials for each OCR service.")
@@ -481,5 +478,24 @@ impl SettingsWindow {
                     .title(crate::fl!("settings-ocr-paddle"))
                     .items([paddle_token, paddle_endpoint, paddle_model, paddle_test]),
             ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ocr_mode_hint_id;
+    use glyphst_settings::OcrMode;
+
+    #[test]
+    fn mode_hint_matches_the_selected_mode() {
+        assert_eq!(
+            ocr_mode_hint_id(OcrMode::Always),
+            "settings-ocr-mode-always-hint"
+        );
+        assert_eq!(
+            ocr_mode_hint_id(OcrMode::Auto),
+            "settings-ocr-mode-auto-hint"
+        );
+        assert_eq!(ocr_mode_hint_id(OcrMode::Off), "settings-ocr-mode-off-hint");
     }
 }

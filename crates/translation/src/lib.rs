@@ -618,20 +618,6 @@ impl TranslationService {
         target_language: &LanguageCode,
         unit: SemanticTranslationUnit,
     ) -> std::result::Result<SemanticTranslation, TranslationError> {
-        if !settings
-            .translation
-            .provider_config(TranslationProvider::Ai)
-            .enabled
-        {
-            return Err(TranslationError {
-                provider: TranslationProvider::Ai,
-                category: TranslationErrorCategory::InvalidRequest,
-                message: "AI translation is disabled in settings".to_string(),
-                status: None,
-                retryable: false,
-                retry_after: None,
-            });
-        }
         let resolved = settings.ai.resolved_translation();
         let input = glyphst_ai::translation::SemanticTranslationInput {
             id: unit.id,
@@ -676,20 +662,6 @@ impl TranslationService {
         target_language: &LanguageCode,
         units: &[SemanticTranslationUnit],
     ) -> std::result::Result<Vec<SemanticTranslation>, TranslationError> {
-        if !settings
-            .translation
-            .provider_config(TranslationProvider::Ai)
-            .enabled
-        {
-            return Err(TranslationError {
-                provider: TranslationProvider::Ai,
-                category: TranslationErrorCategory::InvalidRequest,
-                message: "AI translation is disabled in settings".to_string(),
-                status: None,
-                retryable: false,
-                retry_after: None,
-            });
-        }
         let resolved = settings.ai.resolved_translation();
         if !resolved.can_request() {
             return Err(TranslationError {
@@ -945,20 +917,6 @@ impl TranslationService {
         settings: &Settings,
         request: &TranslationRequest,
     ) -> std::result::Result<TranslationResponse, TranslationError> {
-        if !settings
-            .translation
-            .provider_config(TranslationProvider::Ai)
-            .enabled
-        {
-            return Err(TranslationError {
-                provider: TranslationProvider::Ai,
-                category: TranslationErrorCategory::InvalidRequest,
-                message: "AI translation is disabled in settings".to_string(),
-                status: None,
-                retryable: false,
-                retry_after: None,
-            });
-        }
         let resolved = settings.ai.resolved_translation();
         if !resolved.can_request() {
             return Err(TranslationError {
@@ -1179,16 +1137,6 @@ fn provider_config(
     provider: TranslationProvider,
 ) -> std::result::Result<TranslationProviderConfig, TranslationError> {
     let config = settings.provider_config(provider);
-    if !config.enabled {
-        return Err(TranslationError {
-            provider,
-            category: TranslationErrorCategory::InvalidRequest,
-            message: format!("{} translation is disabled in settings", provider.label()),
-            status: None,
-            retryable: false,
-            retry_after: None,
-        });
-    }
     if config.api_key.is_empty() {
         return Err(TranslationError {
             provider,

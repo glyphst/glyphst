@@ -497,7 +497,6 @@ fn google_semantic_recovery_uses_batch_singleton_then_segmented_html() {
     let google = settings
         .translation
         .provider_config_mut(TranslationProvider::Google);
-    google.enabled = true;
     google.api_key = "test-key".to_string();
     google.base_url = Some(format!("http://localhost:{port}"));
     let placeholder = "[[GLYPHST_NUMBER_0000_88F291A0]]";

@@ -328,31 +328,15 @@ impl AiPanel {
             .overflow_hidden()
             .text_size(ui_rems(12.0));
 
-        menu = menu
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .px_2()
-                    .pt_2()
-                    .pb_2()
-                    .child(Input::new(&search_input).w_full().min_w_0()),
-            )
-            .child(
-                div()
-                    .mx_2()
-                    .mb_1()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(ui_rems(11.0))
-                            .text_color(theme.muted_foreground)
-                            .child(tr("ai-select-provider-model")),
-                    ),
-            );
+        menu = menu.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .px_2()
+                .pt_2()
+                .pb_2()
+                .child(Input::new(&search_input).w_full().min_w_0()),
+        );
 
         if entries.is_empty() {
             menu = menu.child(

@@ -1,10 +1,9 @@
 use super::super::SettingsWindow;
 use glyphst_settings::{
     ModelRef, Settings, SettingsStore, TranslationBoxCorner, TranslationProvider,
-    TranslationProviderConfig,
 };
 use glyphst_translation_ui::target_language_options;
-use gpui::{App, Axis, Context, SharedString};
+use gpui::{App, Context, SharedString};
 use gpui_component::{
     Disableable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -18,30 +17,6 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> SettingGroup {
         let view = cx.entity();
-        let defaults = TranslationProviderConfig::default_for(provider);
-        let enabled = SettingItem::new(
-            "Enabled",
-            SettingField::switch(
-                move |cx: &App| {
-                    cx.global::<SettingsStore>()
-                        .settings
-                        .translation
-                        .provider_config(provider)
-                        .enabled
-                },
-                {
-                    let view = view.clone();
-                    move |value, cx| {
-                        Self::update_settings(&view, cx, move |settings| {
-                            settings.translation.provider_config_mut(provider).enabled = value;
-                        });
-                    }
-                },
-            )
-            .default_value(defaults.enabled),
-        )
-        .description("Allow this provider to be selected for document translation.");
-
         let api_key_field = Self::bound_text_field(
             format!("translation-api-key-{}", provider.as_str()),
             crate::fl!("settings-api-key-placeholder"),
@@ -86,8 +61,7 @@ impl SettingsWindow {
                 }
             },
         );
-        let api_key = SettingItem::new(crate::fl!("settings-api-key"), api_key_field)
-            .description("Stored locally in Glyphst Reader's settings file.");
+        let api_key = SettingItem::new(crate::fl!("settings-api-key"), api_key_field);
 
         let default_base_url = provider
             .default_base_url()
@@ -133,11 +107,9 @@ impl SettingsWindow {
                 }
             },
         );
-        let base_url = SettingItem::new("API endpoint", base_url_field)
-            .layout(Axis::Vertical)
-            .description(format!("Default: {default_base_url}"));
+        let base_url = SettingItem::new("API endpoint", base_url_field);
 
-        let mut items = vec![enabled, api_key, base_url];
+        let mut items = vec![api_key, base_url];
         if provider == TranslationProvider::Microsoft {
             let region_field = Self::bound_text_field(
                 "translation-microsoft-region",
@@ -185,10 +157,7 @@ impl SettingsWindow {
                     }
                 },
             );
-            items.push(
-                SettingItem::new("Azure region", region_field)
-                    .description("Required by region-scoped Microsoft Translator resources."),
-            );
+            items.push(SettingItem::new("Azure region", region_field));
         }
 
         SettingGroup::new().title(provider.label()).items(items)
@@ -229,9 +198,6 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.translation.target_language.clone()),
-        )
-        .description(
-            "The source language is detected automatically. Individual documents may override this target.",
         );
 
         let active_provider = SettingItem::new(
@@ -256,14 +222,12 @@ impl SettingsWindow {
                             TranslationProvider::parse(value.as_ref()).unwrap_or_default();
                         Self::update_settings(&view, cx, move |settings| {
                             settings.translation.active_provider = provider;
-                            settings.translation.provider_config_mut(provider).enabled = true;
                         });
                     }
                 },
             )
             .default_value(defaults.translation.active_provider.as_str().to_string()),
-        )
-        .description("Selecting a provider also enables it.");
+        );
 
         let model_options = Self::model_options(&cx.global::<SettingsStore>().settings);
         let default_translation_model = defaults
@@ -297,32 +261,6 @@ impl SettingsWindow {
                 },
             )
             .default_value(default_translation_model),
-        )
-        .description(crate::fl!("settings-model-list-hint"));
-
-        let ai_enabled = SettingItem::new(
-            "Enabled",
-            SettingField::switch(
-                |cx: &App| {
-                    cx.global::<SettingsStore>()
-                        .settings
-                        .translation
-                        .provider_config(TranslationProvider::Ai)
-                        .enabled
-                },
-                {
-                    let view = view.clone();
-                    move |value, cx| {
-                        Self::update_settings(&view, cx, move |settings| {
-                            settings
-                                .translation
-                                .provider_config_mut(TranslationProvider::Ai)
-                                .enabled = value;
-                        });
-                    }
-                },
-            )
-            .default_value(TranslationProviderConfig::default_for(TranslationProvider::Ai).enabled),
         );
 
         let pinned_width = SettingItem::new(
@@ -414,24 +352,22 @@ impl SettingsWindow {
             "Delete cached provider responses, generated translated PDFs, OCR results, and resumable checkpoints. Source PDFs and settings are preserved.",
         );
 
-        SettingPage::new(crate::fl!("settings-tab-translation"))
-            .description("Configure document translation providers, defaults, and generated data.")
-            .groups([
-                SettingGroup::new()
-                    .title(crate::fl!("settings-section-general"))
-                    .items([target_language, active_provider]),
-                SettingGroup::new()
-                    .title(TranslationProvider::Ai.label())
-                    .items([ai_enabled, ai_model]),
-                self.translation_provider_group(TranslationProvider::DeepL, cx),
-                self.translation_provider_group(TranslationProvider::Google, cx),
-                self.translation_provider_group(TranslationProvider::Microsoft, cx),
-                SettingGroup::new()
-                    .title("Pinned translation")
-                    .items([pinned_width, pinned_corner]),
-                SettingGroup::new()
-                    .title("Translation data")
-                    .item(clear_data),
-            ])
+        SettingPage::new(crate::fl!("settings-tab-translation")).groups([
+            SettingGroup::new()
+                .title(crate::fl!("settings-section-general"))
+                .items([target_language, active_provider]),
+            SettingGroup::new()
+                .title("Pinned translation")
+                .items([pinned_width, pinned_corner]),
+            SettingGroup::new()
+                .title(TranslationProvider::Ai.label())
+                .item(ai_model),
+            self.translation_provider_group(TranslationProvider::DeepL, cx),
+            self.translation_provider_group(TranslationProvider::Google, cx),
+            self.translation_provider_group(TranslationProvider::Microsoft, cx),
+            SettingGroup::new()
+                .title("Translation data")
+                .item(clear_data),
+        ])
     }
 }

@@ -697,7 +697,7 @@ impl Settings {
                 let Some(config) = self.translation.providers.get(&provider) else {
                     continue;
                 };
-                if config.is_default_for(provider) {
+                if config.is_default() {
                     continue;
                 }
                 let mut provider_node = KdlNode::new(provider.as_str());

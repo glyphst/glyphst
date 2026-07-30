@@ -1003,7 +1003,7 @@ mod tests {
                 let mut settings = SettingsWindow::new(|_| {}, cx);
                 settings.initial_selection = SelectIndex {
                     page_ix: 5,
-                    group_ix: Some(4),
+                    group_ix: Some(5),
                 };
                 settings
             });
@@ -1015,43 +1015,114 @@ mod tests {
             _ = window.draw(cx);
         });
 
-        let api_key_row = cx.debug_bounds("setting-item-5-4-1").unwrap();
-        let api_key_label = cx.debug_bounds("setting-item-label-5-4-1").unwrap();
-        let api_key_field = cx.debug_bounds("setting-item-field-5-4-1").unwrap();
+        let api_key_row = cx.debug_bounds("setting-item-5-5-0").unwrap();
+        let api_key_label = cx.debug_bounds("setting-item-label-5-5-0").unwrap();
+        let api_key_field = cx.debug_bounds("setting-item-field-5-5-0").unwrap();
         let api_key_input = cx
             .debug_bounds("setting-bound-input-translation-api-key-microsoft")
             .unwrap();
-        let endpoint_row = cx.debug_bounds("setting-item-5-4-2").unwrap();
-        let endpoint_label = cx.debug_bounds("setting-item-label-5-4-2").unwrap();
-        let endpoint_field = cx.debug_bounds("setting-item-field-5-4-2").unwrap();
+        let endpoint_row = cx.debug_bounds("setting-item-5-5-1").unwrap();
+        let endpoint_label = cx.debug_bounds("setting-item-label-5-5-1").unwrap();
+        let endpoint_field = cx.debug_bounds("setting-item-field-5-5-1").unwrap();
         let endpoint_input = cx
             .debug_bounds("setting-bound-input-translation-base-url-microsoft")
             .unwrap();
-        let region_row = cx.debug_bounds("setting-item-5-4-3").unwrap();
-        let region_label = cx.debug_bounds("setting-item-label-5-4-3").unwrap();
-        let region_field = cx.debug_bounds("setting-item-field-5-4-3").unwrap();
+        let region_row = cx.debug_bounds("setting-item-5-5-2").unwrap();
+        let region_label = cx.debug_bounds("setting-item-label-5-5-2").unwrap();
+        let region_field = cx.debug_bounds("setting-item-field-5-5-2").unwrap();
         let region_input = cx
             .debug_bounds("setting-bound-input-translation-microsoft-region")
             .unwrap();
 
         for (row, label, field, input) in [
             (api_key_row, api_key_label, api_key_field, api_key_input),
+            (endpoint_row, endpoint_label, endpoint_field, endpoint_input),
             (region_row, region_label, region_field, region_input),
         ] {
             assert_eq!(field.right(), row.right());
             assert_eq!(field.size.width, px(480.0));
             assert_eq!(input, field);
             assert!(field.left() > label.right());
+            assert!(field.top() < label.bottom());
         }
+        assert_eq!(api_key_field.left(), endpoint_field.left());
         assert_eq!(api_key_field.left(), region_field.left());
+        assert_eq!(api_key_field.right(), endpoint_field.right());
         assert_eq!(api_key_field.right(), region_field.right());
-
-        assert_eq!(endpoint_field.right(), endpoint_row.right());
-        assert_eq!(endpoint_field.size.width, px(480.0));
-        assert_eq!(endpoint_input, endpoint_field);
-        assert_eq!(endpoint_field.left(), api_key_field.left());
-        assert!(endpoint_field.top() > endpoint_label.bottom());
+        for selector in [
+            "setting-item-description-5-5-0",
+            "setting-item-description-5-5-1",
+            "setting-item-description-5-5-2",
+        ] {
+            assert!(cx.debug_bounds(selector).is_none());
+        }
     }
+
+    macro_rules! ocr_endpoint_row_test {
+        ($name:ident, $group:literal, $item:literal, $input:literal, $test_item:literal) => {
+            #[gpui::test]
+            fn $name(cx: &mut TestAppContext) {
+                initialize_ui_test(cx);
+                let (_, cx) = cx.add_window_view(|window, cx| {
+                    let settings = cx.new(|cx| {
+                        let mut settings = SettingsWindow::new(|_| {}, cx);
+                        settings.initial_selection = SelectIndex {
+                            page_ix: 6,
+                            group_ix: Some($group),
+                        };
+                        settings
+                    });
+                    Root::new(settings, window, cx)
+                });
+                cx.simulate_resize(size(px(2000.0), px(1200.0)));
+                cx.update(|window, cx| {
+                    _ = window.draw(cx);
+                    _ = window.draw(cx);
+                });
+
+                let row = cx
+                    .debug_bounds(concat!("setting-item-6-", $group, "-", $item))
+                    .unwrap();
+                let label = cx
+                    .debug_bounds(concat!("setting-item-label-6-", $group, "-", $item))
+                    .unwrap();
+                let field = cx
+                    .debug_bounds(concat!("setting-item-field-6-", $group, "-", $item))
+                    .unwrap();
+                let input = cx.debug_bounds($input).unwrap();
+
+                assert_eq!(field.right(), row.right());
+                assert_eq!(field.size.width, px(480.0));
+                assert_eq!(input, field);
+                assert!(field.left() > label.right());
+                assert!(field.top() < label.bottom());
+                assert!(
+                    cx.debug_bounds(concat!(
+                        "setting-item-description-6-",
+                        $group,
+                        "-",
+                        $test_item
+                    ))
+                    .is_none()
+                );
+            }
+        };
+    }
+
+    ocr_endpoint_row_test!(
+        unlimited_ocr_endpoint_shares_the_title_row,
+        1,
+        2,
+        "setting-bound-input-ocr-unlimited-endpoint",
+        3
+    );
+    ocr_endpoint_row_test!(
+        paddle_ocr_endpoint_shares_the_title_row,
+        2,
+        1,
+        "setting-bound-input-ocr-paddle-endpoint",
+        3
+    );
 
     #[gpui::test]
     fn long_model_selector_uses_the_control_column_without_stretching_short_selectors(

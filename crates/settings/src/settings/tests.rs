@@ -843,7 +843,6 @@ translation {
     }
     providers {
         microsoft {
-            enabled #true
             api_key "test-key"
             base_url "https://translator.example.com/"
             region "eastus"
@@ -873,6 +872,7 @@ translation {
     );
     assert_eq!(provider.region.as_deref(), Some("eastus"));
     let exported = settings.to_kdl_string();
+    assert!(!exported.contains("enabled"));
     let exported_document = exported.parse::<KdlDocument>().unwrap();
     let exported_pinned = exported_document
         .get("translation")

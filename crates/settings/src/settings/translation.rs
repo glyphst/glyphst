@@ -50,24 +50,14 @@ impl TranslationProvider {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TranslationProviderConfig {
-    pub enabled: bool,
     pub api_key: String,
     pub base_url: Option<String>,
     pub region: Option<String>,
 }
 
 impl TranslationProviderConfig {
-    pub fn default_for(provider: TranslationProvider) -> Self {
-        Self {
-            enabled: provider == TranslationProvider::Ai,
-            api_key: String::new(),
-            base_url: None,
-            region: None,
-        }
-    }
-
     pub(super) fn sanitize(&mut self, provider: TranslationProvider) {
         self.api_key = self.api_key.trim().to_string();
         self.base_url = self
@@ -84,10 +74,7 @@ impl TranslationProviderConfig {
     }
 
     pub(super) fn from_document(provider: TranslationProvider, document: &KdlDocument) -> Self {
-        let mut config = Self::default_for(provider);
-        if let Some(value) = document.get_arg("enabled").and_then(KdlValue::as_bool) {
-            config.enabled = value;
-        }
+        let mut config = Self::default();
         if let Some(value) = document.get_arg("api_key").and_then(KdlValue::as_string) {
             config.api_key = value.to_string();
         }
@@ -104,7 +91,6 @@ impl TranslationProviderConfig {
     }
 
     pub(super) fn write_to_document(&self, document: &mut KdlDocument) {
-        push_value_node(document, "enabled", self.enabled);
         if !self.api_key.is_empty() {
             push_value_node(document, "api_key", self.api_key.clone());
         }
@@ -116,8 +102,8 @@ impl TranslationProviderConfig {
         }
     }
 
-    pub(super) fn is_default_for(&self, provider: TranslationProvider) -> bool {
-        self == &Self::default_for(provider)
+    pub(super) fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 }
 
@@ -189,10 +175,7 @@ pub struct TranslationSettings {
 impl Default for TranslationSettings {
     fn default() -> Self {
         Self {
-            providers: BTreeMap::from([(
-                TranslationProvider::Ai,
-                TranslationProviderConfig::default_for(TranslationProvider::Ai),
-            )]),
+            providers: BTreeMap::new(),
             active_provider: TranslationProvider::Ai,
             source_language: None,
             target_language: DEFAULT_TRANSLATION_TARGET_LANGUAGE.to_string(),
@@ -218,28 +201,16 @@ impl TranslationSettings {
         for (provider, config) in &mut self.providers {
             config.sanitize(*provider);
         }
-
-        if !self.provider_config(self.active_provider).enabled {
-            self.active_provider = TranslationProvider::ALL
-                .into_iter()
-                .find(|provider| self.provider_config(*provider).enabled)
-                .unwrap_or(TranslationProvider::Ai);
-        }
     }
 
     pub fn provider_config(&self, provider: TranslationProvider) -> TranslationProviderConfig {
-        self.providers
-            .get(&provider)
-            .cloned()
-            .unwrap_or_else(|| TranslationProviderConfig::default_for(provider))
+        self.providers.get(&provider).cloned().unwrap_or_default()
     }
 
     pub fn provider_config_mut(
         &mut self,
         provider: TranslationProvider,
     ) -> &mut TranslationProviderConfig {
-        self.providers
-            .entry(provider)
-            .or_insert_with(|| TranslationProviderConfig::default_for(provider))
+        self.providers.entry(provider).or_default()
     }
 }
