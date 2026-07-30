@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use gpui::{
     Anchor, AnyElement, App, Context, Entity, Global, IntoElement, SharedString, Window, div,
-    prelude::*,
+    prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IconName, Sizable as _, Size,
+    ActiveTheme as _, Sizable as _, Size,
     button::{Button, ButtonVariants as _},
     group_box::{GroupBox, GroupBoxVariants as _},
     popover::Popover,
-    progress::Progress,
+    progress::{Progress, ProgressCircle},
     scroll::ScrollableElement as _,
     v_flex,
 };
@@ -151,8 +151,18 @@ impl ActivityCenter {
                 .anchor(Anchor::BottomRight)
                 .trigger(
                     Button::new("background-activity")
-                        .icon(IconName::LoaderCircle)
-                        .label(label)
+                        .icon(
+                            ProgressCircle::new("background-activity-progress-circle")
+                                .loading(true),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .max_w(px(240.0))
+                                .truncate()
+                                .child(label.clone()),
+                        )
+                        .tooltip(label)
                         .with_size(Size::XSmall)
                         .ghost(),
                 )

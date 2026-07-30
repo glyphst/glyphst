@@ -1,5 +1,5 @@
 use std::collections::{HashMap, hash_map::DefaultHasher};
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
@@ -22,8 +22,8 @@ use glyphst_pdf_translation::{
     normalize_unlimited_payload, review_translation_policies, sanitize_source_pdf,
 };
 use glyphst_pdf_translation::{
-    TranslatedUnit, TranslationFailureDiagnostic, TranslationQueueStats, TranslationRunProgress,
-    TranslationRunSnapshot, translate_document_resuming,
+    TranslatedUnit, TranslationDocumentError, TranslationFailureDiagnostic, TranslationQueueStats,
+    TranslationRunProgress, TranslationRunSnapshot, translate_document_resuming,
 };
 
 use crate::backend::GlyphstTranslationBackend;
@@ -277,11 +277,13 @@ impl PdfTranslationService {
             TranslationCheckpointIdentity::new(&settings, &request, &fingerprint, &document);
         let checkpoint_path = job_directory.join("translated-document.partial.json");
         let diagnostics_path = job_directory.join("translation-diagnostics.json");
+        let block_locations = translation_block_locations(&document);
         let resumed_units = load_translation_checkpoint(&checkpoint_path, &checkpoint_identity);
         let mut last_checkpoint_resolved = resumed_units.len();
         let mut last_terminal_failures = 0usize;
         let mut final_translation_counts = TranslationRunProgress::default();
-        let translated = translate_document_resuming(
+        let mut final_translation_snapshot = None;
+        let translation_result = translate_document_resuming(
             document,
             &backend,
             &cancellation,
@@ -289,6 +291,7 @@ impl PdfTranslationService {
             |snapshot| {
                 let counts = &snapshot.progress;
                 final_translation_counts = counts.clone();
+                final_translation_snapshot = Some(snapshot.clone());
                 let resolved = snapshot.resolved_units.len();
                 let should_persist = translation_checkpoint_changed(
                     resolved,
@@ -325,12 +328,28 @@ impl PdfTranslationService {
                 );
                 Ok(())
             },
-        )
-        .map_err(|error| PdfTranslationError {
-            stage: PdfTranslationStage::Translating,
-            message: error.message,
-            retryable: error.retryable,
-        })?;
+        );
+        let translated = match translation_result {
+            Ok(translated) => translated,
+            Err(error) => {
+                let detailed_message = translation_failure_report(
+                    &request,
+                    &fingerprint,
+                    &job_directory,
+                    &diagnostics_path,
+                    &checkpoint_identity,
+                    &block_locations,
+                    final_translation_snapshot.as_ref(),
+                    &error,
+                );
+                return Err(PdfTranslationError {
+                    stage: PdfTranslationStage::Translating,
+                    message: error.message,
+                    retryable: error.retryable,
+                    detailed_message: Some(detailed_message),
+                });
+            }
+        };
         progress.report_translation(
             "Document translation complete",
             final_translation_counts.translated as u32,
@@ -369,6 +388,7 @@ impl PdfTranslationService {
             stage: PdfTranslationStage::Compiling,
             message: format!("Could not remove source text from translated regions: {error}"),
             retryable: false,
+            detailed_message: None,
         })?;
         let typst_output = self
             .typst
@@ -382,6 +402,7 @@ impl PdfTranslationService {
                 stage: PdfTranslationStage::Compiling,
                 message: error.message,
                 retryable: false,
+                detailed_message: None,
             })?;
         write_json(job_directory.join("layout.json"), &layout)?;
         progress.finish_stage(PdfTranslationStage::Compiling, "Typst PDF compiled");
@@ -406,6 +427,7 @@ impl PdfTranslationService {
                 stage: PdfTranslationStage::Composing,
                 message: error.message,
                 retryable: false,
+                detailed_message: None,
             })?;
         progress.finish_stage(PdfTranslationStage::Composing, "PDF structure restored");
 
@@ -543,6 +565,7 @@ impl PdfTranslationService {
                         | crate::PaddleErrorCategory::ServiceUnavailable
                         | crate::PaddleErrorCategory::PollTimeout
                 ),
+                detailed_message: None,
             })?;
         write_json(job_directory.join("paddle-raw.json"), &result.payload)?;
         progress.finish_stage(PdfTranslationStage::Ocr, "PaddleOCR result downloaded");
@@ -649,6 +672,7 @@ impl PdfTranslationService {
                         | crate::UnlimitedErrorCategory::ServiceUnavailable
                         | crate::UnlimitedErrorCategory::PollTimeout
                 ),
+                detailed_message: None,
             })?;
         write_json(job_directory.join("unlimited-raw.json"), &result.payload)?;
         progress.finish_stage(PdfTranslationStage::Ocr, "Unlimited-OCR result downloaded");
@@ -720,6 +744,7 @@ pub struct PdfTranslationError {
     pub stage: PdfTranslationStage,
     pub message: String,
     pub retryable: bool,
+    pub detailed_message: Option<String>,
 }
 
 impl PdfTranslationError {
@@ -728,6 +753,7 @@ impl PdfTranslationError {
             stage,
             message: "PDF translation was cancelled".to_string(),
             retryable: false,
+            detailed_message: None,
         }
     }
 
@@ -736,6 +762,7 @@ impl PdfTranslationError {
             stage,
             message: message.into(),
             retryable: false,
+            detailed_message: None,
         }
     }
 
@@ -744,6 +771,7 @@ impl PdfTranslationError {
             stage,
             message: format!("{context}: {error}"),
             retryable: false,
+            detailed_message: None,
         }
     }
 }
@@ -804,6 +832,207 @@ struct TranslationDiagnostics {
     failures: Vec<TranslationFailureDiagnostic>,
     progress: TranslationRunProgress,
     queue: TranslationQueueStats,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TranslationBlockLocation {
+    page_index: usize,
+    bbox: BoundingBox,
+}
+
+fn translation_block_locations(document: &DocumentV1) -> HashMap<String, TranslationBlockLocation> {
+    document
+        .pages
+        .iter()
+        .flat_map(|page| {
+            page.blocks.iter().map(|block| {
+                (
+                    block.id.clone(),
+                    TranslationBlockLocation {
+                        page_index: page.page_index,
+                        bbox: block.bbox,
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
+fn translation_failure_report(
+    request: &PdfTranslationRequest,
+    fingerprint: &str,
+    job_directory: &Path,
+    diagnostics_path: &Path,
+    identity: &TranslationCheckpointIdentity,
+    block_locations: &HashMap<String, TranslationBlockLocation>,
+    snapshot: Option<&TranslationRunSnapshot>,
+    error: &TranslationDocumentError,
+) -> String {
+    let persisted_diagnostics = snapshot.is_none().then(|| {
+        fs::read(diagnostics_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<TranslationDiagnostics>(&bytes).ok())
+    });
+    let (failures, progress, queue) = if let Some(snapshot) = snapshot {
+        (
+            snapshot.failures.clone(),
+            snapshot.progress.clone(),
+            snapshot.queue.clone(),
+        )
+    } else if let Some(diagnostics) = persisted_diagnostics.flatten() {
+        (
+            diagnostics.failures,
+            diagnostics.progress,
+            diagnostics.queue,
+        )
+    } else {
+        (
+            Vec::new(),
+            TranslationRunProgress::default(),
+            TranslationQueueStats::default(),
+        )
+    };
+
+    let mut report = String::new();
+    let _ = writeln!(report, "Glyphst PDF translation failure");
+    let _ = writeln!(report);
+    let _ = writeln!(report, "Summary: {}", error.message);
+    let _ = writeln!(report, "Stage: translating");
+    let _ = writeln!(report, "Retryable: {}", error.retryable);
+    let _ = writeln!(report, "Source PDF: {}", request.source_path.display());
+    let _ = writeln!(report, "Output PDF: {}", request.output_path.display());
+    let _ = writeln!(
+        report,
+        "Languages: {} -> {}",
+        request
+            .source_language
+            .as_ref()
+            .map(LanguageCode::as_str)
+            .unwrap_or("auto"),
+        request.target_language.as_str()
+    );
+    let _ = writeln!(
+        report,
+        "Translation provider: {}",
+        diagnostic_provider_identity(&identity.provider_identity)
+    );
+    let _ = writeln!(report, "Pipeline: {}", identity.pipeline_version);
+    let _ = writeln!(report, "Fingerprint: {fingerprint}");
+    let _ = writeln!(report, "Job directory: {}", job_directory.display());
+    let _ = writeln!(report, "Diagnostics: {}", diagnostics_path.display());
+    let _ = writeln!(
+        report,
+        "Progress: translated={}, cached={}, retrying={}, failed={}, total={}",
+        progress.translated, progress.cached, progress.retrying, progress.failed, progress.total
+    );
+    let _ = writeln!(
+        report,
+        "Requests: planned={}, dispatched={}, completed={}, retries={} \
+         (provider={}, validation={}), peak_active={}, elapsed_ms={}",
+        queue.planned_requests,
+        queue.dispatched_requests,
+        queue.completed_requests,
+        queue.retry_requests,
+        queue.provider_retry_requests,
+        queue.validation_retry_requests,
+        queue.peak_active_requests,
+        queue.elapsed_ms
+    );
+    let _ = writeln!(report);
+    let _ = writeln!(
+        report,
+        "Unresolved translation units ({})",
+        error.unresolved_unit_ids.len()
+    );
+
+    for (index, unit_id) in error.unresolved_unit_ids.iter().enumerate() {
+        let _ = writeln!(report);
+        let _ = writeln!(report, "{}. {unit_id}", index + 1);
+        let Some(failure) = failures.iter().find(|failure| failure.id == *unit_id) else {
+            let _ = writeln!(report, "   Diagnostic: unavailable");
+            continue;
+        };
+        let _ = writeln!(
+            report,
+            "   Role: {}",
+            failure.role.map_or("unknown", |role| role.as_str())
+        );
+        let _ = writeln!(report, "   Attempts: {}", failure.attempts);
+        let _ = writeln!(report, "   Retryable: {}", failure.retryable);
+        if let Some(category) = &failure.category {
+            let _ = writeln!(report, "   Category: {category}");
+        }
+        if let Some(status) = failure.status {
+            let _ = writeln!(report, "   Provider status: {status}");
+        }
+        let _ = writeln!(report, "   Reason: {}", failure.reason);
+
+        let legacy_block_id = unit_id.strip_prefix("unit-");
+        let block_ids = if failure.member_block_ids.is_empty() {
+            legacy_block_id.into_iter().collect::<Vec<_>>()
+        } else {
+            failure
+                .member_block_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        };
+        if block_ids.is_empty() {
+            let _ = writeln!(report, "   Location: unavailable");
+        }
+        for block_id in block_ids {
+            if let Some(location) = block_locations.get(block_id) {
+                let bbox = location.bbox;
+                let _ = writeln!(
+                    report,
+                    "   Location: page {}, block {}, bbox ({:.2}, {:.2})-({:.2}, {:.2})",
+                    location.page_index + 1,
+                    block_id,
+                    bbox.x0,
+                    bbox.y0,
+                    bbox.x1,
+                    bbox.y1
+                );
+            } else {
+                let _ = writeln!(report, "   Location: block {block_id} (page unavailable)");
+            }
+        }
+        if let Some(excerpt) = &failure.source_excerpt {
+            let _ = writeln!(report, "   Source excerpt: {excerpt}");
+        }
+        if let Some(excerpt) = &failure.rejected_output_excerpt {
+            let _ = writeln!(report, "   Rejected output excerpt: {excerpt}");
+        }
+    }
+
+    report
+}
+
+fn diagnostic_provider_identity(identity: &str) -> String {
+    identity
+        .split('|')
+        .map(|part| {
+            if part.contains("://") {
+                redact_endpoint_credentials(part)
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn redact_endpoint_credentials(endpoint: &str) -> String {
+    let endpoint = endpoint
+        .split_once(['?', '#'])
+        .map_or(endpoint, |(endpoint, _)| endpoint);
+    let Some((scheme, remainder)) = endpoint.split_once("://") else {
+        return endpoint.to_string();
+    };
+    let remainder = remainder
+        .split_once('@')
+        .map_or(remainder, |(_, host_and_path)| host_and_path);
+    format!("{scheme}://{remainder}")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1387,6 +1616,86 @@ mod tests {
 
         assert_eq!(load_normalized_document(&path, "matching"), Some(document));
         assert!(load_normalized_document(&path, "different").is_none());
+    }
+
+    #[test]
+    fn translation_failure_report_includes_unit_location_and_excerpts() {
+        let request = PdfTranslationRequest {
+            source_path: "/tmp/source.pdf".into(),
+            output_path: "/tmp/translated.pdf".into(),
+            source_language: Some(LanguageCode::new("en").unwrap()),
+            target_language: LanguageCode::new("zh-hans").unwrap(),
+        };
+        let identity = TranslationCheckpointIdentity {
+            pipeline_version: PIPELINE_VERSION.to_string(),
+            fingerprint: "fingerprint".to_string(),
+            document_id: "document".to_string(),
+            source_language: Some("en".to_string()),
+            target_language: "zh-hans".to_string(),
+            provider_identity: "google|https://user:secret@example.test/v1?key=secret|us"
+                .to_string(),
+        };
+        let snapshot = TranslationRunSnapshot {
+            resolved_units: Vec::new(),
+            failures: vec![TranslationFailureDiagnostic {
+                id: "unit-p015-b0002".to_string(),
+                reason: "translation failed validation".to_string(),
+                attempts: 3,
+                retryable: true,
+                category: Some("invalid_response".to_string()),
+                status: None,
+                member_block_ids: vec!["p015-b0002".to_string()],
+                role: Some(crate::BlockRole::Body),
+                source_excerpt: Some("Source excerpt around Dunn.".to_string()),
+                rejected_output_excerpt: Some("Rejected output excerpt.".to_string()),
+            }],
+            progress: TranslationRunProgress {
+                translated: 0,
+                cached: 322,
+                retrying: 0,
+                failed: 1,
+                total: 329,
+            },
+            queue: TranslationQueueStats {
+                planned_requests: 1,
+                dispatched_requests: 3,
+                completed_requests: 3,
+                retry_requests: 2,
+                validation_retry_requests: 2,
+                ..TranslationQueueStats::default()
+            },
+        };
+        let locations = HashMap::from([(
+            "p015-b0002".to_string(),
+            TranslationBlockLocation {
+                page_index: 14,
+                bbox: BoundingBox::new(10.0, 20.0, 300.0, 80.0),
+            },
+        )]);
+        let error = TranslationDocumentError {
+            message: "1 translation unit remains unresolved".to_string(),
+            unresolved_unit_ids: vec!["unit-p015-b0002".to_string()],
+            retryable: true,
+        };
+
+        let report = translation_failure_report(
+            &request,
+            "fingerprint",
+            Path::new("/tmp/job"),
+            Path::new("/tmp/job/translation-diagnostics.json"),
+            &identity,
+            &locations,
+            Some(&snapshot),
+            &error,
+        );
+
+        assert!(report.contains("unit-p015-b0002"));
+        assert!(report.contains("page 15, block p015-b0002"));
+        assert!(report.contains("bbox (10.00, 20.00)-(300.00, 80.00)"));
+        assert!(report.contains("Source excerpt around Dunn."));
+        assert!(report.contains("Rejected output excerpt."));
+        assert!(report.contains("google|https://example.test/v1|us"));
+        assert!(!report.contains("secret"));
     }
 
     #[test]

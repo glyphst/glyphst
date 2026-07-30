@@ -75,6 +75,7 @@ pub enum DocumentTranslationJobStatus {
     Failed {
         stage: PdfTranslationStage,
         message: SharedString,
+        detailed_message: SharedString,
         retryable: bool,
     },
     Succeeded {
@@ -234,6 +235,7 @@ impl DocumentTranslationJobManager {
     ) -> DocumentTranslationJobId {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
+        let message = message.into();
         let target_language =
             glyphst_translation::LanguageCode::new("und").expect("und is a valid language code");
         self.jobs.push_back(DocumentTranslationJobRecord {
@@ -248,7 +250,8 @@ impl DocumentTranslationJobManager {
                 open_mode,
                 status: DocumentTranslationJobStatus::Failed {
                     stage: PdfTranslationStage::Preparing,
-                    message: message.into(),
+                    message: message.clone(),
+                    detailed_message: message,
                     retryable: false,
                 },
             },
@@ -379,6 +382,7 @@ impl DocumentTranslationJobManager {
                 job.snapshot.status = DocumentTranslationJobStatus::Failed {
                     stage: PdfTranslationStage::Preparing,
                     message: message.clone().into(),
+                    detailed_message: message.clone().into(),
                     retryable: false,
                 };
                 invalid_languages = true;
@@ -445,7 +449,9 @@ impl DocumentTranslationJobManager {
 
     fn copy_error(&self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
         let Some(message) = self.job(id).and_then(|job| match &job.snapshot.status {
-            DocumentTranslationJobStatus::Failed { message, .. } => Some(message.clone()),
+            DocumentTranslationJobStatus::Failed {
+                detailed_message, ..
+            } => Some(detailed_message.clone()),
             DocumentTranslationJobStatus::Succeeded {
                 open_error: Some(message),
                 ..
@@ -508,6 +514,7 @@ impl DocumentTranslationJobManager {
             self.jobs[index].snapshot.status = DocumentTranslationJobStatus::Failed {
                 stage: PdfTranslationStage::Preparing,
                 message: "Document translation is unavailable.".into(),
+                detailed_message: "Document translation is unavailable.".into(),
                 retryable: false,
             };
             self.remove_background_task(id, cx);
@@ -607,9 +614,13 @@ impl DocumentTranslationJobManager {
                     };
                 }
                 Err(error) => {
+                    let detailed_message = error
+                        .detailed_message
+                        .unwrap_or_else(|| error.message.clone());
                     job.snapshot.status = DocumentTranslationJobStatus::Failed {
                         stage: error.stage,
                         message: error.message.into(),
+                        detailed_message: detailed_message.into(),
                         retryable: error.retryable,
                     };
                 }
@@ -841,7 +852,10 @@ fn background_task_entry(
     cancel_action: Option<CenterAction>,
 ) -> BackgroundTaskEntry {
     let (status, detail, fraction, indeterminate) = job_status_content(snapshot);
-    let mut entry = BackgroundTaskEntry::new(snapshot.title(), format!("{status} · {detail}"));
+    let mut entry = BackgroundTaskEntry::new(
+        format!("Translate {}", snapshot.title()),
+        format!("{status} · {detail}"),
+    );
     entry.progress = Some(TaskProgress {
         fraction,
         indeterminate,
@@ -1079,6 +1093,15 @@ mod tests {
         assert!(english.matches("EN"));
     }
 
+    #[test]
+    fn background_activity_names_the_translation_and_document() {
+        let snapshot = running_record(1).snapshot;
+
+        let entry = background_task_entry(&snapshot, None);
+
+        assert_eq!(entry.title, "Translate source.pdf");
+    }
+
     fn running_record(id: DocumentTranslationJobId) -> DocumentTranslationJobRecord {
         DocumentTranslationJobRecord {
             snapshot: DocumentTranslationJobSnapshot {
@@ -1299,6 +1322,7 @@ mod tests {
             job_actions(&DocumentTranslationJobStatus::Failed {
                 stage: PdfTranslationStage::Translating,
                 message: "failed".into(),
+                detailed_message: "detailed failure".into(),
                 retryable: true,
             }),
             vec![
@@ -1312,6 +1336,29 @@ mod tests {
                 open_error: None,
             }),
             vec![DocumentTranslationJobAction::Open]
+        );
+    }
+
+    #[gpui::test]
+    fn copy_error_uses_detailed_failure_message(cx: &mut TestAppContext) {
+        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+
+        manager.update(cx, |manager, cx| {
+            let id = 22;
+            let mut record = running_record(id);
+            record.snapshot.status = DocumentTranslationJobStatus::Failed {
+                stage: PdfTranslationStage::Translating,
+                message: "7 translation units remain unresolved".into(),
+                detailed_message: "unit-p015-b0002 · page 15 · source excerpt".into(),
+                retryable: true,
+            };
+            manager.jobs.push_back(record);
+            manager.copy_error(id, cx);
+        });
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("unit-p015-b0002 · page 15 · source excerpt".to_string())
         );
     }
 
@@ -1331,6 +1378,7 @@ mod tests {
             record.snapshot.status = DocumentTranslationJobStatus::Failed {
                 stage: PdfTranslationStage::Translating,
                 message: "temporary failure".into(),
+                detailed_message: "temporary failure".into(),
                 retryable: true,
             };
             manager.jobs.push_back(record);

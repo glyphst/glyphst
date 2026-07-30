@@ -90,6 +90,77 @@ fn adjacent_placeholders_accept_only_inserted_whitespace() {
 }
 
 #[test]
+fn style_boundaries_do_not_force_adjacent_structural_markers() {
+    let style_start = ProtectedToken {
+        placeholder: "[[GLYPHST_STYLE_START_0000_AAAAAAAA]]".to_string(),
+        original: style_marker(0, true),
+        kind: ProtectedTokenKind::StyleStart,
+        styled_restoration: None,
+    };
+    let marker = ProtectedToken {
+        placeholder: "[[GLYPHST_STRUCTURAL_0001_BBBBBBBB]]".to_string(),
+        original: "•".to_string(),
+        kind: ProtectedTokenKind::StructuralMarker,
+        styled_restoration: None,
+    };
+    let style_end = ProtectedToken {
+        placeholder: "[[GLYPHST_STYLE_END_0002_CCCCCCCC]]".to_string(),
+        original: style_marker(0, false),
+        kind: ProtectedTokenKind::StyleEnd,
+        styled_restoration: None,
+    };
+    let protected = ProtectedText {
+        text: format!(
+            "{}{}{}",
+            style_start.placeholder, marker.placeholder, style_end.placeholder
+        ),
+        tokens: vec![style_start.clone(), marker.clone(), style_end.clone()],
+    };
+    let translated = format!(
+        "{}谁会{}参加选举？{}",
+        style_start.placeholder, marker.placeholder, style_end.placeholder
+    );
+    let unit = TranslationUnit {
+        id: "unit".to_string(),
+        member_block_ids: vec!["block".to_string()],
+        role: BlockRole::Prompt,
+        source_text: "•Who is running for the election?".to_string(),
+        protected,
+        style_definitions: vec![StyleDefinition {
+            id: 0,
+            style: TextStyle {
+                bold: true,
+                ..TextStyle::default()
+            },
+        }],
+        context_before: None,
+        context_after: None,
+    };
+
+    let validated = validate_translation(&unit, &translated, false).unwrap();
+
+    assert_eq!(validated.text, "•谁会参加选举？");
+    assert!(!validated.style_fallback);
+    assert_eq!(validated.runs[0].text, "•");
+    assert!(
+        validated.runs[0]
+            .style
+            .as_ref()
+            .is_some_and(|style| style.bold)
+    );
+    assert!(validate_resumed_translation(
+        &unit,
+        "•谁会参加选举？",
+        false
+    ));
+    assert!(!validate_resumed_translation(
+        &unit,
+        "谁会•参加选举？",
+        false
+    ));
+}
+
+#[test]
 fn duplicate_immutable_placeholders_are_repaired_before_validation() {
     let protected = protect_text("Use 25 cases and cite [12].");
     let number = protected

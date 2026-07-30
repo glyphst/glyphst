@@ -225,6 +225,16 @@ pub(super) fn validate_resumed_translation(
     {
         return false;
     }
+    let source_without_styles = strip_style_placeholders(&unit.protected.text);
+    if unit.protected.tokens.iter().any(|token| {
+        token.kind == ProtectedTokenKind::StructuralMarker
+            && source_without_styles
+                .trim_start()
+                .starts_with(&token.placeholder)
+            && !translated.trim_start().starts_with(&token.original)
+    }) {
+        return false;
+    }
     if reject_unchanged
         && should_reject_unchanged(&unit.source_text)
         && normalize_for_comparison(translated) == normalize_for_comparison(&unit.source_text)

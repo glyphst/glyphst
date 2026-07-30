@@ -127,7 +127,16 @@ impl ProtectedText {
             }
         }
         let mut normalized = translated.to_string();
+        self.normalize_leading_structural_marker(&mut normalized);
         for pair in self.tokens.windows(2) {
+            if pair.iter().any(|token| {
+                matches!(
+                    token.kind,
+                    ProtectedTokenKind::StyleStart | ProtectedTokenKind::StyleEnd
+                )
+            }) {
+                continue;
+            }
             let adjacent = format!("{}{}", pair[0].placeholder, pair[1].placeholder);
             if self.text.contains(&adjacent) && !normalized.contains(&adjacent) {
                 let left_end = normalized
@@ -173,6 +182,62 @@ impl ProtectedText {
             return Err("translation contains an unresolved placeholder".to_string());
         }
         Ok((restored, style_fallback))
+    }
+
+    fn normalize_leading_structural_marker(&self, translated: &mut String) {
+        let source_without_styles = strip_style_placeholders(&self.text);
+        let Some((marker_index, _)) = self.tokens.iter().enumerate().find(|(_, token)| {
+            token.kind == ProtectedTokenKind::StructuralMarker
+                && source_without_styles
+                    .trim_start()
+                    .starts_with(&token.placeholder)
+        }) else {
+            return;
+        };
+
+        let mut group_start = marker_index;
+        while group_start > 0 {
+            let previous = &self.tokens[group_start - 1];
+            let current = &self.tokens[group_start];
+            let adjacent = format!("{}{}", previous.placeholder, current.placeholder);
+            if !matches!(
+                previous.kind,
+                ProtectedTokenKind::StyleStart | ProtectedTokenKind::StyleEnd
+            ) || !self.text.contains(&adjacent)
+            {
+                break;
+            }
+            group_start -= 1;
+        }
+        let mut group_end = marker_index + 1;
+        while group_end < self.tokens.len() {
+            let previous = &self.tokens[group_end - 1];
+            let next = &self.tokens[group_end];
+            let adjacent = format!("{}{}", previous.placeholder, next.placeholder);
+            if !matches!(
+                next.kind,
+                ProtectedTokenKind::StyleStart | ProtectedTokenKind::StyleEnd
+            ) || !self.text.contains(&adjacent)
+            {
+                break;
+            }
+            group_end += 1;
+        }
+
+        let group = self.tokens[group_start..group_end]
+            .iter()
+            .filter(|token| translated.matches(&token.placeholder).count() == 1)
+            .map(|token| token.placeholder.as_str())
+            .collect::<Vec<_>>();
+        for placeholder in &group {
+            if let Some(start) = translated.find(placeholder) {
+                translated.replace_range(start..start + placeholder.len(), "");
+            }
+        }
+        let insert_at = translated
+            .find(|character: char| !character.is_whitespace())
+            .unwrap_or(translated.len());
+        translated.insert_str(insert_at, &group.concat());
     }
 }
 
@@ -324,6 +389,14 @@ pub struct TranslationFailureDiagnostic {
     pub category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_block_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<BlockRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_excerpt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_output_excerpt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -655,30 +728,41 @@ fn process_completed_request(
                     repair_duplicate_protected_placeholders(&unit.protected, &output.text);
                 let normalized_output =
                     normalize_translated_whitespace(&repaired_output, &unit.source_text, unit.role);
-                validate_translation(&unit, &normalized_output, backend.reject_unchanged_output())
-                    .and_then(|translated| {
-                        backend
-                            .validate_translated_output(&unit, &normalized_output, &translated.text)
-                            .map(|()| translated)
-                    })
-                    .map(|translated| (translated, output.cached, normalized_output))
-                    .map_err(|message| UnitFailure {
+                let validation = validate_translation(
+                    &unit,
+                    &normalized_output,
+                    backend.reject_unchanged_output(),
+                )
+                .and_then(|translated| {
+                    backend
+                        .validate_translated_output(&unit, &normalized_output, &translated.text)
+                        .map(|()| translated)
+                });
+                match validation {
+                    Ok(translated) => Ok((translated, output.cached, normalized_output)),
+                    Err(message) => Err(UnitFailure {
                         message,
                         retryable: true,
                         retry_after: None,
                         category: Some(TranslationErrorCategory::InvalidResponse),
                         status: None,
-                    })
+                        rejected_output: Some(normalized_output),
+                    }),
+                }
             }
-            Some(output) => Err(UnitFailure {
-                message: output
-                    .validation_error
-                    .expect("validation error was checked above"),
-                retryable: false,
-                retry_after: None,
-                category: Some(TranslationErrorCategory::InvalidResponse),
-                status: None,
-            }),
+            Some(output) => {
+                let rejected_output = (!output.text.trim().is_empty()).then_some(output.text);
+                Err(UnitFailure {
+                    message: output
+                        .validation_error
+                        .expect("validation error was checked above"),
+                    retryable: false,
+                    retry_after: None,
+                    category: Some(TranslationErrorCategory::InvalidResponse),
+                    status: None,
+                    rejected_output,
+                })
+            }
             None => {
                 let error = request_error.as_ref();
                 Err(UnitFailure {
@@ -689,6 +773,7 @@ fn process_completed_request(
                     retry_after: error.and_then(|error| error.retry_after),
                     category: error.and_then(|error| error.category),
                     status: error.and_then(|error| error.status),
+                    rejected_output: None,
                 })
             }
         };
@@ -720,6 +805,12 @@ fn process_completed_request(
             Err(failure) => {
                 let attempt = completed.request.attempt;
                 let can_retry = attempt < MAX_UNIT_ATTEMPTS && failure.retryable;
+                let source_excerpt =
+                    focused_diagnostic_excerpt(&unit.source_text, &failure.message);
+                let rejected_output_excerpt = failure
+                    .rejected_output
+                    .as_deref()
+                    .and_then(|output| focused_diagnostic_excerpt(output, &failure.message));
                 state.failures.insert(
                     unit.id.clone(),
                     TranslationFailureDiagnostic {
@@ -729,6 +820,10 @@ fn process_completed_request(
                         retryable: failure.retryable,
                         category: failure.category.map(translation_error_category_name),
                         status: failure.status,
+                        member_block_ids: unit.member_block_ids.clone(),
+                        role: Some(unit.role),
+                        source_excerpt,
+                        rejected_output_excerpt,
                     },
                 );
                 if can_retry {
@@ -797,6 +892,66 @@ struct UnitFailure {
     retry_after: Option<Duration>,
     category: Option<TranslationErrorCategory>,
     status: Option<u16>,
+    rejected_output: Option<String>,
+}
+
+const DIAGNOSTIC_EXCERPT_CHARACTERS: usize = 480;
+
+fn focused_diagnostic_excerpt(text: &str, reason: &str) -> Option<String> {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let characters = normalized.chars().collect::<Vec<_>>();
+    if characters.len() <= DIAGNOSTIC_EXCERPT_CHARACTERS {
+        return Some(normalized);
+    }
+
+    let focus = diagnostic_focus_hint(reason);
+    let focus_character = focus
+        .as_deref()
+        .and_then(|focus| {
+            normalized
+                .to_ascii_lowercase()
+                .find(&focus.to_ascii_lowercase())
+                .map(|byte_index| normalized[..byte_index].chars().count())
+        })
+        .unwrap_or_default();
+    let focus_length = focus
+        .as_deref()
+        .map(|focus| focus.chars().count())
+        .unwrap_or_default();
+    let leading = DIAGNOSTIC_EXCERPT_CHARACTERS
+        .saturating_sub(focus_length)
+        .div_ceil(2);
+    let mut start = focus_character.saturating_sub(leading);
+    let end = (start + DIAGNOSTIC_EXCERPT_CHARACTERS).min(characters.len());
+    start = end.saturating_sub(DIAGNOSTIC_EXCERPT_CHARACTERS);
+
+    let mut excerpt = String::new();
+    if start > 0 {
+        excerpt.push('…');
+    }
+    excerpt.extend(characters[start..end].iter());
+    if end < characters.len() {
+        excerpt.push('…');
+    }
+    Some(excerpt)
+}
+
+fn diagnostic_focus_hint(reason: &str) -> Option<String> {
+    if let Some((_, detail)) = reason.rsplit_once(": ") {
+        let detail_word = detail
+            .split(|character: char| !character.is_ascii_alphabetic())
+            .filter(|word| word.len() >= 4)
+            .max_by_key(|word| word.len());
+        if let Some(word) = detail_word {
+            return Some(word.to_string());
+        }
+    }
+    let start = reason.find("[[GLYPHST_")?;
+    let relative_end = reason[start..].find("]]")?;
+    Some(reason[start..start + relative_end + 2].to_string())
 }
 
 fn translation_snapshot(

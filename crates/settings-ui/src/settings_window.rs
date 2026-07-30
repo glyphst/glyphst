@@ -878,10 +878,7 @@ impl Render for SettingsWindow {
             .with_group_variant(GroupBoxVariant::Outline)
             .default_selected_index(self.initial_selection)
             .pages(self.setting_pages(cx));
-        let background_activity =
-            ActivityCenter::try_global(cx).and_then(|center| center.read(cx).render_activity());
-        let show_footer =
-            background_activity.is_some() || self.status.is_some() || self.save_error.is_some();
+        let show_footer = self.status.is_some() || self.save_error.is_some();
         div()
             .key_context("SettingsPanel")
             .track_focus(&self.focus_handle)
@@ -931,9 +928,6 @@ impl Render for SettingsWindow {
                         .py_3()
                         .border_t_1()
                         .border_color(cx.theme().border)
-                        .when_some(background_activity, |this, activity| {
-                            this.child(div().flex().items_center().child(activity))
-                        })
                         .when_some(self.status.clone(), |this, status| {
                             this.child(div().text_color(cx.theme().success).child(status))
                         })
@@ -1042,6 +1036,31 @@ mod tests {
     settings_page_render_test!(renders_provider_page, 4, 0);
     settings_page_render_test!(renders_translation_page, 5, 6);
     settings_page_render_test!(renders_ocr_page, 6, 1);
+
+    #[gpui::test]
+    fn settings_window_does_not_render_background_activity(cx: &mut TestAppContext) {
+        initialize_ui_test(cx);
+        let center = cx.update(|cx| glyphst_ui::activity::ActivityCenter::global(cx));
+        center.update(cx, |center, cx| {
+            center.add_task(
+                glyphst_ui::activity::BackgroundTaskEntry::new(
+                    "Translate a-long-document-name.pdf",
+                    "Translating",
+                ),
+                cx,
+            );
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let settings = cx.new(|cx| SettingsWindow::new(|_| {}, cx));
+            Root::new(settings, window, cx)
+        });
+
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("background-activity").is_none());
+    }
 
     #[gpui::test]
     fn ui_font_fallbacks_input_shares_the_title_row(cx: &mut TestAppContext) {

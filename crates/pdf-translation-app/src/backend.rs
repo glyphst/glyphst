@@ -396,7 +396,6 @@ fn attached_source_language_residue(
     unit: &TranslationUnit,
     protected_translation: &str,
 ) -> Option<String> {
-    let source = unit.source_text.to_ascii_lowercase();
     let translated = protected_translation.to_ascii_lowercase();
     for token in &unit.protected.tokens {
         if !matches!(
@@ -416,7 +415,7 @@ fn attached_source_language_residue(
                 .collect::<Vec<_>>();
             if suffix.len() >= 4 {
                 let residue = String::from_utf8(suffix).expect("ASCII suffix is valid UTF-8");
-                if source.contains(&residue) {
+                if source_language_residue_requires_translation(unit, &residue) {
                     return Some(format!("{}{residue}", token.original));
                 }
             }
@@ -428,13 +427,57 @@ fn attached_source_language_residue(
                 .count();
             if prefix_length >= 4 {
                 let prefix = &translated[start - prefix_length..start];
-                if source.contains(prefix) {
+                if source_language_residue_requires_translation(unit, prefix) {
                     return Some(format!("{prefix}{}", token.original));
                 }
             }
         }
     }
     None
+}
+
+fn source_language_residue_requires_translation(unit: &TranslationUnit, residue: &str) -> bool {
+    let source = &unit.source_text;
+    let lowercase_source = source.to_ascii_lowercase();
+    lowercase_source
+        .match_indices(residue)
+        .any(|(start, matched)| {
+            let end = start + matched.len();
+            let previous = source[..start].chars().next_back();
+            let next = source[end..].chars().next();
+            let is_whole_word = previous.is_none_or(|character| !character.is_ascii_alphabetic())
+                && next.is_none_or(|character| !character.is_ascii_alphabetic());
+            if !is_whole_word || source_word_is_url_fragment(source, start, end) {
+                return false;
+            }
+
+            let source_spelling = &source[start..end];
+            unit.role == glyphst_pdf_translation::BlockRole::Footnote
+                || source_spelling
+                    .chars()
+                    .next()
+                    .is_none_or(|character| !character.is_uppercase())
+        })
+}
+
+fn source_word_is_url_fragment(source: &str, start: usize, end: usize) -> bool {
+    let previous = source[..start].chars().next_back();
+    let next = source[end..].chars().next();
+    if previous.is_some_and(|character| matches!(character, '/' | ':' | '?' | '=' | '#' | '&'))
+        || next.is_some_and(|character| matches!(character, '/' | ':' | '?' | '=' | '#' | '&'))
+    {
+        return true;
+    }
+
+    let token_start = source[..start]
+        .rfind(char::is_whitespace)
+        .map_or(0, |index| {
+            index + source[index..].chars().next().unwrap().len_utf8()
+        });
+    let token_end = source[end..]
+        .find(char::is_whitespace)
+        .map_or(source.len(), |offset| end + offset);
+    source[token_start..token_end].contains("://")
 }
 
 fn is_cjk(character: char) -> bool {
@@ -529,6 +572,48 @@ mod tests {
         let good = "3该环境由人工创建。";
         let protected_good = translated_with_placeholders(&footnote, good);
         assert!(validate_target_script(&footnote, Some(&protected_good), good, "zh-hans").is_ok());
+    }
+
+    #[test]
+    fn accepts_proper_names_and_url_fragments_next_to_protected_tokens() {
+        for (source, token_value, retained_text) in [
+            (
+                "The Dunn test reported a value below 0.001.",
+                "0.001",
+                "Dunn",
+            ),
+            ("Wekinator was introduced in 2010.", "2010", "Wekinator"),
+            (
+                "Participants were recruited through Prolific in 2022.",
+                "2022",
+                "Prolific",
+            ),
+            (
+                "See https://example.test/aimag for item 1609.",
+                "1609",
+                "aimag",
+            ),
+            (
+                "Reference 246 is available at https://example.test.",
+                "246",
+                "https",
+            ),
+        ] {
+            let unit = body_unit(source);
+            let token = unit
+                .protected
+                .tokens
+                .iter()
+                .find(|token| token.original == token_value)
+                .unwrap();
+            let protected_translation = format!("{}{retained_text}", token.placeholder);
+
+            assert_eq!(
+                attached_source_language_residue(&unit, &protected_translation),
+                None,
+                "{protected_translation}"
+            );
+        }
     }
 
     #[test]
