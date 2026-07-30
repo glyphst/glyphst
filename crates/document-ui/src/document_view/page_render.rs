@@ -1,6 +1,65 @@
 use super::*;
 
 impl DocumentView {
+    pub(super) fn update_render_cache_protection(&self, cx: &mut Context<Self>) {
+        let mut protected_renders = HashSet::new();
+        if !self.grid_overview_open {
+            protected_renders.extend(self.viewport_render_keys.iter().copied());
+        }
+        if self.dock_snapshot.left_sidebar == Some(DocumentSidebar::Thumbnails) {
+            protected_renders.extend(self.thumbnail_sidebar_render_keys.values());
+        }
+        if self.grid_overview_open {
+            protected_renders.extend(self.grid_overview_render_keys.values());
+        }
+        cx.global_mut::<RenderCache>()
+            .set_protected_renders(self.doc_id, protected_renders);
+    }
+
+    fn overview_render_keys_mut(&mut self, surface: PageOverviewSurface) -> &mut SurfaceRenderKeys {
+        match surface {
+            PageOverviewSurface::ThumbnailSidebar => &mut self.thumbnail_sidebar_render_keys,
+            PageOverviewSurface::GridOverview => &mut self.grid_overview_render_keys,
+        }
+    }
+
+    pub(super) fn register_overview_render_key(
+        &mut self,
+        surface: PageOverviewSurface,
+        page_idx: usize,
+        key: RenderKey,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .overview_render_keys_mut(surface)
+            .register(page_idx, key)
+        {
+            self.update_render_cache_protection(cx);
+        }
+    }
+
+    pub(super) fn retain_overview_render_pages(
+        &mut self,
+        surface: PageOverviewSurface,
+        visible_pages: impl IntoIterator<Item = usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .overview_render_keys_mut(surface)
+            .retain_pages(visible_pages)
+        {
+            self.update_render_cache_protection(cx);
+        }
+    }
+
+    pub fn deactivate_render_cache(&mut self, cx: &mut Context<Self>) {
+        self.viewport_render_keys.clear();
+        self.thumbnail_sidebar_render_keys.clear();
+        self.grid_overview_render_keys.clear();
+        cx.global_mut::<RenderCache>()
+            .clear_protected_renders(self.doc_id);
+    }
+
     pub(super) fn request_render(&mut self, key: RenderKey, cx: &mut Context<Self>) {
         if !cx.global::<RenderCache>().contains_render(key) {
             self.start_background_render(key, cx);

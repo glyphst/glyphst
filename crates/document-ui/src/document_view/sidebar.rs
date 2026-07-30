@@ -115,7 +115,15 @@ fn resume_toc_sidebar_follow_state(follow_current: &mut bool, manual_scroll: &Ce
 
 impl DocumentView {
     pub fn set_dock_snapshot(&mut self, snapshot: DocumentDockSnapshot, cx: &mut Context<Self>) {
+        let thumbnail_cache_changed = self.dock_snapshot.left_sidebar
+            == Some(DocumentSidebar::Thumbnails)
+            && (snapshot.left_sidebar != Some(DocumentSidebar::Thumbnails)
+                || self.dock_snapshot.widths.thumbnails != snapshot.widths.thumbnails);
         self.dock_snapshot = snapshot;
+        if thumbnail_cache_changed {
+            self.thumbnail_sidebar_render_keys.clear();
+            self.update_render_cache_protection(cx);
+        }
         if let Some(panel) = &self.ai_panel {
             panel.update(cx, |panel, _| panel.set_width(snapshot.widths.ai));
         }
@@ -153,6 +161,8 @@ impl DocumentView {
     pub fn close_sidebar(&mut self, sidebar: DocumentSidebar, cx: &mut Context<Self>) {
         if sidebar == DocumentSidebar::Thumbnails {
             self.cancel_thumbnail_sidebar_selection(cx);
+            self.thumbnail_sidebar_render_keys.clear();
+            self.update_render_cache_protection(cx);
         }
     }
 

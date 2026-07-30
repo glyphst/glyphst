@@ -94,30 +94,74 @@ impl DocumentView {
         (highlights, active_highlights)
     }
 
-    pub(super) fn search_highlight_rects_by_page(
-        page_count: usize,
+    pub(super) fn thumbnail_overlays_for_page(&self, page_idx: usize) -> PageThumbnailOverlays {
+        Self::thumbnail_overlays_for_page_data(
+            page_idx,
+            &self.highlights,
+            &self.notes,
+            &self.glyphs,
+            &self.search.matches,
+            self.search.active,
+        )
+    }
+
+    pub(super) fn thumbnail_overlays_for_page_data(
+        page_idx: usize,
+        highlights: &[Highlight],
+        notes: &[Note],
         glyphs: &[Glyph],
         matches: &[SearchMatch],
         active_match: Option<usize>,
-    ) -> Vec<Vec<SearchHighlightRect>> {
-        let mut highlights_by_page = vec![Vec::new(); page_count];
+    ) -> PageThumbnailOverlays {
+        let highlights = highlights
+            .iter()
+            .flat_map(|highlight| {
+                highlight
+                    .rects
+                    .iter()
+                    .filter(move |rect| rect.page_idx == page_idx)
+                    .map(move |rect| (*rect, highlight.color))
+            })
+            .collect();
+        let note_underlines = notes
+            .iter()
+            .flat_map(|note| {
+                note.rects
+                    .iter()
+                    .filter(move |rect| rect.page_idx == page_idx)
+                    .map(move |rect| (*rect, note.color))
+            })
+            .collect();
 
-        for (match_ix, search_match) in matches.iter().enumerate() {
-            for rect in Self::highlight_rects_for_glyph_range(glyphs, search_match.range.clone())
-                .into_iter()
-                .filter(|rect| rect.page_idx == search_match.page_idx)
-            {
-                let Some(page_highlights) = highlights_by_page.get_mut(rect.page_idx) else {
-                    continue;
-                };
-                page_highlights.push(SearchHighlightRect {
-                    rect,
-                    active: active_match == Some(match_ix),
-                });
-            }
+        // Search matches are appended page-by-page by `recompute_search`, so
+        // binary partitioning avoids scanning every document match once per
+        // visible thumbnail.
+        let first_match = matches.partition_point(|search_match| search_match.page_idx < page_idx);
+        let end_match = first_match
+            + matches[first_match..]
+                .partition_point(|search_match| search_match.page_idx == page_idx);
+        let mut search_highlights = Vec::new();
+        for (match_ix, search_match) in matches[first_match..end_match]
+            .iter()
+            .enumerate()
+            .map(|(offset, search_match)| (first_match + offset, search_match))
+        {
+            search_highlights.extend(
+                Self::highlight_rects_for_glyph_range(glyphs, search_match.range.clone())
+                    .into_iter()
+                    .filter(|rect| rect.page_idx == page_idx)
+                    .map(|rect| SearchHighlightRect {
+                        rect,
+                        active: active_match == Some(match_ix),
+                    }),
+            );
         }
 
-        highlights_by_page
+        PageThumbnailOverlays {
+            highlights,
+            note_underlines,
+            search_highlights,
+        }
     }
 
     pub(super) fn highlight_rects_for_range(&self, range: Range<usize>) -> Vec<HighlightRect> {

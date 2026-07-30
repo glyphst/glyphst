@@ -197,6 +197,8 @@ impl DocumentView {
             thumbnail_sidebar_current_page: 0,
             thumbnail_sidebar_selecting: false,
             thumbnail_sidebar_selection: BTreeSet::new(),
+            viewport_render_keys: HashSet::new(),
+            thumbnail_sidebar_render_keys: SurfaceRenderKeys::default(),
             dock_snapshot: DocumentDockSnapshot::default(),
             grid_overview_open: false,
             grid_overview_scroll: UniformListScrollHandle::new(),
@@ -206,6 +208,7 @@ impl DocumentView {
             grid_overview_viewport_width: 0.0,
             grid_overview_selecting: false,
             grid_overview_selection: BTreeSet::new(),
+            grid_overview_render_keys: SurfaceRenderKeys::default(),
             presentation_page: None,
             jump_back: Vec::new(),
             jump_forward: Vec::new(),
@@ -520,6 +523,11 @@ impl DocumentView {
         let previous_doc_id = self.doc_id;
         self.previous_doc_id = Some(previous_doc_id);
         self.doc_id = next_document_id();
+        self.viewport_render_keys.clear();
+        self.thumbnail_sidebar_render_keys.clear();
+        self.grid_overview_render_keys.clear();
+        cx.global_mut::<RenderCache>()
+            .clear_protected_renders(previous_doc_id);
         self.schedule_previous_document_eviction(previous_doc_id, cx);
 
         self.document_snapshot = reload.snapshot;

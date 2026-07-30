@@ -1,15 +1,17 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use super::{
     DocumentPage, DocumentView, Glyph, RegionDragState, RegionImageExport, RenderCache, RenderKey,
-    SearchMatch, SearchState, TextChunk, TextFormatBlock, TextIndexState, TextLine,
-    TranslationCardState, TranslationStatus, clear_copied_region_selection,
+    SearchMatch, SearchState, SurfaceRenderKeys, TextChunk, TextFormatBlock, TextIndexState,
+    TextLine, TranslationCardState, TranslationStatus, clear_copied_region_selection,
     reset_translation_cards_for_document_replacement, retain_valid_annotation_id,
 };
 use glyphst_ai::ai_chat::{MentionKind, MentionReference};
 use glyphst_core::{
-    DocumentLayout, DocumentRotation, EpubLayout, PageIndex, PageRegion, RegionImageReference,
+    DocumentLayout, DocumentRotation, EpubLayout, HighlightColor, PageIndex, PageRegion,
+    RegionImageReference,
 };
+use glyphst_library::{Highlight, HighlightRect, Note};
 use glyphst_translation::LanguageCode;
 use gpui::{Bounds, Modifiers, ScrollWheelEvent, point, px, size};
 use image::{Frame, GenericImageView, RgbaImage};
@@ -95,7 +97,7 @@ fn empty_search_does_not_request_reveal_after_indexing() {
 }
 
 #[test]
-fn grid_search_highlights_are_grouped_by_page_and_active_match() {
+fn thumbnail_overlays_are_grouped_by_page_and_active_match() {
     let mut glyphs = vec![
         test_glyph('a', 0.0, 5.0),
         test_glyph('b', 5.0, 10.0),
@@ -135,14 +137,74 @@ fn grid_search_highlights_are_grouped_by_page_and_active_match() {
         },
     ];
 
-    let highlights = DocumentView::search_highlight_rects_by_page(2, &glyphs, &matches, Some(0));
+    let saved_highlights = vec![Highlight {
+        id: 1,
+        path: PathBuf::from("/tmp/document.pdf"),
+        color: HighlightColor::Yellow,
+        rects: vec![
+            HighlightRect {
+                page_idx: 0,
+                x0: 1.0,
+                y0: 2.0,
+                x1: 3.0,
+                y1: 4.0,
+            },
+            HighlightRect {
+                page_idx: 1,
+                x0: 5.0,
+                y0: 6.0,
+                x1: 7.0,
+                y1: 8.0,
+            },
+        ],
+        semantic_range: None,
+        text: String::new(),
+        note: String::new(),
+        created: 0,
+    }];
+    let notes = vec![Note {
+        id: 2,
+        path: PathBuf::from("/tmp/document.pdf"),
+        color: HighlightColor::Blue,
+        rects: vec![HighlightRect {
+            page_idx: 1,
+            x0: 9.0,
+            y0: 10.0,
+            x1: 11.0,
+            y1: 12.0,
+        }],
+        semantic_range: None,
+        text: String::new(),
+        body: String::new(),
+        created: 0,
+    }];
 
-    assert_eq!(highlights.len(), 2);
-    assert_eq!(highlights[0].len(), 3);
-    assert_eq!(highlights[1].len(), 1);
+    let page_zero = DocumentView::thumbnail_overlays_for_page_data(
+        0,
+        &saved_highlights,
+        &notes,
+        &glyphs,
+        &matches,
+        Some(0),
+    );
+    let page_one = DocumentView::thumbnail_overlays_for_page_data(
+        1,
+        &saved_highlights,
+        &notes,
+        &glyphs,
+        &matches,
+        Some(0),
+    );
+
+    assert_eq!(page_zero.highlights.len(), 1);
+    assert!(page_zero.note_underlines.is_empty());
+    assert_eq!(page_one.highlights.len(), 1);
+    assert_eq!(page_one.note_underlines.len(), 1);
+    assert_eq!(page_zero.search_highlights.len(), 3);
+    assert_eq!(page_one.search_highlights.len(), 1);
     assert_eq!(
-        highlights[0][0].rect,
-        glyphst_library::HighlightRect {
+        page_zero.search_highlights[0].rect,
+        HighlightRect {
             page_idx: 0,
             x0: 0.0,
             y0: 0.0,
@@ -151,14 +213,15 @@ fn grid_search_highlights_are_grouped_by_page_and_active_match() {
         }
     );
     assert_eq!(
-        highlights[0]
+        page_zero
+            .search_highlights
             .iter()
             .filter(|highlight| highlight.active)
             .count(),
         2
     );
-    assert!(!highlights[0][2].active);
-    assert!(!highlights[1][0].active);
+    assert!(!page_zero.search_highlights[2].active);
+    assert!(!page_one.search_highlights[0].active);
 }
 
 #[test]
@@ -526,8 +589,14 @@ fn rotation_render_matrix_matches_view_transform() {
     }
 }
 
+fn test_render_image() -> Arc<gpui::RenderImage> {
+    Arc::new(gpui::RenderImage::new(smallvec![Frame::new(
+        RgbaImage::new(1, 1),
+    )]))
+}
+
 #[test]
-fn render_cache_protects_only_the_visible_rotation() {
+fn render_cache_protects_only_the_exact_visible_render() {
     let unrotated = RenderKey {
         doc_id: 1,
         page_idx: 0,
@@ -539,17 +608,166 @@ fn render_cache_protects_only_the_visible_rotation() {
         rotation: DocumentRotation::Degrees90,
         ..unrotated
     };
-    let image = Arc::new(gpui::RenderImage::new(smallvec![Frame::new(
-        RgbaImage::new(1, 1),
-    )]));
     let mut cache = RenderCache::new();
-    cache.set_protected_pages([(1, 0, DocumentRotation::Degrees90)]);
+    cache.set_protected_renders(1, [rotated]);
 
-    cache.insert_render(unrotated, 1.0, image.clone());
-    cache.insert_render(rotated, 1.0, image);
+    cache.insert_render(unrotated, 1.0, test_render_image());
+    cache.insert_render(rotated, 1.0, test_render_image());
 
     assert!(cache.render(unrotated).is_none());
     assert!(cache.render(rotated).is_some());
+}
+
+#[test]
+fn render_cache_resize_churn_keeps_current_viewport_and_thumbnail_sizes() {
+    let key = |physical_width, physical_height| RenderKey {
+        doc_id: 1,
+        page_idx: 0,
+        rotation: DocumentRotation::Degrees0,
+        physical_width,
+        physical_height,
+    };
+    let half_width = key(4_000, 3_000);
+    let fullscreen = key(6_000, 4_000);
+    let current_viewport = key(5_000, 4_000);
+    let visible_thumbnail = key(260, 360);
+    let mut cache = RenderCache::new();
+    cache.set_protected_renders(1, [current_viewport, visible_thumbnail]);
+
+    cache.insert_render(half_width, 1.0, test_render_image());
+    cache.insert_render(fullscreen, 1.0, test_render_image());
+    cache.insert_render(current_viewport, 1.0, test_render_image());
+    cache.insert_render(visible_thumbnail, 1.0, test_render_image());
+
+    assert!(cache.render(half_width).is_none());
+    assert!(cache.render(fullscreen).is_none());
+    assert!(cache.render(current_viewport).is_some());
+    assert!(cache.render(visible_thumbnail).is_some());
+}
+
+#[test]
+fn surface_render_keys_keep_actual_fractional_scale_bounds_and_prune_hidden_pages() {
+    // A 168 x 217.411765 logical thumbnail at 1.5x predicts 252 x 327
+    // when dimensions are rounded independently. GPUI snaps the absolute
+    // canvas edges, so its actual height can instead be 326 physical pixels.
+    let predicted = RenderKey {
+        doc_id: 1,
+        page_idx: 0,
+        rotation: DocumentRotation::Degrees0,
+        physical_width: 252,
+        physical_height: 327,
+    };
+    let actual = RenderKey {
+        physical_height: 326,
+        ..predicted
+    };
+    let resized_actual = RenderKey {
+        physical_width: 253,
+        ..actual
+    };
+    let next_page = RenderKey {
+        page_idx: 1,
+        ..actual
+    };
+    let mut keys = SurfaceRenderKeys::default();
+
+    assert!(predicted != actual);
+    assert!(keys.register(0, actual));
+    assert!(!keys.register(0, actual));
+    assert!(keys.register(0, resized_actual));
+    assert!(keys.register(1, next_page));
+
+    let registered = keys.values().collect::<HashSet<_>>();
+    assert!(!registered.contains(&predicted));
+    assert!(!registered.contains(&actual));
+    assert!(registered.contains(&resized_actual));
+    assert!(registered.contains(&next_page));
+
+    assert!(keys.retain_pages([1]));
+    let retained = keys.values().collect::<HashSet<_>>();
+    assert_eq!(retained.len(), 1);
+    assert!(retained.contains(&next_page));
+    assert!(!keys.retain_pages([1]));
+}
+
+#[test]
+fn render_cache_page_boundary_keeps_actual_visible_thumbnail() {
+    let thumbnail = RenderKey {
+        doc_id: 1,
+        page_idx: 0,
+        rotation: DocumentRotation::Degrees0,
+        physical_width: 252,
+        physical_height: 326,
+    };
+    let fullscreen_page = |page_idx| RenderKey {
+        doc_id: 1,
+        page_idx,
+        rotation: DocumentRotation::Degrees0,
+        physical_width: 2_770,
+        physical_height: 3_585,
+    };
+    let old_page = fullscreen_page(0);
+    let middle_page = fullscreen_page(1);
+    let current_page = fullscreen_page(2);
+    let entering_page = fullscreen_page(3);
+    let mut surface_keys = SurfaceRenderKeys::default();
+    surface_keys.register(0, thumbnail);
+
+    let mut cache = RenderCache::new();
+    cache.set_protected_renders(
+        1,
+        surface_keys.values().chain(std::iter::once(entering_page)),
+    );
+    cache.insert_render(thumbnail, 1.0, test_render_image());
+    cache.insert_render(old_page, 1.0, test_render_image());
+    cache.insert_render(middle_page, 1.0, test_render_image());
+    cache.insert_render(current_page, 1.0, test_render_image());
+
+    // Crossing into the next page pushes the cache beyond 30M pixels.
+    // The stale high-resolution page must be evicted, not the thumbnail.
+    cache.insert_render(entering_page, 1.0, test_render_image());
+
+    assert!(cache.render(old_page).is_none());
+    assert!(cache.render(thumbnail).is_some());
+    assert!(cache.render(entering_page).is_some());
+}
+
+#[test]
+fn render_cache_protection_is_independent_per_document_and_cleared_on_eviction() {
+    let document_one = RenderKey {
+        doc_id: 1,
+        page_idx: 0,
+        rotation: DocumentRotation::Degrees0,
+        physical_width: 5_000,
+        physical_height: 4_000,
+    };
+    let document_two = RenderKey {
+        doc_id: 2,
+        ..document_one
+    };
+    let document_two_thumbnail = RenderKey {
+        physical_width: 260,
+        physical_height: 360,
+        ..document_two
+    };
+    let mut cache = RenderCache::new();
+    cache.set_protected_renders(1, [document_one]);
+    cache.set_protected_renders(2, [document_two]);
+
+    cache.insert_render(document_one, 1.0, test_render_image());
+    cache.insert_render(document_two, 1.0, test_render_image());
+    assert!(cache.render(document_one).is_some());
+    assert!(cache.render(document_two).is_some());
+
+    cache.clear_protected_renders(1);
+    cache.set_protected_renders(2, [document_two, document_two_thumbnail]);
+    cache.insert_render(document_two_thumbnail, 1.0, test_render_image());
+    assert!(cache.render(document_one).is_none());
+    assert!(cache.render(document_two).is_some());
+    assert!(cache.render(document_two_thumbnail).is_some());
+
+    cache.evict_document(2);
+    assert!(!cache.is_render_protected(document_two));
 }
 
 #[test]

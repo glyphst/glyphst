@@ -116,6 +116,7 @@ impl DocumentView {
 
         self.grid_overview_open = open;
         if open {
+            self.viewport_render_keys.clear();
             self.region_tool_active = false;
             self.region_drag = None;
             self.selected_region = None;
@@ -123,9 +124,11 @@ impl DocumentView {
             self.grid_overview_cursor = self.current_page_index().min(self.last_page_index());
             self.scroll_grid_overview_cursor(ScrollStrategy::Center);
         } else {
+            self.grid_overview_render_keys.clear();
             self.grid_overview_selecting = false;
             self.grid_overview_selection.clear();
         }
+        self.update_render_cache_protection(cx);
         cx.notify();
     }
 
@@ -233,6 +236,101 @@ impl DocumentView {
             .max(0.001);
 
         (page_width * scale, page_height * scale)
+    }
+
+    fn render_page_thumbnail(
+        thumbnail_view: Entity<DocumentView>,
+        surface: PageOverviewSurface,
+        page_idx: usize,
+        page_bounds: Rect,
+        page_dimensions: (f32, f32),
+        rotation: DocumentRotation,
+        thumbnail_width: f32,
+        thumbnail_height: f32,
+        document_theme: Theme,
+        ui_theme: ThemeColor,
+        overlays: PageThumbnailOverlays,
+    ) -> impl IntoElement {
+        canvas(
+            move |bounds, window, cx| {
+                thumbnail_view.update(cx, |this, cx| {
+                    let key = this.render_key(page_idx, bounds, window.scale_factor());
+                    this.register_overview_render_key(surface, page_idx, key, cx);
+                    this.cached_or_request_render(key, cx)
+                })
+            },
+            move |bounds, image, window, _| {
+                window.paint_quad(fill(bounds, rgb(document_theme.page)));
+                if let Some(image) = image {
+                    let _ = window.paint_image(bounds, bounds, Corners::default(), image, 0, false);
+                }
+
+                let overlay_bounds = |rect: HighlightRect| {
+                    Self::pdf_rect_to_image_bounds(
+                        page_bounds,
+                        rotation,
+                        page_dimensions,
+                        Rect::new(rect.x0, rect.y0, rect.x1, rect.y1),
+                        bounds,
+                    )
+                };
+
+                for (rect, color) in &overlays.highlights {
+                    window.paint_quad(fill(
+                        overlay_bounds(*rect),
+                        rgba(document_theme.highlight_color(*color)),
+                    ));
+                }
+
+                let underline_scale = (bounds.size.width.as_f32()
+                    / GRID_OVERVIEW_BASE_THUMBNAIL_WIDTH)
+                    .max(bounds.size.height.as_f32() / GRID_OVERVIEW_BASE_THUMBNAIL_MAX_HEIGHT)
+                    .clamp(1.0, 3.0);
+                let dot = px(underline_scale);
+                let gap = dot;
+                let step = dot + gap;
+                for (rect, color) in &overlays.note_underlines {
+                    let note = overlay_bounds(*rect);
+                    let y = note.origin.y + note.size.height - dot - px(0.5);
+                    let right = note.origin.x + note.size.width;
+                    let mut x = note.origin.x;
+                    while x < right {
+                        let width = (right - x).min(dot);
+                        window.paint_quad(
+                            fill(
+                                Bounds::new(point(x, y), size(width, dot)),
+                                rgba(document_theme.note_color(*color)),
+                            )
+                            .corner_radii(Corners::all(dot / 2.0)),
+                        );
+                        x += step;
+                    }
+                }
+
+                for highlight in overlays
+                    .search_highlights
+                    .iter()
+                    .filter(|highlight| !highlight.active)
+                {
+                    window.paint_quad(fill(
+                        overlay_bounds(highlight.rect),
+                        rgba(Self::with_alpha(document_theme.match_highlight, 0x66)),
+                    ));
+                }
+                for highlight in overlays
+                    .search_highlights
+                    .iter()
+                    .filter(|highlight| highlight.active)
+                {
+                    window.paint_quad(fill(
+                        overlay_bounds(highlight.rect),
+                        ui_theme.primary.opacity(0x99 as f32 / 255.0),
+                    ));
+                }
+            },
+        )
+        .w(px(thumbnail_width))
+        .h(px(thumbnail_height))
     }
 
     pub(super) fn render_thumbnail_sidebar(
@@ -361,6 +459,16 @@ impl DocumentView {
                                 page_count,
                                 cx.processor(
                                     move |this, visible_range: Range<usize>, _window, cx| {
+                                        let visible_pages = visible_range
+                                            .clone()
+                                            .filter(|page_idx| *page_idx < this.pages.len())
+                                            .collect::<Vec<_>>();
+                                        this.retain_overview_render_pages(
+                                            PageOverviewSurface::ThumbnailSidebar,
+                                            visible_pages,
+                                            cx,
+                                        );
+
                                         let document_theme =
                                             cx.global::<SettingsStore>().resolved_theme;
                                         let theme = cx.theme().colors;
@@ -387,43 +495,20 @@ impl DocumentView {
                                                 } else {
                                                     theme.muted_foreground
                                                 };
-                                                let thumbnail_view = cx.entity();
-                                                let thumbnail = canvas(
-                                                    {
-                                                        let thumbnail_view =
-                                                            thumbnail_view.clone();
-                                                        move |bounds, window, cx| {
-                                                            thumbnail_view.update(cx, |this, cx| {
-                                                                let key = this.render_key(
-                                                                    page_idx,
-                                                                    bounds,
-                                                                    window.scale_factor(),
-                                                                );
-                                                                this.cached_or_request_render(
-                                                                    key, cx,
-                                                                )
-                                                            })
-                                                        }
-                                                    },
-                                                    move |bounds, image, window, _| {
-                                                        window.paint_quad(fill(
-                                                            bounds,
-                                                            rgb(document_theme.page),
-                                                        ));
-                                                        if let Some(image) = image {
-                                                            let _ = window.paint_image(
-                                                                bounds,
-                                                                bounds,
-                                                                Corners::default(),
-                                                                image,
-                                                                0,
-                                                                false,
-                                                            );
-                                                        }
-                                                    },
-                                                )
-                                                .w(px(thumbnail_width))
-                                                .h(px(thumbnail_height));
+                                                let thumbnail =
+                                                    Self::render_page_thumbnail(
+                                                        cx.entity(),
+                                                        PageOverviewSurface::ThumbnailSidebar,
+                                                        page_idx,
+                                                        this.pages[page_idx].bounds,
+                                                        this.page_dimensions(page_idx),
+                                                        this.rotation,
+                                                        thumbnail_width,
+                                                        thumbnail_height,
+                                                        document_theme,
+                                                        theme,
+                                                        this.thumbnail_overlays_for_page(page_idx),
+                                                    );
 
                                                 Some(
                                                     div()
@@ -588,16 +673,6 @@ impl DocumentView {
         let scroll_handle = self.grid_overview_scroll.clone();
         let measure_view = cx.entity();
         let page_export = self.capabilities.page_export;
-        let search_highlights_by_page = if self.search.matches.is_empty() {
-            Vec::new()
-        } else {
-            Self::search_highlight_rects_by_page(
-                self.pages.len(),
-                &self.glyphs,
-                &self.search.matches,
-                self.search.active,
-            )
-        };
 
         let measure = canvas(
             {
@@ -725,25 +800,22 @@ impl DocumentView {
                             "grid-overview-list",
                             rows,
                             cx.processor(move |this, visible_range: Range<usize>, _window, cx| {
-                                // Protect visible grid pages from cache eviction so
-                                // thumbnails are not evicted by the pixel-budget LRU.
-                                let protect_cols = this.grid_overview_cols.max(1);
-                                let protect_page_count = this.pages.len();
-                                let protect_doc_id = this.doc_id;
-                                let protect_rotation = this.rotation;
-                                let protected: Vec<(u64, usize, DocumentRotation)> = visible_range
+                                let visible_cols = cols;
+                                let visible_page_count = this.pages.len();
+                                let visible_pages = visible_range
                                     .clone()
                                     .flat_map(|row_ix| {
-                                        let start = row_ix * protect_cols;
+                                        let start = row_ix * visible_cols;
                                         let end =
-                                            ((row_ix + 1) * protect_cols).min(protect_page_count);
+                                            ((row_ix + 1) * visible_cols).min(visible_page_count);
                                         start..end
                                     })
-                                    .map(|page_idx| {
-                                        (protect_doc_id, page_idx, protect_rotation)
-                                    })
-                                    .collect();
-                                cx.global_mut::<RenderCache>().set_protected_pages(protected);
+                                    .collect::<Vec<_>>();
+                                this.retain_overview_render_pages(
+                                    PageOverviewSurface::GridOverview,
+                                    visible_pages,
+                                    cx,
+                                );
 
                                 let document_theme =
                                     cx.global::<SettingsStore>().resolved_theme;
@@ -784,80 +856,20 @@ impl DocumentView {
                                                 } else {
                                                     theme.muted_foreground
                                                 };
-                                                let page_bounds = this.pages[page_idx].bounds;
-                                                let page_dimensions = this.page_dimensions(page_idx);
-                                                let page_search_highlights =
-                                                    search_highlights_by_page
-                                                        .get(page_idx)
-                                                        .cloned()
-                                                        .unwrap_or_default();
-                                                let thumbnail_view = cx.entity();
-                                                let thumbnail = canvas(
-                                                    {
-                                                        let thumbnail_view = thumbnail_view.clone();
-                                                        move |bounds, window, cx| {
-                                                            thumbnail_view.update(cx, |this, cx| {
-                                                                let key = this.render_key(
-                                                                    page_idx,
-                                                                    bounds,
-                                                                    window.scale_factor(),
-                                                                );
-                                                                this.cached_or_request_render(
-                                                                    key, cx,
-                                                                )
-                                                            })
-                                                        }
-                                                    },
-                                                    move |bounds, image, window, _| {
-                                                        window.paint_quad(fill(
-                                                            bounds,
-                                                            rgb(document_theme.page),
-                                                        ));
-                                                        if let Some(image) = image {
-                                                            let _ = window.paint_image(
-                                                                bounds,
-                                                                bounds,
-                                                                Corners::default(),
-                                                                image,
-                                                                0,
-                                                                false,
-                                                            );
-                                                        }
-                                                        for highlight in &page_search_highlights {
-                                                            let rect = highlight.rect;
-                                                            let bounds =
-                                                                Self::pdf_rect_to_image_bounds(
-                                                                    page_bounds,
-                                                                    protect_rotation,
-                                                                    page_dimensions,
-                                                                    Rect::new(
-                                                                        rect.x0, rect.y0, rect.x1,
-                                                                        rect.y1,
-                                                                    ),
-                                                                    bounds,
-                                                                );
-                                                            if highlight.active {
-                                                                window.paint_quad(fill(
-                                                                    bounds,
-                                                                    theme.primary.opacity(
-                                                                        0x99 as f32 / 255.0,
-                                                                    ),
-                                                                ));
-                                                            } else {
-                                                                window.paint_quad(fill(
-                                                                    bounds,
-                                                                    rgba(Self::with_alpha(
-                                                                        document_theme
-                                                                            .match_highlight,
-                                                                        0x66,
-                                                                    )),
-                                                                ));
-                                                            }
-                                                        }
-                                                    },
-                                                )
-                                                .w(px(thumbnail_width))
-                                                .h(px(thumbnail_height));
+                                                let thumbnail =
+                                                    Self::render_page_thumbnail(
+                                                        cx.entity(),
+                                                        PageOverviewSurface::GridOverview,
+                                                        page_idx,
+                                                        this.pages[page_idx].bounds,
+                                                        this.page_dimensions(page_idx),
+                                                        this.rotation,
+                                                        thumbnail_width,
+                                                        thumbnail_height,
+                                                        document_theme,
+                                                        theme,
+                                                        this.thumbnail_overlays_for_page(page_idx),
+                                                    );
 
                                                 row = row.child(
                                                     div()

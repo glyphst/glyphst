@@ -268,6 +268,40 @@ impl RenderKey {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PageOverviewSurface {
+    ThumbnailSidebar,
+    GridOverview,
+}
+
+#[derive(Default)]
+struct SurfaceRenderKeys {
+    by_page: HashMap<usize, RenderKey>,
+}
+
+impl SurfaceRenderKeys {
+    fn register(&mut self, page_idx: usize, key: RenderKey) -> bool {
+        debug_assert_eq!(key.page_idx, page_idx);
+        self.by_page.insert(page_idx, key) != Some(key)
+    }
+
+    fn retain_pages(&mut self, visible_pages: impl IntoIterator<Item = usize>) -> bool {
+        let visible_pages = visible_pages.into_iter().collect::<HashSet<_>>();
+        let previous_len = self.by_page.len();
+        self.by_page
+            .retain(|page_idx, _| visible_pages.contains(page_idx));
+        self.by_page.len() != previous_len
+    }
+
+    fn values(&self) -> impl Iterator<Item = RenderKey> + '_ {
+        self.by_page.values().copied()
+    }
+
+    fn clear(&mut self) {
+        self.by_page.clear();
+    }
+}
+
 struct CachedRender {
     key: RenderKey,
     render_scale: f32,
@@ -286,7 +320,7 @@ struct CachedDisplayList {
 pub struct RenderCache {
     renders: Vec<CachedRender>,
     display_lists: Vec<CachedDisplayList>,
-    protected_pages: HashSet<(u64, usize, DocumentRotation)>,
+    protected_renders: HashMap<u64, HashSet<RenderKey>>,
     access_counter: u64,
 }
 
@@ -301,12 +335,26 @@ impl RenderCache {
         self.exact_render_index(key).is_some()
     }
 
-    fn set_protected_pages(
-        &mut self,
-        pages: impl IntoIterator<Item = (u64, usize, DocumentRotation)>,
-    ) {
-        self.protected_pages.clear();
-        self.protected_pages.extend(pages);
+    fn set_protected_renders(&mut self, doc_id: u64, renders: impl IntoIterator<Item = RenderKey>) {
+        let renders = renders
+            .into_iter()
+            .filter(|key| key.doc_id == doc_id)
+            .collect::<HashSet<_>>();
+        if renders.is_empty() {
+            self.protected_renders.remove(&doc_id);
+        } else {
+            self.protected_renders.insert(doc_id, renders);
+        }
+    }
+
+    fn clear_protected_renders(&mut self, doc_id: u64) {
+        self.protected_renders.remove(&doc_id);
+    }
+
+    fn is_render_protected(&self, key: RenderKey) -> bool {
+        self.protected_renders
+            .get(&key.doc_id)
+            .is_some_and(|renders| renders.contains(&key))
     }
 
     fn render(&mut self, key: RenderKey) -> Option<Arc<RenderImage>> {
@@ -376,13 +424,7 @@ impl RenderCache {
                 .renders
                 .iter()
                 .enumerate()
-                .filter(|(_, cached)| {
-                    !self.protected_pages.contains(&(
-                        cached.key.doc_id,
-                        cached.key.page_idx,
-                        cached.key.rotation,
-                    ))
-                })
+                .filter(|(_, cached)| !self.is_render_protected(cached.key))
                 .min_by_key(|(_, cached)| cached.last_access)
                 .map(|(index, _)| index)
             {
@@ -461,6 +503,7 @@ impl RenderCache {
             }
         });
         self.display_lists.retain(|cached| cached.doc_id != doc_id);
+        self.protected_renders.remove(&doc_id);
         removed
     }
 
@@ -843,6 +886,13 @@ struct SearchHighlightRect {
     active: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PageThumbnailOverlays {
+    highlights: Vec<(HighlightRect, HighlightColor)>,
+    note_underlines: Vec<(HighlightRect, HighlightColor)>,
+    search_highlights: Vec<SearchHighlightRect>,
+}
+
 struct SearchState {
     query: SharedString,
     matches: Vec<SearchMatch>,
@@ -1138,6 +1188,8 @@ pub struct DocumentView {
     thumbnail_sidebar_current_page: usize,
     thumbnail_sidebar_selecting: bool,
     thumbnail_sidebar_selection: BTreeSet<usize>,
+    viewport_render_keys: HashSet<RenderKey>,
+    thumbnail_sidebar_render_keys: SurfaceRenderKeys,
     dock_snapshot: DocumentDockSnapshot,
     grid_overview_open: bool,
     grid_overview_scroll: UniformListScrollHandle,
@@ -1147,6 +1199,7 @@ pub struct DocumentView {
     grid_overview_viewport_width: f32,
     grid_overview_selecting: bool,
     grid_overview_selection: BTreeSet<usize>,
+    grid_overview_render_keys: SurfaceRenderKeys,
     presentation_page: Option<usize>,
     jump_back: Vec<JumpPosition>,
     jump_forward: Vec<JumpPosition>,

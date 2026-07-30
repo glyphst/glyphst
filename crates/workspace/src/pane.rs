@@ -1040,6 +1040,7 @@ impl Pane {
         if let Some(Tab::Document(document_view)) = self.tabs.get(tab_ix) {
             document_view.update(cx, |document_view, cx| {
                 document_view.flush_current_history_position(cx);
+                document_view.deactivate_render_cache(cx);
             });
         }
     }

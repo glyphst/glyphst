@@ -271,9 +271,9 @@ impl DocumentView {
         let key = self.render_key(page_idx, image_bounds, scale_factor);
         self.page_image_bounds[page_idx] = Some(image_bounds);
 
-        let doc_id = self.doc_id;
-        cx.global_mut::<RenderCache>()
-            .set_protected_pages([(doc_id, page_idx, self.rotation)]);
+        self.viewport_render_keys.clear();
+        self.viewport_render_keys.insert(key);
+        self.update_render_cache_protection(cx);
 
         for adjacent_page in [
             page_idx.checked_sub(1),
@@ -355,12 +355,10 @@ impl DocumentView {
                 self.image_bounds_and_render_key(page_idx, bounds, scale, scale_factor);
             visible_page_renders.push((page_idx, image_bounds, key));
         }
-        let doc_id = self.doc_id;
-        cx.global_mut::<RenderCache>().set_protected_pages(
-            visible_page_renders
-                .iter()
-                .map(|(page_idx, _, key)| (doc_id, *page_idx, key.rotation)),
-        );
+        self.viewport_render_keys.clear();
+        self.viewport_render_keys
+            .extend(visible_page_renders.iter().map(|(_, _, key)| *key));
+        self.update_render_cache_protection(cx);
 
         if let (Some((first, _, _)), Some((last, _, _))) =
             (visible_page_renders.first(), visible_page_renders.last())
