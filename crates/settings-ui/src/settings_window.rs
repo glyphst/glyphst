@@ -918,7 +918,7 @@ mod tests {
     };
     use glyphst_ai::ai_client::AiModelInfo;
     use glyphst_settings::{
-        AiApiStyle, AiModel, AiProvider, OcrSettings, SettingsStore, sync_component_theme,
+        AiApiStyle, AiModel, AiProvider, ModelRef, OcrSettings, SettingsStore, sync_component_theme,
     };
     use gpui::{
         AppContext as _, Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext,
@@ -996,6 +996,113 @@ mod tests {
     settings_page_render_test!(renders_ocr_page, 6, 1);
 
     #[gpui::test]
+    fn microsoft_translator_text_fields_share_a_bounded_control_column(cx: &mut TestAppContext) {
+        initialize_ui_test(cx);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let settings = cx.new(|cx| {
+                let mut settings = SettingsWindow::new(|_| {}, cx);
+                settings.initial_selection = SelectIndex {
+                    page_ix: 5,
+                    group_ix: Some(4),
+                };
+                settings
+            });
+            Root::new(settings, window, cx)
+        });
+        cx.simulate_resize(size(px(2000.0), px(1200.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            _ = window.draw(cx);
+        });
+
+        let api_key_row = cx.debug_bounds("setting-item-5-4-1").unwrap();
+        let api_key_label = cx.debug_bounds("setting-item-label-5-4-1").unwrap();
+        let api_key_field = cx.debug_bounds("setting-item-field-5-4-1").unwrap();
+        let api_key_input = cx
+            .debug_bounds("setting-bound-input-translation-api-key-microsoft")
+            .unwrap();
+        let endpoint_row = cx.debug_bounds("setting-item-5-4-2").unwrap();
+        let endpoint_label = cx.debug_bounds("setting-item-label-5-4-2").unwrap();
+        let endpoint_field = cx.debug_bounds("setting-item-field-5-4-2").unwrap();
+        let endpoint_input = cx
+            .debug_bounds("setting-bound-input-translation-base-url-microsoft")
+            .unwrap();
+        let region_row = cx.debug_bounds("setting-item-5-4-3").unwrap();
+        let region_label = cx.debug_bounds("setting-item-label-5-4-3").unwrap();
+        let region_field = cx.debug_bounds("setting-item-field-5-4-3").unwrap();
+        let region_input = cx
+            .debug_bounds("setting-bound-input-translation-microsoft-region")
+            .unwrap();
+
+        for (row, label, field, input) in [
+            (api_key_row, api_key_label, api_key_field, api_key_input),
+            (region_row, region_label, region_field, region_input),
+        ] {
+            assert_eq!(field.right(), row.right());
+            assert_eq!(field.size.width, px(480.0));
+            assert_eq!(input, field);
+            assert!(field.left() > label.right());
+        }
+        assert_eq!(api_key_field.left(), region_field.left());
+        assert_eq!(api_key_field.right(), region_field.right());
+
+        assert_eq!(endpoint_field.right(), endpoint_row.right());
+        assert_eq!(endpoint_field.size.width, px(480.0));
+        assert_eq!(endpoint_input, endpoint_field);
+        assert_eq!(endpoint_field.left(), api_key_field.left());
+        assert!(endpoint_field.top() > endpoint_label.bottom());
+    }
+
+    #[gpui::test]
+    fn long_model_selector_uses_the_control_column_without_stretching_short_selectors(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_ui_test(cx);
+        cx.update(|cx| {
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            let model_id = "long-translation-model";
+            let config = settings.ai.provider_config_mut(AiProvider::OpenAi);
+            config.enabled = true;
+            config.ensure_model(AiModel::new(
+                model_id,
+                "Long translation model name ".repeat(80),
+                "OpenAI",
+            ));
+            settings.ai.provider_order = vec![AiProvider::OpenAi];
+            settings.ai.translation_model = Some(ModelRef::new(AiProvider::OpenAi, model_id));
+            cx.global_mut::<SettingsStore>()
+                .set_settings_in_memory(settings);
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let settings = cx.new(|cx| {
+                let mut settings = SettingsWindow::new(|_| {}, cx);
+                settings.initial_selection = SelectIndex {
+                    page_ix: 3,
+                    group_ix: Some(0),
+                };
+                settings
+            });
+            Root::new(settings, window, cx)
+        });
+        cx.simulate_resize(size(px(2000.0), px(1200.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            _ = window.draw(cx);
+        });
+
+        let model_field = cx.debug_bounds("setting-item-field-3-0-2").unwrap();
+        let model_selector = cx.debug_bounds("setting-dropdown-3-0-2").unwrap();
+        assert_eq!(model_selector.right(), model_field.right());
+        assert_eq!(model_selector.size.width, model_field.size.width);
+        assert!(model_selector.left() >= model_field.left());
+
+        let thinking_field = cx.debug_bounds("setting-item-field-3-0-3").unwrap();
+        let thinking_selector = cx.debug_bounds("setting-dropdown-3-0-3").unwrap();
+        assert_eq!(thinking_selector.right(), thinking_field.right());
+        assert!(thinking_selector.size.width < thinking_field.size.width);
+    }
+
+    #[gpui::test]
     fn renders_custom_provider_rows_and_models(cx: &mut TestAppContext) {
         initialize_ui_test(cx);
         let provider = cx.update(|cx| {
@@ -1036,18 +1143,10 @@ mod tests {
         });
 
         let host = provider.as_str();
-        let api_host_row_selector: &'static str =
-            Box::leak(format!("provider-api-host-row-{host}").into_boxed_str());
-        let api_host_label_selector: &'static str =
-            Box::leak(format!("provider-api-host-label-{host}").into_boxed_str());
         let api_host_selector: &'static str =
-            Box::leak(format!("provider-api-host-input-host-{host}").into_boxed_str());
-        let api_key_row_selector: &'static str =
-            Box::leak(format!("provider-api-key-row-{host}").into_boxed_str());
-        let api_key_label_selector: &'static str =
-            Box::leak(format!("provider-api-key-label-{host}").into_boxed_str());
+            Box::leak(format!("setting-bound-input-provider-api-host-{host}").into_boxed_str());
         let api_key_selector: &'static str =
-            Box::leak(format!("provider-api-key-input-host-{host}").into_boxed_str());
+            Box::leak(format!("setting-bound-input-provider-api-key-{host}").into_boxed_str());
         let compatibility_divider_selector: &'static str =
             Box::leak(format!("provider-divider-{host}-compatibility").into_boxed_str());
         let credential_divider_selector: &'static str =
@@ -1068,22 +1167,31 @@ mod tests {
         let api_key = cx
             .debug_bounds(api_key_selector)
             .expect("API Key input host");
-        let api_host_row = cx
-            .debug_bounds(api_host_row_selector)
-            .expect("API Host row");
+        let api_host_row = cx.debug_bounds("setting-item-4-1-2").expect("API Host row");
         let api_host_label = cx
-            .debug_bounds(api_host_label_selector)
+            .debug_bounds("setting-item-label-4-1-2")
             .expect("API Host label");
-        let api_key_row = cx.debug_bounds(api_key_row_selector).expect("API Key row");
+        let api_host_field = cx
+            .debug_bounds("setting-item-field-4-1-2")
+            .expect("API Host field");
+        let api_key_row = cx.debug_bounds("setting-item-4-1-3").expect("API Key row");
         let api_key_label = cx
-            .debug_bounds(api_key_label_selector)
+            .debug_bounds("setting-item-label-4-1-3")
             .expect("API Key label");
-        assert_eq!(api_host.right(), api_host_row.right());
-        assert_eq!(api_key.right(), api_key_row.right());
-        assert!(api_host.left() > api_host_label.right());
-        assert!(api_key.left() > api_key_label.right());
-        assert!(api_host.size.width > api_host_row.size.width - px(160.0));
-        assert!(api_key.size.width > api_key_row.size.width - px(160.0));
+        let api_key_field = cx
+            .debug_bounds("setting-item-field-4-1-3")
+            .expect("API Key field");
+        for (row, label, field, input) in [
+            (api_host_row, api_host_label, api_host_field, api_host),
+            (api_key_row, api_key_label, api_key_field, api_key),
+        ] {
+            assert_eq!(field.right(), row.right());
+            assert_eq!(field.size.width, px(480.0));
+            assert_eq!(input, field);
+            assert!(field.left() > label.right());
+        }
+        assert_eq!(api_host_field.left(), api_key_field.left());
+        assert_eq!(api_host_field.right(), api_key_field.right());
 
         let compatibility_divider = cx
             .debug_bounds(compatibility_divider_selector)

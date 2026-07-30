@@ -12,8 +12,7 @@ use gpui::{
     Subscription, Window, div, prelude::*, px, rgb, rgba,
 };
 use gpui_component::{
-    ActiveTheme as _, AxisExt as _, Disableable as _, Sizable as _, StyledExt as _,
-    Theme as ComponentTheme,
+    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, Theme as ComponentTheme,
     button::{Button, ButtonVariants as _},
     color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
     h_flex,
@@ -34,7 +33,6 @@ struct BoundInputConfig {
     value: SharedString,
     placeholder: SharedString,
     masked: bool,
-    fill_width: bool,
     on_change: TextChangeHandler,
 }
 
@@ -135,9 +133,9 @@ impl SettingsWindow {
             value,
             placeholder,
             masked,
-            fill_width,
             on_change,
         } = config;
+        let selector = format!("setting-bound-input-{id}");
         let initial_value = value.clone();
         let state = window.use_keyed_state(id, cx, move |window, cx| {
             let input = cx.new(|cx| {
@@ -191,19 +189,18 @@ impl SettingsWindow {
         });
 
         let input = state.read(cx).input.clone();
-        Input::new(&input)
-            .disabled(options.disabled)
-            .with_size(options.size)
-            .when(masked, |input| input.mask_toggle())
-            .map(|input| {
-                if fill_width {
-                    input.w_full().min_w_0()
-                } else if options.layout.is_horizontal() {
-                    input.w_64()
-                } else {
-                    input.w_full()
-                }
-            })
+        div()
+            .debug_selector(move || selector.clone())
+            .w_full()
+            .min_w_0()
+            .child(
+                Input::new(&input)
+                    .disabled(options.disabled)
+                    .with_size(options.size)
+                    .when(masked, |input| input.mask_toggle())
+                    .w_full()
+                    .min_w_0(),
+            )
             .into_any_element()
     }
 
@@ -229,7 +226,6 @@ impl SettingsWindow {
                     value: value(cx),
                     placeholder: placeholder.clone(),
                     masked,
-                    fill_width: false,
                     on_change: set_value.clone(),
                 },
                 options,
@@ -259,7 +255,6 @@ impl SettingsWindow {
                 value: value.into(),
                 placeholder: placeholder.into(),
                 masked,
-                fill_width: true,
                 on_change: Rc::new(set_value),
             },
             options,

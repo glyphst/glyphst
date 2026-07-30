@@ -314,7 +314,7 @@ impl SettingsWindow {
     }
 
     fn provider_api_key_item(provider: AiProvider, view: Entity<Self>) -> SettingItem {
-        SettingItem::render(move |options, window, cx| {
+        let field = SettingField::<SharedString>::render(move |options, window, cx| {
             let value: SharedString = cx
                 .global::<SettingsStore>()
                 .settings
@@ -323,52 +323,30 @@ impl SettingsWindow {
                 .api_key
                 .into();
             let input_view = view.clone();
-            let row_selector = format!("provider-api-key-row-{}", provider.as_str());
-            let label_selector = format!("provider-api-key-label-{}", provider.as_str());
-            let input_selector = format!("provider-api-key-input-host-{}", provider.as_str());
-            h_flex()
-                .debug_selector(move || row_selector.clone())
-                .w_full()
-                .min_w_0()
-                .items_start()
-                .gap_3()
-                .child(
-                    div()
-                        .debug_selector(move || label_selector.clone())
-                        .flex_none()
-                        .child(Label::new(crate::fl!("settings-api-key")).text_sm()),
-                )
-                .child(
-                    div()
-                        .debug_selector(move || input_selector.clone())
-                        .flex_1()
-                        .min_w_0()
-                        .child(Self::bound_text_input(
-                            format!("provider-api-key-{}", provider.as_str()),
-                            value,
-                            crate::fl!("settings-api-key-placeholder"),
-                            true,
-                            move |value, cx| {
-                                Self::update_text_settings(&input_view, cx, move |settings| {
-                                    settings.ai.provider_config_mut(provider).api_key =
-                                        value.to_string();
-                                });
-                                input_view.update(cx, |this, cx| {
-                                    this.invalidate_provider_operation(provider);
-                                    cx.notify();
-                                });
-                            },
-                            options,
-                            window,
-                            cx,
-                        )),
-                )
-        })
-        .keywords([crate::fl!("settings-api-key")])
+            Self::bound_text_input(
+                format!("provider-api-key-{}", provider.as_str()),
+                value,
+                crate::fl!("settings-api-key-placeholder"),
+                true,
+                move |value, cx| {
+                    Self::update_text_settings(&input_view, cx, move |settings| {
+                        settings.ai.provider_config_mut(provider).api_key = value.to_string();
+                    });
+                    input_view.update(cx, |this, cx| {
+                        this.invalidate_provider_operation(provider);
+                        cx.notify();
+                    });
+                },
+                options,
+                window,
+                cx,
+            )
+        });
+        SettingItem::new(crate::fl!("settings-api-key"), field)
     }
 
     fn provider_api_host_item(provider: AiProvider, view: Entity<Self>) -> SettingItem {
-        SettingItem::render(move |options, window, cx| {
+        let field = SettingField::<SharedString>::render(move |options, window, cx| {
             let value: SharedString = cx
                 .global::<SettingsStore>()
                 .settings
@@ -378,48 +356,27 @@ impl SettingsWindow {
                 .unwrap_or_default()
                 .into();
             let input_view = view.clone();
-            let row_selector = format!("provider-api-host-row-{}", provider.as_str());
-            let label_selector = format!("provider-api-host-label-{}", provider.as_str());
-            let input_selector = format!("provider-api-host-input-host-{}", provider.as_str());
-            h_flex()
-                .debug_selector(move || row_selector.clone())
-                .w_full()
-                .min_w_0()
-                .items_start()
-                .gap_3()
-                .child(
-                    div()
-                        .debug_selector(move || label_selector.clone())
-                        .flex_none()
-                        .child(Label::new(crate::fl!("settings-api-host")).text_sm()),
-                )
-                .child(
-                    div()
-                        .debug_selector(move || input_selector.clone())
-                        .flex_1()
-                        .min_w_0()
-                        .child(Self::bound_text_input(
-                            format!("provider-api-host-{}", provider.as_str()),
-                            value,
-                            "https://api.example.com/v1",
-                            false,
-                            move |value, cx| {
-                                Self::update_text_settings(&input_view, cx, move |settings| {
-                                    settings.ai.provider_config_mut(provider).base_url =
-                                        Some(value.to_string());
-                                });
-                                input_view.update(cx, |this, cx| {
-                                    this.invalidate_provider_operation(provider);
-                                    cx.notify();
-                                });
-                            },
-                            options,
-                            window,
-                            cx,
-                        )),
-                )
-        })
-        .keywords([crate::fl!("settings-api-host")])
+            Self::bound_text_input(
+                format!("provider-api-host-{}", provider.as_str()),
+                value,
+                "https://api.example.com/v1",
+                false,
+                move |value, cx| {
+                    Self::update_text_settings(&input_view, cx, move |settings| {
+                        settings.ai.provider_config_mut(provider).base_url =
+                            Some(value.to_string());
+                    });
+                    input_view.update(cx, |this, cx| {
+                        this.invalidate_provider_operation(provider);
+                        cx.notify();
+                    });
+                },
+                options,
+                window,
+                cx,
+            )
+        });
+        SettingItem::new(crate::fl!("settings-api-host"), field)
     }
 
     fn provider_connection_item(provider: AiProvider, view: Entity<Self>) -> SettingItem {
