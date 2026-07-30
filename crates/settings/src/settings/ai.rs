@@ -546,28 +546,6 @@ impl ModelRef {
     }
 }
 
-fn sanitize_fixed_provider_model(model_ref: &mut Option<ModelRef>, title: bool) {
-    let Some(model_ref) = model_ref.as_mut() else {
-        return;
-    };
-    if model_ref.provider != AiProvider::ChatGptSubscription {
-        return;
-    }
-    let provider = model_ref.provider;
-    if !provider
-        .default_models()
-        .iter()
-        .any(|model| model.id == model_ref.id.trim())
-    {
-        model_ref.id = if title {
-            provider.default_title_model()
-        } else {
-            provider.default_model()
-        }
-        .to_string();
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiProviderConfig {
     pub name: String,
@@ -622,22 +600,6 @@ impl AiProviderConfig {
 
         if provider == AiProvider::ChatGptSubscription {
             self.api_key.clear();
-            let canonical = provider.default_models();
-            let mut models = Vec::with_capacity(canonical.len());
-            for current in self.models.drain(..) {
-                if let Some(model) = canonical.iter().find(|model| model.id == current.id)
-                    && !models.iter().any(|entry: &AiModel| entry.id == model.id)
-                {
-                    models.push(model.clone());
-                }
-            }
-            for model in canonical {
-                if !models.iter().any(|entry| entry.id == model.id) {
-                    models.push(model);
-                }
-            }
-            self.models = models;
-            return;
         }
 
         let mut models = Vec::new();
@@ -884,10 +846,6 @@ impl AiSettings {
             config.sanitize(*provider);
         }
         self.normalize_provider_order();
-
-        sanitize_fixed_provider_model(&mut self.main_model, false);
-        sanitize_fixed_provider_model(&mut self.title_model, true);
-        sanitize_fixed_provider_model(&mut self.translation_model, false);
 
         if self
             .main_model

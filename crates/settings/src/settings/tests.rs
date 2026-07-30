@@ -543,39 +543,53 @@ ai {
 }
 
 #[test]
-fn chatgpt_catalog_reconciliation_preserves_user_model_order() {
+fn chatgpt_subscription_model_edits_round_trip() {
     let mut settings = Settings::default();
     let config = settings
         .ai
         .provider_config_mut(AiProvider::ChatGptSubscription);
+    assert_eq!(
+        config.models,
+        AiProvider::ChatGptSubscription.default_models()
+    );
     config.enabled = true;
     assert!(config.move_model(0, 2));
-    let expected = config
-        .models
-        .iter()
-        .map(|model| model.id.clone())
-        .collect::<Vec<_>>();
+    config.remove_model("gpt-5.4");
+    config.ensure_model(AiModel::new(
+        "custom-subscription-model",
+        "Custom Subscription Model",
+        "ChatGPT",
+    ));
+    let expected = config.models.clone();
+    settings.ai.main_model = Some(ModelRef::new(
+        AiProvider::ChatGptSubscription,
+        "custom-subscription-model",
+    ));
     settings.sanitize();
 
     assert_eq!(
         settings
             .ai
             .provider_config(AiProvider::ChatGptSubscription)
-            .models
-            .iter()
-            .map(|model| model.id.clone())
-            .collect::<Vec<_>>(),
+            .models,
         expected
+    );
+    assert_eq!(
+        settings.ai.main_model,
+        Some(ModelRef::new(
+            AiProvider::ChatGptSubscription,
+            "custom-subscription-model"
+        ))
     );
     assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
 }
 
 #[test]
-fn chatgpt_subscription_uses_a_fixed_keyless_catalog() {
+fn chatgpt_subscription_is_keyless_with_editable_models() {
     let settings = parse_settings(
         r##"
 ai {
-    main_model "openai-subscribed" "gpt-5.5"
+    main_model "openai-subscribed" "custom-model"
     providers {
         openai-subscribed {
             enabled #true
@@ -597,11 +611,11 @@ ai {
     assert!(config.base_url.is_none());
     assert_eq!(
         config.models,
-        AiProvider::ChatGptSubscription.default_models()
+        vec![AiModel::new("custom-model", "Custom", "Custom")]
     );
     let resolved = settings.ai.resolved_main();
     assert_eq!(resolved.provider, AiProvider::ChatGptSubscription);
-    assert_eq!(resolved.model, "gpt-5.5");
+    assert_eq!(resolved.model, "custom-model");
     assert!(resolved.can_request());
     assert_eq!(resolved.base_url, "https://chatgpt.com/backend-api/codex");
     let exported = settings.to_kdl_string();
@@ -611,7 +625,7 @@ ai {
 }
 
 #[test]
-fn chatgpt_subscription_replaces_stale_model_references() {
+fn chatgpt_subscription_uses_normal_fallback_for_missing_model_references() {
     let settings = parse_settings(
         r##"
 ai {
@@ -621,6 +635,9 @@ ai {
     providers {
         openai-subscribed {
             enabled #true
+            models {
+                model "available-model" "Available Model" "ChatGPT"
+            }
         }
     }
 }
@@ -632,14 +649,14 @@ ai {
         settings.ai.main_model,
         Some(ModelRef::new(
             AiProvider::ChatGptSubscription,
-            AiProvider::ChatGptSubscription.default_model(),
+            "available-model",
         ))
     );
     assert_eq!(
         settings.ai.title_model,
         Some(ModelRef::new(
             AiProvider::ChatGptSubscription,
-            AiProvider::ChatGptSubscription.default_title_model(),
+            "available-model",
         ))
     );
     assert_eq!(settings.ai.translation_model, settings.ai.main_model);
@@ -648,7 +665,11 @@ ai {
             .ai
             .provider_config(AiProvider::ChatGptSubscription)
             .models,
-        AiProvider::ChatGptSubscription.default_models(),
+        vec![AiModel::new(
+            "available-model",
+            "Available Model",
+            "ChatGPT"
+        )],
     );
 }
 

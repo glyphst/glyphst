@@ -386,19 +386,37 @@ impl SettingsWindow {
     }
 
     fn provider_models_item(provider: AiProvider, view: Entity<Self>) -> SettingItem {
-        SettingItem::render(move |options, _window, cx| {
+        SettingItem::render(move |options, window, cx| {
             v_flex()
                 .w_full()
                 .gap_3()
                 .child(
                     h_flex()
+                        .debug_selector({
+                            let selector = format!("provider-model-header-{}", provider.as_str());
+                            move || selector.clone()
+                        })
+                        .w_full()
+                        .items_center()
+                        .justify_between()
                         .gap_2()
-                        .child(Label::new(crate::fl!("settings-model-list")).text_sm())
                         .child(
-                            Label::new(crate::fl!("settings-drag-to-reorder"))
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground),
-                        ),
+                            h_flex()
+                                .gap_2()
+                                .child(Label::new(crate::fl!("settings-model-list")).text_sm())
+                                .child(
+                                    Label::new(crate::fl!("settings-drag-to-reorder"))
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        .child(Self::provider_add_models_button(
+                            provider,
+                            view.clone(),
+                            options,
+                            window,
+                            cx,
+                        )),
                 )
                 .child(Self::provider_model_list_field(
                     provider,
@@ -407,14 +425,9 @@ impl SettingsWindow {
                     cx,
                 ))
         })
-        .keywords([crate::fl!("settings-model-list")])
-    }
-
-    fn provider_model_actions_item(provider: AiProvider, view: Entity<Self>) -> SettingItem {
-        SettingItem::render(move |options, window, cx| {
-            Self::provider_model_actions_field(provider, view.clone(), options, window, cx)
-        })
         .keywords([
+            crate::fl!("settings-model-list"),
+            crate::fl!("settings-add-models"),
             crate::fl!("settings-add-model-id"),
             crate::fl!("settings-fetch-models"),
         ])
@@ -625,7 +638,6 @@ impl SettingsWindow {
     fn model_setting_item(
         &self,
         title: impl Into<SharedString>,
-        description: impl Into<gpui_component::text::Text>,
         target: ModelTarget,
         cx: &mut Context<Self>,
     ) -> SettingItem {
@@ -667,28 +679,18 @@ impl SettingsWindow {
             )
             .default_value(default_value),
         )
-        .description(description)
     }
 
     pub(super) fn ai_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
         let view = cx.entity();
         let defaults = Settings::default();
 
-        let main_model = self.model_setting_item(
-            crate::fl!("settings-main-model"),
-            "Used for chat, document questions, and quick ask.",
-            ModelTarget::Main,
-            cx,
-        );
-        let title_model = self.model_setting_item(
-            crate::fl!("settings-title-model"),
-            "Used for lightweight conversation-title generation.",
-            ModelTarget::Title,
-            cx,
-        );
+        let main_model =
+            self.model_setting_item(crate::fl!("settings-main-model"), ModelTarget::Main, cx);
+        let title_model =
+            self.model_setting_item(crate::fl!("settings-title-model"), ModelTarget::Title, cx);
         let translation_model = self.model_setting_item(
             crate::fl!("settings-translation-model"),
-            "Used when the AI translation provider is active.",
             ModelTarget::Translation,
             cx,
         );
@@ -735,8 +737,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.ai.thinking_level.as_str().to_string()),
-        )
-        .description("Unsupported levels are automatically clamped for the selected model.");
+        );
 
         let text_format = SettingItem::new(
             crate::fl!("settings-page-text-format"),
@@ -774,8 +775,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.ai.page_text_format.as_str().to_string()),
-        )
-        .description(crate::fl!("settings-page-text-format-hint"));
+        );
 
         let image_quality = SettingItem::new(
             crate::fl!("settings-page-image-quality"),
@@ -817,8 +817,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.ai.page_image_quality.as_str().to_string()),
-        )
-        .description(crate::fl!("settings-page-image-quality-hint"));
+        );
 
         let page_image_limit = SettingItem::new(
             crate::fl!("settings-page-image-limit"),
@@ -839,8 +838,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.ai.page_image_limit as f64),
-        )
-        .description(crate::fl!("settings-page-image-limit-hint"));
+        );
 
         let quick_transparency = SettingItem::new(
             "Transparency",
@@ -890,22 +888,17 @@ impl SettingsWindow {
             .default_value(defaults.ai.quick_ask.text_size as f64),
         );
 
-        SettingPage::new("AI")
-            .description(
-                "Configure models and document context shared by Glyphst Reader's AI features.",
-            )
-            .groups([
-                SettingGroup::new()
-                    .title(crate::fl!("settings-default-models"))
-                    .description(crate::fl!("settings-model-list-hint"))
-                    .items([main_model, title_model, translation_model, thinking]),
-                SettingGroup::new()
-                    .title(crate::fl!("settings-page-context"))
-                    .items([text_format, image_quality, page_image_limit]),
-                SettingGroup::new()
-                    .title(crate::fl!("settings-quick-ai-chat"))
-                    .items([quick_transparency, quick_text_size]),
-            ])
+        SettingPage::new("AI").groups([
+            SettingGroup::new()
+                .title(crate::fl!("settings-default-models"))
+                .items([main_model, title_model, translation_model, thinking]),
+            SettingGroup::new()
+                .title(crate::fl!("settings-page-context"))
+                .items([text_format, image_quality, page_image_limit]),
+            SettingGroup::new()
+                .title(crate::fl!("settings-quick-ai-chat"))
+                .items([quick_transparency, quick_text_size]),
+        ])
     }
 
     pub(super) fn provider_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
@@ -1095,8 +1088,6 @@ impl SettingsWindow {
             items.push(Self::provider_connection_item(provider, view.clone()));
             items.push(Self::provider_divider(provider, "credentials"));
             items.push(Self::provider_models_item(provider, view.clone()));
-            items.push(Self::provider_divider(provider, "models"));
-            items.push(Self::provider_model_actions_item(provider, view.clone()));
 
             if provider.is_custom() {
                 items.push(Self::provider_divider(provider, "actions"));

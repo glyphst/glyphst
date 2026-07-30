@@ -460,24 +460,22 @@ impl SettingsWindow {
         let unlimited_test = self.ocr_connection_item(OcrProvider::Unlimited, cx);
         let paddle_test = self.ocr_connection_item(OcrProvider::Paddle, cx);
 
-        SettingPage::new(crate::fl!("settings-tab-ocr"))
-            .description("Configure when OCR runs and the credentials for each OCR service.")
-            .groups([
-                SettingGroup::new()
-                    .title(crate::fl!("settings-ocr-behavior"))
-                    .items([mode, provider]),
-                SettingGroup::new()
-                    .title(crate::fl!("settings-ocr-unlimited"))
-                    .items([
-                        unlimited_api_key,
-                        unlimited_secret_key,
-                        unlimited_endpoint,
-                        unlimited_test,
-                    ]),
-                SettingGroup::new()
-                    .title(crate::fl!("settings-ocr-paddle"))
-                    .items([paddle_token, paddle_endpoint, paddle_model, paddle_test]),
-            ])
+        SettingPage::new(crate::fl!("settings-tab-ocr")).groups([
+            SettingGroup::new()
+                .title(crate::fl!("settings-ocr-behavior"))
+                .items([mode, provider]),
+            SettingGroup::new()
+                .title(crate::fl!("settings-ocr-unlimited"))
+                .items([
+                    unlimited_api_key,
+                    unlimited_secret_key,
+                    unlimited_endpoint,
+                    unlimited_test,
+                ]),
+            SettingGroup::new()
+                .title(crate::fl!("settings-ocr-paddle"))
+                .items([paddle_token, paddle_endpoint, paddle_model, paddle_test]),
+        ])
     }
 }
 

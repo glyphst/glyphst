@@ -31,8 +31,7 @@ impl SettingsWindow {
                         })
                 }
             }),
-        )
-        .description(crate::fl!("settings-export-description"));
+        );
 
         let language = SettingItem::new(
             crate::fl!("settings-language"),
@@ -67,8 +66,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.language.as_str().to_string()),
-        )
-        .description("Choose the interface language used by Glyphst Reader.");
+        );
 
         let default_zoom = SettingItem::new(
             "Default zoom",
@@ -89,8 +87,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.behavior.default_zoom as f64),
-        )
-        .description("Initial zoom level for newly opened documents.");
+        );
 
         let zoom_step = SettingItem::new(
             "Zoom step",
@@ -111,8 +108,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.behavior.zoom_step as f64),
-        )
-        .description("Multiplier used by zoom-in and zoom-out commands.");
+        );
 
         let smooth_scrolling = SettingItem::new(
             "Smooth scrolling",
@@ -133,8 +129,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.behavior.smooth_scrolling),
-        )
-        .description("Animate document scrolling instead of jumping immediately.");
+        );
 
         let dim_inactive = SettingItem::new(
             "Dim inactive panes",
@@ -155,8 +150,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.behavior.dim_inactive_panes),
-        )
-        .description("Visually de-emphasize panes that do not own keyboard focus.");
+        );
 
         let copy_format = SettingItem::new(
             crate::fl!("settings-copy-format"),
@@ -194,8 +188,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.behavior.copy_format.as_str().to_string()),
-        )
-        .description("Format used when copying document text.");
+        );
 
         let semantic_copy = SettingItem::new(
             crate::fl!("settings-copy-semantic"),
@@ -211,8 +204,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.behavior.semantic_copy),
-        )
-        .description("Use semantic reading order when the document exposes it.");
+        );
 
         let reading_font_size = SettingItem::new(
             crate::fl!("settings-reading-font-size"),
@@ -378,8 +370,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.window.opacity as f64),
-        )
-        .description("Opacity used when window transparency is enabled.");
+        );
 
         let window_background = SettingItem::new(
             crate::fl!("settings-background"),
@@ -412,8 +403,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.window.background.as_str().to_string()),
-        )
-        .description("Visual treatment for transparent windows.");
+        );
 
         let tab_bar = SettingItem::new(
             crate::fl!("settings-tab-bar"),
@@ -444,8 +434,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.tab_bar_visibility.as_str().to_string()),
-        )
-        .description("Auto hides the tab bar while a pane has only one tab.");
+        );
 
         SettingPage::new(crate::fl!("settings-tab-general"))
             .default_open(true)
@@ -516,8 +505,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.keymap_preset.as_str().to_string()),
-        )
-        .description("Choose the base keybinding preset.");
+        );
 
         let open_keymap = self.open_keymap;
         let editor = SettingItem::new(
@@ -529,8 +517,7 @@ impl SettingsWindow {
                     .with_size(options.size)
                     .on_click(move |_, _, cx| open_keymap(cx))
             }),
-        )
-        .description("Inspect, search, and override individual commands.");
+        );
 
         SettingPage::new(crate::fl!("settings-tab-keymap")).group(
             SettingGroup::new()

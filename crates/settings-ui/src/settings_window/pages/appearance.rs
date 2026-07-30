@@ -130,8 +130,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.theme.mode.as_str().to_string()),
-        )
-        .description("Follow the system appearance or force a light or dark theme.");
+        );
 
         let light_theme = SettingItem::new(
             crate::fl!("settings-light-theme"),
@@ -155,8 +154,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.theme.light.clone()),
-        )
-        .description("Theme used whenever Glyphst Reader is in light appearance.");
+        );
 
         let dark_theme = SettingItem::new(
             crate::fl!("settings-dark-theme"),
@@ -180,11 +178,9 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.theme.dark.clone()),
-        )
-        .description("Theme used whenever Glyphst Reader is in dark appearance.");
+        );
 
         let themes_directory = user_themes_dir();
-        let themes_directory_label = themes_directory.display().to_string();
         let theme_directory = SettingItem::new(
             "User theme directory",
             SettingField::render(move |options, _, _| {
@@ -195,11 +191,7 @@ impl SettingsWindow {
                     .with_size(options.size)
                     .on_click(move |_, _, cx| cx.reveal_path(&path))
             }),
-        )
-        .description(format!(
-            "Place gpui-components ThemeSet JSON files in {themes_directory_label}. \
-             Glyphst Reader loads them at startup and merges them into both theme catalogs."
-        ));
+        );
 
         let font_options = self
             .font_families
@@ -261,9 +253,8 @@ impl SettingsWindow {
                 }
             },
         );
-        let font_fallbacks = SettingItem::new("UI font fallbacks", fallback_field)
-            .layout(Axis::Vertical)
-            .description(crate::fl!("settings-font-fallbacks-hint"));
+        let font_fallbacks =
+            SettingItem::new("UI font fallbacks", fallback_field).layout(Axis::Vertical);
 
         let font_size = SettingItem::new(
             "UI font size",
@@ -331,8 +322,7 @@ impl SettingsWindow {
                 },
             )
             .default_value(glyphst_settings::theme::DEFAULT_PAGE_GAP as f64),
-        )
-        .description("Spacing between pages in continuous document layouts.");
+        );
 
         let document_colors = DOCUMENT_COLORS
             .into_iter()
@@ -344,32 +334,23 @@ impl SettingsWindow {
             .into_iter()
             .map(|setting| Self::color_setting_item(setting, view.clone()));
 
-        SettingPage::new(crate::fl!("settings-tab-appearance"))
-            .description(
-                "Choose component themes first, then apply optional Glyphst Reader-specific semantic overrides.",
-            )
-            .groups([
-                SettingGroup::new()
-                    .title(crate::fl!("settings-section-theme"))
-                    .items([mode, light_theme, dark_theme, theme_directory]),
-                SettingGroup::new()
-                    .title(crate::fl!("settings-section-fonts"))
-                    .items([font_family, font_fallbacks, font_size, font_weight]),
-                SettingGroup::new()
-                    .title("Document layout")
-                    .item(page_gap),
-                SettingGroup::new()
-                    .title("Document colors")
-                    .description("Colors used by document pages, selections, annotations, and overlays.")
-                    .items(document_colors),
-                SettingGroup::new()
-                    .title("Window chrome")
-                    .description("Glyphst Reader-specific footer, panel, border, and tab semantics.")
-                    .items(chrome_colors),
-                SettingGroup::new()
-                    .title("Text and controls")
-                    .description("Glyphst Reader-specific text, state, and control semantics.")
-                    .items(control_colors),
-            ])
+        SettingPage::new(crate::fl!("settings-tab-appearance")).groups([
+            SettingGroup::new()
+                .title(crate::fl!("settings-section-theme"))
+                .items([mode, light_theme, dark_theme, theme_directory]),
+            SettingGroup::new()
+                .title(crate::fl!("settings-section-fonts"))
+                .items([font_family, font_fallbacks, font_size, font_weight]),
+            SettingGroup::new().title("Document layout").item(page_gap),
+            SettingGroup::new()
+                .title("Document colors")
+                .items(document_colors),
+            SettingGroup::new()
+                .title("Window chrome")
+                .items(chrome_colors),
+            SettingGroup::new()
+                .title("Text and controls")
+                .items(control_colors),
+        ])
     }
 }

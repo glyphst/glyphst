@@ -1,6 +1,6 @@
 use super::SettingsWindow;
 use glyphst_settings::{
-    AiModel, AiProvider, SettingsStore,
+    AiProvider, SettingsStore,
     theme::{PartialTheme, Theme},
 };
 use glyphst_ui::{
@@ -24,7 +24,7 @@ use gpui_component::{
     tag::Tag,
     v_flex,
 };
-use std::rc::Rc;
+use std::{collections::BTreeSet, rc::Rc};
 
 type TextChangeHandler = Rc<dyn Fn(SharedString, &mut App)>;
 
@@ -323,15 +323,57 @@ impl SettingsWindow {
             .into_any_element()
     }
 
+    fn stage_manual_model_input(
+        provider: AiProvider,
+        view: &Entity<Self>,
+        input: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let model_id = input.read(cx).value().trim().to_string();
+        if model_id.is_empty()
+            || cx
+                .global::<SettingsStore>()
+                .settings
+                .ai
+                .provider_config(provider)
+                .model(&model_id)
+                .is_some()
+        {
+            return;
+        }
+        let staged = view.update(cx, |this, cx| {
+            let staged = this.stage_manual_model_id(provider, model_id);
+            if staged {
+                cx.notify();
+            }
+            staged
+        });
+        if staged {
+            input.update(cx, |input, cx| {
+                input.set_value(SharedString::default(), window, cx);
+            });
+        }
+    }
+
     fn provider_model_picker_panel(
         provider: AiProvider,
         view: Entity<Self>,
+        manual_input: Entity<InputState>,
         search_input: Entity<InputState>,
         popover: Entity<PopoverState>,
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let (catalog_loading, catalog_status, catalog_failed, catalog_cached, catalog, selected) = {
+        let (
+            catalog_loading,
+            catalog_status,
+            catalog_failed,
+            catalog_cached,
+            catalog,
+            selected,
+            manual,
+        ) = {
             let this = view.read(cx);
             let operation = &this.model_catalog_operation;
             let cached = this.model_catalogs.get(&provider);
@@ -344,6 +386,14 @@ impl SettingsWindow {
             } else {
                 (false, None, false)
             };
+            let (selected, manual) = if this.model_picker.provider == Some(provider) {
+                (
+                    this.model_picker.selected.clone(),
+                    this.model_picker.manual.clone(),
+                )
+            } else {
+                Default::default()
+            };
             (
                 loading,
                 status,
@@ -352,11 +402,8 @@ impl SettingsWindow {
                 cached
                     .map(|catalog| catalog.models.clone())
                     .unwrap_or_default(),
-                if this.model_picker.provider == Some(provider) {
-                    this.model_picker.selected.clone()
-                } else {
-                    Default::default()
-                },
+                selected,
+                manual,
             )
         };
         let existing = cx
@@ -388,13 +435,19 @@ impl SettingsWindow {
             .filter(|model| !existing.contains(&model.id))
             .map(|model| model.id.clone())
             .collect::<Vec<_>>();
-        let selected_count = selected
+        let pending = selected.union(&manual).cloned().collect::<BTreeSet<_>>();
+        let selected_count = pending
             .iter()
             .filter(|model_id| {
                 !existing.contains(*model_id)
-                    && catalog.iter().any(|model| model.id == model_id.as_str())
+                    && (manual.contains(*model_id)
+                        || catalog.iter().any(|model| model.id == model_id.as_str()))
             })
             .count();
+        let manual_value = manual_input.read(cx).value().trim().to_string();
+        let can_stage_manual = !manual_value.is_empty()
+            && !existing.contains(&manual_value)
+            && !pending.contains(&manual_value);
         let muted = cx.theme().muted_foreground;
         let provider_name = cx
             .global::<SettingsStore>()
@@ -409,7 +462,7 @@ impl SettingsWindow {
                 provider.as_str()
             );
             let is_added = existing.contains(&model_id);
-            let is_selected = selected.contains(&model_id);
+            let is_selected = pending.contains(&model_id);
             let label = fetched_model_display_name(&model.label, &model.id);
             if is_added {
                 div()
@@ -456,14 +509,45 @@ impl SettingsWindow {
             }
         });
 
+        let manual_tags = manual
+            .iter()
+            .cloned()
+            .map(|model_id| {
+                let remove_view = view.clone();
+                let remove_id = model_id.clone();
+                let selector = format!("provider-manual-model-{}-{model_id}", provider.as_str());
+                div()
+                    .id(SharedString::from(format!(
+                        "remove-provider-manual-model-{}-{model_id}",
+                        provider.as_str()
+                    )))
+                    .debug_selector(move || selector.clone())
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        remove_view.update(cx, |this, cx| {
+                            this.remove_manual_model_id(&remove_id);
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        Tag::primary()
+                            .outline()
+                            .small()
+                            .rounded_full()
+                            .child(format!("{model_id} ×")),
+                    )
+            })
+            .collect::<Vec<_>>();
+
         let refresh_view = view.clone();
         let confirm_view = view.clone();
         let select_all_view = view.clone();
         let clear_view = view.clone();
         let select_all_ids = visible_selectable_ids.clone();
-        let clear_ids = selected.iter().cloned().collect::<Vec<_>>();
         let cancel_popover = popover.clone();
         let confirm_popover = popover;
+        let manual_add_view = view.clone();
+        let manual_add_input = manual_input.clone();
         let viewport = window.viewport_size();
         let panel_width = px(480.0).min((viewport.width - px(32.0)).max(px(0.0)));
         let panel_height = px(520.0).min((viewport.height - px(32.0)).max(px(0.0)));
@@ -485,6 +569,48 @@ impl SettingsWindow {
                     .font_semibold(),
                 ),
             )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .px_3()
+                    .pt_3()
+                    .child(Input::new(&manual_input).small().flex_1().min_w_0())
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "stage-provider-manual-model-{}",
+                            provider.as_str()
+                        )))
+                        .label(crate::fl!("settings-add-model-id"))
+                        .outline()
+                        .small()
+                        .disabled(!can_stage_manual)
+                        .on_click(move |_, window, cx| {
+                            Self::stage_manual_model_input(
+                                provider,
+                                &manual_add_view,
+                                &manual_add_input,
+                                window,
+                                cx,
+                            );
+                        }),
+                    ),
+            )
+            .when(!manual.is_empty(), |this| {
+                this.child(
+                    h_flex()
+                        .flex_none()
+                        .w_full()
+                        .items_start()
+                        .flex_wrap()
+                        .gap_2()
+                        .px_3()
+                        .pt_2()
+                        .children(manual_tags),
+                )
+            })
             .child(
                 div()
                     .flex_none()
@@ -543,7 +669,7 @@ impl SettingsWindow {
                                 .disabled(selected_count == 0)
                                 .on_click(move |_, _, cx| {
                                     clear_view.update(cx, |this, cx| {
-                                        this.set_visible_model_selection(clear_ids.clone(), false);
+                                        this.clear_model_picker_selection();
                                         cx.notify();
                                     });
                                 }),
@@ -628,7 +754,11 @@ impl SettingsWindow {
                             "refresh-provider-models-{}",
                             provider.as_str()
                         )))
-                        .label(crate::fl!("settings-refresh-models"))
+                        .label(if catalog_cached {
+                            crate::fl!("settings-refresh-models")
+                        } else {
+                            crate::fl!("settings-fetch-models")
+                        })
                         .outline()
                         .small()
                         .loading(catalog_loading)
@@ -692,7 +822,6 @@ impl SettingsWindow {
         options: &RenderOptions,
         cx: &mut App,
     ) -> AnyElement {
-        let fixed_catalog = provider == AiProvider::ChatGptSubscription;
         let config = cx
             .global::<SettingsStore>()
             .settings
@@ -803,7 +932,7 @@ impl SettingsWindow {
                     .gap_2()
                     .children(model_chips),
             )
-            .when(!fixed_catalog && !disabled && active_model_drag, |this| {
+            .when(!disabled && active_model_drag, |this| {
                 let trash_view = view.clone();
                 this.child(
                     h_flex()
@@ -858,14 +987,13 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    pub(super) fn provider_model_actions_field(
+    pub(super) fn provider_add_models_button(
         provider: AiProvider,
         view: Entity<Self>,
         options: &RenderOptions,
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        debug_assert_ne!(provider, AiProvider::ChatGptSubscription);
         let state = window.use_keyed_state(
             SharedString::from(format!("provider-model-input-{}", provider.as_str())),
             cx,
@@ -879,30 +1007,14 @@ impl SettingsWindow {
                     let subscription = cx.subscribe_in(
                         &input,
                         window,
-                        move |state: &mut ModelIdInputState,
-                              input,
-                              event: &InputEvent,
-                              window,
-                              cx| {
-                            if !matches!(event, InputEvent::PressEnter { .. }) {
-                                return;
+                        move |state: &mut ModelIdInputState, _, event: &InputEvent, window, cx| {
+                            if matches!(event, InputEvent::Change) {
+                                view.update(cx, |_, cx| cx.notify());
                             }
-                            let model_id = input.read(cx).value().trim().to_string();
-                            if model_id.is_empty() {
-                                return;
+                            if matches!(event, InputEvent::PressEnter { .. }) {
+                                let input = state.input.clone();
+                                Self::stage_manual_model_input(provider, &view, &input, window, cx);
                             }
-                            Self::update_settings(&view, cx, {
-                                let model_id = model_id.clone();
-                                move |settings| {
-                                    let provider_name = settings.ai.provider_name(provider);
-                                    settings.ai.provider_config_mut(provider).ensure_model(
-                                        AiModel::new(model_id.clone(), model_id, provider_name),
-                                    );
-                                }
-                            });
-                            state.input.update(cx, |input, cx| {
-                                input.set_value(SharedString::default(), window, cx);
-                            });
                         },
                     );
                     ModelIdInputState {
@@ -940,25 +1052,18 @@ impl SettingsWindow {
             },
         );
         let search_input = search_state.read(cx).input.clone();
-        let config = cx
-            .global::<SettingsStore>()
-            .settings
-            .ai
-            .provider_config(provider);
-        let provider_name = config.name;
         let picker_open = view.read(cx).model_picker.provider == Some(provider);
-        let add_view = view.clone();
-        let add_input = input.clone();
         let picker_view = view.clone();
         let picker_panel_view = view.clone();
+        let picker_manual = input;
         let picker_search = search_input;
 
-        let picker = if options.disabled {
+        if options.disabled {
             Button::new(SharedString::from(format!(
                 "open-provider-model-picker-{}",
                 provider.as_str()
             )))
-            .label(crate::fl!("settings-fetch-models"))
+            .label(crate::fl!("settings-add-models"))
             .outline()
             .with_size(options.size)
             .disabled(true)
@@ -981,7 +1086,11 @@ impl SettingsWindow {
                     "open-provider-model-picker-{}",
                     provider.as_str()
                 )))
-                .label(crate::fl!("settings-fetch-models"))
+                .debug_selector({
+                    let selector = format!("provider-add-models-{}", provider.as_str());
+                    move || selector.clone()
+                })
+                .label(crate::fl!("settings-add-models"))
                 .outline()
                 .with_size(options.size),
             )
@@ -989,6 +1098,7 @@ impl SettingsWindow {
                 Self::provider_model_picker_panel(
                     provider,
                     picker_panel_view.clone(),
+                    picker_manual.clone(),
                     picker_search.clone(),
                     cx.entity(),
                     window,
@@ -996,57 +1106,7 @@ impl SettingsWindow {
                 )
             })
             .into_any_element()
-        };
-
-        v_flex()
-            .debug_selector({
-                let selector = format!("provider-model-actions-{}", provider.as_str());
-                move || selector.clone()
-            })
-            .w_full()
-            .gap_2()
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(
-                        Input::new(&input)
-                            .with_size(options.size)
-                            .disabled(options.disabled)
-                            .flex_1()
-                            .min_w_0(),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!(
-                            "add-provider-model-{}",
-                            provider.as_str()
-                        )))
-                        .label(crate::fl!("settings-add-model-id"))
-                        .outline()
-                        .with_size(options.size)
-                        .disabled(options.disabled)
-                        .on_click(move |_, window, cx| {
-                            let model_id = add_input.read(cx).value().trim().to_string();
-                            if model_id.is_empty() {
-                                return;
-                            }
-                            Self::update_settings(&add_view, cx, {
-                                let model_id = model_id.clone();
-                                let provider_name = provider_name.clone();
-                                move |settings| {
-                                    settings.ai.provider_config_mut(provider).ensure_model(
-                                        AiModel::new(model_id.clone(), model_id, provider_name),
-                                    );
-                                }
-                            });
-                            add_input.update(cx, |input, cx| {
-                                input.set_value(SharedString::default(), window, cx);
-                            });
-                        }),
-                    ),
-            )
-            .child(h_flex().gap_2().child(picker))
-            .into_any_element()
+        }
     }
 
     pub(super) fn color_setting_item(setting: ColorSetting, view: Entity<Self>) -> SettingItem {
@@ -1126,11 +1186,7 @@ impl SettingsWindow {
             },
         );
 
-        SettingItem::new(setting.label, field).description(if setting.with_alpha {
-            "Overrides the selected theme color, including opacity."
-        } else {
-            "Overrides the selected theme color."
-        })
+        SettingItem::new(setting.label, field)
     }
 }
 
