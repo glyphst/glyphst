@@ -7,7 +7,7 @@ use glyphst_settings::{
     theme::{PartialTheme, Theme, ThemeAppearance, ThemeAppearanceMode},
     user_themes_dir,
 };
-use gpui::{App, Axis, Context, SharedString};
+use gpui::{App, Context, SharedString};
 use gpui_component::{
     Sizable as _,
     button::Button,
@@ -253,8 +253,7 @@ impl SettingsWindow {
                 }
             },
         );
-        let font_fallbacks =
-            SettingItem::new("UI font fallbacks", fallback_field).layout(Axis::Vertical);
+        let font_fallbacks = SettingItem::new("UI font fallbacks", fallback_field);
 
         let font_size = SettingItem::new(
             "UI font size",

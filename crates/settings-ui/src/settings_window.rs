@@ -1044,6 +1044,40 @@ mod tests {
     settings_page_render_test!(renders_ocr_page, 6, 1);
 
     #[gpui::test]
+    fn ui_font_fallbacks_input_shares_the_title_row(cx: &mut TestAppContext) {
+        initialize_ui_test(cx);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let settings = cx.new(|cx| {
+                let mut settings = SettingsWindow::new(|_| {}, cx);
+                settings.initial_selection = SelectIndex {
+                    page_ix: 2,
+                    group_ix: Some(1),
+                };
+                settings
+            });
+            Root::new(settings, window, cx)
+        });
+        cx.simulate_resize(size(px(2000.0), px(1200.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            _ = window.draw(cx);
+        });
+
+        let row = cx.debug_bounds("setting-item-2-1-1").unwrap();
+        let label = cx.debug_bounds("setting-item-label-2-1-1").unwrap();
+        let field = cx.debug_bounds("setting-item-field-2-1-1").unwrap();
+        let input = cx
+            .debug_bounds("setting-bound-input-ui-font-fallbacks")
+            .unwrap();
+
+        assert_eq!(field.right(), row.right());
+        assert_eq!(field.size.width, px(480.0));
+        assert_eq!(input, field);
+        assert!(field.left() > label.right());
+        assert!(field.top() < label.bottom());
+    }
+
+    #[gpui::test]
     fn microsoft_translator_text_fields_share_a_bounded_control_column(cx: &mut TestAppContext) {
         initialize_ui_test(cx);
         let (_, cx) = cx.add_window_view(|window, cx| {
