@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,18 @@ pub struct PolicyReviewRequest {
     pub page_height: f32,
     pub blocks: Vec<PolicyReviewBlock>,
     pub protected_regions: Vec<ProtectedRegion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_before: Vec<PolicyReviewContextBlock>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_after: Vec<PolicyReviewContextBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyReviewContextBlock {
+    pub page_index: usize,
+    pub block_id: String,
+    pub role: BlockRole,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,47 +117,68 @@ pub fn review_translation_policies(
     reviewer: &dyn TranslationPolicyReviewer,
 ) -> Vec<PolicyReviewError> {
     let mut errors = Vec::new();
-    for page in &mut document.pages {
+    let requests = document
+        .pages
+        .iter()
+        .enumerate()
+        .map(|(page_index, page)| {
+            let candidate_ids = page
+                .blocks
+                .iter()
+                .filter(|block| policy_needs_review(&block.policy))
+                .map(|block| block.id.clone())
+                .collect::<Vec<_>>();
+            (!candidate_ids.is_empty()).then(|| {
+                (
+                    candidate_ids,
+                    policy_review_request(&document.pages, page_index),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for (page, pending) in document.pages.iter_mut().zip(requests) {
+        let Some((candidate_ids, request)) = pending else {
+            continue;
+        };
         let candidate_ids = page
             .blocks
             .iter()
-            .filter(|block| policy_needs_review(&block.policy))
+            .filter(|block| candidate_ids.contains(&block.id) && !block.policy.locked)
             .map(|block| block.id.clone())
-            .collect::<Vec<_>>();
-        if candidate_ids.is_empty() {
-            continue;
-        }
-        let request = policy_review_request(page);
+            .collect::<BTreeSet<_>>();
         let decisions = match reviewer.review(&request) {
             Ok(decisions) => decisions,
             Err(error) => {
-                for block in &mut page.blocks {
-                    if candidate_ids.contains(&block.id) {
-                        block.policy = TranslationPolicy::candidate(
-                            false,
-                            format!("policy_review_failed:{}", block.policy.reason),
-                            block.policy.source,
-                            block.policy.confidence,
-                        );
-                    }
-                }
+                preserve_review_candidates(page, &candidate_ids, "policy_review_failed");
                 errors.push(error);
                 continue;
             }
         };
-        let by_id = decisions
-            .into_iter()
-            .map(|decision| (decision.block_id.clone(), decision))
-            .collect::<BTreeMap<_, _>>();
+        let mut by_id = BTreeMap::new();
+        let mut invalid_response = false;
+        for decision in decisions {
+            if !candidate_ids.contains(&decision.block_id)
+                || !decision.confidence.is_finite()
+                || !(0.0..=1.0).contains(&decision.confidence)
+                || by_id.insert(decision.block_id.clone(), decision).is_some()
+            {
+                invalid_response = true;
+            }
+        }
+        if invalid_response || by_id.keys().cloned().collect::<BTreeSet<_>>() != candidate_ids {
+            preserve_review_candidates(page, &candidate_ids, "policy_review_incomplete");
+            errors.push(PolicyReviewError::new(format!(
+                "AI content review returned an incomplete or invalid decision set for page {}",
+                page.page_index + 1
+            )));
+            continue;
+        }
         for block in &mut page.blocks {
             if !candidate_ids.contains(&block.id) || block.policy.locked {
                 continue;
             }
-            let Some(decision) = by_id.get(&block.id) else {
-                block.policy.translate = false;
-                block.policy.reason = format!("policy_review_omitted:{}", block.policy.reason);
-                continue;
-            };
+            let decision = &by_id[&block.id];
             if !decision.confidence.is_finite()
                 || decision.confidence < POLICY_REVIEW_CONFIDENCE_THRESHOLD
             {
@@ -162,6 +195,19 @@ pub fn review_translation_policies(
         }
     }
     errors
+}
+
+fn preserve_review_candidates(page: &mut Page, candidate_ids: &BTreeSet<String>, reason: &str) {
+    for block in &mut page.blocks {
+        if candidate_ids.contains(&block.id) && !block.policy.locked {
+            block.policy = TranslationPolicy::candidate(
+                false,
+                format!("{reason}:{}", block.policy.reason),
+                block.policy.source,
+                block.policy.confidence,
+            );
+        }
+    }
 }
 
 pub(crate) fn derive_protected_regions_from_blocks(page: &mut Page) {
@@ -260,7 +306,8 @@ fn policy_needs_review(policy: &TranslationPolicy) -> bool {
             || policy.confidence < POLICY_REVIEW_CONFIDENCE_THRESHOLD)
 }
 
-fn policy_review_request(page: &Page) -> PolicyReviewRequest {
+fn policy_review_request(pages: &[Page], page_index: usize) -> PolicyReviewRequest {
+    let page = &pages[page_index];
     PolicyReviewRequest {
         page_index: page.page_index,
         page_width: page.geometry.width,
@@ -297,7 +344,36 @@ fn policy_review_request(page: &Page) -> PolicyReviewRequest {
                 region
             })
             .collect(),
+        context_before: neighboring_heading_context(pages, page_index, true),
+        context_after: neighboring_heading_context(pages, page_index, false),
     }
+}
+
+fn neighboring_heading_context(
+    pages: &[Page],
+    page_index: usize,
+    before: bool,
+) -> Vec<PolicyReviewContextBlock> {
+    let range = if before {
+        page_index.saturating_sub(2)..page_index
+    } else {
+        page_index.saturating_add(1)..pages.len().min(page_index.saturating_add(3))
+    };
+    pages[range]
+        .iter()
+        .flat_map(|page| {
+            page.blocks
+                .iter()
+                .filter(|block| matches!(block.role, BlockRole::Title | BlockRole::Heading))
+                .map(|block| PolicyReviewContextBlock {
+                    page_index: page.page_index,
+                    block_id: block.id.clone(),
+                    role: block.role,
+                    text: block.content.text.trim().chars().take(400).collect(),
+                })
+        })
+        .take(8)
+        .collect()
 }
 
 fn normalized_bbox(bbox: BoundingBox, width: f32, height: f32) -> BoundingBox {
@@ -572,10 +648,10 @@ mod tests {
                     reason: "possibly prose".to_string(),
                 },
                 PolicyReviewDecision {
-                    block_id: "locked".to_string(),
-                    translate: true,
-                    confidence: 0.99,
-                    reason: "must be ignored".to_string(),
+                    block_id: "omitted".to_string(),
+                    translate: false,
+                    confidence: 0.96,
+                    reason: "publication metadata".to_string(),
                 },
             ])
         }
@@ -686,6 +762,7 @@ mod tests {
                         &[("(3)", BoundingBox::new(170.0, 50.0, 190.0, 60.0))],
                     ),
                 ],
+                inline_objects: Vec::new(),
                 protected_regions: Vec::new(),
                 metadata: BTreeMap::new(),
             }],
@@ -714,6 +791,7 @@ mod tests {
             page_index: 0,
             geometry: PageGeometry::new(200.0, 200.0),
             blocks: vec![formula_number],
+            inline_objects: Vec::new(),
             protected_regions: Vec::new(),
             metadata: BTreeMap::new(),
         };
@@ -747,6 +825,7 @@ mod tests {
                 page_index: 0,
                 geometry: PageGeometry::new(595.0, 842.0),
                 blocks: vec![text_block("delimiter", &[("\u{fffd}", glyph_bbox)])],
+                inline_objects: Vec::new(),
                 protected_regions: vec![ProtectedRegion {
                     id: "formula".to_string(),
                     page_index: 0,
@@ -787,6 +866,7 @@ mod tests {
                 page_index: 0,
                 geometry: PageGeometry::new(595.0, 842.0),
                 blocks: vec![glyph],
+                inline_objects: Vec::new(),
                 protected_regions: vec![ProtectedRegion {
                     id: "formula".to_string(),
                     page_index: 0,
@@ -836,6 +916,7 @@ mod tests {
                         ("chart label", BoundingBox::new(80.0, 80.0, 120.0, 90.0)),
                     ],
                 )],
+                inline_objects: Vec::new(),
                 protected_regions: vec![ProtectedRegion {
                     id: "chart".to_string(),
                     page_index: 0,
@@ -898,6 +979,7 @@ mod tests {
                 page_index: 0,
                 geometry: PageGeometry::new(200.0, 200.0),
                 blocks,
+                inline_objects: Vec::new(),
                 protected_regions: Vec::new(),
                 metadata: BTreeMap::new(),
             }],
@@ -917,17 +999,77 @@ mod tests {
                 .starts_with("policy_review_low_confidence:")
         );
         assert!(!blocks[2].policy.translate);
-        assert!(
-            blocks[2]
-                .policy
-                .reason
-                .starts_with("policy_review_omitted:")
-        );
+        assert!(blocks[2].policy.reason.starts_with("ai_review:"));
         assert!(!blocks[3].policy.translate);
         assert!(blocks[3].policy.locked);
         assert_eq!(
             blocks[3].policy.source,
             PolicyDecisionSource::ProtectedRegion
         );
+    }
+
+    struct IncompleteReviewer;
+
+    impl TranslationPolicyReviewer for IncompleteReviewer {
+        fn review(
+            &self,
+            _request: &PolicyReviewRequest,
+        ) -> Result<Vec<PolicyReviewDecision>, PolicyReviewError> {
+            Ok(vec![PolicyReviewDecision {
+                block_id: "accepted".to_string(),
+                translate: true,
+                confidence: 0.99,
+                reason: "narrative prose".to_string(),
+            }])
+        }
+    }
+
+    #[test]
+    fn incomplete_ai_review_discards_the_whole_page_batch() {
+        let mut blocks = ["accepted", "missing"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let mut block = text_block(
+                    id,
+                    &[(
+                        "Ambiguous text",
+                        BoundingBox::new(
+                            10.0,
+                            10.0 + index as f32 * 20.0,
+                            190.0,
+                            20.0 + index as f32 * 20.0,
+                        ),
+                    )],
+                );
+                block.policy = TranslationPolicy::unresolved("fusion_conflict");
+                block
+            })
+            .collect::<Vec<_>>();
+        let mut document = DocumentV1::new(
+            DocumentMetadata {
+                document_id: "fixture".to_string(),
+                source_path: "fixture.pdf".into(),
+                provider: "fixture".to_string(),
+                provider_version: "1".to_string(),
+                extra: BTreeMap::new(),
+            },
+            vec![Page {
+                page_index: 0,
+                geometry: PageGeometry::new(200.0, 200.0),
+                blocks: std::mem::take(&mut blocks),
+                inline_objects: Vec::new(),
+                protected_regions: Vec::new(),
+                metadata: BTreeMap::new(),
+            }],
+        );
+
+        let errors = review_translation_policies(&mut document, &IncompleteReviewer);
+
+        assert_eq!(errors.len(), 1);
+        for block in &document.pages[0].blocks {
+            assert!(!block.policy.translate);
+            assert!(block.policy.reason.starts_with("policy_review_incomplete:"));
+        }
     }
 }

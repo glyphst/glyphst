@@ -96,6 +96,18 @@ impl DocumentV1 {
                     bail!("protected region {} has invalid confidence", region.id);
                 }
             }
+            for object in &page.inline_objects {
+                if object.page_index != page_index {
+                    bail!("inline object {} is assigned to the wrong page", object.id);
+                }
+                if !object.bbox.is_valid()
+                    || !object.baseline_y.is_finite()
+                    || object.parts.is_empty()
+                    || object.parts.iter().any(|part| !part.bbox.is_valid())
+                {
+                    bail!("inline object {} has invalid geometry", object.id);
+                }
+            }
         }
         Ok(())
     }
@@ -116,6 +128,8 @@ pub struct Page {
     pub page_index: usize,
     pub geometry: PageGeometry,
     pub blocks: Vec<Block>,
+    #[serde(default)]
+    pub inline_objects: Vec<InlineObject>,
     #[serde(default)]
     pub protected_regions: Vec<ProtectedRegion>,
     #[serde(default)]
@@ -324,6 +338,7 @@ pub enum SegmentKind {
     Citation,
     Url,
     Literal,
+    InlineObject,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -505,6 +520,57 @@ pub struct ProtectedRegion {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InlineObject {
+    pub id: String,
+    pub page_index: usize,
+    pub bbox: BoundingBox,
+    pub baseline_y: f32,
+    pub parts: Vec<InlineObjectPart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InlineObjectPart {
+    pub source_block_index: usize,
+    pub bbox: BoundingBox,
+}
+
+pub(crate) const INLINE_OBJECT_MARKER_START: char = '\u{e002}';
+pub(crate) const INLINE_OBJECT_MARKER_END: char = '\u{e003}';
+
+pub fn inline_object_marker(id: &str) -> String {
+    format!("{INLINE_OBJECT_MARKER_START}{id}{INLINE_OBJECT_MARKER_END}")
+}
+
+pub(crate) fn inline_object_marker_prefix(value: &str) -> Option<(usize, &str)> {
+    if !value.starts_with(INLINE_OBJECT_MARKER_START) {
+        return None;
+    }
+    let content = &value[INLINE_OBJECT_MARKER_START.len_utf8()..];
+    let end = content.find(INLINE_OBJECT_MARKER_END)?;
+    let id = &content[..end];
+    (!id.is_empty()).then_some((
+        INLINE_OBJECT_MARKER_START.len_utf8() + end + INLINE_OBJECT_MARKER_END.len_utf8(),
+        id,
+    ))
+}
+
+pub fn strip_inline_object_markers(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut remaining = value;
+    while let Some(start) = remaining.find(INLINE_OBJECT_MARKER_START) {
+        output.push_str(&remaining[..start]);
+        let marker = &remaining[start..];
+        let Some((length, _)) = inline_object_marker_prefix(marker) else {
+            output.push_str(marker);
+            return output;
+        };
+        remaining = &marker[length..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContinuationHint {
     pub group_id: String,
     pub scope: ContinuationScope,
@@ -652,6 +718,7 @@ mod tests {
                     tags: Vec::new(),
                     metadata: BTreeMap::new(),
                 }],
+                inline_objects: Vec::new(),
                 protected_regions: Vec::new(),
                 metadata: BTreeMap::new(),
             }],

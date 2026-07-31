@@ -862,6 +862,10 @@ translation {
         width 420
         corner "bottom-left"
     }
+    content_review {
+        mode "ambiguous"
+        model "openai" "gpt-4.1-mini"
+    }
     providers {
         microsoft {
             api_key "test-key"
@@ -884,6 +888,14 @@ translation {
         settings.translation.pinned.corner,
         TranslationBoxCorner::BottomLeft
     );
+    assert_eq!(
+        settings.translation.content_review.mode,
+        PdfContentReviewMode::Ambiguous
+    );
+    assert_eq!(
+        settings.translation.content_review.model,
+        Some(ModelRef::new(AiProvider::OpenAi, "gpt-4.1-mini"))
+    );
     let provider = settings
         .translation
         .provider_config(TranslationProvider::Microsoft);
@@ -903,6 +915,18 @@ translation {
         .unwrap();
     assert!(exported_pinned.get("enabled").is_none());
     assert_eq!(parse_settings(&exported).unwrap(), settings);
+}
+
+#[test]
+fn pdf_content_review_defaults_off() {
+    let settings = parse_settings("").unwrap();
+
+    assert_eq!(
+        settings.translation.content_review.mode,
+        PdfContentReviewMode::Off
+    );
+    assert!(settings.translation.content_review.model.is_none());
+    assert!(!settings.to_kdl_string().contains("content_review"));
 }
 
 #[test]

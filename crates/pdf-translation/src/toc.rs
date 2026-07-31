@@ -367,6 +367,7 @@ mod tests {
                     BoundingBox::new(70.0, 140.0, 530.0, 152.0),
                 ),
             ],
+            inline_objects: Vec::new(),
             protected_regions: Vec::new(),
             metadata: BTreeMap::new(),
         };
@@ -416,6 +417,7 @@ mod tests {
                     BoundingBox::new(70.0, 170.0, 540.0, 182.0),
                 ),
             ],
+            inline_objects: Vec::new(),
             protected_regions: Vec::new(),
             metadata: BTreeMap::new(),
         };

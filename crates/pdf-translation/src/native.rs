@@ -10,9 +10,10 @@ use serde_json::json;
 use crate::policy::enforce_page_protected_regions;
 use crate::{
     BaselinePosition, Block, BlockContent, BlockKind, BlockRole, BlockStructure, BoundingBox,
-    CancellationToken, DocumentMetadata, DocumentV1, FontFamilyClass, Line, Page, PageGeometry,
-    PolicyDecisionSource, ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind,
-    SourceProvenance, StructureKind, TextFlow, TextStyle, TranslationPolicy,
+    CancellationToken, DocumentMetadata, DocumentV1, FontFamilyClass, InlineObject,
+    InlineObjectPart, Line, Page, PageGeometry, PolicyDecisionSource, ProtectedRegion,
+    ProtectedRegionKind, Segment, SegmentKind, SourceProvenance, StructureKind, TextFlow,
+    TextStyle, TranslationPolicy,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -99,7 +100,6 @@ fn classify_native_role(
     page: &PageGeometry,
     block: &NativeBlock,
     body_font_size: f32,
-    in_references: bool,
 ) -> BlockRole {
     let compact = block.text.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.chars().all(|character| character.is_ascii_digit()) && compact.chars().count() <= 4 {
@@ -142,9 +142,6 @@ fn classify_native_role(
     }
     if block.monospaced_ratio >= 0.62 {
         return BlockRole::Code;
-    }
-    if in_references {
-        return BlockRole::Reference;
     }
     if page_index == 0
         && block.bbox.y0 < page.height * 0.42

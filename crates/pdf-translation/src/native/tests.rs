@@ -1027,6 +1027,7 @@ fn fusion_document(provider: &str, blocks: Vec<Block>) -> DocumentV1 {
             page_index: 0,
             geometry: PageGeometry::new(100.0, 100.0),
             blocks,
+            inline_objects: Vec::new(),
             protected_regions: Vec::new(),
             metadata: BTreeMap::new(),
         }],

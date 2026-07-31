@@ -182,10 +182,13 @@ pub(super) fn validate_translation(
     let (_plain, mut runs, parse_fallback) =
         parse_styled_translation(&restored, &unit.style_definitions);
     normalize_cjk_styled_spacing(&mut runs);
-    let plain = runs.iter().map(|run| run.text.as_str()).collect::<String>();
+    let plain = crate::strip_inline_object_markers(
+        &runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+    );
     if reject_unchanged
         && should_reject_unchanged(&unit.source_text)
-        && normalize_for_comparison(&plain) == normalize_for_comparison(&unit.source_text)
+        && normalize_for_comparison(&plain)
+            == normalize_for_comparison(&crate::strip_inline_object_markers(&unit.source_text))
     {
         return Err("translation is unchanged from the source".to_string());
     }
@@ -208,7 +211,7 @@ pub(super) fn validate_resumed_translation(
     translated: &str,
     reject_unchanged: bool,
 ) -> bool {
-    if translated.trim().is_empty() || translated.contains("[[GLYPHST_") {
+    if translated.trim().is_empty() || translated.contains("GLYPHST_") {
         return false;
     }
     if unit
@@ -218,7 +221,9 @@ pub(super) fn validate_resumed_translation(
         .filter(|token| {
             !matches!(
                 token.kind,
-                ProtectedTokenKind::StyleStart | ProtectedTokenKind::StyleEnd
+                ProtectedTokenKind::StyleStart
+                    | ProtectedTokenKind::StyleEnd
+                    | ProtectedTokenKind::InlineObject
             )
         })
         .any(|token| !translated.contains(&token.original))
@@ -237,7 +242,8 @@ pub(super) fn validate_resumed_translation(
     }
     if reject_unchanged
         && should_reject_unchanged(&unit.source_text)
-        && normalize_for_comparison(translated) == normalize_for_comparison(&unit.source_text)
+        && normalize_for_comparison(translated)
+            == normalize_for_comparison(&crate::strip_inline_object_markers(&unit.source_text))
     {
         return false;
     }
@@ -247,10 +253,37 @@ pub(super) fn validate_resumed_translation(
         || lowercase.starts_with("unable to translate"))
 }
 
+pub(super) fn validate_resumed_inline_objects(
+    unit: &TranslationUnit,
+    resumed: &TranslatedUnit,
+) -> bool {
+    let inline_objects = unit
+        .protected
+        .tokens
+        .iter()
+        .filter(|token| token.kind == ProtectedTokenKind::InlineObject)
+        .collect::<Vec<_>>();
+    if inline_objects.is_empty() {
+        return true;
+    }
+
+    let styled_text = resumed
+        .styled_runs
+        .iter()
+        .map(|run| run.text.as_str())
+        .collect::<String>();
+    inline_objects
+        .iter()
+        .all(|token| styled_text.matches(&token.original).count() == 1)
+}
+
 pub(super) fn protected_prefix(
     text: &str,
     protect_identifiers: bool,
 ) -> Option<(ProtectedTokenKind, usize)> {
+    if let Some((length, _)) = crate::document::inline_object_marker_prefix(text) {
+        return Some((ProtectedTokenKind::InlineObject, length));
+    }
     if let Some(length) =
         delimited_length(text, "$$", "$$").or_else(|| delimited_length(text, "$", "$"))
     {
@@ -442,6 +475,7 @@ pub(super) fn placeholder(kind: ProtectedTokenKind, index: usize, original: &str
         ProtectedTokenKind::Url => "URL",
         ProtectedTokenKind::NumericLiteral => "NUMBER",
         ProtectedTokenKind::Identifier => "IDENTIFIER",
+        ProtectedTokenKind::InlineObject => "INLINE_OBJECT",
         ProtectedTokenKind::StructuralMarker => "STRUCTURAL_MARKER",
         ProtectedTokenKind::LineBreak => "LINE_BREAK",
         ProtectedTokenKind::StyleStart => "STYLE_START",
@@ -472,9 +506,28 @@ fn append_continuation_text(target: &mut String, continuation: &str) {
             .chars()
             .next()
             .is_some_and(|character| character.is_ascii_lowercase());
+    let starts_with_punctuation = continuation.chars().next().is_some_and(|character| {
+        matches!(
+            character,
+            ',' | '.'
+                | ';'
+                | ':'
+                | '!'
+                | '?'
+                | ')'
+                | ']'
+                | '}'
+                | '，'
+                | '。'
+                | '；'
+                | '：'
+                | '！'
+                | '？'
+        )
+    });
     if should_join_without_space {
         target.pop();
-    } else if !target.ends_with(char::is_whitespace) {
+    } else if !starts_with_punctuation && !target.ends_with(char::is_whitespace) {
         target.push(' ');
     }
     target.push_str(continuation);

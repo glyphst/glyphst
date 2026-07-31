@@ -137,6 +137,65 @@ impl TranslationBoxCorner {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PdfContentReviewMode {
+    #[default]
+    Off,
+    Ambiguous,
+}
+
+impl PdfContentReviewMode {
+    pub const ALL: [Self; 2] = [Self::Off, Self::Ambiguous];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "ambiguous" => Some(Self::Ambiguous),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Ambiguous => "Review ambiguous blocks",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PdfContentReviewSettings {
+    pub mode: PdfContentReviewMode,
+    pub model: Option<ModelRef>,
+}
+
+impl Default for PdfContentReviewSettings {
+    fn default() -> Self {
+        Self {
+            mode: PdfContentReviewMode::Off,
+            model: None,
+        }
+    }
+}
+
+impl PdfContentReviewSettings {
+    fn sanitize(&mut self) {
+        if let Some(model) = self.model.as_mut() {
+            model.sanitize();
+            if model.id.is_empty() {
+                self.model = None;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PinnedTranslationSettings {
     pub width: f32,
@@ -170,6 +229,7 @@ pub struct TranslationSettings {
     pub source_language: Option<String>,
     pub target_language: String,
     pub pinned: PinnedTranslationSettings,
+    pub content_review: PdfContentReviewSettings,
 }
 
 impl Default for TranslationSettings {
@@ -180,6 +240,7 @@ impl Default for TranslationSettings {
             source_language: None,
             target_language: DEFAULT_TRANSLATION_TARGET_LANGUAGE.to_string(),
             pinned: PinnedTranslationSettings::default(),
+            content_review: PdfContentReviewSettings::default(),
         }
     }
 }
@@ -197,6 +258,7 @@ impl TranslationSettings {
         }
         self.target_language.make_ascii_lowercase();
         self.pinned.sanitize();
+        self.content_review.sanitize();
 
         for (provider, config) in &mut self.providers {
             config.sanitize(*provider);

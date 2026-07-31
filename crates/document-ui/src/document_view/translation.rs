@@ -225,7 +225,7 @@ impl DocumentView {
                         settings,
                         request,
                         DocumentTranslationOpenMode::Split,
-                        result.output_path,
+                        result,
                         cx,
                     );
                 });

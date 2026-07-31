@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::policy::enforce_unmapped_glyph_policy;
 use crate::{
-    Block, BlockRole, BoundingBox, CancellationToken, DocumentV1, Line, TextFlow, TextStyle,
+    Block, BlockRole, BoundingBox, CancellationToken, DocumentV1, Line, SegmentKind, TextFlow,
+    TextStyle,
 };
 
 const MAX_BATCH_UNITS: usize = 6;
@@ -101,7 +102,7 @@ impl ProtectedText {
         for token in &self.tokens {
             restored = restored.replace(&token.placeholder, &token.original);
         }
-        if restored.contains("[[GLYPHST_") {
+        if restored.contains("GLYPHST_") {
             return Err("translation contains an unresolved placeholder".to_string());
         }
         Ok(restored)
@@ -178,7 +179,7 @@ impl ProtectedText {
             }
         }
         restored = strip_style_placeholders(&restored);
-        if restored.contains("[[GLYPHST_") {
+        if restored.contains("GLYPHST_") {
             return Err("translation contains an unresolved placeholder".to_string());
         }
         Ok((restored, style_fallback))
@@ -258,6 +259,7 @@ pub enum ProtectedTokenKind {
     Url,
     NumericLiteral,
     Identifier,
+    InlineObject,
     StructuralMarker,
     LineBreak,
     StyleStart,
@@ -467,6 +469,7 @@ pub fn translate_document_resuming(
                 &resumed.translated_text,
                 backend.reject_unchanged_output(),
             )
+            && validate_resumed_inline_objects(unit, &resumed)
         {
             resolved.insert(resumed.id.clone(), resumed);
         }

@@ -920,7 +920,13 @@ mod tests {
         let sanitized_source = directory.join("source-sanitized.pdf");
         sanitize_source_pdf(&source_path, &sanitized_source, &layout, &cancellation).unwrap();
         let overlay = TypstCompiler::new(TypstCompilerConfig::default())
-            .compile_translated_pdf(&sanitized_source, &layout, &directory, &cancellation)
+            .compile_translated_pdf(
+                &source_path,
+                &sanitized_source,
+                &layout,
+                &directory,
+                &cancellation,
+            )
             .unwrap();
         let inspection = inspect_pdf(&source_path, &cancellation).unwrap();
         let output_path = directory.join("composed.pdf");
@@ -996,7 +1002,13 @@ mod tests {
         let sanitized_source = directory.join("source-sanitized.pdf");
         sanitize_source_pdf(&source_path, &sanitized_source, &layout, &cancellation).unwrap();
         let overlay = TypstCompiler::new(TypstCompilerConfig::default())
-            .compile_translated_pdf(&sanitized_source, &layout, &directory, &cancellation)
+            .compile_translated_pdf(
+                &source_path,
+                &sanitized_source,
+                &layout,
+                &directory,
+                &cancellation,
+            )
             .unwrap();
         let inspection = inspect_pdf(&source_path, &cancellation).unwrap();
         PdfComposer

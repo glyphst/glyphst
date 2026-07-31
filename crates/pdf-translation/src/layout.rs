@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Block, BlockRole, BoundingBox, FontFamilyClass, PageGeometry, ProtectedRegion, StructureKind,
-    StyledRun, TableOfContentsLeader, TextFlow, TextStyle, TranslatedDocument,
+    Block, BlockRole, BoundingBox, FontFamilyClass, InlineObject, PageGeometry, ProtectedRegion,
+    StructureKind, StyledRun, TableOfContentsLeader, TextFlow, TextStyle, TranslatedDocument,
 };
 
 const MATERIAL_COLLISION_RATIO: f32 = 0.12;
@@ -55,6 +55,8 @@ pub struct LayoutItem {
     pub color_argb: u32,
     #[serde(default)]
     pub styled_runs: Vec<StyledRun>,
+    #[serde(default)]
+    pub inline_objects: Vec<InlineObject>,
     pub first_line_indent_pt: f32,
     pub justify: bool,
     pub preserve_line_breaks: bool,
@@ -203,6 +205,23 @@ pub fn build_layout_with_options(
                 .map(|page| page.protected_regions.as_slice())
                 .unwrap_or_default();
             let layout_bbox = structural_layout_bbox(block, protected_regions);
+            let inline_objects = translated
+                .document
+                .pages
+                .get(block.page_index)
+                .map(|page| {
+                    page.inline_objects
+                        .iter()
+                        .filter(|object| {
+                            let marker = crate::inline_object_marker(&object.id);
+                            unit.styled_runs
+                                .iter()
+                                .any(|run| run.text.contains(&marker))
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
             let item = LayoutItem {
                 unit_id: unit.id.clone(),
                 block_id: block.id.clone(),
@@ -242,6 +261,7 @@ pub fn build_layout_with_options(
                 } else {
                     Vec::new()
                 },
+                inline_objects,
                 first_line_indent_pt: if index == 0 {
                     if block.toc_entry.is_some() {
                         0.0

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -6,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use mupdf::{Colorspace, Document, Matrix};
+use mupdf::{Colorspace, Document, ImageFormat, Matrix, TextPageFlags, text_page::TextBlockType};
 use serde::{Deserialize, Serialize};
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration as TypstDuration};
@@ -88,6 +89,7 @@ impl TypstCompiler {
 
     pub fn compile_translated_pdf(
         &self,
+        original_pdf: &Path,
         source_pdf: &Path,
         layout: &LayoutDocument,
         job_directory: &Path,
@@ -99,6 +101,7 @@ impl TypstCompiler {
                 job_directory.display()
             ))
         })?;
+        materialize_inline_assets(original_pdf, layout, job_directory)?;
         let copied_source = job_directory.join("source.pdf");
         fs::copy(source_pdf, &copied_source).map_err(|error| {
             TypstError::io(format!(
@@ -248,6 +251,121 @@ impl TypstCompiler {
             pdf_path: output_path.to_path_buf(),
         })
     }
+}
+
+fn materialize_inline_assets(
+    original_pdf: &Path,
+    layout: &LayoutDocument,
+    job_directory: &Path,
+) -> Result<(), TypstError> {
+    let mut requests = BTreeMap::<usize, Vec<(usize, String)>>::new();
+    for page in &layout.pages {
+        for item in &page.items {
+            for object in &item.inline_objects {
+                for (part_index, part) in object.parts.iter().enumerate() {
+                    let request = (
+                        part.source_block_index,
+                        inline_asset_filename(&object.id, part_index),
+                    );
+                    let page_requests = requests.entry(object.page_index).or_default();
+                    if !page_requests.contains(&request) {
+                        page_requests.push(request);
+                    }
+                }
+            }
+        }
+    }
+    if requests.is_empty() {
+        return Ok(());
+    }
+
+    let document = Document::open(original_pdf).map_err(|error| {
+        TypstError::io(format!(
+            "failed to open original PDF {} for inline images: {error}",
+            original_pdf.display()
+        ))
+    })?;
+    for (page_index, page_requests) in requests {
+        let page = document.load_page(page_index as i32).map_err(|error| {
+            TypstError::io(format!(
+                "failed to load source page {} for inline images: {error}",
+                page_index + 1
+            ))
+        })?;
+        let text_page = page
+            .to_text_page(
+                TextPageFlags::PRESERVE_WHITESPACE
+                    | TextPageFlags::ACCURATE_BBOXES
+                    | TextPageFlags::ACCURATE_ASCENDERS
+                    | TextPageFlags::ACCURATE_SIDE_BEARINGS
+                    | TextPageFlags::PRESERVE_SPANS
+                    | TextPageFlags::PRESERVE_IMAGES
+                    | TextPageFlags::COLLECT_STYLES,
+            )
+            .map_err(|error| {
+                TypstError::io(format!(
+                    "failed to inspect source page {} for inline images: {error}",
+                    page_index + 1
+                ))
+            })?;
+        let mut remaining = page_requests
+            .into_iter()
+            .collect::<BTreeMap<usize, String>>();
+        for (source_block_index, block) in text_page.blocks().enumerate() {
+            let Some(filename) = remaining.remove(&source_block_index) else {
+                continue;
+            };
+            if block.r#type() != TextBlockType::Image {
+                return Err(TypstError::missing_asset(format!(
+                    "source block {source_block_index} on page {} is not an inline image",
+                    page_index + 1
+                )));
+            }
+            let image = block.image().ok_or_else(|| {
+                TypstError::missing_asset(format!(
+                    "source block {source_block_index} on page {} has no image payload",
+                    page_index + 1
+                ))
+            })?;
+            let pixmap = image.to_pixmap().map_err(|error| {
+                TypstError::io(format!(
+                    "failed to decode inline image on page {}: {error}",
+                    page_index + 1
+                ))
+            })?;
+            let path = job_directory.join(filename);
+            let path_string = path.to_string_lossy();
+            pixmap
+                .save_as(path_string.as_ref(), ImageFormat::PNG)
+                .map_err(|error| {
+                    TypstError::io(format!(
+                        "failed to save inline image {}: {error}",
+                        path.display()
+                    ))
+                })?;
+        }
+        if let Some((source_block_index, _)) = remaining.into_iter().next() {
+            return Err(TypstError::missing_asset(format!(
+                "could not find source inline image block {source_block_index} on page {}",
+                page_index + 1
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn inline_asset_filename(object_id: &str, part_index: usize) -> String {
+    let id = object_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("inline-{id}-{part_index:02}.png")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -436,7 +554,7 @@ impl FileLoader for RestrictedFileLoader {
         match id.root() {
             VirtualRoot::Project => {
                 let path = id.vpath().get_without_slash();
-                if path != self.main_name && path != "source.pdf" {
+                if path != self.main_name && path != "source.pdf" && !is_inline_asset_path(path) {
                     return Err(FileError::AccessDenied);
                 }
                 self.project.load(id.vpath())
@@ -450,6 +568,16 @@ impl FileLoader for RestrictedFileLoader {
             },
         }
     }
+}
+
+fn is_inline_asset_path(path: &str) -> bool {
+    path.starts_with("inline-")
+        && path.ends_with(".png")
+        && !path.contains('/')
+        && !path.contains('\\')
+        && path.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
 }
 
 struct RestrictedRoot {
@@ -1047,6 +1175,30 @@ fn append_typst_styled_run_text(
     if run_text.is_empty() {
         return;
     }
+    let mut remaining = run_text;
+    while let Some(start) = remaining.find(crate::document::INLINE_OBJECT_MARKER_START) {
+        append_typst_plain_styled_run_text(source, &remaining[..start], style, item, literal);
+        let marker = &remaining[start..];
+        let Some((length, object_id)) = crate::document::inline_object_marker_prefix(marker) else {
+            append_typst_plain_styled_run_text(source, marker, style, item, literal);
+            return;
+        };
+        append_typst_inline_object(source, object_id, item);
+        remaining = &marker[length..];
+    }
+    append_typst_plain_styled_run_text(source, remaining, style, item, literal);
+}
+
+fn append_typst_plain_styled_run_text(
+    source: &mut String,
+    run_text: &str,
+    style: &TextStyle,
+    item: &LayoutItem,
+    literal: bool,
+) {
+    if run_text.is_empty() {
+        return;
+    }
     let parts = if item.preserve_line_breaks {
         run_text.split('\n').collect::<Vec<_>>()
     } else {
@@ -1066,6 +1218,37 @@ fn append_typst_styled_run_text(
         }
         append_typst_styled_text(source, &text, style, item, literal);
     }
+}
+
+fn append_typst_inline_object(source: &mut String, object_id: &str, item: &LayoutItem) {
+    let Some(object) = item
+        .inline_objects
+        .iter()
+        .find(|object| object.id == object_id)
+    else {
+        return;
+    };
+    let source_font_size = item.source_font_size_pt.max(0.1);
+    let width_ratio = object.bbox.width() / source_font_size;
+    let height_ratio = object.bbox.height() / source_font_size;
+    let baseline = ((object.baseline_y - object.bbox.y0) / object.bbox.height().max(0.1))
+        .clamp(0.0, 1.25)
+        * 100.0;
+    source.push_str(&format!(
+        "#box(width: text-size * {:.5}, height: text-size * {:.5}, baseline: {:.3}%)[",
+        width_ratio, height_ratio, baseline
+    ));
+    for (part_index, part) in object.parts.iter().enumerate() {
+        source.push_str(&format!(
+            "#place(top + left, dx: text-size * {:.5}, dy: text-size * {:.5}, image(\"{}\", width: text-size * {:.5}, height: text-size * {:.5}, fit: \"stretch\"))",
+            (part.bbox.x0 - object.bbox.x0) / source_font_size,
+            (part.bbox.y0 - object.bbox.y0) / source_font_size,
+            escape_typst_string(&inline_asset_filename(&object.id, part_index)),
+            part.bbox.width() / source_font_size,
+            part.bbox.height() / source_font_size,
+        ));
+    }
+    source.push(']');
 }
 
 fn append_typst_styled_text(
@@ -1681,6 +1864,7 @@ mod tests {
                             style: Some(math_style),
                         },
                     ],
+                    inline_objects: Vec::new(),
                     first_line_indent_pt: 0.0,
                     justify: true,
                     preserve_line_breaks: false,
@@ -1743,6 +1927,7 @@ mod tests {
             strikeout: false,
             color_argb: 0xff00_0000,
             styled_runs: Vec::new(),
+            inline_objects: Vec::new(),
             first_line_indent_pt: 0.0,
             justify: false,
             preserve_line_breaks: true,
@@ -1834,6 +2019,7 @@ mod tests {
             strikeout: false,
             color_argb: 0xff00_0000,
             styled_runs: Vec::new(),
+            inline_objects: Vec::new(),
             first_line_indent_pt: 0.0,
             justify: false,
             preserve_line_breaks: false,
@@ -1957,6 +2143,7 @@ mod tests {
                     strikeout: false,
                     color_argb: 0xff00_0000,
                     styled_runs: Vec::new(),
+                    inline_objects: Vec::new(),
                     first_line_indent_pt: 0.0,
                     justify: true,
                     preserve_line_breaks: true,

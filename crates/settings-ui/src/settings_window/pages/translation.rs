@@ -1,6 +1,7 @@
 use super::super::SettingsWindow;
 use glyphst_settings::{
-    ModelRef, Settings, SettingsStore, TranslationBoxCorner, TranslationProvider,
+    ModelRef, PdfContentReviewMode, Settings, SettingsStore, TranslationBoxCorner,
+    TranslationProvider,
 };
 use glyphst_translation_ui::target_language_options;
 use gpui::{App, Context, SharedString};
@@ -263,6 +264,87 @@ impl SettingsWindow {
             .default_value(default_translation_model),
         );
 
+        let content_review_mode = SettingItem::new(
+            "AI content review",
+            SettingField::dropdown(
+                PdfContentReviewMode::ALL
+                    .into_iter()
+                    .map(|mode| Self::setting_option(mode.as_str(), mode.label()))
+                    .collect(),
+                |cx: &App| {
+                    cx.global::<SettingsStore>()
+                        .settings
+                        .translation
+                        .content_review
+                        .mode
+                        .as_str()
+                        .into()
+                },
+                {
+                    let view = view.clone();
+                    move |value: SharedString, cx: &mut App| {
+                        let mode = PdfContentReviewMode::parse(value.as_ref()).unwrap_or_default();
+                        Self::update_settings(&view, cx, move |settings| {
+                            settings.translation.content_review.mode = mode;
+                            if mode == PdfContentReviewMode::Ambiguous
+                                && settings.translation.content_review.model.is_none()
+                            {
+                                settings.translation.content_review.model =
+                                    settings.ai.translation_model.clone();
+                            }
+                        });
+                    }
+                },
+            )
+            .default_value(defaults.translation.content_review.mode.as_str().to_string()),
+        )
+        .description(
+            "Optionally ask a separate AI model about only the blocks whose translate/preserve policy is ambiguous. Deterministic decisions remain locked.",
+        );
+
+        let default_review_model = defaults
+            .translation
+            .content_review
+            .model
+            .as_ref()
+            .map(Self::model_ref_key)
+            .unwrap_or_default();
+        let content_review_model = SettingItem::new(
+            "Review model",
+            SettingField::scrollable_dropdown(
+                Self::model_options(&cx.global::<SettingsStore>().settings),
+                |cx: &App| {
+                    cx.global::<SettingsStore>()
+                        .settings
+                        .translation
+                        .content_review
+                        .model
+                        .as_ref()
+                        .map(Self::model_ref_key)
+                        .unwrap_or_default()
+                        .into()
+                },
+                {
+                    let view = view.clone();
+                    move |value: SharedString, cx: &mut App| {
+                        let model = Self::parse_model_ref(value.as_ref());
+                        Self::update_settings(&view, cx, move |settings| {
+                            settings.translation.content_review.model = model;
+                        });
+                    }
+                },
+            )
+            .default_value(default_review_model),
+        )
+        .disabled(
+            cx.global::<SettingsStore>()
+                .settings
+                .translation
+                .content_review
+                .mode
+                == PdfContentReviewMode::Off,
+        );
+
         let pinned_width = SettingItem::new(
             "Floating panel width",
             SettingField::number_input(
@@ -362,6 +444,9 @@ impl SettingsWindow {
             SettingGroup::new()
                 .title(TranslationProvider::Ai.label())
                 .item(ai_model),
+            SettingGroup::new()
+                .title("PDF content policy")
+                .items([content_review_mode, content_review_model]),
             self.translation_provider_group(TranslationProvider::DeepL, cx),
             self.translation_provider_group(TranslationProvider::Google, cx),
             self.translation_provider_group(TranslationProvider::Microsoft, cx),

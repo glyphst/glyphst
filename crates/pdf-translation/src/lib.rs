@@ -6,6 +6,7 @@ mod native;
 mod paddle;
 mod policy;
 mod progress;
+mod reference;
 mod toc;
 mod translate;
 mod typst;
@@ -17,10 +18,11 @@ pub use composition::{
 };
 pub use document::{
     BaselinePosition, Block, BlockContent, BlockKind, BlockRole, BlockStructure, BoundingBox,
-    ContinuationHint, ContinuationScope, DocumentMetadata, DocumentV1, FontFamilyClass, Line, Page,
-    PageGeometry, PolicyDecisionSource, ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind,
-    SourceProvenance, StructureKind, TableOfContentsEntry, TableOfContentsLeader, TextFlow,
-    TextStyle, TranslationPolicy,
+    ContinuationHint, ContinuationScope, DocumentMetadata, DocumentV1, FontFamilyClass,
+    InlineObject, InlineObjectPart, Line, Page, PageGeometry, PolicyDecisionSource,
+    ProtectedRegion, ProtectedRegionKind, Segment, SegmentKind, SourceProvenance, StructureKind,
+    TableOfContentsEntry, TableOfContentsLeader, TextFlow, TextStyle, TranslationPolicy,
+    inline_object_marker, strip_inline_object_markers,
 };
 pub use layout::{
     FontWeight, LayoutDocument, LayoutItem, LayoutOptions, LayoutPage, LayoutWarning,
@@ -37,13 +39,14 @@ pub use paddle::{
     PaddleProbeResult, normalize_paddle_payload,
 };
 pub use policy::{
-    POLICY_REVIEW_CONFIDENCE_THRESHOLD, PolicyReviewBlock, PolicyReviewDecision, PolicyReviewError,
-    PolicyReviewRequest, TranslationPolicyReviewer, enforce_protected_regions,
-    review_translation_policies,
+    POLICY_REVIEW_CONFIDENCE_THRESHOLD, PolicyReviewBlock, PolicyReviewContextBlock,
+    PolicyReviewDecision, PolicyReviewError, PolicyReviewRequest, TranslationPolicyReviewer,
+    enforce_protected_regions, review_translation_policies,
 };
 pub use progress::{
     PdfTranslationProgress, PdfTranslationStage, ProgressTracker, TranslationProgressSink,
 };
+pub use reference::{ReferenceClassification, annotate_reference_sections};
 pub use translate::{
     ProtectedText, ProtectedToken, ProtectedTokenKind, StyleDefinition, StyledRun,
     TranslatedDocument, TranslatedUnit, TranslationBackend, TranslationBackendError,

@@ -366,6 +366,21 @@ impl Settings {
                     settings.translation.pinned.corner = value;
                 }
             }
+            if let Some(content_review) = translation
+                .get("content_review")
+                .and_then(KdlNode::children)
+            {
+                if let Some(value) = content_review
+                    .get_arg("mode")
+                    .and_then(KdlValue::as_string)
+                    .and_then(PdfContentReviewMode::parse)
+                {
+                    settings.translation.content_review.mode = value;
+                }
+                if let Some(model) = content_review.get("model").and_then(ModelRef::from_node) {
+                    settings.translation.content_review.model = Some(model);
+                }
+            }
             if let Some(providers) = translation.get("providers").and_then(KdlNode::children) {
                 for node in providers.nodes() {
                     let Some(provider) = TranslationProvider::parse(node.name().value()) else {
@@ -689,6 +704,21 @@ impl Settings {
                     self.translation.pinned.corner.as_str(),
                 );
                 translation_children.nodes_mut().push(pinned);
+            }
+
+            let default_content_review = PdfContentReviewSettings::default();
+            if self.translation.content_review != default_content_review {
+                let mut content_review = KdlNode::new("content_review");
+                let content_review_children = content_review.ensure_children();
+                push_value_node(
+                    content_review_children,
+                    "mode",
+                    self.translation.content_review.mode.as_str(),
+                );
+                if let Some(model) = &self.translation.content_review.model {
+                    model.write_to_document(content_review_children, "model");
+                }
+                translation_children.nodes_mut().push(content_review);
             }
 
             let mut providers = KdlNode::new("providers");

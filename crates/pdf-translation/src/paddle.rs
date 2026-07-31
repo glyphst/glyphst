@@ -707,6 +707,7 @@ pub fn normalize_paddle_payload(
             page_index,
             geometry,
             blocks,
+            inline_objects: Vec::new(),
             protected_regions: Vec::new(),
             metadata,
         };

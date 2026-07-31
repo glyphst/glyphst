@@ -566,6 +566,7 @@ fn native_line_atoms(blocks: &[Block]) -> Vec<NativeLineAtom> {
         if block.policy.locked
             || !matches!(block.kind, BlockKind::Text | BlockKind::Code)
             || block.content.text.trim().is_empty()
+            || block.tags.iter().any(|tag| tag == "inline_objects")
         {
             continue;
         }

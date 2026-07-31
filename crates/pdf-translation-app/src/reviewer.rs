@@ -1,16 +1,35 @@
 use glyphst_pdf_translation::{
     PolicyReviewDecision, PolicyReviewError, PolicyReviewRequest, TranslationPolicyReviewer,
 };
-use glyphst_settings::{ResolvedAiConfig, Settings};
+use glyphst_settings::{PdfContentReviewMode, ResolvedAiConfig, Settings};
 
 pub(crate) struct GlyphstPolicyReviewer {
-    settings: ResolvedAiConfig,
+    settings: Option<ResolvedAiConfig>,
+    configuration_error: Option<String>,
 }
 
 impl GlyphstPolicyReviewer {
     pub(crate) fn from_settings(settings: &Settings) -> Option<Self> {
-        let settings = settings.ai.resolved_translation();
-        settings.can_request().then_some(Self { settings })
+        if settings.translation.content_review.mode == PdfContentReviewMode::Off {
+            return None;
+        }
+        let resolved = settings
+            .translation
+            .content_review
+            .model
+            .as_ref()
+            .and_then(|model| settings.ai.resolved_model(model));
+        let configuration_error = match &resolved {
+            Some(resolved) if resolved.can_request() => None,
+            Some(resolved) => Some(resolved.missing_credentials_message()),
+            None => Some(
+                "The configured PDF content review model is unavailable or disabled".to_string(),
+            ),
+        };
+        Some(Self {
+            settings: resolved,
+            configuration_error,
+        })
     }
 }
 
@@ -19,10 +38,17 @@ impl TranslationPolicyReviewer for GlyphstPolicyReviewer {
         &self,
         request: &PolicyReviewRequest,
     ) -> Result<Vec<PolicyReviewDecision>, PolicyReviewError> {
+        if let Some(error) = &self.configuration_error {
+            return Err(PolicyReviewError::new(error.clone()));
+        }
+        let settings = self
+            .settings
+            .clone()
+            .ok_or_else(|| PolicyReviewError::new("PDF content review model is unavailable"))?;
         let payload = serde_json::to_value(request).map_err(|error| {
             PolicyReviewError::new(format!("could not encode page map: {error}"))
         })?;
-        glyphst_ai::translation::review_pdf_translation_policy(self.settings.clone(), payload)
+        glyphst_ai::translation::review_pdf_translation_policy(settings, payload)
             .map(|decisions| {
                 decisions
                     .into_iter()

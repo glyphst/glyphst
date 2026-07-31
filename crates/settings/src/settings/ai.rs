@@ -298,7 +298,7 @@ impl AiProvider {
     pub fn label(self) -> &'static str {
         match self {
             Self::OpenAi => "OpenAI",
-            Self::ChatGptSubscription => "ChatGPT Subscription",
+            Self::ChatGptSubscription => "ChatGPT Subscription (experimental)",
             Self::Anthropic => "Anthropic",
             Self::DeepSeek => "DeepSeek",
             Self::OpenRouter => "OpenRouter",
@@ -996,6 +996,16 @@ impl AiSettings {
             return Self::unavailable_resolved();
         };
         self.resolved_for(model_ref.provider, model_ref.id, AiThinkingLevel::Off)
+    }
+
+    pub fn resolved_model(&self, model_ref: &ModelRef) -> Option<ResolvedAiConfig> {
+        self.is_enabled_model_ref(model_ref).then(|| {
+            self.resolved_for(
+                model_ref.provider,
+                model_ref.id.clone(),
+                AiThinkingLevel::Off,
+            )
+        })
     }
 
     pub fn model_label(&self, model_ref: &ModelRef) -> String {

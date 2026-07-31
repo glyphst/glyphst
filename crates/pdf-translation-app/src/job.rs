@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, anyhow};
-use glyphst_settings::{OcrMode, OcrProvider, Settings};
+use glyphst_settings::{OcrMode, OcrProvider, PdfContentReviewMode, Settings};
 use glyphst_translation::{LanguageCode, TranslationService};
 use mupdf::{Document, TextPageFlags};
 use serde::{Deserialize, Serialize};
@@ -17,8 +17,8 @@ use glyphst_pdf_translation::{
     BoundingBox, CancellationToken, DocumentV1, LayoutDocument, LayoutOptions, PaddleClient,
     PaddleClientConfig, PdfComposer, PdfTranslationStage, ProgressTracker, TranslatedDocument,
     TranslationProgressSink, TypstCompiler, TypstCompilerConfig, UnlimitedClient,
-    UnlimitedClientConfig, build_layout_with_options, extract_native_document,
-    fuse_native_with_ocr_report, inspect_pdf, normalize_paddle_payload,
+    UnlimitedClientConfig, annotate_reference_sections, build_layout_with_options,
+    extract_native_document, fuse_native_with_ocr_report, inspect_pdf, normalize_paddle_payload,
     normalize_unlimited_payload, review_translation_policies, sanitize_source_pdf,
 };
 use glyphst_pdf_translation::{
@@ -29,8 +29,8 @@ use glyphst_pdf_translation::{
 use crate::backend::GlyphstTranslationBackend;
 use crate::reviewer::GlyphstPolicyReviewer;
 
-const ARTIFACT_VERSION: u32 = 4;
-const PIPELINE_VERSION: &str = "native-rust-v21-structured-toc";
+const ARTIFACT_VERSION: u32 = 5;
+const PIPELINE_VERSION: &str = "native-rust-v22-document-context-inline-objects";
 const CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone)]
@@ -245,6 +245,8 @@ impl PdfTranslationService {
                 }
             }
         };
+        annotate_reference_sections(&mut document);
+        let mut warnings = Vec::new();
         if let Some(reviewer) = GlyphstPolicyReviewer::from_settings(&settings) {
             let review_errors = review_translation_policies(&mut document, &reviewer);
             if !review_errors.is_empty() {
@@ -257,6 +259,28 @@ impl PdfTranslationService {
                             .collect::<Vec<_>>()
                     ),
                 );
+                let affected_block_ids = document
+                    .pages
+                    .iter()
+                    .flat_map(|page| &page.blocks)
+                    .filter(|block| {
+                        block.policy.reason.starts_with("policy_review_failed:")
+                            || block.policy.reason.starts_with("policy_review_incomplete:")
+                    })
+                    .map(|block| block.id.clone())
+                    .collect();
+                let detail = review_errors
+                    .first()
+                    .map(|error| error.message.trim().chars().take(300).collect::<String>())
+                    .unwrap_or_default();
+                warnings.push(PdfTranslationWarning {
+                    code: "content_review_failed".to_string(),
+                    message: format!(
+                        "AI content review failed for {} page batch(es); ambiguous text was preserved. {detail}",
+                        review_errors.len()
+                    ),
+                    affected_block_ids,
+                });
             }
         }
         write_json(&document_path, &document)?;
@@ -393,6 +417,7 @@ impl PdfTranslationService {
         let typst_output = self
             .typst
             .compile_translated_pdf(
+                &pipeline_request.source_path,
                 &sanitized_source_path,
                 &layout,
                 &job_directory,
@@ -454,6 +479,7 @@ impl PdfTranslationService {
             &job_directory,
             &layout,
             &translated,
+            &warnings,
         );
         let manifest_path = job_directory.join("artifact-manifest.json");
         write_json(&manifest_path, &manifest)?;
@@ -464,6 +490,7 @@ impl PdfTranslationService {
             manifest_path,
             job_directory,
             fingerprint,
+            warnings,
         })
     }
 
@@ -478,12 +505,22 @@ impl PdfTranslationService {
         let manifest_path = job_directory.join("artifact-manifest.json");
         let manifest: PdfTranslationArtifactManifest =
             serde_json::from_slice(&fs::read(&manifest_path).ok()?).ok()?;
+        if manifest
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "content_review_failed")
+        {
+            // A warning artifact is still useful output, but it must not make a
+            // later user-initiated retry bypass the optional reviewer forever.
+            return None;
+        }
         let output_path = PathBuf::from(manifest.output_path);
         output_path.is_file().then_some(PdfTranslationResult {
             output_path,
             manifest_path,
             job_directory,
             fingerprint,
+            warnings: manifest.warnings,
         })
     }
 
@@ -737,6 +774,15 @@ pub struct PdfTranslationResult {
     pub manifest_path: PathBuf,
     pub job_directory: PathBuf,
     pub fingerprint: String,
+    pub warnings: Vec<PdfTranslationWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PdfTranslationWarning {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_block_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1049,6 +1095,8 @@ pub struct PdfTranslationArtifactManifest {
     pub translated_unit_count: usize,
     #[serde(default)]
     pub preserved_on_overflow: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<PdfTranslationWarning>,
     pub job_directory: String,
     pub geometry: Vec<ArtifactGeometry>,
 }
@@ -1068,6 +1116,7 @@ fn build_manifest(
     job_directory: &Path,
     layout: &LayoutDocument,
     translated: &TranslatedDocument,
+    warnings: &[PdfTranslationWarning],
 ) -> PdfTranslationArtifactManifest {
     PdfTranslationArtifactManifest {
         version: ARTIFACT_VERSION,
@@ -1087,6 +1136,7 @@ fn build_manifest(
         translation_provider: settings.translation.active_provider.as_str().to_string(),
         translated_unit_count: translated.units.len(),
         preserved_on_overflow: layout.preserved_on_overflow.clone(),
+        warnings: warnings.to_vec(),
         job_directory: job_directory.to_string_lossy().to_string(),
         geometry: layout
             .pages
@@ -1285,6 +1335,22 @@ fn request_fingerprint_with_source(
     }
     settings.translation.active_provider.hash(&mut hasher);
     translation_provider_identity(settings).hash(&mut hasher);
+    settings
+        .translation
+        .content_review
+        .mode
+        .as_str()
+        .hash(&mut hasher);
+    if settings.translation.content_review.mode == PdfContentReviewMode::Ambiguous
+        && let Some(model) = &settings.translation.content_review.model
+    {
+        model.provider.as_str().hash(&mut hasher);
+        model.id.hash(&mut hasher);
+        if let Some(review) = settings.ai.resolved_model(model) {
+            review.base_url.hash(&mut hasher);
+            review.api_style.as_str().hash(&mut hasher);
+        }
+    }
     Ok((format!("{:016x}", hasher.finish()), source_bytes))
 }
 
@@ -1591,6 +1657,42 @@ mod tests {
         assert!(!fingerprint.contains("baidu-api-key-secret"));
         assert!(!fingerprint.contains("baidu-secret-key-secret"));
         assert!(!fingerprint.contains("google-secret"));
+    }
+
+    #[test]
+    fn fingerprint_tracks_enabled_content_review_configuration() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let source_path =
+            std::env::temp_dir().join(format!("glyphst-review-fingerprint-{nonce:x}.pdf"));
+        fs::write(&source_path, b"fingerprint fixture").unwrap();
+        let request = PdfTranslationRequest {
+            source_path: source_path.clone(),
+            output_path: "/tmp/translated.pdf".into(),
+            source_language: None,
+            target_language: LanguageCode::new("zh-hans").unwrap(),
+        };
+        let mut settings = Settings::default();
+        let off = request_fingerprint(&settings, &request).unwrap();
+        settings.translation.content_review.model = Some(glyphst_settings::ModelRef::new(
+            glyphst_settings::AiProvider::OpenAi,
+            "review-a",
+        ));
+        assert_eq!(off, request_fingerprint(&settings, &request).unwrap());
+
+        settings.translation.content_review.mode = PdfContentReviewMode::Ambiguous;
+        let review_a = request_fingerprint(&settings, &request).unwrap();
+        settings.translation.content_review.model = Some(glyphst_settings::ModelRef::new(
+            glyphst_settings::AiProvider::OpenAi,
+            "review-b",
+        ));
+        let review_b = request_fingerprint(&settings, &request).unwrap();
+
+        assert_ne!(off, review_a);
+        assert_ne!(review_a, review_b);
+        fs::remove_file(source_path).unwrap();
     }
 
     #[test]

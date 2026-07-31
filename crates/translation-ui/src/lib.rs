@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use futures::{StreamExt as _, channel::mpsc};
 use glyphst_pdf_translation_app::{
     CancellationToken, PdfTranslationError, PdfTranslationProgress, PdfTranslationRequest,
-    PdfTranslationResult, PdfTranslationService, PdfTranslationStage,
+    PdfTranslationResult, PdfTranslationService, PdfTranslationStage, PdfTranslationWarning,
 };
 use glyphst_settings::{Settings, SettingsStore};
 use glyphst_translation::TARGET_LANGUAGES;
@@ -41,7 +41,12 @@ impl DocumentTranslationJobAction {
         }
     }
 
-    fn label(self, open_mode: DocumentTranslationOpenMode, open_error: bool) -> &'static str {
+    fn label(
+        self,
+        open_mode: DocumentTranslationOpenMode,
+        open_error: bool,
+        has_warnings: bool,
+    ) -> &'static str {
         match self {
             Self::Retry => "Retry",
             Self::Open if open_error => "Open again",
@@ -49,6 +54,7 @@ impl DocumentTranslationJobAction {
                 DocumentTranslationOpenMode::Document => "Open output",
                 DocumentTranslationOpenMode::Split => "Open split",
             },
+            Self::CopyError if has_warnings && !open_error => "Copy warning",
             Self::CopyError => "Copy error",
         }
     }
@@ -81,9 +87,11 @@ pub enum DocumentTranslationJobStatus {
     Succeeded {
         output_path: PathBuf,
         open_error: Option<SharedString>,
+        warnings: Vec<PdfTranslationWarning>,
     },
     Opening {
         output_path: PathBuf,
+        warnings: Vec<PdfTranslationWarning>,
     },
 }
 
@@ -104,7 +112,13 @@ fn job_actions(status: &DocumentTranslationJobStatus) -> Vec<DocumentTranslation
         }
         DocumentTranslationJobStatus::Succeeded { open_error, .. } => {
             let mut actions = vec![DocumentTranslationJobAction::Open];
-            if open_error.is_some() {
+            if matches!(status, DocumentTranslationJobStatus::Succeeded { warnings, .. } if !warnings.is_empty())
+            {
+                actions.push(DocumentTranslationJobAction::Retry);
+            }
+            if open_error.is_some()
+                || matches!(status, DocumentTranslationJobStatus::Succeeded { warnings, .. } if !warnings.is_empty())
+            {
                 actions.push(DocumentTranslationJobAction::CopyError);
             }
             actions
@@ -269,26 +283,32 @@ impl DocumentTranslationJobManager {
         settings: Settings,
         request: PdfTranslationRequest,
         open_mode: DocumentTranslationOpenMode,
-        output_path: PathBuf,
+        result: PdfTranslationResult,
         cx: &mut Context<Self>,
     ) -> DocumentTranslationJobId {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
+        let has_warnings = !result.warnings.is_empty();
         self.jobs.push_back(DocumentTranslationJobRecord {
             snapshot: DocumentTranslationJobSnapshot {
                 id,
                 request,
                 open_mode,
                 status: DocumentTranslationJobStatus::Succeeded {
-                    output_path,
+                    output_path: result.output_path,
                     open_error: None,
+                    warnings: result.warnings,
                 },
             },
             settings,
             cancellation: CancellationToken::new(),
             task: None,
         });
-        self.open(id, cx);
+        if has_warnings {
+            self.publish_terminal_notification(id, cx);
+        } else {
+            self.open(id, cx);
+        }
         id
     }
 
@@ -374,6 +394,9 @@ impl DocumentTranslationJobManager {
                     retryable: true,
                     ..
                 } | DocumentTranslationJobStatus::Cancelled
+            ) || matches!(
+                &job.snapshot.status,
+                DocumentTranslationJobStatus::Succeeded { warnings, .. } if !warnings.is_empty()
             );
             if !can_retry {
                 return;
@@ -410,8 +433,12 @@ impl DocumentTranslationJobManager {
     }
 
     pub fn open(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
-        let Some((open_mode, source_path, output_path)) = self.job(id).and_then(|job| {
-            let DocumentTranslationJobStatus::Succeeded { output_path, .. } = &job.snapshot.status
+        let Some((open_mode, source_path, output_path, warnings)) = self.job(id).and_then(|job| {
+            let DocumentTranslationJobStatus::Succeeded {
+                output_path,
+                warnings,
+                ..
+            } = &job.snapshot.status
             else {
                 return None;
             };
@@ -419,6 +446,7 @@ impl DocumentTranslationJobManager {
                 job.snapshot.open_mode,
                 job.snapshot.request.source_path.clone(),
                 output_path.clone(),
+                warnings.clone(),
             ))
         }) else {
             return;
@@ -426,6 +454,7 @@ impl DocumentTranslationJobManager {
         if let Some(job) = self.job_mut(id) {
             job.snapshot.status = DocumentTranslationJobStatus::Opening {
                 output_path: output_path.clone(),
+                warnings,
             };
         }
         self.remove_job_notification(id, cx);
@@ -456,6 +485,26 @@ impl DocumentTranslationJobManager {
                 open_error: Some(message),
                 ..
             } => Some(message.clone()),
+            DocumentTranslationJobStatus::Succeeded { warnings, .. } if !warnings.is_empty() => {
+                Some(
+                    warnings
+                        .iter()
+                        .map(|warning| {
+                            if warning.affected_block_ids.is_empty() {
+                                warning.message.clone()
+                            } else {
+                                format!(
+                                    "{}\nAffected blocks: {}",
+                                    warning.message,
+                                    warning.affected_block_ids.join(", ")
+                                )
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                        .into(),
+                )
+            }
             _ => None,
         }) else {
             return;
@@ -479,14 +528,19 @@ impl DocumentTranslationJobManager {
                 let Some(job) = self.job_mut(id) else {
                     return;
                 };
-                let DocumentTranslationJobStatus::Opening { output_path } = &job.snapshot.status
+                let DocumentTranslationJobStatus::Opening {
+                    output_path,
+                    warnings,
+                } = &job.snapshot.status
                 else {
                     return;
                 };
                 let output_path = output_path.clone();
+                let warnings = warnings.clone();
                 job.snapshot.status = DocumentTranslationJobStatus::Succeeded {
                     output_path,
                     open_error: Some(message),
+                    warnings,
                 };
                 publish_error = true;
             }
@@ -611,6 +665,7 @@ impl DocumentTranslationJobManager {
                     job.snapshot.status = DocumentTranslationJobStatus::Succeeded {
                         output_path: result.output_path,
                         open_error: None,
+                        warnings: result.warnings,
                     };
                 }
                 Err(error) => {
@@ -738,8 +793,13 @@ pub fn document_translation_notification(
     let id = snapshot.id;
     let type_ = match &snapshot.status {
         DocumentTranslationJobStatus::Succeeded {
+            open_error: None,
+            warnings,
+            ..
+        } if warnings.is_empty() => NotificationType::Success,
+        DocumentTranslationJobStatus::Succeeded {
             open_error: None, ..
-        } => NotificationType::Success,
+        } => NotificationType::Warning,
         DocumentTranslationJobStatus::Failed { .. }
         | DocumentTranslationJobStatus::Cancelled
         | DocumentTranslationJobStatus::Succeeded {
@@ -754,8 +814,9 @@ pub fn document_translation_notification(
         &snapshot.status,
         DocumentTranslationJobStatus::Succeeded {
             open_error: None,
+            warnings,
             ..
-        }
+        } if warnings.is_empty()
     );
     let content_snapshot = snapshot.clone();
     let close_manager = manager.clone();
@@ -773,6 +834,10 @@ pub fn document_translation_notification(
                     ..
                 }
             );
+            let has_warnings = matches!(
+                &content_snapshot.status,
+                DocumentTranslationJobStatus::Succeeded { warnings, .. } if !warnings.is_empty()
+            );
             let actions = job_actions(&content_snapshot.status)
                 .into_iter()
                 .map(|action| {
@@ -782,6 +847,7 @@ pub fn document_translation_notification(
                         content_snapshot.open_mode,
                         action,
                         open_error,
+                        has_warnings,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -826,9 +892,10 @@ fn document_translation_action_button(
     open_mode: DocumentTranslationOpenMode,
     action: DocumentTranslationJobAction,
     open_error: bool,
+    has_warnings: bool,
 ) -> Button {
     let button = Button::new(format!("document-translation-job-{id}-{}", action.id()))
-        .label(action.label(open_mode, open_error))
+        .label(action.label(open_mode, open_error, has_warnings))
         .with_size(Size::XSmall)
         .on_click(move |_, _, cx| {
             _ = manager.update(cx, |manager, cx| match action {
@@ -951,6 +1018,7 @@ fn job_status_content(snapshot: &DocumentTranslationJobSnapshot) -> (String, Str
         DocumentTranslationJobStatus::Succeeded {
             output_path,
             open_error,
+            warnings,
         } => {
             if let Some(error) = open_error {
                 (
@@ -960,19 +1028,29 @@ fn job_status_content(snapshot: &DocumentTranslationJobSnapshot) -> (String, Str
                     false,
                 )
             } else {
+                let detail = warnings.first().map_or_else(
+                    || {
+                        output_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("Translated PDF")
+                            .to_string()
+                    },
+                    |warning| warning.message.clone(),
+                );
                 (
-                    "Complete".to_string(),
-                    output_path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("Translated PDF")
-                        .to_string(),
+                    if warnings.is_empty() {
+                        "Complete".to_string()
+                    } else {
+                        format!("Complete with {} warning(s)", warnings.len())
+                    },
+                    detail,
                     1.0,
                     false,
                 )
             }
         }
-        DocumentTranslationJobStatus::Opening { output_path } => (
+        DocumentTranslationJobStatus::Opening { output_path, .. } => (
             "Opening output".to_string(),
             output_path
                 .file_name()
@@ -1192,6 +1270,7 @@ mod tests {
                     manifest_path: "/tmp/manifest.json".into(),
                     job_directory: "/tmp/job".into(),
                     fingerprint: "test".to_string(),
+                    warnings: Vec::new(),
                 }),
                 cx,
             );
@@ -1232,6 +1311,7 @@ mod tests {
             record.snapshot.status = DocumentTranslationJobStatus::Succeeded {
                 output_path: "/tmp/translated.pdf".into(),
                 open_error: None,
+                warnings: Vec::new(),
             };
             manager.jobs.push_back(record);
 
@@ -1300,6 +1380,7 @@ mod tests {
                     manifest_path: "/tmp/manifest.json".into(),
                     job_directory: "/tmp/job".into(),
                     fingerprint: "completed-after-cancel".to_string(),
+                    warnings: Vec::new(),
                 }),
                 cx,
             );
@@ -1334,9 +1415,33 @@ mod tests {
             job_actions(&DocumentTranslationJobStatus::Succeeded {
                 output_path: "/tmp/translated.pdf".into(),
                 open_error: None,
+                warnings: Vec::new(),
             }),
             vec![DocumentTranslationJobAction::Open]
         );
+        let warning = PdfTranslationWarning {
+            code: "content_review_failed".to_string(),
+            message: "Ambiguous text was preserved.".to_string(),
+            affected_block_ids: vec!["block-1".to_string()],
+        };
+        let warning_status = DocumentTranslationJobStatus::Succeeded {
+            output_path: "/tmp/translated.pdf".into(),
+            open_error: None,
+            warnings: vec![warning],
+        };
+        assert_eq!(
+            job_actions(&warning_status),
+            vec![
+                DocumentTranslationJobAction::Open,
+                DocumentTranslationJobAction::Retry,
+                DocumentTranslationJobAction::CopyError,
+            ]
+        );
+        let mut snapshot = running_record(1).snapshot;
+        snapshot.status = warning_status;
+        let (status, detail, _, _) = job_status_content(&snapshot);
+        assert_eq!(status, "Complete with 1 warning(s)");
+        assert_eq!(detail, "Ambiguous text was preserved.");
     }
 
     #[gpui::test]

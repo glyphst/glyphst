@@ -145,8 +145,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let sanitized = job_directory.join("source-sanitized.pdf");
         sanitize_source_pdf(&source_path, &sanitized, &layout, &cancellation)?;
-        let typst =
-            compiler.compile_translated_pdf(&sanitized, &layout, &job_directory, &cancellation)?;
+        let typst = compiler.compile_translated_pdf(
+            &source_path,
+            &sanitized,
+            &layout,
+            &job_directory,
+            &cancellation,
+        )?;
         let output_pdf = output_directory.join(format!("{sample}-cjk-layout.pdf"));
         PdfComposer.compose(
             &source_path,

@@ -485,6 +485,9 @@ fn dominant_text_style(block: &Block) -> Option<TextStyle> {
         .iter()
         .flat_map(|line| line.segments.iter())
     {
+        if segment.kind == SegmentKind::InlineObject {
+            continue;
+        }
         let weight = segment
             .text
             .chars()
@@ -662,18 +665,60 @@ pub(super) fn style_marker(style_id: usize, start: bool) -> String {
 
 pub(super) fn strip_style_placeholders(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
-    let mut remaining = value;
-    while let Some(start) = remaining.find("[[GLYPHST_STYLE_") {
-        output.push_str(&remaining[..start]);
-        let token = &remaining[start..];
-        let Some(end) = token.find("]]") else {
-            output.push_str(token);
-            return output;
+    let mut cursor = 0;
+    while let Some(relative_start) = value[cursor..].find("GLYPHST_STYLE_") {
+        let core_start = cursor + relative_start;
+        let Some(core_length) = style_placeholder_core_length(&value[core_start..]) else {
+            let prefix_end = core_start + "GLYPHST_STYLE_".len();
+            output.push_str(&value[cursor..prefix_end]);
+            cursor = prefix_end;
+            continue;
         };
-        remaining = &token[end + 2..];
+        let marker_start = if value[..core_start].ends_with("[[") {
+            core_start - 2
+        } else if value[..core_start].ends_with('[') {
+            core_start - 1
+        } else {
+            core_start
+        };
+        let mut marker_end = core_start + core_length;
+        for _ in 0..2 {
+            if value[marker_end..].starts_with(']') {
+                marker_end += 1;
+            }
+        }
+        output.push_str(&value[cursor..marker_start]);
+        cursor = marker_end;
     }
-    output.push_str(remaining);
+    output.push_str(&value[cursor..]);
     output
+}
+
+fn style_placeholder_core_length(value: &str) -> Option<usize> {
+    let suffix = value.strip_prefix("GLYPHST_STYLE_")?;
+    let kind = if suffix.starts_with("START_") {
+        "START_"
+    } else if suffix.starts_with("END_") {
+        "END_"
+    } else {
+        return None;
+    };
+    let fields = &suffix[kind.len()..];
+    let (style_id, checksum) = fields.split_once('_')?;
+    let checksum = checksum.get(..8)?;
+    if style_id.len() != 4
+        || !style_id.bytes().all(|byte| byte.is_ascii_digit())
+        || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let core_length = "GLYPHST_STYLE_".len() + kind.len() + style_id.len() + 1 + checksum.len();
+    value
+        .get(core_length..)
+        .and_then(|tail| tail.chars().next())
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .is_none()
+        .then_some(core_length)
 }
 
 pub(super) fn parse_styled_translation(

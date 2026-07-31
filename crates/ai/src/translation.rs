@@ -155,8 +155,10 @@ pub fn review_pdf_translation_policy_with_client(
 text blocks should be translated. You do not receive or need an image. Bounding boxes are \
 normalized to the page. Never change a block whose locked field is true. Translate narrative \
 prose, headings, and separate figure/table captions. Preserve author and publication metadata, \
-page furniture, formulas, code and literal examples, table cells, chart labels, axis labels, \
-legends, and text associated with protected regions. Review only unlocked low-confidence blocks. \
+reference and bibliography entries, page furniture, formulas, code and literal examples, table \
+cells, chart labels, axis labels, legends, and text associated with protected regions. The optional \
+context_before and context_after headings describe neighboring document pages. Review only unlocked \
+low-confidence blocks. Return exactly one decision for every such block and no other blocks. \
 When uncertain, choose translate=false. Return only valid JSON in this exact shape: \
 {\"decisions\":[{\"block_id\":\"id\",\"translate\":false,\"confidence\":0.0,\"reason\":\"short \
 reason\"}]}. Omit locked and already-confident blocks.";
@@ -221,18 +223,175 @@ pub fn translate_semantic_single_with_client(
     if !settings.can_request() {
         return Err(configuration_error(settings.missing_credentials_message()));
     }
-    let input = vec![unit.text.clone()];
-    let mut outputs =
-        translate_batch_with_client(client, settings, &input, source_language, target_language)?;
-    if outputs.len() != 1 {
-        return Err(invalid_response(anyhow!(
-            "AI translation recovery omitted the semantic unit"
-        )));
-    }
+    let text = if unit.text.contains("[[GLYPHST_") {
+        translate_around_protected_tokens(
+            client,
+            &settings,
+            &unit.text,
+            source_language,
+            target_language,
+        )?
+    } else {
+        let input = vec![unit.text.clone()];
+        let mut outputs = translate_batch_with_client(
+            client,
+            settings,
+            &input,
+            source_language,
+            target_language,
+        )?;
+        if outputs.len() != 1 {
+            return Err(invalid_response(anyhow!(
+                "AI translation recovery omitted the semantic unit"
+            )));
+        }
+        outputs.remove(0)
+    };
     Ok(SemanticTranslationOutput {
         id: unit.id.clone(),
-        text: outputs.remove(0),
+        text,
     })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RecoverySegment {
+    Natural(String),
+    Protected(String),
+}
+
+fn translate_around_protected_tokens(
+    client: &reqwest::blocking::Client,
+    settings: &ResolvedAiConfig,
+    text: &str,
+    source_language: Option<&str>,
+    target_language: &str,
+) -> std::result::Result<String, AiTranslationError> {
+    let mut segments = split_recovery_segments(text)?;
+    let translatable = segments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, segment)| match segment {
+            RecoverySegment::Natural(text) if text.chars().any(char::is_alphabetic) => {
+                Some((index, text.clone()))
+            }
+            RecoverySegment::Natural(_) | RecoverySegment::Protected(_) => None,
+        })
+        .collect::<Vec<_>>();
+
+    let mut translated = Vec::with_capacity(translatable.len());
+    let mut cursor = 0;
+    while cursor < translatable.len() {
+        let mut end = cursor;
+        let mut characters = 0usize;
+        while end < translatable.len()
+            && end - cursor < 24
+            && (end == cursor || characters + translatable[end].1.chars().count() <= 4_000)
+        {
+            characters += translatable[end].1.chars().count();
+            end += 1;
+        }
+        let texts = translatable[cursor..end]
+            .iter()
+            .map(|(_, text)| text.clone())
+            .collect::<Vec<_>>();
+        translated.extend(translate_recovery_fragments(
+            client,
+            settings,
+            &texts,
+            source_language,
+            target_language,
+        )?);
+        cursor = end;
+    }
+
+    for ((segment_index, source), translated) in translatable.into_iter().zip(translated) {
+        segments[segment_index] =
+            RecoverySegment::Natural(restore_edge_whitespace(&source, translated.trim()));
+    }
+    Ok(segments
+        .into_iter()
+        .map(|segment| match segment {
+            RecoverySegment::Natural(text) | RecoverySegment::Protected(text) => text,
+        })
+        .collect())
+}
+
+fn translate_recovery_fragments(
+    client: &reqwest::blocking::Client,
+    settings: &ResolvedAiConfig,
+    texts: &[String],
+    source_language: Option<&str>,
+    target_language: &str,
+) -> std::result::Result<Vec<String>, AiTranslationError> {
+    match translate_batch_with_client(
+        client,
+        settings.clone(),
+        texts,
+        source_language,
+        target_language,
+    ) {
+        Ok(translated) => Ok(translated),
+        Err(error)
+            if error.category == AiTranslationErrorCategory::InvalidResponse && texts.len() > 1 =>
+        {
+            let middle = texts.len() / 2;
+            let mut translated = translate_recovery_fragments(
+                client,
+                settings,
+                &texts[..middle],
+                source_language,
+                target_language,
+            )?;
+            translated.extend(translate_recovery_fragments(
+                client,
+                settings,
+                &texts[middle..],
+                source_language,
+                target_language,
+            )?);
+            Ok(translated)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn split_recovery_segments(
+    text: &str,
+) -> std::result::Result<Vec<RecoverySegment>, AiTranslationError> {
+    let mut segments = Vec::new();
+    let mut remaining = text;
+    while let Some(start) = remaining.find("[[GLYPHST_") {
+        if start > 0 {
+            segments.push(RecoverySegment::Natural(remaining[..start].to_string()));
+        }
+        remaining = &remaining[start..];
+        let Some(end) = remaining.find("]]") else {
+            return Err(configuration_error(
+                "semantic translation recovery received an incomplete protected token".to_string(),
+            ));
+        };
+        let end = end + 2;
+        segments.push(RecoverySegment::Protected(remaining[..end].to_string()));
+        remaining = &remaining[end..];
+    }
+    if !remaining.is_empty() {
+        segments.push(RecoverySegment::Natural(remaining.to_string()));
+    }
+    Ok(segments)
+}
+
+fn restore_edge_whitespace(source: &str, translated: &str) -> String {
+    let leading = source.len() - source.trim_start_matches(char::is_whitespace).len();
+    let trailing_start = source
+        .trim_end_matches(char::is_whitespace)
+        .len()
+        .max(leading);
+    format!(
+        "{}{}{}",
+        &source[..leading],
+        translated,
+        &source[trailing_start..]
+    )
 }
 
 fn translation_system_prompt(source_language: Option<&str>, target_language: &str) -> String {
@@ -296,12 +455,23 @@ fn request_openai_payload_inner(
         body["response_format"] = json!({"type": "json_object"});
     }
     apply_translation_thinking_mode(&mut body, settings);
+    apply_translation_output_budget(&mut body, settings, payload);
     let mut request = client.post(url).json(&body);
     if !settings.api_key.is_empty() {
         request = request.bearer_auth(&settings.api_key);
     }
 
     let value = send_json(request, &settings.provider_name)?;
+    if let Some(reason) = value
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .filter(|reason| *reason != "stop")
+    {
+        return Err(invalid_response(anyhow!(
+            "{} stopped translation output with finish_reason={reason}",
+            settings.provider_name
+        )));
+    }
     value
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -328,7 +498,24 @@ fn request_chatgpt_payload(
 ) -> std::result::Result<String, AiTranslationError> {
     let content = serde_json::to_string(&payload)
         .map_err(|error| configuration_error(format!("failed to encode request: {error}")))?;
-    let body = json!({
+    let body = chatgpt_translation_body(settings, system, content);
+    let access =
+        acquire_request_access().map_err(|error| authentication_error(format!("{error:#}")))?;
+    let request = access.authorize(client.post(responses_url(&settings.base_url)).json(&body));
+    let text = send_chatgpt_sse(request, &settings.provider_name).inspect_err(|error| {
+        if matches!(error.status, Some(401 | 403)) {
+            invalidate_credentials("Your ChatGPT session is invalid. Sign in again.");
+        }
+    })?;
+    if text.trim().is_empty() {
+        Err(invalid_response_message(&settings.provider_name))
+    } else {
+        Ok(text)
+    }
+}
+
+fn chatgpt_translation_body(settings: &ResolvedAiConfig, system: &str, content: String) -> Value {
+    json!({
         "model": settings.model,
         "instructions": system,
         "input": [{
@@ -338,22 +525,92 @@ fn request_chatgpt_payload(
                 "text": content,
             }],
         }],
+        "stream": true,
         "store": false,
-    });
-    let access =
-        acquire_request_access().map_err(|error| authentication_error(format!("{error:#}")))?;
-    let request = access.authorize(client.post(responses_url(&settings.base_url)).json(&body));
-    let value = send_json(request, &settings.provider_name).map_err(|error| {
-        if matches!(error.status, Some(401 | 403)) {
-            invalidate_credentials("Your ChatGPT session is invalid. Sign in again.");
-        }
-        error
-    })?;
-    response_text(&value).ok_or_else(|| {
-        response_error(&value)
-            .map(|message| invalid_response(anyhow!(message)))
-            .unwrap_or_else(|| invalid_response_message(&settings.provider_name))
     })
+}
+
+fn send_chatgpt_sse(
+    request: reqwest::blocking::RequestBuilder,
+    provider: &str,
+) -> std::result::Result<String, AiTranslationError> {
+    let response = request
+        .send()
+        .map_err(|error| request_error(provider, error))?;
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(retry_after_duration);
+    let body = response.text().map_err(|_| AiTranslationError {
+        category: AiTranslationErrorCategory::Network,
+        message: format!("failed to read {provider} translation response"),
+        status: Some(status.as_u16()),
+        retryable: true,
+        retry_after: None,
+    })?;
+    if !status.is_success() {
+        return Err(http_status_error(provider, status, retry_after, &body));
+    }
+    parse_chatgpt_stream_text(&body).map_err(invalid_response)
+}
+
+fn parse_chatgpt_stream_text(body: &str) -> Result<String> {
+    if let Ok(value) = serde_json::from_str::<Value>(body.trim()) {
+        return response_text(&value).ok_or_else(|| {
+            anyhow!(response_error(&value).unwrap_or_else(|| {
+                "ChatGPT Subscription response did not include text content".to_string()
+            }))
+        });
+    }
+
+    let mut text = String::new();
+    let mut completed_text = None;
+    for line in body.lines() {
+        let Some(data) = line.trim().strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(data)
+            .context("failed to parse ChatGPT Subscription stream event")?;
+        match value.get("type").and_then(Value::as_str) {
+            Some("response.output_text.delta") => {
+                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                    text.push_str(delta);
+                }
+            }
+            Some("response.output_text.done") => {
+                if let Some(done) = value.get("text").and_then(Value::as_str) {
+                    completed_text = Some(done.to_string());
+                }
+            }
+            Some("response.completed") => {
+                if text.is_empty()
+                    && let Some(response) = value.get("response")
+                {
+                    completed_text = response_text(response);
+                }
+            }
+            Some("response.failed") | Some("response.incomplete") | Some("error") => {
+                return Err(anyhow!(response_error(&value).unwrap_or_else(|| {
+                    "ChatGPT Subscription request failed".to_string()
+                })));
+            }
+            _ => {}
+        }
+    }
+    if text.is_empty()
+        && let Some(completed_text) = completed_text
+    {
+        text = completed_text;
+    }
+    (!text.trim().is_empty())
+        .then_some(text)
+        .ok_or_else(|| anyhow!("ChatGPT Subscription response did not include text content"))
 }
 
 fn apply_translation_thinking_mode(body: &mut Value, settings: &ResolvedAiConfig) {
@@ -361,6 +618,19 @@ fn apply_translation_thinking_mode(body: &mut Value, settings: &ResolvedAiConfig
     {
         body["thinking"] = json!({"type": "disabled"});
     }
+}
+
+fn apply_translation_output_budget(body: &mut Value, settings: &ResolvedAiConfig, payload: &Value) {
+    if settings.provider != AiProvider::DeepSeek {
+        return;
+    }
+    let characters = payload.to_string().chars().count() as u64;
+    let provider_limit = if settings.model.starts_with("deepseek-v4-") {
+        64_000
+    } else {
+        8_192
+    };
+    body["max_tokens"] = json!(characters.saturating_mul(2).clamp(4_096, provider_limit));
 }
 
 fn request_anthropic(
@@ -494,25 +764,7 @@ fn send_json(
         retry_after: None,
     })?;
     if !status.is_success() {
-        let category = match status {
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-                AiTranslationErrorCategory::Authentication
-            }
-            StatusCode::TOO_MANY_REQUESTS => AiTranslationErrorCategory::RateLimited,
-            StatusCode::REQUEST_TIMEOUT => AiTranslationErrorCategory::Timeout,
-            status if status.is_server_error() => AiTranslationErrorCategory::ServiceUnavailable,
-            _ => AiTranslationErrorCategory::InvalidRequest,
-        };
-        return Err(AiTranslationError {
-            category,
-            message: format!("{provider} translation request failed with status {status}"),
-            status: Some(status.as_u16()),
-            retryable: matches!(
-                status,
-                StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
-            ) || status.is_server_error(),
-            retry_after,
-        });
+        return Err(http_status_error(provider, status, retry_after, &body));
     }
     serde_json::from_str(&body).map_err(|_| AiTranslationError {
         category: AiTranslationErrorCategory::InvalidResponse,
@@ -521,6 +773,51 @@ fn send_json(
         retryable: true,
         retry_after: None,
     })
+}
+
+fn http_status_error(
+    provider: &str,
+    status: StatusCode,
+    retry_after: Option<Duration>,
+    body: &str,
+) -> AiTranslationError {
+    let category = match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            AiTranslationErrorCategory::Authentication
+        }
+        StatusCode::TOO_MANY_REQUESTS => AiTranslationErrorCategory::RateLimited,
+        StatusCode::REQUEST_TIMEOUT => AiTranslationErrorCategory::Timeout,
+        status if status.is_server_error() => AiTranslationErrorCategory::ServiceUnavailable,
+        _ => AiTranslationErrorCategory::InvalidRequest,
+    };
+    let detail = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| response_error(&value))
+        .map(|message| {
+            message
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(300)
+                .collect::<String>()
+        })
+        .filter(|message| !message.is_empty());
+    AiTranslationError {
+        category,
+        message: match detail {
+            Some(detail) => {
+                format!("{provider} translation request failed with status {status}: {detail}")
+            }
+            None => format!("{provider} translation request failed with status {status}"),
+        },
+        status: Some(status.as_u16()),
+        retryable: matches!(
+            status,
+            StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+        ) || status.is_server_error(),
+        retry_after,
+    }
 }
 
 pub fn retry_after_duration(value: &str) -> Option<Duration> {
@@ -831,5 +1128,81 @@ mod tests {
         apply_translation_thinking_mode(&mut body, &settings);
 
         assert_eq!(body["thinking"], json!({"type": "disabled"}));
+    }
+
+    #[test]
+    fn deepseek_translation_scales_the_output_budget() {
+        let settings = ResolvedAiConfig {
+            provider: AiProvider::DeepSeek,
+            provider_name: "DeepSeek".to_string(),
+            api_style: AiApiStyle::OpenAi,
+            enabled: true,
+            model: "deepseek-v4-flash".to_string(),
+            api_key: String::new(),
+            base_url: "https://api.deepseek.com".to_string(),
+            base_url_overridden: false,
+            thinking_level: AiThinkingLevel::Off,
+        };
+        let mut body = json!({"model": settings.model});
+
+        apply_translation_output_budget(&mut body, &settings, &json!({"text": "x".repeat(6_000)}));
+
+        assert!(body["max_tokens"].as_u64().unwrap() >= 12_000);
+    }
+
+    #[test]
+    fn chatgpt_subscription_translation_uses_streaming_responses() {
+        let settings = ResolvedAiConfig {
+            provider: AiProvider::ChatGptSubscription,
+            provider_name: "ChatGPT Subscription".to_string(),
+            api_style: AiApiStyle::OpenAiResponses,
+            enabled: true,
+            model: "gpt-5.6-luna".to_string(),
+            api_key: String::new(),
+            base_url: "https://chatgpt.com/backend-api/codex".to_string(),
+            base_url_overridden: false,
+            thinking_level: AiThinkingLevel::Off,
+        };
+
+        let body = chatgpt_translation_body(&settings, "Translate to JSON.", "[]".to_string());
+
+        assert_eq!(body["stream"], json!(true));
+        assert_eq!(body["store"], json!(false));
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+    }
+
+    #[test]
+    fn chatgpt_subscription_translation_collects_sse_text() {
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"translations\\\":[\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"\\\"你好\\\"]}\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+            "data: [DONE]\n"
+        );
+
+        assert_eq!(
+            parse_chatgpt_stream_text(body).unwrap(),
+            r#"{"translations":["你好"]}"#
+        );
+    }
+
+    #[test]
+    fn protected_token_recovery_segmentation_round_trips_all_tokens() {
+        let source = (0..150)
+            .map(|index| {
+                format!("Entry {index} [[GLYPHST_IDENTIFIER_{index:04}_AAAAAAAA]] title. ")
+            })
+            .collect::<String>();
+        let segments = split_recovery_segments(&source).unwrap();
+        let restored = segments
+            .into_iter()
+            .map(|segment| match segment {
+                RecoverySegment::Natural(text) | RecoverySegment::Protected(text) => text,
+            })
+            .collect::<String>();
+
+        assert_eq!(restored, source);
+        assert_eq!(restored.matches("[[GLYPHST_").count(), 150);
     }
 }

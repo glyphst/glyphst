@@ -674,6 +674,18 @@ fn malformed_style_markers_fall_back_without_losing_text() {
 }
 
 #[test]
+fn malformed_transport_style_placeholders_are_removed() {
+    for translated in [
+        "前文[[GLYPHST_STYLE_END_0005_25F3E011]]后文",
+        "前文[GLYPHST_STYLE_END_0005_25F3E011]]后文",
+        "前文[[GLYPHST_STYLE_END_0005_25F3E011]后文",
+        "前文GLYPHST_STYLE_END_0005_25F3E011后文",
+    ] {
+        assert_eq!(strip_style_placeholders(translated), "前文后文");
+    }
+}
+
+#[test]
 fn repairs_placeholder_corruption() {
     let document = test_document("Equation $x + y$ is discussed in [3].");
     let backend = EchoBackend {
@@ -1212,6 +1224,55 @@ fn resumed_styled_units_do_not_require_internal_style_markers() {
         "已翻译的样式文本",
         true
     ));
+    assert!(!validate_resumed_translation(
+        &unit,
+        "[GLYPHST_STYLE_END_0001_BBBBBBBB]]已翻译的样式文本",
+        true
+    ));
+}
+
+#[test]
+fn resumed_inline_objects_must_still_exist_in_styled_runs() {
+    let marker = crate::inline_object_marker("p001-o0000");
+    let unit = TranslationUnit {
+        id: "inline".to_string(),
+        member_block_ids: vec!["block".to_string()],
+        role: BlockRole::Body,
+        source_text: format!("Before {marker} after"),
+        protected: ProtectedText {
+            text: "Before [[GLYPHST_INLINE_OBJECT_0000_AAAAAAAA]] after".to_string(),
+            tokens: vec![ProtectedToken {
+                placeholder: "[[GLYPHST_INLINE_OBJECT_0000_AAAAAAAA]]".to_string(),
+                original: marker.clone(),
+                kind: ProtectedTokenKind::InlineObject,
+                styled_restoration: None,
+            }],
+        },
+        style_definitions: Vec::new(),
+        context_before: None,
+        context_after: None,
+    };
+    let resumed = TranslatedUnit {
+        id: unit.id.clone(),
+        member_block_ids: unit.member_block_ids.clone(),
+        role: unit.role,
+        source_text: unit.source_text.clone(),
+        translated_text: "之前之后".to_string(),
+        styled_runs: vec![StyledRun {
+            text: format!("之前{marker}之后"),
+            style: None,
+        }],
+        style_fallback: false,
+        semantic_hash: semantic_unit_hash(&unit),
+    };
+
+    assert!(validate_resumed_inline_objects(&unit, &resumed));
+    let mut missing = resumed.clone();
+    missing.styled_runs[0].text = "之前之后".to_string();
+    assert!(!validate_resumed_inline_objects(&unit, &missing));
+    let mut duplicated = resumed;
+    duplicated.styled_runs[0].text.push_str(&marker);
+    assert!(!validate_resumed_inline_objects(&unit, &duplicated));
 }
 
 #[test]
@@ -1346,6 +1407,7 @@ fn test_document_with_blocks(blocks: Vec<(BlockRole, String)>) -> DocumentV1 {
                     metadata: BTreeMap::new(),
                 })
                 .collect(),
+            inline_objects: Vec::new(),
             protected_regions: Vec::new(),
             metadata: BTreeMap::new(),
         }],
