@@ -1231,12 +1231,16 @@ fn append_typst_inline_object(source: &mut String, object_id: &str, item: &Layou
     let source_font_size = item.source_font_size_pt.max(0.1);
     let width_ratio = object.bbox.width() / source_font_size;
     let height_ratio = object.bbox.height() / source_font_size;
-    let baseline = ((object.baseline_y - object.bbox.y0) / object.bbox.height().max(0.1))
-        .clamp(0.0, 1.25)
-        * 100.0;
+    // Typst's bare `baseline: <length>` value is a shift from the box's
+    // automatically selected baseline, not an absolute position within the
+    // box. Anchor at the bottom explicitly, then shift to the PDF text
+    // baseline. Most inline images sit exactly on that baseline, so their
+    // shift is zero and their bottom aligns with the surrounding glyphs.
+    let baseline_shift_ratio = ((object.bbox.y1 - object.baseline_y) / source_font_size)
+        .clamp(-height_ratio, height_ratio);
     source.push_str(&format!(
-        "#box(width: text-size * {:.5}, height: text-size * {:.5}, baseline: {:.3}%)[",
-        width_ratio, height_ratio, baseline
+        "#box(width: text-size * {:.5}, height: text-size * {:.5}, baseline: (at: bottom, shift: text-size * {:.5}))[",
+        width_ratio, height_ratio, baseline_shift_ratio
     ));
     for (part_index, part) in object.parts.iter().enumerate() {
         source.push_str(&format!(
@@ -1751,8 +1755,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::{
-        BoundingBox, FontWeight, LayoutItem, LayoutPage, PageGeometry, TableOfContentsLayout,
-        TableOfContentsLeader, layout::LayoutDocument,
+        BoundingBox, FontWeight, InlineObject, InlineObjectPart, LayoutItem, LayoutPage,
+        PageGeometry, TableOfContentsLayout, TableOfContentsLeader, inline_object_marker,
+        layout::LayoutDocument,
     };
 
     use super::*;
@@ -1979,6 +1984,34 @@ mod tests {
         assert!(source.contains("#text(\"流水线框架\")"));
         assert!(source.contains("#box(width: 1fr, repeat(text(\".\"), gap: 0.320em))"));
         assert!(source.contains("#text(\"4\")"));
+    }
+
+    #[test]
+    fn inline_objects_anchor_their_pdf_baseline_from_the_box_bottom() {
+        let marker = inline_object_marker("icon-1");
+        let mut item = test_layout_item(&format!("before{marker}after"));
+        item.inline_objects.push(InlineObject {
+            id: "icon-1".to_string(),
+            page_index: 0,
+            bbox: BoundingBox::new(20.0, 10.0, 32.0, 20.0),
+            baseline_y: 20.0,
+            parts: vec![InlineObjectPart {
+                source_block_index: 1,
+                bbox: BoundingBox::new(20.0, 10.0, 32.0, 20.0),
+            }],
+        });
+
+        let source = generate_typst_source(&test_layout(item.clone()));
+        assert!(source.contains("baseline: (at: bottom, shift: text-size * 0.00000)"));
+        assert!(!source.contains("baseline: 100"));
+
+        item.inline_objects[0].baseline_y = 18.0;
+        let raised = generate_typst_source(&test_layout(item.clone()));
+        assert!(raised.contains("baseline: (at: bottom, shift: text-size * 0.20000)"));
+
+        item.inline_objects[0].baseline_y = 22.0;
+        let lowered = generate_typst_source(&test_layout(item));
+        assert!(lowered.contains("baseline: (at: bottom, shift: text-size * -0.20000)"));
     }
 
     fn test_layout(item: LayoutItem) -> LayoutDocument {

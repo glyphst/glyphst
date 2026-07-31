@@ -30,7 +30,7 @@ use crate::backend::GlyphstTranslationBackend;
 use crate::reviewer::GlyphstPolicyReviewer;
 
 const ARTIFACT_VERSION: u32 = 5;
-const PIPELINE_VERSION: &str = "native-rust-v22-document-context-inline-objects";
+const PIPELINE_VERSION: &str = "native-rust-v23-inline-object-anchors-baselines";
 const CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone)]

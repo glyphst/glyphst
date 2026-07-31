@@ -429,7 +429,7 @@ fn google_semantic_cache_identity_bypasses_pre_html_entries() {
     let mut changed_token = unit.clone();
     changed_token.protected_tokens[0].original = "ML".to_string();
 
-    assert!(key.starts_with("google-semantic-v3-"));
+    assert!(key.starts_with("google-semantic-v4-"));
     assert_ne!(
         key,
         semantic_cache_key(
@@ -441,6 +441,101 @@ fn google_semantic_cache_identity_bypasses_pre_html_entries() {
         )
     );
     assert!(!key.starts_with("semantic-v3-"));
+}
+
+#[test]
+fn google_inline_objects_are_reassembled_at_their_source_anchors() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let body = read_json_request(&mut stream);
+        let queries = body["q"].as_array().unwrap();
+        assert_eq!(queries.len(), 3);
+        assert!(queries.iter().all(|query| {
+            let query = query.as_str().unwrap();
+            !query.contains("GLYPHST_INLINE_OBJECT")
+                && !query.contains("book-icon")
+                && !query.contains("pencil-icon")
+                && !query.contains("computer-icon")
+                && !query.contains("mail-icon")
+        }));
+        write_json_response(
+            &mut stream,
+            json!({
+                "data": {
+                    "translations": [
+                        { "translatedText": "日记显示为" },
+                        { "translatedText": "，而电子邮件显示为" },
+                        {
+                            "translatedText": "点击头像。<span translate=\"no\" class=\"notranslate\">style-end</span>"
+                        }
+                    ]
+                }
+            }),
+        );
+        body
+    });
+
+    let mut settings = Settings::default();
+    let google = settings
+        .translation
+        .provider_config_mut(TranslationProvider::Google);
+    google.api_key = "test-key".to_string();
+    google.base_url = Some(format!("http://localhost:{port}"));
+    let book = "[[GLYPHST_INLINE_OBJECT_0000_AAAAAAAA]]";
+    let pencil = "[[GLYPHST_INLINE_OBJECT_0001_BBBBBBBB]]";
+    let computer = "[[GLYPHST_INLINE_OBJECT_0002_CCCCCCCC]]";
+    let mail = "[[GLYPHST_INLINE_OBJECT_0003_DDDDDDDD]]";
+    let style_end = "[[GLYPHST_STYLE_END_0004_EEEEEEEE]]";
+    let unit = test_semantic_unit(
+        "unit-google-inline-anchors",
+        &format!(
+            "The diary appears as {book}{pencil}, while the email appears as \
+             {computer}{mail}{style_end}. Click the portrait."
+        ),
+        vec![
+            test_semantic_token(book, "book-icon", SemanticProtectedTokenKind::InlineObject),
+            test_semantic_token(
+                pencil,
+                "pencil-icon",
+                SemanticProtectedTokenKind::InlineObject,
+            ),
+            test_semantic_token(
+                computer,
+                "computer-icon",
+                SemanticProtectedTokenKind::InlineObject,
+            ),
+            test_semantic_token(mail, "mail-icon", SemanticProtectedTokenKind::InlineObject),
+            test_semantic_token(
+                style_end,
+                "style-end",
+                SemanticProtectedTokenKind::StyleBoundary,
+            ),
+        ],
+    );
+
+    let translated = TranslationService::new()
+        .unwrap()
+        .translate_semantic_batch(
+            &settings,
+            TranslationProvider::Google,
+            Some(LanguageCode::new("en").unwrap()),
+            LanguageCode::new("zh-hans").unwrap(),
+            vec![unit],
+        )
+        .unwrap();
+    let request = server.join().unwrap();
+
+    assert_eq!(request["format"], "html");
+    assert_eq!(translated.len(), 1);
+    assert_eq!(
+        translated[0].text,
+        format!(
+            "日记显示为 {book}{pencil}，而电子邮件显示为 {computer}{mail}。点击头像。{style_end}"
+        )
+    );
+    assert!(translated[0].validation_error.is_none());
 }
 
 #[test]

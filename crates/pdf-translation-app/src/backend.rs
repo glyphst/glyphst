@@ -165,9 +165,7 @@ fn semantic_unit(unit: &TranslationUnit) -> SemanticTranslationUnit {
                     ProtectedTokenKind::StructuralMarker => {
                         SemanticProtectedTokenKind::StructuralMarker
                     }
-                    ProtectedTokenKind::InlineObject => {
-                        SemanticProtectedTokenKind::StructuralMarker
-                    }
+                    ProtectedTokenKind::InlineObject => SemanticProtectedTokenKind::InlineObject,
                     ProtectedTokenKind::LineBreak => SemanticProtectedTokenKind::LineBreak,
                     ProtectedTokenKind::StyleStart | ProtectedTokenKind::StyleEnd => {
                         SemanticProtectedTokenKind::StyleBoundary

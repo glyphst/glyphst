@@ -12,12 +12,13 @@ use glyphst_settings::{
 use reqwest::{StatusCode, blocking::Client};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_BATCH_TEXTS: usize = 64;
 const MAX_BATCH_CHARS: usize = 24_000;
 const SEMANTIC_PROTOCOL_VERSION: &str = "semantic-v5-json-items-adjacency-styles-structured-lines";
-const GOOGLE_SEMANTIC_PROTOCOL_VERSION: &str = "google-semantic-v3-html-spans-segmented-v1";
+const GOOGLE_SEMANTIC_PROTOCOL_VERSION: &str = "google-semantic-v4-html-spans-inline-anchors-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TargetLanguage {
@@ -240,6 +241,7 @@ pub enum SemanticProtectedTokenKind {
     NumericLiteral,
     Identifier,
     StructuralMarker,
+    InlineObject,
     LineBreak,
     StyleBoundary,
 }
@@ -715,6 +717,39 @@ impl TranslationService {
         target_language: &LanguageCode,
         units: &[SemanticTranslationUnit],
     ) -> std::result::Result<Vec<SemanticTranslation>, TranslationError> {
+        let (inline_anchored, ordinary): (Vec<_>, Vec<_>) =
+            units.iter().cloned().partition(|unit| {
+                unit.protected_tokens
+                    .iter()
+                    .any(|token| token.kind == SemanticProtectedTokenKind::InlineObject)
+            });
+        let mut translations = self.translate_google_semantic_units(
+            settings,
+            source_language,
+            target_language,
+            &ordinary,
+        )?;
+        for unit in &inline_anchored {
+            translations.push(self.translate_google_inline_anchored_unit(
+                settings,
+                source_language,
+                target_language,
+                unit,
+            )?);
+        }
+        order_semantic_translations(units, translations, TranslationProvider::Google)
+    }
+
+    fn translate_google_semantic_units(
+        &self,
+        settings: &Settings,
+        source_language: Option<&LanguageCode>,
+        target_language: &LanguageCode,
+        units: &[SemanticTranslationUnit],
+    ) -> std::result::Result<Vec<SemanticTranslation>, TranslationError> {
+        if units.is_empty() {
+            return Ok(Vec::new());
+        }
         let prepared = units
             .iter()
             .map(prepare_google_semantic_unit)
@@ -873,6 +908,120 @@ impl TranslationService {
             }
         }
         order_semantic_translations(units, translations, TranslationProvider::Google)
+    }
+
+    fn translate_google_inline_anchored_unit(
+        &self,
+        settings: &Settings,
+        source_language: Option<&LanguageCode>,
+        target_language: &LanguageCode,
+        unit: &SemanticTranslationUnit,
+    ) -> std::result::Result<SemanticTranslation, TranslationError> {
+        let anchored =
+            prepare_google_inline_anchored_unit(unit).map_err(|message| TranslationError {
+                provider: TranslationProvider::Google,
+                category: TranslationErrorCategory::InvalidRequest,
+                message,
+                status: None,
+                retryable: false,
+                retry_after: None,
+            })?;
+        let translatable = anchored
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.translatable)
+            .map(|chunk| chunk.unit.clone())
+            .collect::<Vec<_>>();
+        let mut translated_chunks = Vec::with_capacity(translatable.len());
+        let mut batch = Vec::new();
+        let mut batch_chars = 0usize;
+        for chunk in translatable {
+            if !batch.is_empty()
+                && (batch.len() == MAX_BATCH_TEXTS
+                    || batch_chars + chunk.text.len() > MAX_BATCH_CHARS)
+            {
+                translated_chunks.extend(self.translate_google_semantic_units(
+                    settings,
+                    source_language,
+                    target_language,
+                    &batch,
+                )?);
+                batch.clear();
+                batch_chars = 0;
+            }
+            batch_chars += chunk.text.len();
+            batch.push(chunk);
+        }
+        if !batch.is_empty() {
+            translated_chunks.extend(self.translate_google_semantic_units(
+                settings,
+                source_language,
+                target_language,
+                &batch,
+            )?);
+        }
+
+        let mut translated_by_id = translated_chunks
+            .into_iter()
+            .map(|translation| (translation.id.clone(), translation))
+            .collect::<HashMap<_, _>>();
+        let mut text = String::with_capacity(unit.text.len());
+        let mut validation_errors = Vec::new();
+        for (index, chunk) in anchored.chunks.iter().enumerate() {
+            if chunk.translatable {
+                match translated_by_id.remove(&chunk.unit.id) {
+                    Some(translation) => {
+                        if let Some(error) = translation.validation_error {
+                            validation_errors.push(format!(
+                                "inline chunk {} failed validation: {error}",
+                                index + 1
+                            ));
+                        }
+                        text.push_str(&restore_google_edge_boundaries(
+                            &chunk.unit,
+                            translation.text.trim_matches(char::is_whitespace),
+                            target_language,
+                            &chunk.leading_boundary,
+                            &chunk.trailing_boundary,
+                        ));
+                    }
+                    None => {
+                        validation_errors.push(format!(
+                            "inline chunk {} did not receive a translation",
+                            index + 1
+                        ));
+                        text.push_str(&chunk.unit.text);
+                    }
+                }
+            } else {
+                text.push_str(&chunk.unit.text);
+            }
+            if let Some(anchor) = anchored.anchors.get(index) {
+                text.push_str(anchor);
+            }
+        }
+        if let Err(error) = validate_google_semantic_output(
+            unit,
+            &anchored.prepared,
+            &text,
+            source_language,
+            target_language,
+            "inline-anchor HTML",
+        ) {
+            validation_errors.push(error);
+        }
+
+        Ok(SemanticTranslation {
+            id: unit.id.clone(),
+            text,
+            cached: false,
+            validation_error: (!validation_errors.is_empty()).then(|| {
+                format!(
+                    "Google inline-anchor translation failed: {}",
+                    validation_errors.join("; ")
+                )
+            }),
+        })
     }
 
     fn translate_google_semantic_segments(
@@ -1343,6 +1492,21 @@ struct PreparedGoogleSemanticUnit {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct PreparedGoogleInlineAnchoredUnit {
+    prepared: PreparedGoogleSemanticUnit,
+    chunks: Vec<GoogleInlineChunk>,
+    anchors: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GoogleInlineChunk {
+    unit: SemanticTranslationUnit,
+    translatable: bool,
+    leading_boundary: String,
+    trailing_boundary: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct PreparedGoogleToken {
     placeholder: String,
     original: String,
@@ -1411,6 +1575,7 @@ fn prepare_google_semantic_unit(
                 | SemanticProtectedTokenKind::Citation
                 | SemanticProtectedTokenKind::Url
                 | SemanticProtectedTokenKind::StructuralMarker
+                | SemanticProtectedTokenKind::InlineObject
                 | SemanticProtectedTokenKind::LineBreak
                 | SemanticProtectedTokenKind::StyleBoundary
         );
@@ -1451,6 +1616,114 @@ fn prepare_google_semantic_unit(
         html,
         tokens,
         segments,
+    })
+}
+
+fn prepare_google_inline_anchored_unit(
+    unit: &SemanticTranslationUnit,
+) -> std::result::Result<PreparedGoogleInlineAnchoredUnit, String> {
+    let prepared = prepare_google_semantic_unit(unit)?;
+    let mut anchors = Vec::new();
+    for token in unit
+        .protected_tokens
+        .iter()
+        .filter(|token| token.kind == SemanticProtectedTokenKind::InlineObject)
+    {
+        let mut occurrences = unit.text.match_indices(&token.placeholder);
+        let Some((start, _)) = occurrences.next() else {
+            return Err(format!(
+                "Google semantic input {} does not contain inline object {}",
+                unit.id, token.placeholder
+            ));
+        };
+        if occurrences.next().is_some() {
+            return Err(format!(
+                "Google semantic input {} contains inline object {} more than once",
+                unit.id, token.placeholder
+            ));
+        }
+        anchors.push((
+            start,
+            start + token.placeholder.len(),
+            token.placeholder.clone(),
+        ));
+    }
+    if anchors.is_empty() {
+        return Err(format!(
+            "Google semantic input {} has no inline-object anchors",
+            unit.id
+        ));
+    }
+    anchors.sort_by_key(|(start, _, _)| *start);
+
+    let mut chunks = Vec::with_capacity(anchors.len() + 1);
+    let mut cursor = 0usize;
+    for (index, (start, end, _)) in anchors.iter().enumerate() {
+        if *start < cursor {
+            return Err(format!(
+                "Google semantic input {} contains overlapping inline-object anchors",
+                unit.id
+            ));
+        }
+        chunks.push(prepare_google_inline_chunk(
+            unit,
+            index,
+            &unit.text[cursor..*start],
+        )?);
+        cursor = *end;
+    }
+    chunks.push(prepare_google_inline_chunk(
+        unit,
+        anchors.len(),
+        &unit.text[cursor..],
+    )?);
+
+    Ok(PreparedGoogleInlineAnchoredUnit {
+        prepared,
+        chunks,
+        anchors: anchors
+            .into_iter()
+            .map(|(_, _, placeholder)| placeholder)
+            .collect(),
+    })
+}
+
+fn prepare_google_inline_chunk(
+    unit: &SemanticTranslationUnit,
+    index: usize,
+    text: &str,
+) -> std::result::Result<GoogleInlineChunk, String> {
+    let chunk = SemanticTranslationUnit {
+        id: format!("{}-inline-chunk-{index}", unit.id),
+        role: unit.role.clone(),
+        text: text.to_string(),
+        protected_tokens: unit
+            .protected_tokens
+            .iter()
+            .filter(|token| {
+                token.kind != SemanticProtectedTokenKind::InlineObject
+                    && text.contains(&token.placeholder)
+            })
+            .cloned()
+            .collect(),
+        context_before: None,
+        context_after: None,
+    };
+    let prepared = prepare_google_semantic_unit(&chunk)?;
+    let translatable = prepared.segments.iter().any(|segment| {
+        matches!(
+            segment,
+            GoogleSemanticSegment::NaturalLanguage(text)
+                if text.chars().any(char::is_alphabetic)
+        )
+    });
+    let leading_boundary = google_natural_edge_boundary(&prepared, &chunk, true);
+    let trailing_boundary = google_natural_edge_boundary(&prepared, &chunk, false);
+    Ok(GoogleInlineChunk {
+        unit: chunk,
+        translatable,
+        leading_boundary,
+        trailing_boundary,
     })
 }
 
@@ -1605,6 +1878,191 @@ fn reassemble_google_segments(
     result
 }
 
+fn restore_google_edge_whitespace(source: &str, translated: &str) -> String {
+    let leading_end = source.len() - source.trim_start_matches(char::is_whitespace).len();
+    let trailing_start = source
+        .trim_end_matches(char::is_whitespace)
+        .len()
+        .max(leading_end);
+    format!(
+        "{}{}{}",
+        &source[..leading_end],
+        translated,
+        &source[trailing_start..]
+    )
+}
+
+fn google_natural_edge_boundary(
+    prepared: &PreparedGoogleSemanticUnit,
+    unit: &SemanticTranslationUnit,
+    leading: bool,
+) -> String {
+    let style_boundaries = unit
+        .protected_tokens
+        .iter()
+        .filter(|token| token.kind == SemanticProtectedTokenKind::StyleBoundary)
+        .map(|token| token.placeholder.as_str())
+        .collect::<HashSet<_>>();
+    let mut boundary = String::new();
+    if leading {
+        for segment in &prepared.segments {
+            match segment {
+                GoogleSemanticSegment::Protected(placeholder)
+                    if style_boundaries.contains(placeholder.as_str()) => {}
+                GoogleSemanticSegment::Protected(_) => break,
+                GoogleSemanticSegment::NaturalLanguage(text) => {
+                    let edge_end =
+                        text.len() - text.trim_start_matches(is_google_edge_character).len();
+                    boundary.push_str(&text[..edge_end]);
+                    if edge_end < text.len() {
+                        break;
+                    }
+                }
+            }
+        }
+    } else {
+        for segment in prepared.segments.iter().rev() {
+            match segment {
+                GoogleSemanticSegment::Protected(placeholder)
+                    if style_boundaries.contains(placeholder.as_str()) => {}
+                GoogleSemanticSegment::Protected(_) => break,
+                GoogleSemanticSegment::NaturalLanguage(text) => {
+                    let edge_start = text.trim_end_matches(is_google_edge_character).len();
+                    boundary.insert_str(0, &text[edge_start..]);
+                    if edge_start > 0 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if boundary.chars().any(is_google_edge_punctuation) {
+        boundary
+    } else {
+        String::new()
+    }
+}
+
+fn restore_google_edge_boundaries(
+    unit: &SemanticTranslationUnit,
+    translated: &str,
+    target_language: &LanguageCode,
+    leading_boundary: &str,
+    trailing_boundary: &str,
+) -> String {
+    let mut restored = restore_google_edge_whitespace(&unit.text, translated);
+    if !leading_boundary.is_empty() {
+        let insertion = google_leading_content_index(&restored, unit);
+        let starts_with_placeholder = restored[insertion..].starts_with("[[GLYPHST_");
+        let translated_has_punctuation = !starts_with_placeholder
+            && restored[insertion..]
+                .chars()
+                .next()
+                .is_some_and(is_google_edge_punctuation);
+        if !translated_has_punctuation {
+            restored.insert_str(
+                insertion,
+                &localize_google_edge_punctuation(leading_boundary, target_language),
+            );
+        }
+    }
+
+    if !trailing_boundary.is_empty() {
+        let insertion = google_trailing_content_index(&restored, unit);
+        let ends_with_placeholder = unit
+            .protected_tokens
+            .iter()
+            .any(|token| restored[..insertion].ends_with(&token.placeholder));
+        let translated_has_punctuation = !ends_with_placeholder
+            && restored[..insertion]
+                .chars()
+                .next_back()
+                .is_some_and(is_google_edge_punctuation);
+        if !translated_has_punctuation {
+            restored.insert_str(
+                insertion,
+                &localize_google_edge_punctuation(trailing_boundary, target_language),
+            );
+        }
+    }
+    restored
+}
+
+fn google_leading_content_index(value: &str, unit: &SemanticTranslationUnit) -> usize {
+    let mut cursor = 0usize;
+    loop {
+        cursor += value[cursor..].len().saturating_sub(
+            value[cursor..]
+                .trim_start_matches(char::is_whitespace)
+                .len(),
+        );
+        let remaining = &value[cursor..];
+        let Some(end) = remaining
+            .starts_with("[[GLYPHST_")
+            .then(|| remaining.find("]]"))
+            .flatten()
+            .map(|end| end + 2)
+        else {
+            break;
+        };
+        let placeholder = &remaining[..end];
+        let style_boundary = unit.protected_tokens.iter().any(|token| {
+            token.kind == SemanticProtectedTokenKind::StyleBoundary
+                && token.placeholder == placeholder
+        });
+        if !style_boundary {
+            break;
+        }
+        cursor += end;
+    }
+    cursor
+}
+
+fn google_trailing_content_index(value: &str, unit: &SemanticTranslationUnit) -> usize {
+    let mut cursor = value.len();
+    loop {
+        cursor = value[..cursor].trim_end_matches(char::is_whitespace).len();
+        let Some(token) = unit.protected_tokens.iter().find(|token| {
+            token.kind == SemanticProtectedTokenKind::StyleBoundary
+                && value[..cursor].ends_with(&token.placeholder)
+        }) else {
+            break;
+        };
+        cursor -= token.placeholder.len();
+    }
+    cursor
+}
+
+fn is_google_edge_character(character: char) -> bool {
+    character.is_whitespace() || is_google_edge_punctuation(character)
+}
+
+fn is_google_edge_punctuation(character: char) -> bool {
+    character.general_category_group() == GeneralCategoryGroup::Punctuation
+}
+
+fn localize_google_edge_punctuation(value: &str, target_language: &LanguageCode) -> String {
+    let cjk = matches!(
+        target_language.as_str(),
+        "zh" | "zh-cn" | "zh-hans" | "zh-tw" | "zh-hant" | "ja"
+    );
+    value
+        .chars()
+        .filter(|character| !cjk || !character.is_whitespace())
+        .map(|character| match (target_language.as_str(), character) {
+            ("zh" | "zh-cn" | "zh-hans" | "zh-tw" | "zh-hant", '.') => '。',
+            ("zh" | "zh-cn" | "zh-hans" | "zh-tw" | "zh-hant", ',') => '，',
+            ("zh" | "zh-cn" | "zh-hans" | "zh-tw" | "zh-hant", ':') => '：',
+            ("zh" | "zh-cn" | "zh-hans" | "zh-tw" | "zh-hant", ';') => '；',
+            ("zh" | "zh-cn" | "zh-hans" | "zh-tw" | "zh-hant", '!') => '！',
+            ("zh" | "zh-cn" | "zh-hans" | "zh-tw" | "zh-hant", '?') => '？',
+            ("ja", '.') => '。',
+            ("ja", ',') => '、',
+            _ => character,
+        })
+        .collect()
+}
+
 fn diagnostic_excerpt(value: &str) -> String {
     const LIMIT: usize = 80;
     let mut excerpt = value.chars().take(LIMIT).collect::<String>();
@@ -1686,7 +2144,7 @@ fn semantic_cache_key(
     unit.context_before.hash(&mut hasher);
     unit.context_after.hash(&mut hasher);
     let prefix = if provider == TranslationProvider::Google {
-        "google-semantic-v3"
+        "google-semantic-v4"
     } else {
         "semantic-v5"
     };

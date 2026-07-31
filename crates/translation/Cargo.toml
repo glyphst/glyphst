@@ -14,3 +14,4 @@ redb.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+unicode-properties.workspace = true

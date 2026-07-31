@@ -72,6 +72,7 @@ typst-kit = { version = "=0.15.1", default-features = false, features = [
 ] }
 typst-layout = "=0.15.1"
 typst-pdf = "=0.15.1"
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 ztracing = { git = "https://github.com/zed-industries/zed" }
