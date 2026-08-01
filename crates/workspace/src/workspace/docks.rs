@@ -1,8 +1,8 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, Context, Pixels, Task, Window, deferred, div, prelude::*, px};
 use gpui_component::{
-    Sizable as _, ThemeColor,
+    Selectable as _, Sizable as _, ThemeColor,
     button::{Button, ButtonVariants as _},
     status_bar::StatusBar,
 };
@@ -16,9 +16,11 @@ use crate::{
     icons::IconName,
     library::{LibraryStore, SidebarWidths},
 };
+use glyphst_ui::motion::{LAYOUT, ScalarTween};
 
 const DOCK_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 const DOCK_SEPARATOR_WIDTH: f32 = 1.0;
+const TOOL_RAIL_WIDTH: f32 = 44.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkspaceDockPosition {
@@ -39,6 +41,10 @@ pub(super) struct WorkspaceDockState {
     pub(super) left_sidebar: Option<DocumentSidebar>,
     pub(super) ai_panel_open: bool,
     pub(super) preferred_widths: SidebarWidths,
+    rendered_left_sidebar: Option<DocumentSidebar>,
+    render_ai_panel: bool,
+    left_width: ScalarTween,
+    right_width: ScalarTween,
     width_save_task: Option<Task<()>>,
 }
 
@@ -54,20 +60,37 @@ impl WorkspaceDockState {
             left_sidebar: None,
             ai_panel_open: false,
             preferred_widths,
+            rendered_left_sidebar: None,
+            render_ai_panel: false,
+            left_width: ScalarTween::new(0.0, LAYOUT),
+            right_width: ScalarTween::new(0.0, LAYOUT),
             width_save_task: None,
         }
     }
 
-    pub(super) fn snapshot(&self, workspace_width: f32) -> DocumentDockSnapshot {
+    pub(super) fn snapshot(
+        &self,
+        workspace_width: f32,
+        docks_visible: bool,
+        tool_rail_visible: bool,
+    ) -> DocumentDockSnapshot {
         let mut widths = self.preferred_widths;
-        let left_preferred = self
-            .left_sidebar
-            .map(|sidebar| sidebar.width(self.preferred_widths));
-        let right_preferred = self.ai_panel_open.then_some(self.preferred_widths.ai);
-        let (left_width, right_width) =
-            fit_dock_widths(left_preferred, right_preferred, workspace_width);
+        let left_sidebar = docks_visible.then_some(self.left_sidebar).flatten();
+        let ai_panel_open = docks_visible && self.ai_panel_open;
+        let left_preferred = left_sidebar.map(|sidebar| sidebar.width(self.preferred_widths));
+        let right_preferred = ai_panel_open.then_some(self.preferred_widths.ai);
+        let tool_rail_width = if tool_rail_visible {
+            TOOL_RAIL_WIDTH
+        } else {
+            0.0
+        };
+        let (left_width, right_width) = fit_dock_widths(
+            left_preferred,
+            right_preferred,
+            workspace_width - tool_rail_width,
+        );
 
-        if let (Some(sidebar), Some(width)) = (self.left_sidebar, left_width) {
+        if let (Some(sidebar), Some(width)) = (left_sidebar, left_width) {
             sidebar.set_width(&mut widths, width);
         }
         if let Some(width) = right_width {
@@ -75,10 +98,48 @@ impl WorkspaceDockState {
         }
 
         DocumentDockSnapshot {
-            left_sidebar: self.left_sidebar,
-            ai_panel_open: self.ai_panel_open,
+            left_sidebar,
+            ai_panel_open,
+            tool_rail_width,
             widths,
         }
+    }
+
+    fn update_motion(
+        &mut self,
+        snapshot: DocumentDockSnapshot,
+        now: Instant,
+        reduce_motion: bool,
+    ) -> (f32, f32, bool) {
+        if let Some(sidebar) = snapshot.left_sidebar {
+            self.rendered_left_sidebar = Some(sidebar);
+        }
+        if snapshot.ai_panel_open {
+            self.render_ai_panel = true;
+        }
+
+        let left_target = snapshot
+            .left_sidebar
+            .map(|sidebar| sidebar.width(snapshot.widths))
+            .unwrap_or_default();
+        let right_target = if snapshot.ai_panel_open {
+            snapshot.widths.ai
+        } else {
+            0.0
+        };
+        self.left_width.retarget(left_target, now, reduce_motion);
+        self.right_width.retarget(right_target, now, reduce_motion);
+
+        let left = self.left_width.value(now).max(0.0);
+        let right = self.right_width.value(now).max(0.0);
+        let animating = self.left_width.is_animating(now) || self.right_width.is_animating(now);
+        if left <= f32::EPSILON && left_target == 0.0 && !self.left_width.is_animating(now) {
+            self.rendered_left_sidebar = None;
+        }
+        if right <= f32::EPSILON && right_target == 0.0 && !self.right_width.is_animating(now) {
+            self.render_ai_panel = false;
+        }
+        (left, right, animating)
     }
 }
 
@@ -198,8 +259,12 @@ impl Workspace {
                 if let Some(sidebar) = self.docks.left_sidebar {
                     sidebar.set_width(&mut self.docks.preferred_widths, width);
                 }
+                self.docks.left_width.snap(width);
             }
-            WorkspaceDockPosition::Right => self.docks.preferred_widths.ai = width,
+            WorkspaceDockPosition::Right => {
+                self.docks.preferred_widths.ai = width;
+                self.docks.right_width.snap(width);
+            }
         }
         self.schedule_dock_width_save(cx);
         cx.notify();
@@ -317,7 +382,7 @@ impl Workspace {
     pub(super) fn toggle_left_sidebar(
         &mut self,
         sidebar: DocumentSidebar,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let previous = self.docks.left_sidebar;
@@ -332,6 +397,9 @@ impl Workspace {
         }
 
         self.docks.left_sidebar = next;
+        if next.is_none() {
+            self.focus_active_pane(window, cx);
+        }
         cx.notify();
     }
 
@@ -343,7 +411,9 @@ impl Workspace {
         }
 
         self.docks.ai_panel_open = true;
-        let snapshot = self.docks.snapshot(window.bounds().size.width.as_f32());
+        let snapshot = self
+            .docks
+            .snapshot(window.bounds().size.width.as_f32(), true, true);
         if let Some(document_view) = self.active_pane.read(cx).active_document_view() {
             document_view.update(cx, |document_view, cx| {
                 document_view.set_dock_snapshot(snapshot, cx);
@@ -483,6 +553,79 @@ impl Workspace {
             })
     }
 
+    fn render_tool_rail(
+        &self,
+        document_view: &Entity<DocumentView>,
+        theme: ThemeColor,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let supports = |sidebar| document_view.read(cx).supports_sidebar(sidebar);
+        let button = |id: &'static str,
+                      icon: IconName,
+                      sidebar: DocumentSidebar,
+                      tooltip: String| {
+            Button::new(id)
+                .xsmall()
+                .compact()
+                .ghost()
+                .selected(self.docks.left_sidebar == Some(sidebar))
+                .icon(icon)
+                .w(px(32.0))
+                .h(px(32.0))
+                .tooltip(tooltip)
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    match sidebar {
+                        DocumentSidebar::Thumbnails => {
+                            window.dispatch_action(Box::new(ToggleThumbnailSidebar), cx)
+                        }
+                        DocumentSidebar::Toc => window.dispatch_action(Box::new(ToggleToc), cx),
+                        DocumentSidebar::Notes => window.dispatch_action(Box::new(ToggleNotes), cx),
+                    }
+                })
+        };
+
+        div()
+            .id("workspace-document-tool-rail")
+            .debug_selector(|| "workspace-document-tool-rail".to_string())
+            .h_full()
+            .w(px(TOOL_RAIL_WIDTH))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .py_2()
+            .border_r(px(1.0))
+            .border_color(theme.sidebar_border)
+            .bg(theme.sidebar)
+            .when(supports(DocumentSidebar::Thumbnails), |this| {
+                this.child(button(
+                    "tool-rail-thumbnails",
+                    IconName::PanelLeft,
+                    DocumentSidebar::Thumbnails,
+                    crate::fl!("pdf-thumbnails-title"),
+                ))
+            })
+            .when(supports(DocumentSidebar::Toc), |this| {
+                this.child(button(
+                    "tool-rail-toc",
+                    IconName::TableOfContents,
+                    DocumentSidebar::Toc,
+                    crate::fl!("table-of-contents-title"),
+                ))
+            })
+            .when(supports(DocumentSidebar::Notes), |this| {
+                this.child(button(
+                    "tool-rail-notes",
+                    IconName::NotebookTabs,
+                    DocumentSidebar::Notes,
+                    crate::fl!("notes-title"),
+                ))
+            })
+            .into_any_element()
+    }
+
     pub(super) fn render_body(
         &mut self,
         theme: ThemeColor,
@@ -497,15 +640,32 @@ impl Workspace {
             return active_document_view.into_any_element();
         }
 
-        let snapshot = self.docks.snapshot(window.bounds().size.width.as_f32());
+        let loading = self.active_pane.read(cx).active_tab_is_loading();
+        let docks_visible = active_document_view.is_some() || loading;
+        let tool_rail_visible = active_document_view.is_some();
+        let snapshot = self.docks.snapshot(
+            window.bounds().size.width.as_f32(),
+            docks_visible,
+            tool_rail_visible,
+        );
         self.sync_visible_document_docks(snapshot, cx);
+        let now = Instant::now();
+        let (left_render_width, right_render_width, animating) =
+            self.docks.update_motion(snapshot, now, cx.reduce_motion());
+        if animating {
+            window.request_animation_frame();
+        }
         let center =
             self.pane_group
                 .render(&self.active_pane, theme, dim_inactive_panes, window, cx);
-        let loading = self.active_pane.read(cx).active_tab_is_loading();
-        let mut dock_panels = Vec::with_capacity(3);
+        let mut dock_panels = Vec::with_capacity(4);
 
-        if let Some(sidebar) = snapshot.left_sidebar {
+        if let Some(document_view) = active_document_view.as_ref() {
+            dock_panels.push(self.render_tool_rail(document_view, theme, cx));
+        }
+
+        if let Some(sidebar) = self.docks.rendered_left_sidebar {
+            let content_width = sidebar.width(snapshot.widths).max(SIDEBAR_MIN_WIDTH);
             let content = active_document_view
                 .as_ref()
                 .filter(|document_view| document_view.read(cx).supports_sidebar(sidebar))
@@ -523,13 +683,22 @@ impl Workspace {
                     .debug_selector(|| "workspace-left-dock".to_string())
                     .relative()
                     .h_full()
-                    .w(px(sidebar.width(snapshot.widths)))
+                    .w(px(left_render_width))
                     .flex_none()
-                    .child(content)
-                    .child(Self::render_dock_resize_handle(
-                        WorkspaceDockPosition::Left,
-                        cx,
-                    ))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h_full()
+                            .w(px(content_width))
+                            .flex_none()
+                            .child(content),
+                    )
+                    .when(snapshot.left_sidebar.is_some(), |this| {
+                        this.child(Self::render_dock_resize_handle(
+                            WorkspaceDockPosition::Left,
+                            cx,
+                        ))
+                    })
                     .into_any_element(),
             );
         }
@@ -546,7 +715,8 @@ impl Workspace {
                 .into_any_element(),
         );
 
-        if snapshot.ai_panel_open {
+        if self.docks.render_ai_panel {
+            let content_width = snapshot.widths.ai.max(SIDEBAR_MIN_WIDTH);
             let content = active_document_view
                 .as_ref()
                 .map(|document_view| {
@@ -562,13 +732,24 @@ impl Workspace {
                     .debug_selector(|| "workspace-ai-dock".to_string())
                     .relative()
                     .h_full()
-                    .w(px(snapshot.widths.ai))
+                    .w(px(right_render_width))
                     .flex_none()
-                    .child(content)
-                    .child(Self::render_dock_resize_handle(
-                        WorkspaceDockPosition::Right,
-                        cx,
-                    ))
+                    .overflow_hidden()
+                    .flex()
+                    .justify_end()
+                    .child(
+                        div()
+                            .h_full()
+                            .w(px(content_width))
+                            .flex_none()
+                            .child(content),
+                    )
+                    .when(snapshot.ai_panel_open, |this| {
+                        this.child(Self::render_dock_resize_handle(
+                            WorkspaceDockPosition::Right,
+                            cx,
+                        ))
+                    })
                     .into_any_element(),
             );
         }

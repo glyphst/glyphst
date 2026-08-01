@@ -100,6 +100,12 @@ impl Settings {
             settings.behavior.smooth_scrolling = value;
         }
 
+        if let Some(motion) = document.get("motion").and_then(KdlNode::children)
+            && let Some(value) = motion.get_arg("reduce").and_then(KdlValue::as_bool)
+        {
+            settings.behavior.reduce_motion = value;
+        }
+
         if let Some(reading) = document.get("reading").and_then(KdlNode::children) {
             if let Some(value) = reading.get_arg("font_size").and_then(value_to_f32) {
                 settings.reading.font_size = value;
@@ -501,6 +507,11 @@ impl Settings {
         let scroll_children = scroll.ensure_children();
         push_value_node(scroll_children, "smooth", self.behavior.smooth_scrolling);
         document.nodes_mut().push(scroll);
+
+        let mut motion = KdlNode::new("motion");
+        let motion_children = motion.ensure_children();
+        push_value_node(motion_children, "reduce", self.behavior.reduce_motion);
+        document.nodes_mut().push(motion);
 
         let mut reading = KdlNode::new("reading");
         let reading_children = reading.ensure_children();

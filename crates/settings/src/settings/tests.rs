@@ -32,6 +32,7 @@ theme-overrides {
     assert_eq!(settings.behavior.default_zoom, 1.5);
     assert_eq!(settings.behavior.zoom_step, DEFAULT_ZOOM_STEP);
     assert_eq!(settings.behavior.smooth_scrolling, DEFAULT_SMOOTH_SCROLLING);
+    assert!(!settings.behavior.reduce_motion);
     assert!(!settings.behavior.dim_inactive_panes);
     assert_eq!(settings.window.opacity, 0.85);
     assert_eq!(
@@ -79,6 +80,21 @@ reading {
 }
 
 #[test]
+fn parses_and_exports_reduced_motion() {
+    let settings = parse_settings(
+        r#"
+motion {
+    reduce #true
+}
+"#,
+    )
+    .unwrap();
+
+    assert!(settings.behavior.reduce_motion);
+    assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+}
+
+#[test]
 fn clamps_window_opacity() {
     let settings = parse_settings(
         r##"
@@ -101,6 +117,7 @@ fn exported_settings_are_reparseable() {
             default_zoom: 1.5,
             zoom_step: 1.2,
             smooth_scrolling: false,
+            reduce_motion: true,
             dim_inactive_panes: true,
             copy_format: CopyFormat::Markdown,
             semantic_copy: false,
@@ -1453,6 +1470,7 @@ fn export_to_writes_selected_path() {
             default_zoom: 1.5,
             zoom_step: 1.2,
             smooth_scrolling: false,
+            reduce_motion: true,
             dim_inactive_panes: true,
             copy_format: CopyFormat::PlainText,
             semantic_copy: false,

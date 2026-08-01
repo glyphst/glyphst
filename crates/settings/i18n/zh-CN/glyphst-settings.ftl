@@ -112,6 +112,8 @@ translation-close = 关闭
 
 ai-title = AI
 ai-ask-placeholder = 询问此 PDF…
+ai-empty-title = 询问此文档
+ai-empty-description = 可附加页面、选区或区域以获得更有针对性的回答，也可以直接在下方输入。
 ai-new-chat = 新建对话
 ai-no-current-page-text = 当前页面没有可用文本。
 ai-no-selected-pages-text = 选中页面没有可用文本。
@@ -299,7 +301,11 @@ language-simplified-chinese = 简体中文
 new-tab-title = 新标签页
 new-tab-empty-title = 无最近文档
 new-tab-empty-description = 打开文档后会添加到历史记录。
+new-tab-no-results-title = 没有匹配的文档
+new-tab-no-results-description = 请尝试其他文件名或文件夹。
 new-tab-open-file = 打开文件
+new-tab-search-placeholder = 搜索最近的文档…
+new-tab-results-count = { $visible } / { $total }
 new-tab-last-read = 上次阅读：第 { $page } 页
 new-tab-last-read-progress = 上次阅读：{ $progress }%
 new-tab-progress-page = 第 { $page } 页
@@ -315,6 +321,23 @@ new-tab-column-format-size = 格式 / 大小
 new-tab-column-last-opened = 上次打开
 new-tab-column-progress = 阅读进度
 new-tab-remove-from-recents = 从最近记录中移除
+
+## Document browser
+
+document-browser-filter-placeholder = 筛选此文件夹…
+document-browser-home = 主目录
+document-browser-documents = 文档
+document-browser-downloads = 下载
+document-browser-places = 位置
+document-browser-folder-kind = 文件夹
+document-browser-read-error = 无法读取 { $path }：{ $error }
+document-browser-retry = 重试
+document-browser-empty-folder = 此文件夹中没有 PDF 或 EPUB 文档
+document-browser-no-results = 没有匹配的文档或文件夹
+document-browser-show-dotfiles = 显示点文件
+document-browser-hide-dotfiles = 隐藏点文件
+document-browser-keyboard-hint = ↑↓ 选择   Enter/→ 打开   ← 返回上级   Esc 关闭
+document-browser-system-picker = 系统文件选择器…
 
 ## Notes
 

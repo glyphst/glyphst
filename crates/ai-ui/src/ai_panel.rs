@@ -26,7 +26,7 @@ use glyphst_settings::{
     ui_rems,
 };
 use glyphst_ui::{
-    icons::{IconName, toolbar_icon_button},
+    icons::{Icon, IconName, toolbar_icon_button},
     markdown::{Markdown, MarkdownContextMenuRequest, MarkdownElement, MarkdownStyle},
     picker::fuzzy_match,
     scrollbar::{ScrollbarHandle, WithScrollbar as _},

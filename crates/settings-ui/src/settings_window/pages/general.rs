@@ -131,6 +131,22 @@ impl SettingsWindow {
             .default_value(defaults.behavior.smooth_scrolling),
         );
 
+        let reduce_motion = SettingItem::new(
+            "Reduce motion",
+            SettingField::switch(
+                |cx: &App| cx.global::<SettingsStore>().settings.behavior.reduce_motion,
+                {
+                    let view = view.clone();
+                    move |value, cx| {
+                        Self::update_settings(&view, cx, move |settings| {
+                            settings.behavior.reduce_motion = value;
+                        });
+                    }
+                },
+            )
+            .default_value(defaults.behavior.reduce_motion),
+        );
+
         let dim_inactive = SettingItem::new(
             "Dim inactive panes",
             SettingField::switch(
@@ -447,7 +463,7 @@ impl SettingsWindow {
                     .items([default_zoom, zoom_step]),
                 SettingGroup::new()
                     .title(crate::fl!("settings-section-scroll"))
-                    .items([smooth_scrolling, dim_inactive]),
+                    .items([smooth_scrolling, reduce_motion, dim_inactive]),
                 SettingGroup::new()
                     .title(crate::fl!("settings-section-copy"))
                     .items([copy_format, semantic_copy]),

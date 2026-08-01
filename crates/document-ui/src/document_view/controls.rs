@@ -46,44 +46,6 @@ impl DocumentView {
             }))
     }
 
-    pub(super) fn render_toc_button(&self, open: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::render_footbar_icon_button(
-            "footbar-toc",
-            IconName::TableOfContents,
-            open,
-            |_, window, cx| window.dispatch_action(Box::new(ToggleToc), cx),
-            cx,
-        )
-    }
-
-    pub(super) fn render_notes_button(
-        &self,
-        open: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        Self::render_footbar_icon_button(
-            "footbar-notes",
-            IconName::NotebookTabs,
-            open,
-            |_, window, cx| window.dispatch_action(Box::new(ToggleNotes), cx),
-            cx,
-        )
-    }
-
-    pub(super) fn render_thumbnail_sidebar_button(
-        &self,
-        open: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        Self::render_footbar_icon_button(
-            "footbar-thumbnails",
-            IconName::PanelLeft,
-            open,
-            |_, window, cx| window.dispatch_action(Box::new(ToggleThumbnailSidebar), cx),
-            cx,
-        )
-    }
-
     pub(super) fn render_grid_overview_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         Self::render_footbar_icon_button(
             "footbar-grid-overview",

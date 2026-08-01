@@ -120,6 +120,8 @@ translation-close = Close
 
 ai-title = AI
 ai-ask-placeholder = Ask about this PDF…
+ai-empty-title = Ask about this document
+ai-empty-description = Attach a page, selection, or region for a focused answer, or simply start typing below.
 ai-new-chat = New chat
 ai-no-current-page-text = No current page text is available.
 ai-no-selected-pages-text = No text is available for the selected pages.
@@ -319,7 +321,11 @@ language-simplified-chinese = Simplified Chinese
 new-tab-title = New Tab
 new-tab-empty-title = No recent documents
 new-tab-empty-description = Open a document to add it to history.
+new-tab-no-results-title = No matching documents
+new-tab-no-results-description = Try a different file name or folder.
 new-tab-open-file = Open File
+new-tab-search-placeholder = Search recent documents…
+new-tab-results-count = { $visible } of { $total }
 new-tab-last-read = Last read: p. { $page }
 new-tab-last-read-progress = Last read: { $progress }%
 new-tab-progress-page = p. { $page }
@@ -335,6 +341,23 @@ new-tab-column-format-size = Format / Size
 new-tab-column-last-opened = Last Opened
 new-tab-column-progress = Progress
 new-tab-remove-from-recents = Remove from Recents
+
+## Document browser
+
+document-browser-filter-placeholder = Filter this folder…
+document-browser-home = Home
+document-browser-documents = Documents
+document-browser-downloads = Downloads
+document-browser-places = Places
+document-browser-folder-kind = Folder
+document-browser-read-error = Could not read { $path }: { $error }
+document-browser-retry = Retry
+document-browser-empty-folder = No PDF or EPUB documents in this folder
+document-browser-no-results = No matching documents or folders
+document-browser-show-dotfiles = Show dotfiles
+document-browser-hide-dotfiles = Hide dotfiles
+document-browser-keyboard-hint = ↑↓ select   Enter/→ open   ← up   Esc close
+document-browser-system-picker = System picker…
 
 ## Notes
 

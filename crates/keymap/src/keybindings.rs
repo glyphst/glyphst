@@ -2,6 +2,7 @@ use std::{rc::Rc, sync::OnceLock};
 
 use glyphst_actions::{
     ai_panel::AiPanelClose,
+    document_browser::{GoUp as DocumentBrowserGoUp, OpenSelected as DocumentBrowserOpenSelected},
     document_viewer::{
         AddBookmark, CancelDocumentTranslation, CancelRegionSelection, CloseTab, CopySelection,
         GoToBeginning, GoToEnd, GridCursorDown, GridCursorLeft, GridCursorRight, GridCursorUp,
@@ -78,6 +79,7 @@ const OVERLAY_CONTEXTS: &[&str] = &[
     "CommandPalette",
     "Search",
     "QuickAsk",
+    "DocumentBrowser",
     "Toc",
     "Notes",
     "History",
@@ -547,6 +549,13 @@ fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
     add_many::<menu::SelectNext>(cx, bindings, &["down"], "Menu");
     add_many::<menu::SelectPrev>(cx, bindings, &["up"], "Menu");
     add_many::<menu::Remove>(cx, bindings, &["shift-delete"], "Menu");
+
+    add_many::<menu::Confirm>(cx, bindings, &["enter"], "DocumentBrowser");
+    add_many::<menu::Cancel>(cx, bindings, &["escape"], "DocumentBrowser");
+    add_many::<menu::SelectNext>(cx, bindings, &["down"], "DocumentBrowser");
+    add_many::<menu::SelectPrev>(cx, bindings, &["up"], "DocumentBrowser");
+    add_many::<DocumentBrowserOpenSelected>(cx, bindings, &["right"], "DocumentBrowser");
+    add_many::<DocumentBrowserGoUp>(cx, bindings, &["left"], "DocumentBrowser");
 
     add_many::<SearchInputConfirm>(cx, bindings, &["enter"], "Search");
     add_many::<SearchInputPrevious>(cx, bindings, &["shift-enter"], "Search");

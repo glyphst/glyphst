@@ -12,9 +12,9 @@ use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Local, Utc};
 use glyphst_core::DocumentFormat;
 use gpui::{
-    AnyElement, Context, Corners, EventEmitter, FocusHandle, IntoElement, Modifiers, MouseButton,
-    MouseDownEvent, Pixels, Render, RenderImage, ScrollStrategy, SharedString,
-    UniformListScrollHandle, Window, canvas, div, fill, point, prelude::*, px, rgb,
+    AnyElement, Context, Corners, Entity, EventEmitter, FocusHandle, IntoElement, Modifiers,
+    MouseButton, MouseDownEvent, Pixels, Render, RenderImage, ScrollStrategy, SharedString,
+    Subscription, UniformListScrollHandle, Window, canvas, div, fill, point, prelude::*, px, rgb,
     transparent_black, uniform_list,
 };
 use gpui_component::{
@@ -22,6 +22,7 @@ use gpui_component::{
     alert::Alert,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
+    input::{Input, InputEvent, InputState},
 };
 use image::{Frame, ImageFormat, RgbaImage};
 use mupdf::{Colorspace, Device, DisplayList, Matrix, Pixmap, Rect};
@@ -58,7 +59,7 @@ const DETAILS_HEADER_HEIGHT: f32 = 32.0;
 const DETAILS_LOCATION_BREAKPOINT: f32 = 760.0;
 const DETAILS_FORMAT_SIZE_BREAKPOINT: f32 = 620.0;
 const DETAILS_LAST_OPENED_BREAKPOINT: f32 = 480.0;
-const NEW_TAB_HEADER_HEIGHT: f32 = 40.0;
+const NEW_TAB_HEADER_HEIGHT: f32 = 88.0;
 const THUMBNAIL_CACHE_VERSION: &str = "v1";
 const MAX_PERSISTENT_THUMBNAILS: usize = 256;
 
@@ -235,7 +236,9 @@ pub(crate) enum NewTabEvent {
 
 pub struct NewTab {
     entries: Vec<NewTabEntry>,
+    filtered_entries: Vec<usize>,
     thumbnails: HashMap<PathBuf, ThumbnailState>,
+    search_input: Entity<InputState>,
     focus_handle: FocusHandle,
     scroll: UniformListScrollHandle,
     cols: usize,
@@ -245,13 +248,18 @@ pub struct NewTab {
     focused_item: NewTabItemKey,
     selection_anchor: Option<PathBuf>,
     observed_view_mode: NewTabViewMode,
+    _search_subscription: Subscription,
 }
 
 impl NewTab {
     pub const WINDOW_WIDTH: f32 = BOARD_WIDTH;
     pub const WINDOW_HEIGHT: f32 = BOARD_HEIGHT;
 
-    pub(crate) fn new(focus_handle: FocusHandle, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        focus_handle: FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         if !cx.has_global::<ThumbnailCache>() {
             cx.set_global(ThumbnailCache::new());
         }
@@ -267,20 +275,35 @@ impl NewTab {
                 .map(NewTabEntry::from_history)
                 .collect::<Vec<_>>()
         };
+        let filtered_entries = (0..entries.len()).collect::<Vec<_>>();
+        let focused_item = entries
+            .first()
+            .map(|entry| NewTabItemKey::Document(entry.path.clone()))
+            .unwrap_or(NewTabItemKey::OpenFile);
+        let search_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::fl!("new-tab-search-placeholder"))
+                .submit_on_enter(true)
+        });
+        let _search_subscription =
+            cx.subscribe_in(&search_input, window, Self::on_search_input_event);
 
         let observed_view_mode = cx.global::<SettingsStore>().settings.new_tab.view_mode;
         let board = Self {
             entries,
+            filtered_entries,
             thumbnails: HashMap::new(),
+            search_input,
             focus_handle,
             scroll: UniformListScrollHandle::new(),
             cols: DEFAULT_COLS,
             viewport_width: 0.0,
             selecting: false,
             selection: BTreeSet::new(),
-            focused_item: NewTabItemKey::OpenFile,
+            focused_item,
             selection_anchor: None,
             observed_view_mode,
+            _search_subscription,
         };
 
         cx.observe_global::<SettingsStore>(|this, cx| {
@@ -408,35 +431,80 @@ impl NewTab {
         cx.refresh_windows();
     }
 
+    fn update_filter(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).value().trim().to_lowercase();
+        self.filtered_entries = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                query.is_empty()
+                    || entry.file_name.to_lowercase().contains(&query)
+                    || entry.directory.to_lowercase().contains(&query)
+            })
+            .map(|(entry_ix, _)| entry_ix)
+            .collect();
+
+        if self.item_index(&self.focused_item).is_none() {
+            self.focused_item = self
+                .filtered_entries
+                .first()
+                .and_then(|entry_ix| self.entries.get(*entry_ix))
+                .map(|entry| NewTabItemKey::Document(entry.path.clone()))
+                .unwrap_or(NewTabItemKey::OpenFile);
+        }
+        self.selection_anchor = self.selection_anchor.take().filter(|path| {
+            self.item_index(&NewTabItemKey::Document(path.clone()))
+                .is_some()
+        });
+        if !self.filtered_entries.is_empty() {
+            self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        }
+    }
+
+    fn on_search_input_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                self.update_filter(cx);
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => self.activate_focused(cx),
+            InputEvent::CompletionAccepted { .. }
+            | InputEvent::SpanHoverChanged { .. }
+            | InputEvent::Focus
+            | InputEvent::Blur => {}
+        }
+    }
+
     fn item_count(&self) -> usize {
-        self.entries.len() + 1
+        self.filtered_entries.len()
     }
 
     fn item_key(&self, item_ix: usize) -> Option<NewTabItemKey> {
-        if item_ix == 0 {
-            Some(NewTabItemKey::OpenFile)
-        } else {
-            self.entries
-                .get(item_ix - 1)
-                .map(|entry| NewTabItemKey::Document(entry.path.clone()))
-        }
+        self.entry_for_item(item_ix)
+            .map(|entry| NewTabItemKey::Document(entry.path.clone()))
     }
 
     fn item_index(&self, key: &NewTabItemKey) -> Option<usize> {
         match key {
-            NewTabItemKey::OpenFile => Some(0),
+            NewTabItemKey::OpenFile => None,
             NewTabItemKey::Document(path) => self
-                .entries
+                .filtered_entries
                 .iter()
-                .position(|entry| &entry.path == path)
-                .map(|entry_ix| entry_ix + 1),
+                .position(|entry_ix| self.entries[*entry_ix].path == *path),
         }
     }
 
     fn entry_for_item(&self, item_ix: usize) -> Option<&NewTabEntry> {
-        item_ix
-            .checked_sub(1)
-            .and_then(|entry_ix| self.entries.get(entry_ix))
+        self.filtered_entries
+            .get(item_ix)
+            .and_then(|entry_ix| self.entries.get(*entry_ix))
     }
 
     fn focused_index(&self) -> usize {
@@ -485,7 +553,7 @@ impl NewTab {
     fn enter_select(&mut self, cx: &mut Context<Self>) {
         self.selecting = true;
         if self.focused_item == NewTabItemKey::OpenFile
-            && let Some(first) = self.entries.first()
+            && let Some(first) = self.entry_for_item(0)
         {
             self.focused_item = NewTabItemKey::Document(first.path.clone());
         }
@@ -514,28 +582,33 @@ impl NewTab {
 
     fn selection_range(
         entries: &[NewTabEntry],
+        filtered_entries: &[usize],
         anchor: &Path,
         target_item_ix: usize,
     ) -> BTreeSet<PathBuf> {
-        let Some(anchor_entry_ix) = entries.iter().position(|entry| entry.path == anchor) else {
+        if filtered_entries.is_empty() {
+            return BTreeSet::new();
+        }
+        let Some(anchor_item_ix) = filtered_entries
+            .iter()
+            .position(|entry_ix| entries[*entry_ix].path == anchor)
+        else {
             return BTreeSet::new();
         };
-        let target_entry_ix = target_item_ix
-            .saturating_sub(1)
-            .min(entries.len().saturating_sub(1));
-        let (start, end) = if anchor_entry_ix <= target_entry_ix {
-            (anchor_entry_ix, target_entry_ix)
+        let target_item_ix = target_item_ix.min(filtered_entries.len().saturating_sub(1));
+        let (start, end) = if anchor_item_ix <= target_item_ix {
+            (anchor_item_ix, target_item_ix)
         } else {
-            (target_entry_ix, anchor_entry_ix)
+            (target_item_ix, anchor_item_ix)
         };
-        entries[start..=end]
+        filtered_entries[start..=end]
             .iter()
-            .map(|entry| entry.path.clone())
+            .map(|entry_ix| entries[*entry_ix].path.clone())
             .collect()
     }
 
     fn extend_selection_to(&mut self, target_item_ix: usize, cx: &mut Context<Self>) {
-        if self.entries.is_empty() {
+        if self.filtered_entries.is_empty() {
             return;
         }
 
@@ -543,11 +616,7 @@ impl NewTab {
             self.entry_for_item(self.focused_index())
                 .map(|entry| entry.path.clone())
         });
-        let target_item_ix = if target_item_ix == 0 {
-            1
-        } else {
-            target_item_ix.min(self.item_count() - 1)
-        };
+        let target_item_ix = target_item_ix.min(self.item_count() - 1);
         let Some(anchor) = anchor.or_else(|| {
             self.entry_for_item(target_item_ix)
                 .map(|entry| entry.path.clone())
@@ -557,7 +626,12 @@ impl NewTab {
 
         self.selecting = true;
         self.selection_anchor = Some(anchor.clone());
-        self.selection = Self::selection_range(&self.entries, &anchor, target_item_ix);
+        self.selection = Self::selection_range(
+            &self.entries,
+            &self.filtered_entries,
+            &anchor,
+            target_item_ix,
+        );
         self.set_focused_index(target_item_ix);
         cx.notify();
     }
@@ -569,10 +643,9 @@ impl NewTab {
         cx: &mut Context<Self>,
     ) {
         let target_item_ix = self
-            .entries
+            .filtered_entries
             .iter()
-            .position(|entry| entry.path == path)
-            .map(|entry_ix| entry_ix + 1)
+            .position(|entry_ix| self.entries[*entry_ix].path == path)
             .unwrap_or(0);
 
         if modifiers.shift {
@@ -634,7 +707,7 @@ impl NewTab {
         let path = match self.focused_item.clone() {
             NewTabItemKey::Document(path) => path,
             NewTabItemKey::OpenFile => {
-                let Some(first) = self.entries.first() else {
+                let Some(first) = self.entry_for_item(0) else {
                     self.enter_select(cx);
                     return;
                 };
@@ -645,20 +718,22 @@ impl NewTab {
     }
 
     fn select_all(&mut self, cx: &mut Context<Self>) {
-        if self.entries.is_empty() {
+        if self.filtered_entries.is_empty() {
             return;
         }
         self.selecting = true;
         self.selection = self
-            .entries
+            .filtered_entries
             .iter()
-            .map(|entry| entry.path.clone())
+            .map(|entry_ix| self.entries[*entry_ix].path.clone())
             .collect();
         if self.selection_anchor.is_none() {
-            self.selection_anchor = self.entries.first().map(|entry| entry.path.clone());
+            self.selection_anchor = self.entry_for_item(0).map(|entry| entry.path.clone());
         }
-        if self.focused_item == NewTabItemKey::OpenFile {
-            self.focused_item = NewTabItemKey::Document(self.entries[0].path.clone());
+        if self.focused_item == NewTabItemKey::OpenFile
+            && let Some(first) = self.entry_for_item(0)
+        {
+            self.focused_item = NewTabItemKey::Document(first.path.clone());
         }
         cx.notify();
     }
@@ -699,6 +774,7 @@ impl NewTab {
             .iter()
             .map(NewTabEntry::from_history)
             .collect();
+        self.update_filter(cx);
         let existing = self
             .entries
             .iter()
@@ -778,68 +854,6 @@ impl NewTab {
             selecting: self.selecting,
             selected,
         }
-    }
-
-    fn render_open_file_card(
-        state: NewTabItemState,
-        theme: ThemeColor,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let border_color = if state.focused {
-            theme.ring
-        } else {
-            theme.border
-        };
-
-        div()
-            .id("new-tab-open-file-grid")
-            .debug_selector(|| "new-tab-open-file-grid".to_string())
-            .flex()
-            .flex_none()
-            .flex_col()
-            .items_center()
-            .relative()
-            .w(px(CARD_WIDTH))
-            .h(px(CARD_HEIGHT))
-            .p_3()
-            .border_1()
-            .border_color(border_color)
-            .bg(theme.popover)
-            .hover(move |style| style.bg(theme.list_hover))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.focused_item = NewTabItemKey::OpenFile;
-                    this.open_file(cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(THUMBNAIL_MAX_WIDTH))
-                    .h(px(THUMBNAIL_MAX_HEIGHT))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.background)
-                    .child(
-                        Icon::new(IconName::FolderOpen)
-                            .size(ui_rems(42.0))
-                            .text_color(theme.primary),
-                    ),
-            )
-            .child(
-                div()
-                    .mt_3()
-                    .w_full()
-                    .text_size(ui_rems(13.0))
-                    .text_color(theme.primary)
-                    .child(crate::fl!("new-tab-open-file")),
-            )
-            .into_any_element()
     }
 
     fn render_document_card(
@@ -938,79 +952,6 @@ impl NewTab {
                     .text_color(theme.muted_foreground)
                     .child(last_read),
             )
-    }
-
-    fn render_open_file_row(
-        state: NewTabItemState,
-        details: bool,
-        columns: DetailsColumns,
-        theme: ThemeColor,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = if details {
-            "new-tab-open-file-details"
-        } else {
-            "new-tab-open-file-list"
-        };
-        let mut row = div()
-            .id(id)
-            .debug_selector(move || id.to_string())
-            .h(px(LIST_ROW_HEIGHT))
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .border_1()
-            .border_color(if state.focused {
-                theme.ring
-            } else {
-                transparent_black()
-            })
-            .hover(move |style| style.bg(theme.list_hover))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.focused_item = NewTabItemKey::OpenFile;
-                    this.open_file(cx);
-                    cx.stop_propagation();
-                }),
-            );
-
-        if state.selecting {
-            row = row.child(div().flex_none().w(px(18.0)));
-        }
-        row = row
-            .child(
-                Icon::new(IconName::FolderOpen)
-                    .size(ui_rems(16.0))
-                    .text_color(theme.primary),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(theme.primary)
-                    .child(crate::fl!("new-tab-open-file")),
-            );
-
-        if details {
-            if columns.location {
-                row = row.child(div().flex_1().min_w_0());
-            }
-            if columns.format_size {
-                row = row.child(div().flex_none().w(px(112.0)));
-            }
-            if columns.last_opened {
-                row = row.child(div().flex_none().w(px(140.0)));
-            }
-            row = row.child(div().flex_none().w(px(92.0)));
-        }
-
-        row.into_any_element()
     }
 
     fn render_document_row(
@@ -1136,7 +1077,7 @@ impl NewTab {
         row.into_any_element()
     }
 
-    fn render_empty_hint(height: f32, theme: ThemeColor) -> AnyElement {
+    fn render_empty_hint(height: f32, filtering: bool, theme: ThemeColor) -> AnyElement {
         div()
             .h(px(height))
             .w_full()
@@ -1146,16 +1087,16 @@ impl NewTab {
             .justify_center()
             .gap_1()
             .text_color(theme.muted_foreground)
-            .child(
-                div()
-                    .text_size(ui_rems(14.0))
-                    .child(crate::fl!("new-tab-empty-title")),
-            )
-            .child(
-                div()
-                    .text_size(ui_rems(11.0))
-                    .child(crate::fl!("new-tab-empty-description")),
-            )
+            .child(div().text_size(ui_rems(14.0)).child(if filtering {
+                crate::fl!("new-tab-no-results-title")
+            } else {
+                crate::fl!("new-tab-empty-title")
+            }))
+            .child(div().text_size(ui_rems(11.0)).child(if filtering {
+                crate::fl!("new-tab-no-results-description")
+            } else {
+                crate::fl!("new-tab-empty-description")
+            }))
             .into_any_element()
     }
 
@@ -1215,7 +1156,8 @@ impl NewTab {
         let cols = self.cols.max(1);
         let item_count = self.item_count();
         let item_rows = item_count.div_ceil(cols);
-        let rows = item_rows + usize::from(self.entries.is_empty());
+        let rows = item_rows + usize::from(item_count == 0);
+        let filtering = !self.search_input.read(cx).value().trim().is_empty();
         let horizontal_gap = Self::horizontal_gap(self.viewport_width, cols);
         let scroll = self.scroll.clone();
 
@@ -1254,7 +1196,11 @@ impl NewTab {
                                 visible_range
                                     .map(|row_ix| {
                                         if row_ix >= item_rows {
-                                            return Self::render_empty_hint(GRID_ROW_HEIGHT, theme);
+                                            return Self::render_empty_hint(
+                                                GRID_ROW_HEIGHT,
+                                                filtering,
+                                                theme,
+                                            );
                                         }
 
                                         let mut row = div()
@@ -1270,13 +1216,7 @@ impl NewTab {
 
                                         for col_ix in 0..cols {
                                             let item_ix = row_ix * cols + col_ix;
-                                            if item_ix == 0 {
-                                                row = row.child(Self::render_open_file_card(
-                                                    this.item_state(item_ix),
-                                                    theme,
-                                                    cx,
-                                                ));
-                                            } else if item_ix < item_count {
+                                            if item_ix < item_count {
                                                 let entry = this
                                                     .entry_for_item(item_ix)
                                                     .expect("document item must have an entry")
@@ -1321,7 +1261,8 @@ impl NewTab {
 
     fn render_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let item_count = self.item_count();
-        let rows = item_count + usize::from(self.entries.is_empty());
+        let rows = item_count + usize::from(item_count == 0);
+        let filtering = !self.search_input.read(cx).value().trim().is_empty();
         let show_location = !self.viewport_width.is_finite()
             || self.viewport_width <= 0.0
             || self.viewport_width >= DETAILS_LAST_OPENED_BREAKPOINT;
@@ -1345,33 +1286,26 @@ impl NewTab {
                                 visible_range
                                     .map(|item_ix| {
                                         if item_ix >= item_count {
-                                            return Self::render_empty_hint(LIST_ROW_HEIGHT, theme);
+                                            return Self::render_empty_hint(
+                                                LIST_ROW_HEIGHT,
+                                                filtering,
+                                                theme,
+                                            );
                                         }
 
-                                        let state = this.item_state(item_ix);
-                                        if item_ix == 0 {
-                                            Self::render_open_file_row(
-                                                state,
-                                                false,
-                                                DetailsColumns::for_width(this.viewport_width),
-                                                theme,
-                                                cx,
-                                            )
-                                        } else {
-                                            let entry = this
-                                                .entry_for_item(item_ix)
-                                                .expect("document item must have an entry")
-                                                .clone();
-                                            Self::render_document_row(
-                                                &entry,
-                                                state,
-                                                false,
-                                                DetailsColumns::for_width(this.viewport_width),
-                                                show_location,
-                                                theme,
-                                                cx,
-                                            )
-                                        }
+                                        let entry = this
+                                            .entry_for_item(item_ix)
+                                            .expect("document item must have an entry")
+                                            .clone();
+                                        Self::render_document_row(
+                                            &entry,
+                                            this.item_state(item_ix),
+                                            false,
+                                            DetailsColumns::for_width(this.viewport_width),
+                                            show_location,
+                                            theme,
+                                            cx,
+                                        )
                                     })
                                     .collect::<Vec<_>>()
                             }),
@@ -1449,7 +1383,8 @@ impl NewTab {
 
     fn render_details(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let item_count = self.item_count();
-        let rows = item_count + usize::from(self.entries.is_empty());
+        let rows = item_count + usize::from(item_count == 0);
+        let filtering = !self.search_input.read(cx).value().trim().is_empty();
         let columns = DetailsColumns::for_width(self.viewport_width);
         let scroll = self.scroll.clone();
 
@@ -1476,23 +1411,26 @@ impl NewTab {
                                 visible_range
                                     .map(|item_ix| {
                                         if item_ix >= item_count {
-                                            return Self::render_empty_hint(LIST_ROW_HEIGHT, theme);
+                                            return Self::render_empty_hint(
+                                                LIST_ROW_HEIGHT,
+                                                filtering,
+                                                theme,
+                                            );
                                         }
 
-                                        let state = this.item_state(item_ix);
-                                        if item_ix == 0 {
-                                            Self::render_open_file_row(
-                                                state, true, columns, theme, cx,
-                                            )
-                                        } else {
-                                            let entry = this
-                                                .entry_for_item(item_ix)
-                                                .expect("document item must have an entry")
-                                                .clone();
-                                            Self::render_document_row(
-                                                &entry, state, true, columns, false, theme, cx,
-                                            )
-                                        }
+                                        let entry = this
+                                            .entry_for_item(item_ix)
+                                            .expect("document item must have an entry")
+                                            .clone();
+                                        Self::render_document_row(
+                                            &entry,
+                                            this.item_state(item_ix),
+                                            true,
+                                            columns,
+                                            false,
+                                            theme,
+                                            cx,
+                                        )
                                     })
                                     .collect::<Vec<_>>()
                             }),
@@ -1633,84 +1571,151 @@ impl Render for NewTab {
         let selecting = self.selecting;
         let has_selection = !self.selection.is_empty();
         let selected_count = self.selection.len() as i64;
+        let filtered_count = self.filtered_entries.len() as i64;
+        let total_count = self.entries.len() as i64;
         let library_error = cx
             .global::<LibraryStore>()
             .startup_error()
             .map(|error| format!("Library unavailable. Changes will not be saved: {error}"));
 
-        let header = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_between()
-            .h(px(NEW_TAB_HEADER_HEIGHT))
-            .px_3()
-            .border_b(px(1.0))
-            .border_color(theme.border)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(ui_rems(13.0))
-                    .child(crate::fl!("new-tab-recent-pdfs"))
-                    .when(selecting, |this| {
-                        this.child(
+        let header =
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .h(px(NEW_TAB_HEADER_HEIGHT))
+                .gap_1()
+                .px_4()
+                .py_2()
+                .border_b(px(1.0))
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
                             div()
-                                .text_size(ui_rems(11.0))
-                                .text_color(theme.muted_foreground)
-                                .child(crate::fl!("selected-count", count = selected_count)),
+                                .flex()
+                                .items_baseline()
+                                .gap_2()
+                                .text_size(ui_rems(14.0))
+                                .child(crate::fl!("new-tab-recent-pdfs"))
+                                .child(
+                                    div()
+                                        .text_size(ui_rems(11.0))
+                                        .text_color(theme.muted_foreground)
+                                        .child(crate::fl!(
+                                            "new-tab-results-count",
+                                            visible = filtered_count,
+                                            total = total_count
+                                        )),
+                                )
+                                .when(selecting, |this| {
+                                    this.child(
+                                        div()
+                                            .text_size(ui_rems(11.0))
+                                            .text_color(theme.muted_foreground)
+                                            .child(crate::fl!(
+                                                "selected-count",
+                                                count = selected_count
+                                            )),
+                                    )
+                                }),
                         )
-                    }),
-            )
-            .child({
-                let mut toolbar = div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(Self::render_view_button(
-                        NewTabViewMode::Grid,
-                        view_mode,
-                        cx,
-                    ))
-                    .child(Self::render_view_button(
-                        NewTabViewMode::List,
-                        view_mode,
-                        cx,
-                    ))
-                    .child(Self::render_view_button(
-                        NewTabViewMode::Details,
-                        view_mode,
-                        cx,
-                    ))
-                    .child(div().mx_1().h(px(18.0)).w(px(1.0)).bg(theme.border));
-                if selecting && has_selection {
-                    toolbar = toolbar
-                        .child(Self::render_toolbar_button(
-                            crate::fl!("new-tab-remove-from-recents"),
-                            |this, _, cx| this.delete_selected(cx),
-                            cx,
-                        ))
-                        .child(Self::render_toolbar_button(
-                            crate::fl!("cancel-selection"),
-                            |this, _, cx| this.cancel_select(cx),
-                            cx,
-                        ));
-                } else if selecting {
-                    toolbar = toolbar.child(Self::render_toolbar_button(
-                        crate::fl!("cancel"),
-                        |this, _, cx| this.cancel_select(cx),
-                        cx,
-                    ));
-                } else {
-                    toolbar = toolbar.child(Self::render_toolbar_button(
-                        crate::fl!("select"),
-                        |this, _, cx| this.enter_select(cx),
-                        cx,
-                    ));
-                }
-                toolbar
-            });
+                        .child(
+                            Button::new("new-tab-open-file")
+                                .debug_selector(|| "new-tab-open-file".to_string())
+                                .small()
+                                .primary()
+                                .icon(IconName::FolderOpen)
+                                .label(crate::fl!("new-tab-open-file"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_file(cx);
+                                    cx.stop_propagation();
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("new-tab-search")
+                                .debug_selector(|| "new-tab-search".to_string())
+                                .flex()
+                                .flex_1()
+                                .min_w_0()
+                                .h(px(30.0))
+                                .items_center()
+                                .gap_1()
+                                .px_2()
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.background)
+                                .child(
+                                    Icon::new(IconName::Search)
+                                        .size(ui_rems(14.0))
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .child(div().flex_1().min_w_0().child(
+                                    Input::new(&self.search_input).small().appearance(false),
+                                )),
+                        )
+                        .child({
+                            let mut toolbar = div()
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .gap_1()
+                                .child(Self::render_view_button(
+                                    NewTabViewMode::Grid,
+                                    view_mode,
+                                    cx,
+                                ))
+                                .child(Self::render_view_button(
+                                    NewTabViewMode::List,
+                                    view_mode,
+                                    cx,
+                                ))
+                                .child(Self::render_view_button(
+                                    NewTabViewMode::Details,
+                                    view_mode,
+                                    cx,
+                                ))
+                                .child(div().mx_1().h(px(18.0)).w(px(1.0)).bg(theme.border));
+                            if selecting && has_selection {
+                                toolbar = toolbar
+                                    .child(Self::render_toolbar_button(
+                                        crate::fl!("new-tab-remove-from-recents"),
+                                        |this, _, cx| this.delete_selected(cx),
+                                        cx,
+                                    ))
+                                    .child(Self::render_toolbar_button(
+                                        crate::fl!("cancel-selection"),
+                                        |this, _, cx| this.cancel_select(cx),
+                                        cx,
+                                    ));
+                            } else if selecting {
+                                toolbar = toolbar.child(Self::render_toolbar_button(
+                                    crate::fl!("cancel"),
+                                    |this, _, cx| this.cancel_select(cx),
+                                    cx,
+                                ));
+                            } else {
+                                toolbar = toolbar.child(Self::render_toolbar_button(
+                                    crate::fl!("select"),
+                                    |this, _, cx| this.enter_select(cx),
+                                    cx,
+                                ));
+                            }
+                            toolbar
+                        }),
+                );
 
         div()
             .id("new-tab")
@@ -2052,24 +2057,39 @@ mod tests {
     }
 
     #[test]
-    fn selection_ranges_include_documents_but_not_open_file() {
+    fn selection_ranges_follow_the_visible_document_order() {
         let entries = vec![
             test_entry("/tmp/a.pdf"),
             test_entry("/tmp/b.pdf"),
             test_entry("/tmp/c.pdf"),
         ];
+        let filtered = vec![0, 1, 2];
 
         assert_eq!(
-            NewTab::selection_range(&entries, PathBuf::from("/tmp/b.pdf").as_path(), 0),
+            NewTab::selection_range(
+                &entries,
+                &filtered,
+                PathBuf::from("/tmp/b.pdf").as_path(),
+                0,
+            ),
             BTreeSet::from([PathBuf::from("/tmp/a.pdf"), PathBuf::from("/tmp/b.pdf"),])
         );
         assert_eq!(
-            NewTab::selection_range(&entries, PathBuf::from("/tmp/a.pdf").as_path(), 3),
+            NewTab::selection_range(
+                &entries,
+                &filtered,
+                PathBuf::from("/tmp/a.pdf").as_path(),
+                2,
+            ),
             BTreeSet::from([
                 PathBuf::from("/tmp/a.pdf"),
                 PathBuf::from("/tmp/b.pdf"),
                 PathBuf::from("/tmp/c.pdf"),
             ])
+        );
+        assert!(
+            NewTab::selection_range(&entries, &[], PathBuf::from("/tmp/a.pdf").as_path(), 0,)
+                .is_empty()
         );
     }
 
@@ -2081,7 +2101,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn open_file_is_first_in_all_three_rendered_modes(cx: &mut TestAppContext) {
+    fn open_file_and_search_stay_in_the_header_across_view_modes(cx: &mut TestAppContext) {
         let directory = temporary_directory("new-tab-view-modes");
         fs::create_dir(&directory).unwrap();
         cx.update(|cx| {
@@ -2093,14 +2113,15 @@ mod tests {
         });
 
         let (_root, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| NewTab::new(cx.focus_handle(), cx));
+            let view = cx.new(|cx| NewTab::new(cx.focus_handle(), window, cx));
             Root::new(view, window, cx)
         });
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
 
-        assert!(cx.debug_bounds("new-tab-open-file-grid").is_some());
+        assert!(cx.debug_bounds("new-tab-open-file").is_some());
+        assert!(cx.debug_bounds("new-tab-search").is_some());
         assert!(cx.debug_bounds("new-tab-view-grid").is_some());
         assert!(cx.debug_bounds("new-tab-view-list").is_some());
         assert!(cx.debug_bounds("new-tab-view-details").is_some());
@@ -2110,7 +2131,7 @@ mod tests {
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
-        assert!(cx.debug_bounds("new-tab-open-file-list").is_some());
+        assert!(cx.debug_bounds("new-tab-open-file").is_some());
 
         let details = cx.debug_bounds("new-tab-view-details").unwrap().center();
         cx.simulate_click(details, gpui::Modifiers::default());
@@ -2121,7 +2142,7 @@ mod tests {
                 NewTabViewMode::Details
             );
         });
-        assert!(cx.debug_bounds("new-tab-open-file-details").is_some());
+        assert!(cx.debug_bounds("new-tab-open-file").is_some());
 
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2156,7 +2177,7 @@ mod tests {
         });
 
         let (root, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| NewTab::new(cx.focus_handle(), cx));
+            let view = cx.new(|cx| NewTab::new(cx.focus_handle(), window, cx));
             Root::new(view, window, cx)
         });
         let view = root.read_with(cx, |root, _| {
@@ -2164,7 +2185,10 @@ mod tests {
         });
 
         view.update_in(cx, |this, _, cx| {
-            assert_eq!(this.item_key(0), Some(NewTabItemKey::OpenFile));
+            assert_eq!(
+                this.item_key(0),
+                Some(NewTabItemKey::Document(paths[0].clone()))
+            );
 
             this.handle_document_pointer(paths[0].clone(), gpui::Modifiers::secondary_key(), cx);
             assert_eq!(this.selection, BTreeSet::from([paths[0].clone()]));
@@ -2178,9 +2202,7 @@ mod tests {
             );
             assert_eq!(this.selection.len(), 3);
             this.cancel_select(cx);
-            this.focused_item = NewTabItemKey::OpenFile;
-
-            this.move_cursor(CursorMove::Down, false, cx);
+            this.focused_item = NewTabItemKey::Document(paths[0].clone());
             this.toggle_focused(cx);
             assert_eq!(this.selection.len(), 1);
 

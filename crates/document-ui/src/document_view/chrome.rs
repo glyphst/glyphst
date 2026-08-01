@@ -30,21 +30,8 @@ impl DocumentView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(
-                        self.render_toc_button(dock.left_sidebar == Some(DocumentSidebar::Toc), cx),
-                    )
-                    .child(
-                        self.render_notes_button(
-                            dock.left_sidebar == Some(DocumentSidebar::Notes),
-                            cx,
-                        ),
-                    )
                     .when(self.capabilities.page_overview, |this| {
-                        this.child(self.render_thumbnail_sidebar_button(
-                            dock.left_sidebar == Some(DocumentSidebar::Thumbnails),
-                            cx,
-                        ))
-                        .child(self.render_grid_overview_button(cx))
+                        this.child(self.render_grid_overview_button(cx))
                     })
                     .when(
                         self.capabilities.page_export && !self.grid_overview_open,
@@ -54,17 +41,17 @@ impl DocumentView {
                         this.child(self.render_epub_style_button(cx))
                     }),
             )
+            .child(div().flex_none().text_color(theme.muted_foreground).child(
+                Self::page_counter_label(self.current_page(), self.pages.len()),
+            ))
             .child(
                 div()
-                    .flex_none()
+                    .flex_1()
                     .flex()
                     .items_center()
+                    .justify_end()
                     .gap_2()
                     .when_some(background_activity, |this, activity| this.child(activity))
-                    .child(Self::page_counter_label(
-                        self.current_page(),
-                        self.pages.len(),
-                    ))
                     .child(self.render_ai_button(dock.ai_panel_open, cx)),
             )
             .into_any_element()

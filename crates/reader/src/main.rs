@@ -66,6 +66,7 @@ fn main() {
                 eprintln!("failed to install theme catalog: {error:#}");
             }
             localize::select_language(settings_store.settings.language);
+            cx.set_reduce_motion(settings_store.settings.behavior.reduce_motion);
             cx.set_global(settings_store);
             glyphst_ai::chatgpt_subscription::init(cx);
             sync_component_theme(cx);

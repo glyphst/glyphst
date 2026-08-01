@@ -264,7 +264,7 @@ impl Render for AiPanel {
             .h_full()
             .border_l(px(1.0))
             .border_color(theme.border)
-            .bg(theme.popover)
+            .bg(theme.background)
             .text_color(theme.foreground)
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
                 this.close_message_context_menu(cx);
@@ -281,10 +281,11 @@ impl Render for AiPanel {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .h(px(42.0))
-                    .px_2()
+                    .h(px(46.0))
+                    .px_3()
                     .border_b(px(1.0))
-                    .border_color(theme.border)
+                    .border_color(theme.border.opacity(0.8))
+                    .bg(theme.muted.opacity(0.28))
                     .text_size(ui_rems(12.0))
                     .child(
                         div()
@@ -366,7 +367,44 @@ impl Render for AiPanel {
                 ))
             })
             .when(!showing_sessions, |this| {
-                this.when(!empty_chat, |this| {
+                this.when(empty_chat, |this| {
+                    this.child(
+                        div()
+                            .id("ai-panel-empty")
+                            .flex()
+                            .flex_1()
+                            .min_h_0()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .px_6()
+                            .text_center()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(42.0))
+                                    .rounded_full()
+                                    .bg(theme.primary.opacity(0.12))
+                                    .child(
+                                        Icon::new(IconName::Bot)
+                                            .size(ui_rems(20.0))
+                                            .text_color(theme.primary),
+                                    ),
+                            )
+                            .child(div().text_size(ui_rems(14.0)).child(tr("ai-empty-title")))
+                            .child(
+                                div()
+                                    .max_w(px(260.0))
+                                    .text_size(ui_rems(11.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(tr("ai-empty-description")),
+                            ),
+                    )
+                })
+                .when(!empty_chat, |this| {
                     this.child(
                         div()
                             .relative()
@@ -416,39 +454,47 @@ impl Render for AiPanel {
                         div()
                             .flex()
                             .flex_col()
-                            .py_2()
-                            .bg(theme.tab_active)
-                            .when(empty_chat, |this| this.flex_1().min_h_0())
-                            .when(!empty_chat, |this| {
-                                this.border_t(px(1.0)).border_color(theme.border)
-                            })
+                            .flex_none()
+                            .p_2()
+                            .border_t(px(1.0))
+                            .border_color(theme.border.opacity(0.8))
+                            .bg(theme.background)
                             .child(
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap_2()
-                                    .px_2()
-                                    .when(empty_chat, |this| this.flex_1().min_h_0())
+                                    .gap_1()
+                                    .overflow_hidden()
+                                    .rounded(cx.theme().radius_lg)
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.popover)
+                                    .shadow_sm()
                                     .child(
                                         div()
                                             .id("ai-panel-composer-input")
                                             .relative()
                                             .w_full()
                                             .min_h_0()
-                                            .when(empty_chat, |this| this.flex_1())
+                                            .px_2()
+                                            .pt_1()
                                             .child(
                                                 Input::new(&self.composer_input)
                                                     .appearance(false)
                                                     .bordered(false)
                                                     .focus_bordered(false)
-                                                    .w_full()
-                                                    .when(empty_chat, |input| input.h_full()),
+                                                    .w_full(),
                                             ),
                                     )
                                     .when_some(validation_notice.clone(), |this, notice| {
                                         this.child(
-                                            Alert::error("ai-composer-validation-alert", notice)
+                                            div().px_2().child(
+                                                Alert::error(
+                                                    "ai-composer-validation-alert",
+                                                    notice,
+                                                )
                                                 .xsmall(),
+                                            ),
                                         )
                                     })
                                     .child(
@@ -460,6 +506,8 @@ impl Render for AiPanel {
                                             .items_center()
                                             .justify_between()
                                             .gap_2()
+                                            .px_1()
+                                            .pb_1()
                                             .text_size(ui_rems(11.0))
                                             .text_color(theme.muted_foreground)
                                             .child(

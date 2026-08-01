@@ -26,6 +26,7 @@ pub use glyphst_actions::workspace::{
 
 use crate::{
     command_palette::{CommandPalette, CommandPaletteDelegate},
+    document_browser::{DocumentBrowser, DocumentBrowserEvent},
     document_view::{
         CloseTab, DocumentSidebar, DocumentView, DocumentViewEvent, OpenFile, OpenKeybindings,
         OpenNewTab, OpenSettings, ToggleAiPanel, ToggleCommandPalette, ToggleNotes,
@@ -54,6 +55,8 @@ pub struct Workspace {
     pending_translation_splits: Vec<PendingTranslationSplit>,
     command_palette: Option<Entity<CommandPalette>>,
     command_palette_previous_focus_handle: Option<FocusHandle>,
+    document_browser: Option<Entity<DocumentBrowser>>,
+    document_browser_previous_focus_handle: Option<FocusHandle>,
     theme_selector: Option<Entity<ThemeSelector>>,
     theme_selector_previous_focus_handle: Option<FocusHandle>,
     title_bar_menu_expanded: bool,
@@ -162,6 +165,8 @@ impl Workspace {
             pending_translation_splits: Vec::new(),
             command_palette: None,
             command_palette_previous_focus_handle: None,
+            document_browser: None,
+            document_browser_previous_focus_handle: None,
             theme_selector: None,
             theme_selector_previous_focus_handle: None,
             title_bar_menu_expanded: false,
@@ -401,9 +406,66 @@ impl Workspace {
         active_pane.update(cx, |pane, cx| pane.open_keymap_tab(window, cx));
     }
 
-    fn open_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_title_bar_menu_expanded(false, cx);
-        let replace_active_new_tab = self.active_pane.read(cx).active_tab_is_new_tab();
+        if let Some(browser) = self.document_browser.as_ref() {
+            browser.focus_handle(cx).focus(window, cx);
+            return;
+        }
+
+        self.close_command_palette(window, cx);
+        self.close_theme_selector(window, cx);
+        let previous_focus_handle = window
+            .focused(cx)
+            .unwrap_or_else(|| self.active_pane.read(cx).focus_handle());
+        let active_path = self
+            .active_pane
+            .read(cx)
+            .active_document_view()
+            .map(|view| view.read(cx).path().to_path_buf());
+        let initial_dir = DocumentBrowser::suggested_directory(active_path.as_deref(), cx);
+        let browser = cx.new(|cx| DocumentBrowser::new(initial_dir, window, cx));
+        cx.subscribe_in(
+            &browser,
+            window,
+            |this, _, event: &DocumentBrowserEvent, window, cx| match event {
+                DocumentBrowserEvent::Open(path) => {
+                    let path = path.clone();
+                    let replace_active_new_tab = this.active_pane.read(cx).active_tab_is_new_tab();
+                    this.close_document_browser(window, cx);
+                    if let Err(error) =
+                        this.focus_or_open_document(path, None, replace_active_new_tab, window, cx)
+                    {
+                        eprintln!("failed to open selected document: {error:#}");
+                    }
+                }
+                DocumentBrowserEvent::UseSystemPicker => {
+                    this.open_system_file_picker(cx);
+                }
+                DocumentBrowserEvent::Dismissed => {
+                    this.close_document_browser(window, cx);
+                }
+            },
+        )
+        .detach();
+        self.document_browser_previous_focus_handle = Some(previous_focus_handle);
+        self.document_browser = Some(browser);
+        cx.notify();
+    }
+
+    fn close_document_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.document_browser.take().is_none() {
+            return;
+        }
+        if let Some(previous_focus_handle) = self.document_browser_previous_focus_handle.take() {
+            previous_focus_handle.focus(window, cx);
+        } else {
+            self.focus_active_pane(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn open_system_file_picker(&mut self, cx: &mut Context<Self>) {
         let dialog = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -417,6 +479,8 @@ impl Workspace {
                     return;
                 };
                 match this.update_in(cx, |this, window, cx| {
+                    let replace_active_new_tab = this.active_pane.read(cx).active_tab_is_new_tab();
+                    this.close_document_browser(window, cx);
                     this.focus_or_open_document(path, None, replace_active_new_tab, window, cx)
                 }) {
                     Ok(Ok(())) => {}
@@ -438,6 +502,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
+        if self.document_browser.is_some() {
+            self.close_document_browser(window, cx);
+        }
         let path = normalize_path(&path);
         if let Some((pane, tab_ix)) = self.document_location(&path, cx) {
             self.active_pane = pane.clone();
@@ -1394,10 +1461,6 @@ impl Workspace {
         }
     }
 
-    fn active_tab_is_new_tab(&self, cx: &Context<Self>) -> bool {
-        self.active_pane.read(cx).active_tab_is_new_tab()
-    }
-
     fn set_title_bar_menu_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
         let changed = self.title_bar_menu_expanded != expanded
             || (!expanded
@@ -1496,6 +1559,32 @@ impl Workspace {
             })
             .child(content)
     }
+
+    fn render_centered_overlay(
+        content: impl IntoElement + 'static,
+        close: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        theme: ThemeColor,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| close(this, window, cx)),
+            )
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(glyphst_ui::motion::modal_in(
+                "document-browser-enter",
+                div().child(content),
+            ))
+    }
 }
 
 impl Render for Workspace {
@@ -1516,7 +1605,6 @@ impl Render for Workspace {
         let title_bar = (!active_pdf_is_presentation).then(|| {
             WorkspaceTitleBar::new(
                 cx.entity(),
-                self.title_bar_menu_expanded || self.active_tab_is_new_tab(cx),
                 self.title_bar_open_menu,
                 self.title_bar_popup_menu.clone(),
                 self.active_tab_label(cx),
@@ -1684,6 +1772,14 @@ impl Render for Workspace {
                     cx,
                 ))
             })
+            .when_some(self.document_browser.clone(), |this, browser| {
+                this.child(Self::render_centered_overlay(
+                    browser,
+                    |this, window, cx| this.close_document_browser(window, cx),
+                    theme,
+                    cx,
+                ))
+            })
             .children(root_overlays)
     }
 }
@@ -1783,7 +1879,48 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dock_visibility_is_shared_by_tabs_and_placeholders_are_closable(cx: &mut TestAppContext) {
+    fn open_file_uses_the_in_app_document_browser(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_file(window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.document_browser.is_some());
+        });
+        assert!(cx.debug_bounds("document-browser").is_some());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_document_browser(window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("document-browser").is_none());
+    }
+
+    #[gpui::test]
+    fn dock_requests_are_preserved_while_documentless_tabs_suspend_them(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
@@ -1815,45 +1952,19 @@ mod tests {
             assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Toc));
             assert!(workspace.docks.ai_panel_open);
         });
-        assert!(
-            cx.debug_bounds("workspace-left-sidebar-placeholder")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("workspace-ai-sidebar-placeholder")
-                .is_some()
-        );
-
-        let close_left = cx
-            .debug_bounds("workspace-left-sidebar-placeholder-close")
-            .unwrap()
-            .center();
-        cx.simulate_click(close_left, Modifiers::default());
-        workspace.read_with(cx, |workspace, _| {
-            assert_eq!(workspace.docks.left_sidebar, None);
-            assert!(workspace.docks.ai_panel_open);
-        });
-
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-        });
-        let close_ai = cx
-            .debug_bounds("workspace-ai-sidebar-placeholder-close")
-            .unwrap()
-            .center();
-        cx.simulate_click(close_ai, Modifiers::default());
-        workspace.read_with(cx, |workspace, _| {
-            assert_eq!(workspace.docks.left_sidebar, None);
-            assert!(!workspace.docks.ai_panel_open);
-        });
+        assert!(cx.debug_bounds("workspace-left-dock").is_none());
+        assert!(cx.debug_bounds("workspace-ai-dock").is_none());
     }
 
     #[gpui::test]
     fn dock_widths_stay_fixed_across_window_resizes_and_restore_after_constraint(
         cx: &mut TestAppContext,
     ) {
+        let document_path = temporary_pdf_path("dock-widths");
+        write_minimal_pdf(&document_path);
         cx.update(|cx| {
             gpui_component::init(cx);
+            cx.set_reduce_motion(true);
             cx.set_global(SettingsStore::memory());
             cx.set_global(LibraryStore::memory());
             cx.set_global(RenderCache::new());
@@ -1863,13 +1974,16 @@ mod tests {
             open_settings_window: ignore_settings_window,
         };
 
-        let (root, cx) = cx.add_window_view(|window, cx| {
-            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
             Root::new(workspace, window, cx)
         });
         let workspace = root.read_with(cx, |root, _| {
             root.view().clone().downcast::<Workspace>().unwrap()
         });
+        cx.run_until_parked();
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.docks.preferred_widths.toc = 280.0;
             workspace.docks.preferred_widths.ai = 360.0;
@@ -1921,7 +2035,8 @@ mod tests {
             .as_f32();
         assert!(constrained_left < 280.0);
         assert!(constrained_right < 360.0);
-        assert!((constrained_left + constrained_right - 498.0).abs() < 0.1);
+        // The 44 px document tool rail and two 1 px dock separators remain fixed.
+        assert!((constrained_left + constrained_right - 454.0).abs() < 0.1);
         workspace.read_with(cx, |workspace, _| {
             assert_eq!(workspace.docks.preferred_widths.toc, 280.0);
             assert_eq!(workspace.docks.preferred_widths.ai, 360.0);
@@ -1939,12 +2054,16 @@ mod tests {
             cx.debug_bounds("workspace-ai-dock").unwrap().size.width,
             px(360.0)
         );
+        fs::remove_file(document_path).unwrap();
     }
 
     #[gpui::test]
     fn double_clicking_dock_handles_restores_each_default_width(cx: &mut TestAppContext) {
+        let document_path = temporary_pdf_path("dock-double-click");
+        write_minimal_pdf(&document_path);
         cx.update(|cx| {
             gpui_component::init(cx);
+            cx.set_reduce_motion(true);
             cx.set_global(SettingsStore::memory());
             cx.set_global(LibraryStore::memory());
             cx.set_global(RenderCache::new());
@@ -1954,13 +2073,16 @@ mod tests {
             open_settings_window: ignore_settings_window,
         };
 
-        let (root, cx) = cx.add_window_view(|window, cx| {
-            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
             Root::new(workspace, window, cx)
         });
         let workspace = root.read_with(cx, |root, _| {
             root.view().clone().downcast::<Workspace>().unwrap()
         });
+        cx.run_until_parked();
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.docks.preferred_widths.toc = 420.0;
             workspace.docks.preferred_widths.notes = 410.0;
@@ -2027,12 +2149,16 @@ mod tests {
             cx.debug_bounds("workspace-left-dock").unwrap().size.width,
             px(280.0)
         );
+        fs::remove_file(document_path).unwrap();
     }
 
     #[gpui::test]
     fn dragging_a_dock_handle_can_exceed_half_the_window(cx: &mut TestAppContext) {
+        let document_path = temporary_pdf_path("dock-drag");
+        write_minimal_pdf(&document_path);
         cx.update(|cx| {
             gpui_component::init(cx);
+            cx.set_reduce_motion(true);
             cx.set_global(SettingsStore::memory());
             cx.set_global(LibraryStore::memory());
             cx.set_global(RenderCache::new());
@@ -2042,13 +2168,16 @@ mod tests {
             open_settings_window: ignore_settings_window,
         };
 
-        let (root, cx) = cx.add_window_view(|window, cx| {
-            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
             Root::new(workspace, window, cx)
         });
         let workspace = root.read_with(cx, |root, _| {
             root.view().clone().downcast::<Workspace>().unwrap()
         });
+        cx.run_until_parked();
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
         });
@@ -2088,6 +2217,7 @@ mod tests {
             cx.debug_bounds("workspace-left-dock").unwrap().size.width,
             px(800.0)
         );
+        fs::remove_file(document_path).unwrap();
     }
 
     #[gpui::test]
@@ -2130,7 +2260,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn hamburger_expands_the_inline_application_menu(cx: &mut TestAppContext) {
+    fn compact_title_bar_menus_switch_without_changing_layout(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
@@ -2153,16 +2283,16 @@ mod tests {
             _ = window.draw(cx);
         });
 
-        assert!(cx.debug_bounds("workspace-menu-toggle").is_some());
-        assert!(cx.debug_bounds("workspace-menu-glyphst").is_none());
+        assert!(cx.debug_bounds("workspace-menu-glyphst").is_some());
+        assert!(cx.debug_bounds("workspace-menu-file").is_some());
+        assert!(cx.debug_bounds("workspace-menu-tab").is_some());
 
-        let toggle = cx.debug_bounds("workspace-menu-toggle").unwrap().center();
-        cx.simulate_click(toggle, Modifiers::default());
+        let glyphst = cx.debug_bounds("workspace-menu-glyphst").unwrap().center();
+        cx.simulate_click(glyphst, Modifiers::default());
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
 
-        assert!(cx.debug_bounds("workspace-menu-toggle").is_none());
         assert!(cx.debug_bounds("workspace-menu-glyphst").is_some());
         assert!(cx.debug_bounds("workspace-menu-file").is_some());
         assert!(cx.debug_bounds("workspace-menu-tab").is_some());
@@ -2195,8 +2325,11 @@ mod tests {
             _ = window.draw(cx);
         });
 
-        assert!(cx.debug_bounds("workspace-menu-toggle").is_some());
-        assert!(cx.debug_bounds("workspace-menu-glyphst").is_none());
+        assert!(cx.debug_bounds("workspace-menu-glyphst").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.title_bar_menu_expanded);
+            assert_eq!(workspace.title_bar_open_menu, None);
+        });
     }
 
     #[gpui::test]
@@ -2257,6 +2390,7 @@ mod tests {
     fn open_sidebar_survives_document_tab_changes(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
+            cx.set_reduce_motion(true);
             cx.set_global(SettingsStore::memory());
             cx.set_global(LibraryStore::memory());
             cx.set_global(RenderCache::new());

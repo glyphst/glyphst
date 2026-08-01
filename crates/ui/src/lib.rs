@@ -6,6 +6,7 @@ pub mod activity;
 pub mod assets;
 pub mod icons;
 pub mod markdown;
+pub mod motion;
 pub mod picker;
 pub mod prompt;
 pub mod root;

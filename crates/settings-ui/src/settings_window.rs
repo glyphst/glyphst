@@ -301,6 +301,9 @@ impl SettingsWindow {
     }
 
     fn apply_runtime_changes(before: &Settings, after: &Settings, cx: &mut App) -> bool {
+        if before.behavior.reduce_motion != after.behavior.reduce_motion {
+            cx.set_reduce_motion(after.behavior.reduce_motion);
+        }
         if before.keymap_preset != after.keymap_preset
             || before.keybinding_overrides != after.keybinding_overrides
         {
@@ -1104,7 +1107,7 @@ mod tests {
                 let mut settings = SettingsWindow::new(|_| {}, cx);
                 settings.initial_selection = SelectIndex {
                     page_ix: 5,
-                    group_ix: Some(5),
+                    group_ix: Some(6),
                 };
                 settings
             });
@@ -1116,21 +1119,21 @@ mod tests {
             _ = window.draw(cx);
         });
 
-        let api_key_row = cx.debug_bounds("setting-item-5-5-0").unwrap();
-        let api_key_label = cx.debug_bounds("setting-item-label-5-5-0").unwrap();
-        let api_key_field = cx.debug_bounds("setting-item-field-5-5-0").unwrap();
+        let api_key_row = cx.debug_bounds("setting-item-5-6-0").unwrap();
+        let api_key_label = cx.debug_bounds("setting-item-label-5-6-0").unwrap();
+        let api_key_field = cx.debug_bounds("setting-item-field-5-6-0").unwrap();
         let api_key_input = cx
             .debug_bounds("setting-bound-input-translation-api-key-microsoft")
             .unwrap();
-        let endpoint_row = cx.debug_bounds("setting-item-5-5-1").unwrap();
-        let endpoint_label = cx.debug_bounds("setting-item-label-5-5-1").unwrap();
-        let endpoint_field = cx.debug_bounds("setting-item-field-5-5-1").unwrap();
+        let endpoint_row = cx.debug_bounds("setting-item-5-6-1").unwrap();
+        let endpoint_label = cx.debug_bounds("setting-item-label-5-6-1").unwrap();
+        let endpoint_field = cx.debug_bounds("setting-item-field-5-6-1").unwrap();
         let endpoint_input = cx
             .debug_bounds("setting-bound-input-translation-base-url-microsoft")
             .unwrap();
-        let region_row = cx.debug_bounds("setting-item-5-5-2").unwrap();
-        let region_label = cx.debug_bounds("setting-item-label-5-5-2").unwrap();
-        let region_field = cx.debug_bounds("setting-item-field-5-5-2").unwrap();
+        let region_row = cx.debug_bounds("setting-item-5-6-2").unwrap();
+        let region_label = cx.debug_bounds("setting-item-label-5-6-2").unwrap();
+        let region_field = cx.debug_bounds("setting-item-field-5-6-2").unwrap();
         let region_input = cx
             .debug_bounds("setting-bound-input-translation-microsoft-region")
             .unwrap();

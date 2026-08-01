@@ -19,6 +19,7 @@ macro_rules! fl {
 }
 
 pub mod command_palette;
+pub mod document_browser;
 pub mod new_tab;
 pub mod pane;
 pub mod theme_selector;

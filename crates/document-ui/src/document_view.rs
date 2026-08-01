@@ -1024,6 +1024,7 @@ impl DocumentSidebar {
 pub struct DocumentDockSnapshot {
     pub left_sidebar: Option<DocumentSidebar>,
     pub ai_panel_open: bool,
+    pub tool_rail_width: f32,
     pub widths: SidebarWidths,
 }
 
@@ -1032,6 +1033,7 @@ impl Default for DocumentDockSnapshot {
         Self {
             left_sidebar: None,
             ai_panel_open: false,
+            tool_rail_width: 0.0,
             widths: default_sidebar_widths(),
         }
     }
@@ -1048,7 +1050,7 @@ impl DocumentDockSnapshot {
         } else {
             0.0
         };
-        left + right
+        self.tool_rail_width.max(0.0) + left + right
     }
 }
 

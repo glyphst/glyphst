@@ -76,7 +76,6 @@ pub(super) fn build_popup_menu(
 #[derive(IntoElement)]
 pub(super) struct WorkspaceTitleBar {
     workspace: Entity<Workspace>,
-    expanded: bool,
     open_menu: Option<WorkspaceMenu>,
     popup_menu: Option<Entity<PopupMenu>>,
     active_tab_label: Option<SharedString>,
@@ -85,14 +84,12 @@ pub(super) struct WorkspaceTitleBar {
 impl WorkspaceTitleBar {
     pub(super) fn new(
         workspace: Entity<Workspace>,
-        expanded: bool,
         open_menu: Option<WorkspaceMenu>,
         popup_menu: Option<Entity<PopupMenu>>,
         active_tab_label: Option<SharedString>,
     ) -> Self {
         Self {
             workspace,
-            expanded,
             open_menu,
             popup_menu,
             active_tab_label,
@@ -125,7 +122,7 @@ impl WorkspaceTitleBar {
                     .compact()
                     .ghost()
                     .icon(icon)
-                    .label(label)
+                    .tooltip(label)
                     .selected(active)
                     .debug_selector(move || id.to_string())
                     .on_click(move |_, window, cx| {
@@ -145,23 +142,6 @@ impl WorkspaceTitleBar {
             })
             .into_any_element()
     }
-
-    fn menu_toggle_button(workspace: Entity<Workspace>) -> AnyElement {
-        Button::new("workspace-menu-toggle")
-            .small()
-            .compact()
-            .ghost()
-            .icon(IconName::Menu)
-            .tooltip(crate::fl!("toolbar-show-menus"))
-            .debug_selector(|| "workspace-menu-toggle".to_string())
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                workspace.update(cx, |workspace, cx| {
-                    workspace.open_title_bar_menu(WorkspaceMenu::Glyphst, window, cx);
-                });
-            })
-            .into_any_element()
-    }
 }
 
 impl RenderOnce for WorkspaceTitleBar {
@@ -172,64 +152,54 @@ impl RenderOnce for WorkspaceTitleBar {
                 .then(|| self.popup_menu.clone())
                 .flatten()
         };
-        let controls = if self.expanded {
-            div()
-                .h_full()
-                .flex()
-                .items_center()
-                .gap_1()
-                .children([
-                    Self::menu_button(
-                        "workspace-menu-glyphst",
-                        crate::fl!("toolbar-menu-glyphst").into(),
-                        IconName::AppWindow,
-                        WorkspaceMenu::Glyphst,
-                        workspace.clone(),
-                        self.open_menu == Some(WorkspaceMenu::Glyphst),
-                        popup_for(WorkspaceMenu::Glyphst),
-                    ),
-                    Self::menu_button(
-                        "workspace-menu-file",
-                        crate::fl!("toolbar-menu-file").into(),
-                        IconName::File,
-                        WorkspaceMenu::File,
-                        workspace.clone(),
-                        self.open_menu == Some(WorkspaceMenu::File),
-                        popup_for(WorkspaceMenu::File),
-                    ),
-                    Self::menu_button(
-                        "workspace-menu-tab",
-                        crate::fl!("toolbar-menu-tab").into(),
-                        IconName::Plus,
-                        WorkspaceMenu::Tabs,
-                        workspace.clone(),
-                        self.open_menu == Some(WorkspaceMenu::Tabs),
-                        popup_for(WorkspaceMenu::Tabs),
-                    ),
-                ])
-                .into_any_element()
-        } else {
-            div()
-                .h_full()
-                .flex()
-                .min_w_0()
-                .items_center()
-                .gap_1()
-                .child(Self::menu_toggle_button(workspace.clone()))
-                .when_some(self.active_tab_label, |this, label| {
-                    this.child(
-                        div()
-                            .min_w_0()
-                            .max_w(px(360.0))
-                            .truncate()
-                            .px_1()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(label),
-                    )
-                })
-                .into_any_element()
-        };
+        let controls = div()
+            .h_full()
+            .flex()
+            .min_w_0()
+            .items_center()
+            .gap_1()
+            .children([
+                Self::menu_button(
+                    "workspace-menu-glyphst",
+                    crate::fl!("toolbar-menu-glyphst").into(),
+                    IconName::Menu,
+                    WorkspaceMenu::Glyphst,
+                    workspace.clone(),
+                    self.open_menu == Some(WorkspaceMenu::Glyphst),
+                    popup_for(WorkspaceMenu::Glyphst),
+                ),
+                Self::menu_button(
+                    "workspace-menu-file",
+                    crate::fl!("toolbar-menu-file").into(),
+                    IconName::FolderOpen,
+                    WorkspaceMenu::File,
+                    workspace.clone(),
+                    self.open_menu == Some(WorkspaceMenu::File),
+                    popup_for(WorkspaceMenu::File),
+                ),
+                Self::menu_button(
+                    "workspace-menu-tab",
+                    crate::fl!("toolbar-menu-tab").into(),
+                    IconName::Plus,
+                    WorkspaceMenu::Tabs,
+                    workspace.clone(),
+                    self.open_menu == Some(WorkspaceMenu::Tabs),
+                    popup_for(WorkspaceMenu::Tabs),
+                ),
+            ])
+            .when_some(self.active_tab_label, |this, label| {
+                this.child(
+                    div()
+                        .min_w_0()
+                        .max_w(px(360.0))
+                        .truncate()
+                        .px_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(label),
+                )
+            })
+            .into_any_element();
         let collapse_workspace = workspace;
 
         TitleBar::new().child(

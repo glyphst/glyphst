@@ -904,7 +904,7 @@ impl Pane {
 
     fn create_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Tab {
         let focus_handle = self.focus_handle.clone();
-        let new_tab = cx.new(|cx| NewTab::new(focus_handle.clone(), cx));
+        let new_tab = cx.new(|cx| NewTab::new(focus_handle.clone(), window, cx));
         self.subscribe_to_new_tab(&new_tab, window, cx);
         let tab = Tab::NewTab(new_tab);
         self.register_tab_focus_handle(&tab, focus_handle);
