@@ -29,8 +29,8 @@ use crate::{
     document_browser::{DocumentBrowser, DocumentBrowserEvent},
     document_view::{
         CloseTab, DocumentSidebar, DocumentView, DocumentViewEvent, OpenFile, OpenKeybindings,
-        OpenNewTab, OpenSettings, ToggleAiPanel, ToggleCommandPalette, ToggleNotes,
-        ToggleThumbnailSidebar, ToggleToc,
+        OpenNewTab, OpenSettings, OpenWithSystemPicker, ToggleAiPanel, ToggleCommandPalette,
+        ToggleNotes, ToggleThumbnailSidebar, ToggleToc,
     },
     library::{DocumentPosition, normalize_path},
     pane::{
@@ -438,9 +438,6 @@ impl Workspace {
                     {
                         eprintln!("failed to open selected document: {error:#}");
                     }
-                }
-                DocumentBrowserEvent::UseSystemPicker => {
-                    this.open_system_file_picker(cx);
                 }
                 DocumentBrowserEvent::Dismissed => {
                     this.close_document_browser(window, cx);
@@ -1638,6 +1635,9 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
                 this.open_file(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenWithSystemPicker, _, cx| {
+                this.open_system_file_picker(cx);
             }))
             .on_action(cx.listener(|this, _: &OpenNewTab, window, cx| {
                 this.open_new_tab(window, cx);

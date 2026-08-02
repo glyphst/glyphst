@@ -369,6 +369,17 @@ impl RenderCache {
         rotation: DocumentRotation,
         render_scale: f32,
     ) -> Option<Arc<RenderImage>> {
+        self.scaled_render_with_key(doc_id, page_idx, rotation, render_scale)
+            .map(|(_, image)| image)
+    }
+
+    fn scaled_render_with_key(
+        &mut self,
+        doc_id: u64,
+        page_idx: usize,
+        rotation: DocumentRotation,
+        render_scale: f32,
+    ) -> Option<(RenderKey, Arc<RenderImage>)> {
         let index = self
             .renders
             .iter()
@@ -385,7 +396,8 @@ impl RenderCache {
             })
             .map(|(index, _)| index)?;
 
-        Some(self.touch_render(index))
+        let key = self.renders[index].key;
+        Some((key, self.touch_render(index)))
     }
 
     fn insert_render(
@@ -1026,6 +1038,11 @@ pub struct DocumentDockSnapshot {
     pub ai_panel_open: bool,
     pub tool_rail_width: f32,
     pub widths: SidebarWidths,
+    /// The workspace is continuously changing the document viewport as a dock
+    /// opens, closes, or switches width. PDF geometry still follows the live
+    /// viewport, but raster requests are held at a cached size until motion
+    /// settles so intermediate full-screen renders cannot evict one another.
+    pub layout_motion_active: bool,
 }
 
 impl Default for DocumentDockSnapshot {
@@ -1035,6 +1052,7 @@ impl Default for DocumentDockSnapshot {
             ai_panel_open: false,
             tool_rail_width: 0.0,
             widths: default_sidebar_widths(),
+            layout_motion_active: false,
         }
     }
 }

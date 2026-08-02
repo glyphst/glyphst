@@ -5,9 +5,6 @@ pub mod ai_panel {
 pub mod menu {
     gpui::actions!(menu, [Confirm, Cancel, SelectNext, SelectPrev, Remove]);
 }
-pub mod document_browser {
-    gpui::actions!(document_browser, [OpenSelected, GoUp]);
-}
 pub mod new_tab {
     gpui::actions!(
         new_tab,
@@ -104,6 +101,7 @@ pub mod document_viewer {
             OpenHistory,
             OpenBookmarks,
             OpenFile,
+            OpenWithSystemPicker,
             OpenNewTab,
             OpenQuickAsk,
             OpenGoToPage,

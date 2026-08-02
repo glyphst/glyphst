@@ -102,6 +102,7 @@ impl WorkspaceDockState {
             ai_panel_open,
             tool_rail_width,
             widths,
+            layout_motion_active: false,
         }
     }
 
@@ -643,15 +644,16 @@ impl Workspace {
         let loading = self.active_pane.read(cx).active_tab_is_loading();
         let docks_visible = active_document_view.is_some() || loading;
         let tool_rail_visible = active_document_view.is_some();
-        let snapshot = self.docks.snapshot(
+        let mut snapshot = self.docks.snapshot(
             window.bounds().size.width.as_f32(),
             docks_visible,
             tool_rail_visible,
         );
-        self.sync_visible_document_docks(snapshot, cx);
         let now = Instant::now();
         let (left_render_width, right_render_width, animating) =
             self.docks.update_motion(snapshot, now, cx.reduce_motion());
+        snapshot.layout_motion_active = animating;
+        self.sync_visible_document_docks(snapshot, cx);
         if animating {
             window.request_animation_frame();
         }

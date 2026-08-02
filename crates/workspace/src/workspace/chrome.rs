@@ -9,7 +9,7 @@ use gpui_component::{
 };
 
 use crate::{
-    document_view::{CloseTab, OpenFile, OpenNewTab, OpenSettings},
+    document_view::{CloseTab, OpenFile, OpenNewTab, OpenSettings, OpenWithSystemPicker},
     icons::IconName,
     pane::{SplitDown, SplitRight},
 };
@@ -38,6 +38,11 @@ fn file_menu(menu: PopupMenu) -> PopupMenu {
         crate::fl!("toolbar-open-file"),
         IconName::File,
         Box::new(OpenFile),
+    )
+    .menu_with_icon(
+        crate::fl!("toolbar-open-system-picker"),
+        IconName::FolderOpen,
+        Box::new(OpenWithSystemPicker),
     )
 }
 

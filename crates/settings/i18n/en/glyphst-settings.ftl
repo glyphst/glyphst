@@ -344,7 +344,7 @@ new-tab-remove-from-recents = Remove from Recents
 
 ## Document browser
 
-document-browser-filter-placeholder = Filter this folder…
+document-browser-filter-placeholder = Search folders and documents…
 document-browser-home = Home
 document-browser-documents = Documents
 document-browser-downloads = Downloads
@@ -354,10 +354,9 @@ document-browser-read-error = Could not read { $path }: { $error }
 document-browser-retry = Retry
 document-browser-empty-folder = No PDF or EPUB documents in this folder
 document-browser-no-results = No matching documents or folders
-document-browser-show-dotfiles = Show dotfiles
-document-browser-hide-dotfiles = Hide dotfiles
-document-browser-keyboard-hint = ↑↓ select   Enter/→ open   ← up   Esc close
-document-browser-system-picker = System picker…
+document-browser-navigate = Navigate
+document-browser-up = Up
+document-browser-open = Open
 
 ## Notes
 
@@ -376,6 +375,7 @@ toolbar-show-menus = Show application menus
 toolbar-open-settings = Open Settings
 toolbar-quit-glyphst = Quit Glyphst Reader
 toolbar-open-file = Open File
+toolbar-open-system-picker = Open with System Picker…
 toolbar-new-tab = New Tab
 toolbar-close-tab = Close Tab
 toolbar-split-right = Split Right

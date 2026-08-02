@@ -4,7 +4,8 @@ use super::{
     DocumentPage, DocumentView, Glyph, RegionDragState, RegionImageExport, RenderCache, RenderKey,
     SearchMatch, SearchState, SurfaceRenderKeys, TextChunk, TextFormatBlock, TextIndexState,
     TextLine, TranslationCardState, TranslationStatus, clear_copied_region_selection,
-    reset_translation_cards_for_document_replacement, retain_valid_annotation_id,
+    page_render::should_start_viewport_render, reset_translation_cards_for_document_replacement,
+    retain_valid_annotation_id,
 };
 use glyphst_ai::ai_chat::{MentionKind, MentionReference};
 use glyphst_core::{
@@ -643,6 +644,41 @@ fn render_cache_resize_churn_keeps_current_viewport_and_thumbnail_sizes() {
     assert!(cache.render(fullscreen).is_none());
     assert!(cache.render(current_viewport).is_some());
     assert!(cache.render(visible_thumbnail).is_some());
+}
+
+#[test]
+fn dock_motion_reuses_a_fallback_then_requests_the_settled_size() {
+    assert!(!should_start_viewport_render(false, false, true));
+    assert!(should_start_viewport_render(false, true, true));
+    assert!(should_start_viewport_render(false, false, false));
+    assert!(!should_start_viewport_render(true, true, true));
+}
+
+#[test]
+fn render_cache_reports_and_protects_the_texture_used_during_resize() {
+    let fallback = RenderKey {
+        doc_id: 1,
+        page_idx: 0,
+        rotation: DocumentRotation::Degrees0,
+        physical_width: 5_000,
+        physical_height: 4_000,
+    };
+    let settled = RenderKey {
+        physical_width: 6_000,
+        ..fallback
+    };
+    let mut cache = RenderCache::new();
+    cache.insert_render(fallback, 1.0, test_render_image());
+
+    let (resolved, _) = cache
+        .scaled_render_with_key(1, 0, DocumentRotation::Degrees0, 1.2)
+        .expect("the previous viewport raster should be reusable");
+    assert!(resolved == fallback);
+
+    cache.set_protected_renders(1, [fallback, settled]);
+    cache.insert_render(settled, 1.2, test_render_image());
+    assert!(cache.render(fallback).is_some());
+    assert!(cache.render(settled).is_some());
 }
 
 #[test]

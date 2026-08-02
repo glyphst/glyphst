@@ -324,7 +324,7 @@ new-tab-remove-from-recents = 从最近记录中移除
 
 ## Document browser
 
-document-browser-filter-placeholder = 筛选此文件夹…
+document-browser-filter-placeholder = 搜索文件夹和文档…
 document-browser-home = 主目录
 document-browser-documents = 文档
 document-browser-downloads = 下载
@@ -334,10 +334,9 @@ document-browser-read-error = 无法读取 { $path }：{ $error }
 document-browser-retry = 重试
 document-browser-empty-folder = 此文件夹中没有 PDF 或 EPUB 文档
 document-browser-no-results = 没有匹配的文档或文件夹
-document-browser-show-dotfiles = 显示点文件
-document-browser-hide-dotfiles = 隐藏点文件
-document-browser-keyboard-hint = ↑↓ 选择   Enter/→ 打开   ← 返回上级   Esc 关闭
-document-browser-system-picker = 系统文件选择器…
+document-browser-navigate = 导航
+document-browser-up = 返回上级
+document-browser-open = 打开
 
 ## Notes
 
@@ -356,6 +355,7 @@ toolbar-show-menus = 显示应用菜单
 toolbar-open-settings = 打开设置
 toolbar-quit-glyphst = 退出 Glyphst Reader
 toolbar-open-file = 打开文件
+toolbar-open-system-picker = 使用系统文件选择器打开…
 toolbar-new-tab = 新建标签页
 toolbar-close-tab = 关闭标签页
 toolbar-split-right = 向右拆分

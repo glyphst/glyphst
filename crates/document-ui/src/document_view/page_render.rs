@@ -1,5 +1,13 @@
 use super::*;
 
+pub(super) fn should_start_viewport_render(
+    has_pending_render: bool,
+    request_exact: bool,
+    has_fallback: bool,
+) -> bool {
+    !has_pending_render && (request_exact || !has_fallback)
+}
+
 impl DocumentView {
     pub(super) fn update_render_cache_protection(&self, cx: &mut Context<Self>) {
         let mut protected_renders = HashSet::new();
@@ -71,27 +79,63 @@ impl DocumentView {
         key: RenderKey,
         cx: &mut Context<Self>,
     ) -> Option<Arc<RenderImage>> {
+        self.cached_or_request_viewport_render(key, true, cx).0
+    }
+
+    /// Resolve a page image while optionally suppressing a new exact-size
+    /// raster request. During a dock tween the page is painted from the
+    /// nearest cached texture and scaled to the live bounds; once the tween
+    /// finishes, the exact final raster is requested and replaces the fallback
+    /// atomically. The returned key identifies the texture that was actually
+    /// used so callers can protect it from cache eviction.
+    pub(super) fn cached_or_request_viewport_render(
+        &mut self,
+        key: RenderKey,
+        request_exact: bool,
+        cx: &mut Context<Self>,
+    ) -> (Option<Arc<RenderImage>>, Option<RenderKey>) {
         if let Some(image) = cx.global_mut::<RenderCache>().render(key) {
-            return Some(image);
+            return (Some(image), Some(key));
         }
 
-        if !self.pending_renders.iter().any(|pending| {
+        let has_pending_render = self.pending_renders.iter().any(|pending| {
             pending.key.page_idx == key.page_idx && pending.key.rotation == key.rotation
-        }) {
-            self.start_background_render(key, cx);
-        }
+        });
         let (page_width, _) = self.page_dimensions(key.page_idx);
         let render_scale = key.physical_width as f32 / page_width;
-        let render_cache = cx.global_mut::<RenderCache>();
-        if let Some(image) =
-            render_cache.scaled_render(self.doc_id, key.page_idx, key.rotation, render_scale)
-        {
-            return Some(image);
+        let fallback = {
+            let render_cache = cx.global_mut::<RenderCache>();
+            render_cache.scaled_render_with_key(
+                self.doc_id,
+                key.page_idx,
+                key.rotation,
+                render_scale,
+            )
+        };
+
+        // A cached image keeps motion visually continuous, so intermediate
+        // exact-size work can wait. With no fallback we still bootstrap one
+        // render; otherwise a document opened during motion could stay blank.
+        if should_start_viewport_render(has_pending_render, request_exact, fallback.is_some()) {
+            self.start_background_render(key, cx);
         }
 
-        self.previous_doc_id.and_then(|previous_doc_id| {
-            render_cache.scaled_render(previous_doc_id, key.page_idx, key.rotation, render_scale)
-        })
+        if let Some((fallback_key, image)) = fallback {
+            return (Some(image), Some(fallback_key));
+        }
+
+        let previous = self.previous_doc_id.and_then(|previous_doc_id| {
+            cx.global_mut::<RenderCache>().scaled_render_with_key(
+                previous_doc_id,
+                key.page_idx,
+                key.rotation,
+                render_scale,
+            )
+        });
+        match previous {
+            Some((fallback_key, image)) => (Some(image), Some(fallback_key)),
+            None => (None, None),
+        }
     }
 
     fn insert_cached_render(

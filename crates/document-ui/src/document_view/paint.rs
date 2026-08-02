@@ -360,8 +360,9 @@ impl DocumentView {
             .extend(visible_page_renders.iter().map(|(_, _, key)| *key));
         self.update_render_cache_protection(cx);
 
-        if let (Some((first, _, _)), Some((last, _, _))) =
-            (visible_page_renders.first(), visible_page_renders.last())
+        if !self.dock_snapshot.layout_motion_active
+            && let (Some((first, _, _)), Some((last, _, _))) =
+                (visible_page_renders.first(), visible_page_renders.last())
         {
             let start = first.saturating_sub(1);
             let end = (*last + 1).min(self.pages.len().saturating_sub(1));
@@ -381,13 +382,26 @@ impl DocumentView {
         let mut pages = Vec::with_capacity(visible_page_renders.len());
         let mut has_rendered_page = false;
         for (_, image_bounds, key) in visible_page_renders {
-            let image = self.cached_or_request_render(key, cx);
+            let (image, fallback_key) = self.cached_or_request_viewport_render(
+                key,
+                !self.dock_snapshot.layout_motion_active,
+                cx,
+            );
+            if let Some(fallback_key) = fallback_key
+                && fallback_key.doc_id == self.doc_id
+            {
+                self.viewport_render_keys.insert(fallback_key);
+            }
             has_rendered_page |= image.is_some();
             pages.push(PaintPage {
                 bounds: image_bounds,
                 image,
             });
         }
+        // Desired keys were protected before resolution so a final render can
+        // land safely. Add the actual fallback keys as well so cache pressure
+        // from thumbnails or adjacent pages cannot blank the animated view.
+        self.update_render_cache_protection(cx);
         if has_rendered_page {
             self.start_text_indexing(cx);
         }

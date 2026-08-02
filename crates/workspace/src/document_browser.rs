@@ -5,20 +5,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use glyphst_actions::{
-    document_browser::{GoUp, OpenSelected},
-    menu::{Cancel, Confirm, SelectNext, SelectPrev},
-};
 use glyphst_core::DocumentFormat;
 use gpui::{
-    AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent,
+    AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeystrokeEvent,
     MouseButton, MouseDownEvent, Render, ScrollStrategy, SharedString, Subscription, Task,
     UniformListScrollHandle, Window, div, prelude::*, px, relative, transparent_black,
     uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Selectable as _, Sizable as _, StyledExt as _,
-    button::{Button, ButtonVariants as _},
+    ActiveTheme as _, Sizable as _, StyledExt as _, ThemeColor,
+    button::Button,
     input::{Input, InputEvent, InputState},
     skeleton::Skeleton,
 };
@@ -30,10 +26,10 @@ use crate::{
     settings::ui_rems,
 };
 
-const BROWSER_WIDTH: f32 = 720.0;
-const BROWSER_HEIGHT: f32 = 520.0;
-const PLACES_WIDTH: f32 = 172.0;
-const ROW_HEIGHT: f32 = 38.0;
+const BROWSER_WIDTH: f32 = 680.0;
+const BROWSER_HEIGHT: f32 = 414.0;
+const PLACES_WIDTH: f32 = 196.0;
+const ROW_HEIGHT: f32 = 32.0;
 const MAX_RECENT_PLACES: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,7 +80,6 @@ enum LoadState {
 #[derive(Clone, Debug)]
 pub enum DocumentBrowserEvent {
     Open(PathBuf),
-    UseSystemPicker,
     Dismissed,
 }
 
@@ -101,6 +96,7 @@ pub struct DocumentBrowser {
     scroll: UniformListScrollHandle,
     load_task: Option<Task<()>>,
     _input_subscription: Subscription,
+    _key_interceptor: Subscription,
 }
 
 impl DocumentBrowser {
@@ -124,9 +120,10 @@ impl DocumentBrowser {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(crate::fl!("document-browser-filter-placeholder"))
-                .submit_on_enter(true)
         });
         let _input_subscription = cx.subscribe_in(&input, window, Self::on_input_event);
+        let key_listener = cx.listener(Self::on_keystroke);
+        let _key_interceptor = cx.intercept_keystrokes(key_listener);
         let mut browser = Self {
             input: input.clone(),
             current_dir: initial_dir.clone(),
@@ -140,6 +137,7 @@ impl DocumentBrowser {
             scroll: UniformListScrollHandle::new(),
             load_task: None,
             _input_subscription,
+            _key_interceptor,
         };
         browser.load_directory(initial_dir, cx);
 
@@ -301,26 +299,43 @@ impl DocumentBrowser {
     }
 
     fn update_filter(&mut self, cx: &mut Context<Self>) {
-        let query = self.input.read(cx).value().to_lowercase();
-        self.filtered = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| query.is_empty() || entry.name.to_lowercase().contains(&query))
-            .map(|(index, _)| index)
-            .collect();
-        self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+        let query = self.input.read(cx).value().to_string();
+        self.filtered = Self::filter_indices(&query, &self.entries);
+        self.selected = 0;
         if !self.filtered.is_empty() {
             self.scroll
-                .scroll_to_item(self.selected, ScrollStrategy::Center);
+                .scroll_to_item(self.selected, ScrollStrategy::Nearest);
         }
+    }
+
+    fn filter_indices(query: &str, entries: &[BrowserEntry]) -> Vec<usize> {
+        let query = query.trim().to_lowercase();
+        let mut ranked = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                if query.is_empty() {
+                    return Some((1, index));
+                }
+                let name = entry.name.to_lowercase();
+                if name.starts_with(&query) {
+                    Some((0, index))
+                } else if name.contains(&query) {
+                    Some((1, index))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|&(rank, index)| (rank, index));
+        ranked.into_iter().map(|(_, index)| index).collect()
     }
 
     fn on_input_event(
         &mut self,
         _: &gpui::Entity<InputState>,
         event: &InputEvent,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
@@ -328,7 +343,7 @@ impl DocumentBrowser {
                 self.update_filter(cx);
                 cx.notify();
             }
-            InputEvent::PressEnter { .. } => self.open_selected(window, cx),
+            InputEvent::PressEnter { .. } => {}
             InputEvent::CompletionAccepted { .. }
             | InputEvent::SpanHoverChanged { .. }
             | InputEvent::Focus
@@ -369,38 +384,17 @@ impl DocumentBrowser {
         }
     }
 
-    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_selected(window, cx);
-    }
-
-    fn open_selected_action(
-        &mut self,
-        _: &OpenSelected,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_selected(window, cx);
-    }
-
-    fn go_up_action(&mut self, _: &GoUp, window: &mut Window, cx: &mut Context<Self>) {
-        self.go_up(window, cx);
-    }
-
-    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(DocumentBrowserEvent::Dismissed);
-    }
-
-    fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_next(&mut self, cx: &mut Context<Self>) {
         if self.filtered.is_empty() {
             return;
         }
         self.selected = (self.selected + 1) % self.filtered.len();
         self.scroll
-            .scroll_to_item(self.selected, ScrollStrategy::Center);
+            .scroll_to_item(self.selected, ScrollStrategy::Nearest);
         cx.notify();
     }
 
-    fn select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_prev(&mut self, cx: &mut Context<Self>) {
         if self.filtered.is_empty() {
             return;
         }
@@ -409,18 +403,74 @@ impl DocumentBrowser {
             .checked_sub(1)
             .unwrap_or(self.filtered.len() - 1);
         self.scroll
-            .scroll_to_item(self.selected, ScrollStrategy::Center);
+            .scroll_to_item(self.selected, ScrollStrategy::Nearest);
         cx.notify();
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.key.as_str() == "backspace" && self.input.read(cx).value().is_empty() {
-            self.go_up(window, cx);
+    fn on_keystroke(
+        &mut self,
+        event: &KeystrokeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.input.focus_handle(cx).is_focused(window) {
+            return;
+        }
+
+        let key = event.keystroke.key.as_str();
+        let handled = match key {
+            "up" => {
+                self.select_prev(cx);
+                true
+            }
+            "down" => {
+                self.select_next(cx);
+                true
+            }
+            "left" => {
+                self.go_up(window, cx);
+                true
+            }
+            "right" | "enter" => {
+                self.open_selected(window, cx);
+                true
+            }
+            "escape" => {
+                cx.emit(DocumentBrowserEvent::Dismissed);
+                true
+            }
+            "backspace" if self.input.read(cx).value().is_empty() => {
+                self.go_up(window, cx);
+                true
+            }
+            "h" if event.keystroke.modifiers.control => {
+                self.show_hidden = !self.show_hidden;
+                self.load_directory(self.current_dir.clone(), cx);
+                true
+            }
+            _ => false,
+        };
+        if handled {
             cx.stop_propagation();
         }
     }
 
     fn breadcrumbs(&self) -> Vec<(SharedString, PathBuf)> {
+        if let Some(home) = dirs::home_dir()
+            && let Ok(relative_path) = self.current_dir.strip_prefix(&home)
+        {
+            let mut path = home.clone();
+            let mut breadcrumbs = vec![(crate::fl!("document-browser-home").into(), home)];
+            for component in relative_path.components() {
+                path.push(component.as_os_str());
+                breadcrumbs.push((
+                    component.as_os_str().to_string_lossy().into_owned().into(),
+                    path.clone(),
+                ));
+            }
+            return breadcrumbs;
+        }
+
         let mut ancestors = self.current_dir.ancestors().collect::<Vec<_>>();
         ancestors.reverse();
         ancestors
@@ -436,6 +486,73 @@ impl DocumentBrowser {
             .collect()
     }
 
+    fn key_cap(label: impl Into<SharedString>, theme: &ThemeColor) -> gpui::Div {
+        div()
+            .h(px(22.0))
+            .px(px(6.0))
+            .rounded(px(5.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.foreground.opacity(0.06))
+            .text_size(ui_rems(10.5))
+            .text_color(theme.muted_foreground.opacity(0.82))
+            .child(label.into())
+    }
+
+    fn footer_hint(
+        key: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        theme: &ThemeColor,
+    ) -> gpui::Div {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .child(Self::key_cap(key, theme))
+            .child(
+                div()
+                    .text_size(ui_rems(10.5))
+                    .text_color(theme.muted_foreground.opacity(0.7))
+                    .child(label.into()),
+            )
+    }
+
+    fn footer_hint_pair(
+        first: impl Into<SharedString>,
+        second: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        theme: &ThemeColor,
+    ) -> gpui::Div {
+        let cap = div()
+            .h(px(22.0))
+            .px(px(5.0))
+            .rounded(px(5.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(5.0))
+            .bg(theme.foreground.opacity(0.06))
+            .text_size(ui_rems(10.5))
+            .text_color(theme.muted_foreground.opacity(0.82))
+            .child(first.into())
+            .child(
+                div()
+                    .w(px(1.0))
+                    .h(px(11.0))
+                    .bg(theme.foreground.opacity(0.1)),
+            )
+            .child(second.into());
+        div().flex().items_center().gap(px(5.0)).child(cap).child(
+            div()
+                .text_size(ui_rems(10.5))
+                .text_color(theme.muted_foreground.opacity(0.7))
+                .child(label.into()),
+        )
+    }
+
     fn render_entry(
         &self,
         display_index: usize,
@@ -445,62 +562,71 @@ impl DocumentBrowser {
         let theme = cx.theme().colors;
         let selected = self.selected == display_index;
         let path = entry.path.clone();
+        let kind = entry.kind;
         div()
-            .id(("document-browser-entry", display_index))
             .h(px(ROW_HEIGHT))
             .w_full()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .cursor_pointer()
-            .bg(if selected {
-                theme.list_active
-            } else {
-                transparent_black()
-            })
-            .hover(move |style| style.bg(theme.list_hover))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.selected = display_index;
-                    if event.click_count >= 2 {
-                        if let Some(index) = this.filtered.get(display_index).copied()
-                            && let Some(entry) = this.entries.get(index).cloned()
-                        {
-                            if entry.kind == EntryKind::Directory {
-                                this.navigate_to(path.clone(), window, cx);
-                            } else {
-                                cx.emit(DocumentBrowserEvent::Open(path.clone()));
-                            }
-                        }
+            .px(px(8.0))
+            .py(px(2.0))
+            .child(
+                div()
+                    .id(("document-browser-entry", display_index))
+                    .size_full()
+                    .rounded(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(8.0))
+                    .cursor_pointer()
+                    .bg(if selected {
+                        theme.list_active
                     } else {
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                }),
-            )
-            .child(Icon::new(entry.kind.icon()).size(ui_rems(15.0)).text_color(
-                if entry.kind == EntryKind::Directory {
-                    theme.primary
-                } else {
-                    theme.muted_foreground
-                },
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(theme.foreground)
-                    .child(entry.name),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(ui_rems(11.0))
-                    .text_color(theme.muted_foreground)
-                    .child(entry.kind.label()),
+                        transparent_black()
+                    })
+                    .when(selected, |row| {
+                        row.border_1().border_color(theme.list_active_border)
+                    })
+                    .hover(move |style| style.bg(theme.list_hover))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            if kind == EntryKind::Directory {
+                                this.navigate_to(path.clone(), window, cx);
+                            } else if event.click_count >= 2 {
+                                cx.emit(DocumentBrowserEvent::Open(path.clone()));
+                            } else {
+                                this.selected = display_index;
+                                cx.notify();
+                            }
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        Icon::new(entry.kind.icon()).size(ui_rems(15.0)).text_color(
+                            theme
+                                .muted_foreground
+                                .opacity(if entry.kind == EntryKind::Directory {
+                                    0.86
+                                } else {
+                                    0.72
+                                }),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.foreground)
+                            .child(entry.name),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(ui_rems(10.5))
+                            .text_color(theme.muted_foreground.opacity(0.78))
+                            .child(entry.kind.label()),
+                    ),
             )
             .into_any_element()
     }
@@ -513,49 +639,75 @@ impl DocumentBrowser {
             .flex_none()
             .flex()
             .flex_col()
-            .gap_1()
-            .p_2()
+            .gap(px(2.0))
+            .px(px(8.0))
+            .py(px(8.0))
             .border_r(px(1.0))
-            .border_color(theme.sidebar_border)
-            .bg(theme.sidebar)
+            .border_color(theme.border.opacity(0.72))
+            .bg(theme.muted.opacity(0.16))
             .child(
                 div()
-                    .px_2()
-                    .pb_1()
+                    .px(px(8.0))
+                    .pt(px(2.0))
+                    .pb(px(4.0))
                     .text_size(ui_rems(11.0))
-                    .text_color(theme.muted_foreground)
+                    .text_color(theme.muted_foreground.opacity(0.74))
                     .child(crate::fl!("document-browser-places")),
             )
             .children(self.places.iter().enumerate().map(|(index, place)| {
                 let path = place.path.clone();
-                Button::new(("document-browser-place", index))
-                    .small()
-                    .ghost()
-                    .selected(self.current_dir == place.path)
-                    .icon(IconName::FolderOpen)
-                    .label(place.label.clone())
-                    .justify_start()
+                let selected = self.current_dir == place.path;
+                div()
+                    .id(("document-browser-place", index))
+                    .h(px(28.0))
                     .w_full()
+                    .px(px(8.0))
+                    .rounded(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .text_size(ui_rems(12.5))
+                    .text_color(if selected {
+                        theme.foreground
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .when(selected, |row| {
+                        row.bg(theme.list_active)
+                            .border_1()
+                            .border_color(theme.list_active_border)
+                    })
+                    .when(!selected, |row| {
+                        row.hover(|style| style.bg(theme.list_hover))
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.navigate_to(path.clone(), window, cx);
                         cx.stop_propagation();
                     }))
+                    .child(
+                        Icon::new(IconName::FolderOpen)
+                            .size(ui_rems(14.0))
+                            .text_color(theme.muted_foreground.opacity(0.82)),
+                    )
+                    .child(div().min_w_0().truncate().child(place.label.clone()))
             }))
             .into_any_element()
     }
 
-    fn render_loading(cx: &mut Context<Self>) -> AnyElement {
+    fn render_loading(_: &mut Context<Self>) -> AnyElement {
         div()
             .size_full()
             .flex()
             .flex_col()
-            .gap_3()
-            .p_4()
-            .children((0..8).map(|index| {
+            .gap(px(4.0))
+            .px(px(16.0))
+            .py(px(8.0))
+            .children((0..7).map(|index| {
                 Skeleton::new()
-                    .h(px(18.0))
+                    .h(px(24.0))
                     .w(relative(if index % 3 == 0 { 0.68 } else { 0.9 }))
-                    .rounded(cx.theme().radius)
+                    .rounded(px(8.0))
             }))
             .into_any_element()
     }
@@ -572,7 +724,7 @@ impl DocumentBrowser {
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap_3()
+                    .gap(px(10.0))
                     .px_6()
                     .text_center()
                     .text_color(theme.muted_foreground)
@@ -649,20 +801,21 @@ impl Render for DocumentBrowser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let breadcrumbs = self.breadcrumbs();
-        let show_hidden = self.show_hidden;
+        let last_crumb = breadcrumbs.len().saturating_sub(1);
+        let open_shortcut: SharedString = if cfg!(target_os = "macos") {
+            "⌘ O".into()
+        } else {
+            "Ctrl O".into()
+        };
+        let can_open = matches!(self.load_state, LoadState::Ready) && !self.filtered.is_empty();
+        let band = theme.muted.opacity(0.28);
+        let hairline = theme.border.opacity(0.72);
 
         div()
             .id("document-browser")
             .debug_selector(|| "document-browser".to_string())
             .key_context("DocumentBrowser")
             .track_focus(&self.input.focus_handle(cx))
-            .on_action(cx.listener(Self::confirm))
-            .on_action(cx.listener(Self::cancel))
-            .on_action(cx.listener(Self::select_next))
-            .on_action(cx.listener(Self::select_prev))
-            .on_action(cx.listener(Self::open_selected_action))
-            .on_action(cx.listener(Self::go_up_action))
-            .on_key_down(cx.listener(Self::on_key_down))
             .w(px(BROWSER_WIDTH))
             .h(px(BROWSER_HEIGHT))
             .max_w(relative(0.92))
@@ -671,101 +824,65 @@ impl Render for DocumentBrowser {
             .flex_col()
             .overflow_hidden()
             .popover_style(cx)
-            .rounded(cx.theme().radius_lg)
+            .rounded(px(14.0))
+            .border_1()
+            .border_color(hairline)
+            .bg(theme.popover)
             .shadow_xl()
-            .text_size(ui_rems(13.0))
+            .text_size(ui_rems(12.5))
+            .text_color(theme.popover_foreground)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
-                    .h(px(48.0))
+                    .h(px(46.0))
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .px_3()
+                    .gap(px(10.0))
+                    .pl(px(12.0))
+                    .pr(px(10.0))
                     .border_b(px(1.0))
-                    .border_color(theme.border.opacity(0.7))
-                    .bg(theme.muted.opacity(0.35))
-                    .child(
-                        Icon::new(IconName::Search)
-                            .size(ui_rems(15.0))
-                            .text_color(theme.muted_foreground),
-                    )
+                    .border_color(hairline)
+                    .bg(band)
+                    .child(Self::key_cap(open_shortcut, &theme))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
+                            .text_size(ui_rems(14.0))
                             .child(Input::new(&self.input).appearance(false)),
                     )
                     .child(
-                        Button::new("document-browser-hidden")
-                            .xsmall()
-                            .ghost()
-                            .selected(show_hidden)
-                            .label(if show_hidden {
-                                crate::fl!("document-browser-hide-dotfiles")
-                            } else {
-                                crate::fl!("document-browser-show-dotfiles")
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_hidden = !this.show_hidden;
-                                this.load_directory(this.current_dir.clone(), cx);
+                        div()
+                            .id("document-browser-open")
+                            .h(px(22.0))
+                            .px(px(9.0))
+                            .rounded(px(5.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .bg(theme.primary)
+                            .text_size(ui_rems(11.5))
+                            .text_color(theme.primary_foreground)
+                            .when(!can_open, |chip| chip.opacity(0.55))
+                            .hover(move |style| style.bg(theme.primary_hover))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_selected(window, cx);
                                 cx.stop_propagation();
-                            })),
+                            }))
+                            .child("Enter"),
                     )
                     .child(
-                        Button::new("document-browser-close")
-                            .xsmall()
-                            .compact()
-                            .ghost()
-                            .icon(IconName::X)
-                            .tooltip(crate::fl!("close"))
+                        Self::key_cap("esc", &theme)
+                            .id("document-browser-close")
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(theme.foreground.opacity(0.1)))
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(DocumentBrowserEvent::Dismissed);
                                 cx.stop_propagation();
                             })),
-                    ),
-            )
-            .child(
-                div()
-                    .h(px(40.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_3()
-                    .border_b(px(1.0))
-                    .border_color(theme.border.opacity(0.7))
-                    .overflow_hidden()
-                    .children(
-                        breadcrumbs
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, (label, path))| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .min_w_0()
-                                    .when(index > 0, |this| {
-                                        this.child(
-                                            div()
-                                                .px_1()
-                                                .text_color(theme.muted_foreground)
-                                                .child("/"),
-                                        )
-                                    })
-                                    .child(
-                                        Button::new(("document-browser-crumb", index))
-                                            .xsmall()
-                                            .compact()
-                                            .ghost()
-                                            .label(label)
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.navigate_to(path.clone(), window, cx);
-                                                cx.stop_propagation();
-                                            })),
-                                    )
-                            }),
                     ),
             )
             .child(
@@ -779,35 +896,109 @@ impl Render for DocumentBrowser {
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
+                            .flex()
+                            .flex_col()
                             .bg(theme.background)
-                            .child(self.render_listing(window, cx)),
+                            .child(
+                                div()
+                                    .h(px(38.0))
+                                    .flex_none()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .px(px(13.0))
+                                    .overflow_hidden()
+                                    .text_size(ui_rems(11.0))
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .children(breadcrumbs.into_iter().enumerate().map(
+                                        |(index, (label, path))| {
+                                            let is_current = index == last_crumb;
+                                            let crumb = div()
+                                                .id(("document-browser-crumb", index))
+                                                .px(px(3.0))
+                                                .rounded(px(4.0))
+                                                .text_color(if is_current {
+                                                    theme.foreground.opacity(0.9)
+                                                } else {
+                                                    theme.muted_foreground.opacity(0.72)
+                                                })
+                                                .child(label);
+                                            let crumb: AnyElement = if is_current {
+                                                crumb.into_any_element()
+                                            } else {
+                                                crumb
+                                                    .cursor_pointer()
+                                                    .hover(move |style| {
+                                                        style
+                                                            .text_color(theme.foreground)
+                                                            .bg(theme.list_hover)
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.navigate_to(
+                                                                path.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                            cx.stop_propagation();
+                                                        },
+                                                    ))
+                                                    .into_any_element()
+                                            };
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .when(index > 0, |item| {
+                                                    item.child(
+                                                        div()
+                                                            .text_color(
+                                                                theme
+                                                                    .muted_foreground
+                                                                    .opacity(0.55),
+                                                            )
+                                                            .child("/"),
+                                                    )
+                                                })
+                                                .child(crumb)
+                                        },
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .child(self.render_listing(window, cx)),
+                            ),
                     ),
             )
             .child(
                 div()
-                    .h(px(42.0))
+                    .h(px(38.0))
                     .flex_none()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .px_3()
+                    .gap(px(12.0))
+                    .px(px(12.0))
                     .border_t(px(1.0))
-                    .border_color(theme.border.opacity(0.7))
-                    .bg(theme.muted.opacity(0.35))
-                    .text_size(ui_rems(11.0))
-                    .text_color(theme.muted_foreground)
-                    .child(crate::fl!("document-browser-keyboard-hint"))
-                    .child(
-                        Button::new("document-browser-system-picker")
-                            .xsmall()
-                            .outline()
-                            .label(crate::fl!("document-browser-system-picker"))
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(DocumentBrowserEvent::UseSystemPicker);
-                                cx.stop_propagation();
-                            })),
-                    ),
+                    .border_color(hairline)
+                    .bg(band)
+                    .child(Self::footer_hint_pair(
+                        "↑",
+                        "↓",
+                        crate::fl!("document-browser-navigate"),
+                        &theme,
+                    ))
+                    .child(Self::footer_hint(
+                        "←",
+                        crate::fl!("document-browser-up"),
+                        &theme,
+                    ))
+                    .child(Self::footer_hint(
+                        "→",
+                        crate::fl!("document-browser-open"),
+                        &theme,
+                    )),
             )
     }
 }
@@ -840,6 +1031,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["alpha", "beta", "Alpha.epub", "z.pdf"]
         );
+    }
+
+    #[test]
+    fn filter_ranks_prefix_matches_before_substring_matches() {
+        let entries = vec![
+            entry("my-paper.pdf", EntryKind::Pdf),
+            entry("paperwork", EntryKind::Directory),
+            entry("wallpaper.epub", EntryKind::Epub),
+        ];
+
+        let filtered = DocumentBrowser::filter_indices("paper", &entries);
+
+        assert_eq!(filtered, vec![1, 0, 2]);
     }
 
     #[test]
