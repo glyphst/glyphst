@@ -60,6 +60,7 @@ const AI_SESSIONS_V4_MIGRATION_KEY: &str = "ai_sessions_v4";
 const AI_SESSIONS_V4_VERSION: u8 = 4;
 const AI_SESSIONS_V4_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v4");
 const SIDEBAR_WIDTHS_KEY: &str = "sidebar_widths";
+const DOCUMENT_BROWSER_SIZE_KEY: &str = "document_browser_size";
 const MAX_AI_SESSIONS: usize = 200;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -725,6 +726,28 @@ impl StoredSidebarWidthsV1 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct StoredDocumentBrowserSizeV1 {
+    version: u8,
+    size: DocumentBrowserSize,
+}
+
+impl From<DocumentBrowserSize> for StoredDocumentBrowserSizeV1 {
+    fn from(size: DocumentBrowserSize) -> Self {
+        Self {
+            version: STORAGE_SCHEMA_VERSION,
+            size,
+        }
+    }
+}
+
+impl StoredDocumentBrowserSizeV1 {
+    fn into_domain(self) -> Result<DocumentBrowserSize> {
+        require_storage_version(self.version, STORAGE_SCHEMA_VERSION)?;
+        Ok(self.size)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredDocumentPreferencesV1 {
     version: u8,
@@ -1204,6 +1227,13 @@ pub struct SidebarWidths {
     pub ai: f32,
 }
 
+/// Preferred document-browser dimensions in logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DocumentBrowserSize {
+    pub width: f32,
+    pub height: f32,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentPreferences {
     pub path: PathBuf,
@@ -1228,6 +1258,7 @@ pub struct Library {
     pub notes: Vec<Note>,
     pub ai_sessions: Vec<AiSession>,
     pub sidebar_widths: Option<SidebarWidths>,
+    pub document_browser_size: Option<DocumentBrowserSize>,
     pub document_preferences: Vec<DocumentPreferences>,
     next_bookmark_id: u64,
     next_highlight_id: u64,

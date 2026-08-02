@@ -26,6 +26,8 @@ use glyphst_workspace::{
 };
 
 const APP_ID: &str = "glyphst-reader";
+const READER_WINDOW_MIN_WIDTH: f32 = 900.0;
+const READER_WINDOW_MIN_HEIGHT: f32 = 600.0;
 
 fn main() {
     if let Some(exit_code) = run_typst_worker_if_requested() {
@@ -244,7 +246,7 @@ fn open_workspace_window_inner(
     cx: &mut App,
 ) -> Result<WorkspaceWindowHandle> {
     let window_size = if path.is_some() {
-        size(px(800.0), px(1000.0))
+        size(px(READER_WINDOW_MIN_WIDTH), px(1000.0))
     } else {
         size(px(NewTab::WINDOW_WIDTH), px(NewTab::WINDOW_HEIGHT))
     };
@@ -256,6 +258,10 @@ fn open_workspace_window_inner(
         WindowOptions {
             titlebar: Some(TitleBar::title_bar_options()),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(
+                px(READER_WINDOW_MIN_WIDTH),
+                px(READER_WINDOW_MIN_HEIGHT),
+            )),
             window_background: window_settings.background_appearance(transparency_enabled),
             ..Default::default()
         },

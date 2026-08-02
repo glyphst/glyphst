@@ -1252,6 +1252,27 @@ fn persists_sidebar_widths() {
 }
 
 #[test]
+fn persists_document_browser_size() {
+    let path = temp_library_path("document-browser-size");
+    let size = DocumentBrowserSize {
+        width: 864.0,
+        height: 576.0,
+    };
+
+    {
+        let mut store = LibraryStore::open(path.clone()).unwrap();
+        store.set_document_browser_size(size).unwrap();
+    }
+
+    {
+        let store = LibraryStore::open(path.clone()).unwrap();
+        assert_eq!(store.document_browser_size(), Some(size));
+    }
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn persists_document_target_language() {
     let database_path = temp_library_path("document-language");
     let document_path = Path::new("/tmp/translated.pdf");

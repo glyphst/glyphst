@@ -1879,7 +1879,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn open_file_uses_the_in_app_document_browser(cx: &mut TestAppContext) {
+    fn escape_closes_the_document_browser_after_a_blank_area_click(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
@@ -1908,15 +1908,102 @@ mod tests {
         workspace.read_with(cx, |workspace, _| {
             assert!(workspace.document_browser.is_some());
         });
-        assert!(cx.debug_bounds("document-browser").is_some());
+        let browser_bounds = cx.debug_bounds("document-browser").unwrap();
+        let blank_footer_area = point(
+            browser_bounds.right() - px(80.0),
+            browser_bounds.bottom() - px(20.0),
+        );
+        cx.simulate_click(blank_footer_area, Modifiers::default());
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.document_browser.is_none());
+        });
+        assert!(cx.debug_bounds("document-browser").is_none());
+    }
 
+    #[gpui::test]
+    fn document_browser_resize_persists_and_temporary_window_clamps_restore(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.simulate_resize(size(px(1200.0), px(800.0)));
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.close_document_browser(window, cx);
+            workspace.open_file(window, cx);
         });
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
-        assert!(cx.debug_bounds("document-browser").is_none());
+
+        let initial = cx.debug_bounds("document-browser").unwrap();
+        assert_eq!(initial.size, size(px(680.0), px(415.0)));
+        let handle = cx
+            .debug_bounds("document-browser-resize-corner")
+            .unwrap()
+            .center();
+        let resized_pointer = point(handle.x + px(24.0), handle.y + px(20.0));
+        cx.simulate_mouse_down(handle, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(handle.x + px(8.0), handle.y + px(8.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(resized_pointer, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(resized_pointer, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let resized = cx.debug_bounds("document-browser").unwrap();
+        assert_eq!(resized.size, size(px(728.0), px(455.0)));
+        assert_eq!(resized.center(), initial.center());
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.global::<LibraryStore>().document_browser_size(),
+                Some(crate::library::DocumentBrowserSize {
+                    width: 728.0,
+                    height: 455.0,
+                })
+            );
+        });
+
+        cx.simulate_resize(size(px(700.0), px(440.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("document-browser").unwrap().size,
+            size(px(668.0), px(408.0))
+        );
+
+        cx.simulate_resize(size(px(1200.0), px(800.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("document-browser").unwrap().size,
+            size(px(728.0), px(455.0))
+        );
     }
 
     #[gpui::test]

@@ -275,6 +275,20 @@ impl LibraryStore {
         Ok(())
     }
 
+    pub(super) fn write_document_browser_size(&self, size: DocumentBrowserSize) -> Result<()> {
+        let Some(database) = &self.database else {
+            return Ok(());
+        };
+        let write_txn = database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(UI_STATE_V1_TABLE)?;
+            let encoded = encode(&StoredDocumentBrowserSizeV1::from(size))?;
+            table.insert(DOCUMENT_BROWSER_SIZE_KEY, encoded.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
     pub(super) fn write_document_preferences(
         &self,
         preferences: &DocumentPreferences,

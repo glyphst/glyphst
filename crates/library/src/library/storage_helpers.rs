@@ -412,6 +412,14 @@ fn load_shared_v1_storage(read_txn: &redb::ReadTransaction, library: &mut Librar
             Err(error) => eprintln!("failed to decode sidebar widths: {error:#}"),
         }
     }
+    if let Some(value) = table.get(DOCUMENT_BROWSER_SIZE_KEY)? {
+        match decode::<StoredDocumentBrowserSizeV1>(value.value())
+            .and_then(StoredDocumentBrowserSizeV1::into_domain)
+        {
+            Ok(size) => library.document_browser_size = Some(size),
+            Err(error) => eprintln!("failed to decode document browser size: {error:#}"),
+        }
+    }
     Ok(())
 }
 
@@ -634,6 +642,10 @@ fn migrate_legacy_storage_v1(database: &Database, library: &Library) -> Result<(
         if let Some(widths) = library.sidebar_widths {
             let encoded = encode(&StoredSidebarWidthsV1::from(widths))?;
             table.insert(SIDEBAR_WIDTHS_KEY, encoded.as_slice())?;
+        }
+        if let Some(size) = library.document_browser_size {
+            let encoded = encode(&StoredDocumentBrowserSizeV1::from(size))?;
+            table.insert(DOCUMENT_BROWSER_SIZE_KEY, encoded.as_slice())?;
         }
     }
     {

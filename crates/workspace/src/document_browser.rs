@@ -7,13 +7,14 @@ use std::{
 
 use glyphst_core::DocumentFormat;
 use gpui::{
-    AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeystrokeEvent,
-    MouseButton, MouseDownEvent, Render, ScrollStrategy, SharedString, Subscription, Task,
-    UniformListScrollHandle, Window, div, prelude::*, px, relative, transparent_black,
-    uniform_list,
+    AnyElement, App, Context, DragMoveEvent, Empty, EventEmitter, FocusHandle, Focusable,
+    IntoElement, KeystrokeEvent, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle, Window, div,
+    prelude::*, px, relative, transparent_black, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Sizable as _, StyledExt as _, ThemeColor,
+    ActiveTheme as _, FocusTrapElement as _, IconName as ComponentIconName, Sizable as _,
+    StyledExt as _, ThemeColor,
     button::Button,
     input::{Input, InputEvent, InputState},
     skeleton::Skeleton,
@@ -21,16 +22,68 @@ use gpui_component::{
 
 use crate::{
     icons::{Icon, IconName},
-    library::LibraryStore,
+    library::{DocumentBrowserSize, LibraryStore},
     scrollbar::WithScrollbar as _,
     settings::ui_rems,
 };
 
-const BROWSER_WIDTH: f32 = 680.0;
-const BROWSER_HEIGHT: f32 = 414.0;
+const BROWSER_MIN_WIDTH: f32 = 680.0;
+const BROWSER_MIN_HEIGHT: f32 = 415.0;
+const BROWSER_VIEWPORT_MARGIN: f32 = 16.0;
+const RESIZE_EDGE_SIZE: f32 = 8.0;
+const RESIZE_CORNER_SIZE: f32 = 16.0;
 const PLACES_WIDTH: f32 = 196.0;
 const ROW_HEIGHT: f32 = 32.0;
 const MAX_RECENT_PLACES: usize = 5;
+
+fn default_browser_size() -> DocumentBrowserSize {
+    DocumentBrowserSize {
+        width: BROWSER_MIN_WIDTH,
+        height: BROWSER_MIN_HEIGHT,
+    }
+}
+
+fn sanitize_preferred_size(size: DocumentBrowserSize) -> DocumentBrowserSize {
+    let default = default_browser_size();
+    DocumentBrowserSize {
+        width: if size.width.is_finite() {
+            size.width.max(BROWSER_MIN_WIDTH)
+        } else {
+            default.width
+        },
+        height: if size.height.is_finite() {
+            size.height.max(BROWSER_MIN_HEIGHT)
+        } else {
+            default.height
+        },
+    }
+}
+
+fn available_browser_size(viewport_width: f32, viewport_height: f32) -> DocumentBrowserSize {
+    DocumentBrowserSize {
+        width: (viewport_width - BROWSER_VIEWPORT_MARGIN * 2.0).max(0.0),
+        height: (viewport_height - BROWSER_VIEWPORT_MARGIN * 2.0).max(0.0),
+    }
+}
+
+fn fit_browser_size(
+    preferred: DocumentBrowserSize,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> DocumentBrowserSize {
+    // Clamp only the rendered size so a temporary compositor constraint does not
+    // overwrite the user's preferred dimensions.
+    let preferred = sanitize_preferred_size(preferred);
+    let available = available_browser_size(viewport_width, viewport_height);
+    DocumentBrowserSize {
+        width: preferred.width.min(available.width),
+        height: preferred.height.min(available.height),
+    }
+}
+
+fn clamp_resized_dimension(candidate: f32, minimum: f32, available: f32) -> f32 {
+    candidate.max(minimum).min(available.max(minimum))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntryKind {
@@ -77,6 +130,40 @@ enum LoadState {
     Error(SharedString),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResizeAxis {
+    Width,
+    Height,
+    Both,
+}
+
+impl ResizeAxis {
+    fn includes_width(self) -> bool {
+        matches!(self, Self::Width | Self::Both)
+    }
+
+    fn includes_height(self) -> bool {
+        matches!(self, Self::Height | Self::Both)
+    }
+}
+
+#[derive(Clone)]
+struct DraggedDocumentBrowser(ResizeAxis);
+
+impl Render for DraggedDocumentBrowser {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResizeDrag {
+    axis: ResizeAxis,
+    initial_pointer: Point<Pixels>,
+    initial_actual_size: DocumentBrowserSize,
+    changed: bool,
+}
+
 #[derive(Clone, Debug)]
 pub enum DocumentBrowserEvent {
     Open(PathBuf),
@@ -85,6 +172,9 @@ pub enum DocumentBrowserEvent {
 
 pub struct DocumentBrowser {
     input: gpui::Entity<InputState>,
+    modal_focus_handle: FocusHandle,
+    preferred_size: DocumentBrowserSize,
+    resize_drag: Option<ResizeDrag>,
     current_dir: PathBuf,
     places: Vec<Place>,
     entries: Vec<BrowserEntry>,
@@ -124,8 +214,16 @@ impl DocumentBrowser {
         let _input_subscription = cx.subscribe_in(&input, window, Self::on_input_event);
         let key_listener = cx.listener(Self::on_keystroke);
         let _key_interceptor = cx.intercept_keystrokes(key_listener);
+        let preferred_size = cx
+            .global::<LibraryStore>()
+            .document_browser_size()
+            .map(sanitize_preferred_size)
+            .unwrap_or_else(default_browser_size);
         let mut browser = Self {
             input: input.clone(),
+            modal_focus_handle: cx.focus_handle(),
+            preferred_size,
+            resize_drag: None,
             current_dir: initial_dir.clone(),
             places: Self::build_places(cx),
             entries: Vec::new(),
@@ -413,11 +511,23 @@ impl DocumentBrowser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.input.focus_handle(cx).is_focused(window) {
+        if !self.modal_focus_handle.contains_focused(window, cx) {
             return;
         }
 
         let key = event.keystroke.key.as_str();
+        if key == "escape" {
+            cx.emit(DocumentBrowserEvent::Dismissed);
+            cx.stop_propagation();
+            return;
+        }
+
+        let navigation_focus = self.input.focus_handle(cx).is_focused(window)
+            || self.modal_focus_handle.is_focused(window);
+        if !navigation_focus {
+            return;
+        }
+
         let handled = match key {
             "up" => {
                 self.select_prev(cx);
@@ -435,10 +545,6 @@ impl DocumentBrowser {
                 self.open_selected(window, cx);
                 true
             }
-            "escape" => {
-                cx.emit(DocumentBrowserEvent::Dismissed);
-                true
-            }
             "backspace" if self.input.read(cx).value().is_empty() => {
                 self.go_up(window, cx);
                 true
@@ -453,6 +559,170 @@ impl DocumentBrowser {
         if handled {
             cx.stop_propagation();
         }
+    }
+
+    fn actual_size(&self, window: &Window) -> DocumentBrowserSize {
+        let viewport = window.viewport_size();
+        fit_browser_size(
+            self.preferred_size,
+            viewport.width.as_f32(),
+            viewport.height.as_f32(),
+        )
+    }
+
+    fn begin_resize(
+        &mut self,
+        axis: ResizeAxis,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resize_drag = Some(ResizeDrag {
+            axis,
+            initial_pointer: event.position,
+            initial_actual_size: self.actual_size(window),
+            changed: false,
+        });
+        self.modal_focus_handle.focus(window, cx);
+        cx.stop_propagation();
+    }
+
+    fn resize_from_drag(
+        &mut self,
+        event: &DragMoveEvent<DraggedDocumentBrowser>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let axis = event.drag(cx).0;
+        let Some(mut drag) = self.resize_drag else {
+            return;
+        };
+        if drag.axis != axis {
+            return;
+        }
+
+        let viewport = window.viewport_size();
+        let available = available_browser_size(viewport.width.as_f32(), viewport.height.as_f32());
+        // The card remains centered, so each edge moves by half of its size delta.
+        let delta_x = (event.event.position.x - drag.initial_pointer.x).as_f32() * 2.0;
+        let delta_y = (event.event.position.y - drag.initial_pointer.y).as_f32() * 2.0;
+        let previous = self.preferred_size;
+        if axis.includes_width() {
+            self.preferred_size.width = clamp_resized_dimension(
+                drag.initial_actual_size.width + delta_x,
+                BROWSER_MIN_WIDTH,
+                available.width,
+            );
+        }
+        if axis.includes_height() {
+            self.preferred_size.height = clamp_resized_dimension(
+                drag.initial_actual_size.height + delta_y,
+                BROWSER_MIN_HEIGHT,
+                available.height,
+            );
+        }
+        drag.changed |= self.preferred_size != previous;
+        self.resize_drag = Some(drag);
+        cx.notify();
+    }
+
+    fn finish_resize(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.resize_drag.take() else {
+            return;
+        };
+        if !drag.changed {
+            return;
+        }
+
+        self.preferred_size = sanitize_preferred_size(self.preferred_size);
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .set_document_browser_size(self.preferred_size)
+        {
+            eprintln!("failed to persist document browser size: {error:#}");
+        }
+    }
+
+    fn render_resize_handle(
+        axis: ResizeAxis,
+        theme: ThemeColor,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (id, selector) = match axis {
+            ResizeAxis::Width => (
+                "document-browser-resize-width",
+                "document-browser-resize-width",
+            ),
+            ResizeAxis::Height => (
+                "document-browser-resize-height",
+                "document-browser-resize-height",
+            ),
+            ResizeAxis::Both => (
+                "document-browser-resize-corner",
+                "document-browser-resize-corner",
+            ),
+        };
+
+        div()
+            .id(id)
+            .debug_selector(move || selector.to_string())
+            .absolute()
+            .occlude()
+            .map(|handle| match axis {
+                ResizeAxis::Width => handle
+                    .top_0()
+                    .right_0()
+                    .w(px(RESIZE_EDGE_SIZE))
+                    .h_full()
+                    .cursor_ew_resize()
+                    .hover(move |style| style.bg(theme.primary.opacity(0.08))),
+                ResizeAxis::Height => handle
+                    .left_0()
+                    .bottom_0()
+                    .w_full()
+                    .h(px(RESIZE_EDGE_SIZE))
+                    .cursor_ns_resize()
+                    .hover(move |style| style.bg(theme.primary.opacity(0.08))),
+                ResizeAxis::Both => handle
+                    .right_0()
+                    .bottom_0()
+                    .size(px(RESIZE_CORNER_SIZE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_nwse_resize()
+                    .child(
+                        Icon::new(ComponentIconName::ResizeCorner)
+                            .size_3()
+                            .text_color(theme.muted_foreground.opacity(0.58)),
+                    ),
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.begin_resize(axis, event, window, cx);
+                }),
+            )
+            .on_drag(DraggedDocumentBrowser(axis), |drag, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| drag.clone())
+            })
+            .on_drag_move(cx.listener(
+                move |this, event: &DragMoveEvent<DraggedDocumentBrowser>, window, cx| {
+                    if event.drag(cx).0 == axis {
+                        this.resize_from_drag(event, window, cx);
+                    }
+                },
+            ))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_resize(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_resize(cx)),
+            )
+            .into_any_element()
     }
 
     fn breadcrumbs(&self) -> Vec<(SharedString, PathBuf)> {
@@ -800,6 +1070,7 @@ impl Focusable for DocumentBrowser {
 impl Render for DocumentBrowser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
+        let actual_size = self.actual_size(window);
         let breadcrumbs = self.breadcrumbs();
         let last_crumb = breadcrumbs.len().saturating_sub(1);
         let open_shortcut: SharedString = if cfg!(target_os = "macos") {
@@ -815,11 +1086,10 @@ impl Render for DocumentBrowser {
             .id("document-browser")
             .debug_selector(|| "document-browser".to_string())
             .key_context("DocumentBrowser")
-            .track_focus(&self.input.focus_handle(cx))
-            .w(px(BROWSER_WIDTH))
-            .h(px(BROWSER_HEIGHT))
-            .max_w(relative(0.92))
-            .max_h(relative(0.86))
+            .track_focus(&self.modal_focus_handle)
+            .relative()
+            .w(px(actual_size.width))
+            .h(px(actual_size.height))
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -831,7 +1101,15 @@ impl Render for DocumentBrowser {
             .shadow_xl()
             .text_size(ui_rems(12.5))
             .text_color(theme.popover_foreground)
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if !this.modal_focus_handle.contains_focused(window, cx) {
+                        this.modal_focus_handle.focus(window, cx);
+                    }
+                    cx.stop_propagation();
+                }),
+            )
             .child(
                 div()
                     .h(px(46.0))
@@ -974,7 +1252,7 @@ impl Render for DocumentBrowser {
             )
             .child(
                 div()
-                    .h(px(38.0))
+                    .h(px(39.0))
                     .flex_none()
                     .flex()
                     .items_center()
@@ -1000,6 +1278,11 @@ impl Render for DocumentBrowser {
                         &theme,
                     )),
             )
+            .children(
+                [ResizeAxis::Width, ResizeAxis::Height, ResizeAxis::Both]
+                    .map(|axis| Self::render_resize_handle(axis, theme, cx)),
+            )
+            .focus_trap("document-browser-focus-trap", &self.modal_focus_handle)
     }
 }
 
@@ -1044,6 +1327,41 @@ mod tests {
         let filtered = DocumentBrowser::filter_indices("paper", &entries);
 
         assert_eq!(filtered, vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn preferred_size_is_sanitized_to_comet_geometry() {
+        assert_eq!(
+            sanitize_preferred_size(DocumentBrowserSize {
+                width: 120.0,
+                height: 200.0,
+            }),
+            default_browser_size()
+        );
+        assert_eq!(
+            sanitize_preferred_size(DocumentBrowserSize {
+                width: f32::NAN,
+                height: f32::INFINITY,
+            }),
+            default_browser_size()
+        );
+    }
+
+    #[test]
+    fn fitted_size_restores_the_unchanged_preference_when_the_window_grows() {
+        let preferred = DocumentBrowserSize {
+            width: 920.0,
+            height: 640.0,
+        };
+
+        assert_eq!(
+            fit_browser_size(preferred, 700.0, 440.0),
+            DocumentBrowserSize {
+                width: 668.0,
+                height: 408.0,
+            }
+        );
+        assert_eq!(fit_browser_size(preferred, 1200.0, 800.0), preferred);
     }
 
     #[test]
