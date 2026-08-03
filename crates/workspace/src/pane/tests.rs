@@ -63,6 +63,48 @@ fn loading_grid_opacity_spans_the_expected_wave() {
     }
 }
 
+#[gpui::test]
+fn rendered_tab_bounds_include_the_visual_suffix(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        cx.set_global(SettingsStore::memory());
+        cx.set_global(LibraryStore::memory());
+        cx.set_global(RenderCache::new());
+    });
+    let jobs = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs.clone()));
+        Root::new(pane, window, cx)
+    });
+    let pane = root.read_with(cx, |root, _| {
+        root.view().clone().downcast::<Pane>().unwrap()
+    });
+    pane.update_in(cx, |pane, window, cx| {
+        pane.set_force_show_tab_bar(true, cx);
+        pane.open_new_tab(window, cx);
+    });
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+
+    pane.read_with(cx, |pane, _| {
+        let tab_id = Pane::tab_entity_id(&pane.tabs[0]);
+        let measured = pane.tab_bounds.borrow().get(&tab_id).copied().unwrap();
+        let body = measured.body.unwrap();
+        let suffix = measured.suffix.unwrap();
+        let visual = pane.tab_bounds(tab_id).unwrap();
+
+        assert!(
+            suffix.right() > body.right(),
+            "the suffix must expose the measurement regression: body={body:?}, suffix={suffix:?}"
+        );
+        assert_eq!(visual, body.union(&suffix));
+        assert!(visual.contains(&suffix.center()));
+        assert!(visual.center().x > body.center().x);
+    });
+}
+
 #[test]
 fn debug_file_open_min_duration_is_parsed_as_positive_milliseconds() {
     assert_eq!(

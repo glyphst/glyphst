@@ -111,17 +111,39 @@ struct FadingSynchronizedConnection {
 }
 
 #[derive(Clone, Copy)]
+struct SynchronizedConnectionAnchor {
+    position: Point<Pixels>,
+    edge: SynchronizedConnectionAnchorEdge,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SynchronizedConnectionAnchorEdge {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+#[derive(Clone, Copy)]
 struct SynchronizedConnectionCurve {
-    start: Point<Pixels>,
+    start: SynchronizedConnectionAnchor,
     control_a: Point<Pixels>,
     control_b: Point<Pixels>,
-    end: Point<Pixels>,
+    end: SynchronizedConnectionAnchor,
+    added_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct SynchronizedConnectionHandle {
+    center: Point<Pixels>,
     added_at: Instant,
 }
 
 const SYNCHRONIZED_DOT_PERIOD: Duration = Duration::from_millis(1400);
 const SYNCHRONIZED_EDGE_FADE_IN: Duration = Duration::from_millis(180);
 const SYNCHRONIZED_NETWORK_FADE_OUT: Duration = Duration::from_millis(160);
+const SYNCHRONIZED_HANDLE_DIAMETER: f32 = 5.5;
+const SYNCHRONIZED_HANDLE_OUTLINE_DIAMETER: f32 = 9.0;
 
 pub type WorkspaceWindowHandle = glyphst_ui::root::RootWindowHandle<Workspace>;
 
@@ -946,29 +968,78 @@ impl Workspace {
     fn synchronized_connection_anchor(
         tab_bounds: Bounds<Pixels>,
         toward: Point<Pixels>,
-    ) -> Point<Pixels> {
+    ) -> SynchronizedConnectionAnchor {
         let center = tab_bounds.center();
         let dx = toward.x.as_f32() - center.x.as_f32();
         let dy = toward.y.as_f32() - center.y.as_f32();
         if dx.abs() >= dy.abs() {
-            point(
-                if dx >= 0.0 {
-                    tab_bounds.right()
-                } else {
-                    tab_bounds.left()
-                },
-                center.y,
-            )
+            let (x, edge) = if dx >= 0.0 {
+                (tab_bounds.right(), SynchronizedConnectionAnchorEdge::Right)
+            } else {
+                (tab_bounds.left(), SynchronizedConnectionAnchorEdge::Left)
+            };
+            SynchronizedConnectionAnchor {
+                position: point(x, center.y),
+                edge,
+            }
         } else {
-            point(
-                center.x,
-                if dy >= 0.0 {
-                    tab_bounds.bottom()
-                } else {
-                    tab_bounds.top()
-                },
-            )
+            let (y, edge) = if dy >= 0.0 {
+                (
+                    tab_bounds.bottom(),
+                    SynchronizedConnectionAnchorEdge::Bottom,
+                )
+            } else {
+                (tab_bounds.top(), SynchronizedConnectionAnchorEdge::Top)
+            };
+            SynchronizedConnectionAnchor {
+                position: point(center.x, y),
+                edge,
+            }
         }
+    }
+
+    fn synchronized_connection_control(
+        anchor: SynchronizedConnectionAnchor,
+        distance: f32,
+    ) -> Point<Pixels> {
+        match anchor.edge {
+            SynchronizedConnectionAnchorEdge::Top => {
+                point(anchor.position.x, anchor.position.y - px(distance))
+            }
+            SynchronizedConnectionAnchorEdge::Right => {
+                point(anchor.position.x + px(distance), anchor.position.y)
+            }
+            SynchronizedConnectionAnchorEdge::Bottom => {
+                point(anchor.position.x, anchor.position.y + px(distance))
+            }
+            SynchronizedConnectionAnchorEdge::Left => {
+                point(anchor.position.x - px(distance), anchor.position.y)
+            }
+        }
+    }
+
+    fn synchronized_connection_handles(
+        curves: &[SynchronizedConnectionCurve],
+    ) -> Vec<SynchronizedConnectionHandle> {
+        let mut handles: Vec<SynchronizedConnectionHandle> = Vec::with_capacity(curves.len() * 2);
+        for curve in curves {
+            for center in [curve.start.position, curve.end.position] {
+                if let Some(existing) = handles
+                    .iter_mut()
+                    .find(|handle| Self::point_distance(handle.center, center) < 0.5)
+                {
+                    if curve.added_at < existing.added_at {
+                        existing.added_at = curve.added_at;
+                    }
+                } else {
+                    handles.push(SynchronizedConnectionHandle {
+                        center,
+                        added_at: curve.added_at,
+                    });
+                }
+            }
+        }
+        handles
     }
 
     fn synchronized_connection_curve(
@@ -978,33 +1049,18 @@ impl Workspace {
     ) -> SynchronizedConnectionCurve {
         let start = Self::synchronized_connection_anchor(from, to.center());
         let end = Self::synchronized_connection_anchor(to, from.center());
-        let dx = end.x.as_f32() - start.x.as_f32();
-        let dy = end.y.as_f32() - start.y.as_f32();
-        let (control_a, control_b) = if dx.abs() >= dy.abs() {
-            let bend = (dx.abs() * 0.35).clamp(18.0, 110.0);
-            let direction = if dx >= 0.0 { 1.0 } else { -1.0 };
-            let bow = if dy.abs() < 20.0 {
-                (dx.abs() * 0.08).clamp(8.0, 24.0)
-            } else {
-                0.0
-            };
-            (
-                point(start.x + px(bend * direction), start.y + px(bow)),
-                point(end.x - px(bend * direction), end.y + px(bow)),
-            )
+        let dx = end.position.x.as_f32() - start.position.x.as_f32();
+        let dy = end.position.y.as_f32() - start.position.y.as_f32();
+        let bend = if matches!(
+            start.edge,
+            SynchronizedConnectionAnchorEdge::Left | SynchronizedConnectionAnchorEdge::Right
+        ) {
+            (dx.abs() * 0.35).clamp(18.0, 110.0)
         } else {
-            let bend = (dy.abs() * 0.35).clamp(18.0, 110.0);
-            let direction = if dy >= 0.0 { 1.0 } else { -1.0 };
-            let bow = if dx.abs() < 20.0 {
-                (dy.abs() * 0.06).clamp(6.0, 18.0)
-            } else {
-                0.0
-            };
-            (
-                point(start.x + px(bow), start.y + px(bend * direction)),
-                point(end.x + px(bow), end.y - px(bend * direction)),
-            )
+            (dy.abs() * 0.35).clamp(18.0, 110.0)
         };
+        let control_a = Self::synchronized_connection_control(start, bend);
+        let control_b = Self::synchronized_connection_control(end, bend);
         SynchronizedConnectionCurve {
             start,
             control_a,
@@ -1021,15 +1077,20 @@ impl Workspace {
         let c = 3.0 * inverse * t * t;
         let d = t * t * t;
         point(
-            px(curve.start.x.as_f32() * a
+            px(curve.start.position.x.as_f32() * a
                 + curve.control_a.x.as_f32() * b
                 + curve.control_b.x.as_f32() * c
-                + curve.end.x.as_f32() * d),
-            px(curve.start.y.as_f32() * a
+                + curve.end.position.x.as_f32() * d),
+            px(curve.start.position.y.as_f32() * a
                 + curve.control_a.y.as_f32() * b
                 + curve.control_b.y.as_f32() * c
-                + curve.end.y.as_f32() * d),
+                + curve.end.position.y.as_f32() * d),
         )
+    }
+
+    fn synchronized_connection_dot_parameter(index: usize, dot_count: usize) -> f32 {
+        debug_assert!(index < dot_count);
+        (index + 1) as f32 / (dot_count + 1) as f32
     }
 
     fn point_distance(left: Point<Pixels>, right: Point<Pixels>) -> f32 {
@@ -1175,20 +1236,23 @@ impl Workspace {
         let viewport = bounds(point(px(0.0), px(0.0)), window.viewport_size());
         let curves = self.synchronized_connection_curves(&edges, viewport, cx);
         let color = Self::synchronized_group_color(theme, color_slot);
+        let handle_outline = theme.background;
         let network = (!curves.is_empty()).then(|| {
             canvas(
                 move |_, _, _| curves,
                 move |_, curves, window, _| {
+                    let handles = Self::synchronized_connection_handles(&curves);
                     let period = SYNCHRONIZED_DOT_PERIOD.as_secs_f32();
                     let phase = now
                         .saturating_duration_since(animation_started_at)
                         .as_secs_f32()
                         / period
                         % 1.0;
-                    for curve in curves {
-                        let approximate_length = Self::point_distance(curve.start, curve.control_a)
-                            + Self::point_distance(curve.control_a, curve.control_b)
-                            + Self::point_distance(curve.control_b, curve.end);
+                    for curve in curves.iter() {
+                        let approximate_length =
+                            Self::point_distance(curve.start.position, curve.control_a)
+                                + Self::point_distance(curve.control_a, curve.control_b)
+                                + Self::point_distance(curve.control_b, curve.end.position);
                         let dot_count = ((approximate_length / 9.0).ceil() as usize).clamp(2, 120);
                         let edge_opacity = if reduce_motion {
                             1.0
@@ -1197,8 +1261,8 @@ impl Workspace {
                                 / SYNCHRONIZED_EDGE_FADE_IN.as_secs_f32())
                             .clamp(0.0, 1.0)
                         };
-                        for index in 0..=dot_count {
-                            let t = index as f32 / dot_count as f32;
+                        for index in 0..dot_count {
+                            let t = Self::synchronized_connection_dot_parameter(index, dot_count);
                             let distance_from_end = t.min(1.0 - t) * 2.0;
                             let pulse = if reduce_motion {
                                 0.0
@@ -1217,7 +1281,7 @@ impl Workspace {
                             } else {
                                 0.3 + pulse * 0.65
                             };
-                            let center = Self::cubic_point(curve, t);
+                            let center = Self::cubic_point(*curve, t);
                             let radius = diameter / 2.0;
                             window.paint_quad(
                                 fill(
@@ -1230,6 +1294,51 @@ impl Workspace {
                                 .corner_radii(px(radius)),
                             );
                         }
+                    }
+
+                    for handle in handles {
+                        let handle_opacity = if reduce_motion {
+                            1.0
+                        } else {
+                            (now.saturating_duration_since(handle.added_at).as_secs_f32()
+                                / SYNCHRONIZED_EDGE_FADE_IN.as_secs_f32())
+                            .clamp(0.0, 1.0)
+                        } * overall_opacity;
+                        let outline_radius = SYNCHRONIZED_HANDLE_OUTLINE_DIAMETER / 2.0;
+                        window.paint_quad(
+                            fill(
+                                bounds(
+                                    point(
+                                        handle.center.x - px(outline_radius),
+                                        handle.center.y - px(outline_radius),
+                                    ),
+                                    size(
+                                        px(SYNCHRONIZED_HANDLE_OUTLINE_DIAMETER),
+                                        px(SYNCHRONIZED_HANDLE_OUTLINE_DIAMETER),
+                                    ),
+                                ),
+                                handle_outline.opacity(0.96 * handle_opacity),
+                            )
+                            .corner_radii(px(outline_radius)),
+                        );
+
+                        let handle_radius = SYNCHRONIZED_HANDLE_DIAMETER / 2.0;
+                        window.paint_quad(
+                            fill(
+                                bounds(
+                                    point(
+                                        handle.center.x - px(handle_radius),
+                                        handle.center.y - px(handle_radius),
+                                    ),
+                                    size(
+                                        px(SYNCHRONIZED_HANDLE_DIAMETER),
+                                        px(SYNCHRONIZED_HANDLE_DIAMETER),
+                                    ),
+                                ),
+                                color.opacity(handle_opacity),
+                            )
+                            .corner_radii(px(handle_radius)),
+                        );
                     }
                 },
             )
@@ -2837,18 +2946,24 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, time::SystemTime};
+    use std::{
+        fs,
+        path::Path,
+        time::{Duration, Instant, SystemTime},
+    };
 
     use glyphst_translation_ui::DocumentTranslationOpenMode;
     use gpui::{
-        AppContext as _, Modifiers, MouseButton, MouseUpEvent, TestAppContext, point, px, size,
+        AppContext as _, Modifiers, MouseButton, MouseUpEvent, TestAppContext, bounds, point, px,
+        size,
     };
     use gpui_component::{Root, WindowExt as _};
 
     use super::{
-        SplitDirection, SynchronizedConnectionGroup, SynchronizedConnectionInvalidReason,
-        SynchronizedConnectionTabState, Workspace, WorkspaceCallbacks, WorkspaceMenu,
-        WorkspaceWindowHandle, WorkspaceWindowRequest,
+        SplitDirection, SynchronizedConnectionAnchor, SynchronizedConnectionAnchorEdge,
+        SynchronizedConnectionCurve, SynchronizedConnectionGroup,
+        SynchronizedConnectionInvalidReason, SynchronizedConnectionTabState, Workspace,
+        WorkspaceCallbacks, WorkspaceMenu, WorkspaceWindowHandle, WorkspaceWindowRequest,
     };
     use crate::{
         document_view::{
@@ -2905,6 +3020,127 @@ mod tests {
             .as_bytes(),
         );
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn synchronized_connection_anchors_use_facing_edge_midpoints() {
+        let tab = bounds(point(px(10.0), px(20.0)), size(px(100.0), px(30.0)));
+        let cases = [
+            (
+                point(px(500.0), px(35.0)),
+                point(px(110.0), px(35.0)),
+                SynchronizedConnectionAnchorEdge::Right,
+            ),
+            (
+                point(px(-500.0), px(35.0)),
+                point(px(10.0), px(35.0)),
+                SynchronizedConnectionAnchorEdge::Left,
+            ),
+            (
+                point(px(60.0), px(500.0)),
+                point(px(60.0), px(50.0)),
+                SynchronizedConnectionAnchorEdge::Bottom,
+            ),
+            (
+                point(px(60.0), px(-500.0)),
+                point(px(60.0), px(20.0)),
+                SynchronizedConnectionAnchorEdge::Top,
+            ),
+        ];
+
+        for (toward, expected_position, expected_edge) in cases {
+            let anchor = Workspace::synchronized_connection_anchor(tab, toward);
+            assert_eq!(anchor.position, expected_position);
+            assert_eq!(anchor.edge, expected_edge);
+        }
+    }
+
+    #[test]
+    fn synchronized_connection_curves_leave_handles_perpendicularly() {
+        let now = Instant::now();
+        let horizontal = Workspace::synchronized_connection_curve(
+            bounds(point(px(0.0), px(10.0)), size(px(80.0), px(30.0))),
+            bounds(point(px(220.0), px(70.0)), size(px(80.0), px(30.0))),
+            now,
+        );
+        assert_eq!(
+            horizontal.start.edge,
+            SynchronizedConnectionAnchorEdge::Right
+        );
+        assert_eq!(horizontal.end.edge, SynchronizedConnectionAnchorEdge::Left);
+        assert_eq!(horizontal.control_a.y, horizontal.start.position.y);
+        assert!(horizontal.control_a.x > horizontal.start.position.x);
+        assert_eq!(horizontal.control_b.y, horizontal.end.position.y);
+        assert!(horizontal.control_b.x < horizontal.end.position.x);
+
+        let vertical = Workspace::synchronized_connection_curve(
+            bounds(point(px(20.0), px(0.0)), size(px(80.0), px(30.0))),
+            bounds(point(px(100.0), px(220.0)), size(px(80.0), px(30.0))),
+            now,
+        );
+        assert_eq!(
+            vertical.start.edge,
+            SynchronizedConnectionAnchorEdge::Bottom
+        );
+        assert_eq!(vertical.end.edge, SynchronizedConnectionAnchorEdge::Top);
+        assert_eq!(vertical.control_a.x, vertical.start.position.x);
+        assert!(vertical.control_a.y > vertical.start.position.y);
+        assert_eq!(vertical.control_b.x, vertical.end.position.x);
+        assert!(vertical.control_b.y < vertical.end.position.y);
+    }
+
+    #[test]
+    fn synchronized_connection_dots_stay_between_endpoint_handles() {
+        for dot_count in [2, 7, 120] {
+            let parameters = (0..dot_count)
+                .map(|index| Workspace::synchronized_connection_dot_parameter(index, dot_count))
+                .collect::<Vec<_>>();
+            assert!(parameters.first().is_some_and(|parameter| *parameter > 0.0));
+            assert!(parameters.last().is_some_and(|parameter| *parameter < 1.0));
+            assert!(parameters.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+    }
+
+    #[test]
+    fn synchronized_connection_handles_deduplicate_shared_endpoints() {
+        let now = Instant::now();
+        let earlier = now - Duration::from_millis(40);
+        let shared = SynchronizedConnectionAnchor {
+            position: point(px(80.0), px(25.0)),
+            edge: SynchronizedConnectionAnchorEdge::Right,
+        };
+        let upper = SynchronizedConnectionAnchor {
+            position: point(px(220.0), px(15.0)),
+            edge: SynchronizedConnectionAnchorEdge::Left,
+        };
+        let lower = SynchronizedConnectionAnchor {
+            position: point(px(220.0), px(85.0)),
+            edge: SynchronizedConnectionAnchorEdge::Left,
+        };
+        let curves = [
+            SynchronizedConnectionCurve {
+                start: shared,
+                control_a: point(px(120.0), px(25.0)),
+                control_b: point(px(180.0), px(15.0)),
+                end: upper,
+                added_at: now,
+            },
+            SynchronizedConnectionCurve {
+                start: shared,
+                control_a: point(px(120.0), px(25.0)),
+                control_b: point(px(180.0), px(85.0)),
+                end: lower,
+                added_at: earlier,
+            },
+        ];
+
+        let handles = Workspace::synchronized_connection_handles(&curves);
+        assert_eq!(handles.len(), 3);
+        let shared_handle = handles
+            .iter()
+            .find(|handle| handle.center == shared.position)
+            .unwrap();
+        assert_eq!(shared_handle.added_at, earlier);
     }
 
     #[gpui::test]

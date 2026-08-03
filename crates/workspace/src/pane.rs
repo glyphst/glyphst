@@ -315,6 +315,23 @@ pub(crate) struct PaneSynchronizedPresentation {
     pub(crate) recently_added: Option<RecentlyAddedSynchronizedTab>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct PaneTabBounds {
+    body: Option<Bounds<Pixels>>,
+    suffix: Option<Bounds<Pixels>>,
+}
+
+impl PaneTabBounds {
+    fn visual(self) -> Option<Bounds<Pixels>> {
+        match (self.body, self.suffix) {
+            (Some(body), Some(suffix)) => Some(body.union(&suffix)),
+            (Some(body), None) => Some(body),
+            (None, Some(suffix)) => Some(suffix),
+            (None, None) => None,
+        }
+    }
+}
+
 pub(crate) struct Pane {
     tabs: Vec<Tab>,
     active_tab: usize,
@@ -324,7 +341,7 @@ pub(crate) struct Pane {
     drag_split_direction: Option<SplitDirection>,
     force_show_tab_bar: bool,
     synchronized_presentation: PaneSynchronizedPresentation,
-    tab_bounds: Rc<RefCell<HashMap<EntityId, Bounds<Pixels>>>>,
+    tab_bounds: Rc<RefCell<HashMap<EntityId, PaneTabBounds>>>,
     context_menu_position: Option<Point<Pixels>>,
     context_menu_popup: Option<Entity<PopupMenu>>,
 }
@@ -500,7 +517,11 @@ impl Pane {
     }
 
     pub(crate) fn tab_bounds(&self, tab_id: EntityId) -> Option<Bounds<Pixels>> {
-        self.tab_bounds.borrow().get(&tab_id).copied()
+        self.tab_bounds
+            .borrow()
+            .get(&tab_id)
+            .copied()
+            .and_then(PaneTabBounds::visual)
     }
 
     #[cfg(test)]
@@ -1545,7 +1566,14 @@ impl Pane {
                         .child(format!("+{overflow_count}")),
                 )
             });
-        let suffix = h_flex().gap_1().child(membership_tags).child(close_button);
+        let suffix_bounds = self.tab_bounds.clone();
+        let suffix = h_flex()
+            .gap_1()
+            .child(membership_tags)
+            .child(close_button)
+            .on_prepaint(move |bounds, _, _| {
+                suffix_bounds.borrow_mut().entry(tab_id).or_default().suffix = Some(bounds);
+            });
         let tab_bounds = self.tab_bounds.clone();
 
         ComponentTab::new()
@@ -1555,7 +1583,7 @@ impl Pane {
             .min_w(ui_rems(PANE_TAB_MIN_WIDTH))
             .debug_selector(move || format!("pane-tab-{tab_ix}"))
             .on_prepaint(move |bounds, _, _| {
-                tab_bounds.borrow_mut().insert(tab_id, bounds);
+                tab_bounds.borrow_mut().entry(tab_id).or_default().body = Some(bounds);
             })
             .on_mouse_down(
                 MouseButton::Right,
