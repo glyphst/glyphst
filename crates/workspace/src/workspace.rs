@@ -449,31 +449,23 @@ impl Workspace {
                 PaneEvent::CreateSynchronizedGroup(tab_id) => {
                     this.start_new_synchronized_group(pane_for_events.clone(), *tab_id, cx);
                 }
-                PaneEvent::ConnectMoreSynchronizedTabs { tab_id, group_id } => {
-                    this.start_connecting_synchronized_group(
-                        pane_for_events.clone(),
-                        *tab_id,
-                        *group_id,
-                        cx,
-                    );
-                }
-                PaneEvent::SwitchSynchronizedGroup { tab_id, group_id } => {
-                    if this.synchronized_tabs.select_for_tab(*tab_id, *group_id) {
-                        this.activate_synchronized_group(*group_id, &pane_for_events, window, cx);
+                PaneEvent::ConnectMoreSynchronizedTabs(tab_id) => {
+                    if let Some(group_id) = this.synchronized_tabs.group_for_tab(*tab_id) {
+                        this.start_connecting_synchronized_group(
+                            pane_for_events.clone(),
+                            *tab_id,
+                            group_id,
+                            cx,
+                        );
                     }
-                    this.refresh_synchronized_tab_presentation(cx);
                 }
                 PaneEvent::SetSynchronizedScrollPaused { tab_id, paused } => {
                     if this.synchronized_tabs.set_paused(*tab_id, *paused) {
                         this.refresh_synchronized_tab_presentation(cx);
                     }
                 }
-                PaneEvent::LeaveSynchronizedGroup { tab_id, group_id } => {
-                    this.synchronized_tabs.leave_group(*tab_id, *group_id);
-                    this.refresh_synchronized_tab_presentation(cx);
-                }
-                PaneEvent::LeaveAllSynchronizedGroups(tab_id) => {
-                    this.synchronized_tabs.leave_all(*tab_id);
+                PaneEvent::LeaveSynchronizedGroup(tab_id) => {
+                    this.synchronized_tabs.leave_group(*tab_id);
                     this.refresh_synchronized_tab_presentation(cx);
                 }
                 PaneEvent::FinishSynchronizedConnection => {
@@ -561,6 +553,16 @@ impl Workspace {
         if !is_document {
             return SynchronizedConnectionTabState::Invalid(
                 SynchronizedConnectionInvalidReason::NonDocument,
+            );
+        }
+
+        if let Some(group_id) = self.synchronized_tabs.group_for_tab(tab_id) {
+            let group_number = self
+                .synchronized_tabs
+                .group_summary(group_id)
+                .map_or(0, |group| group.display_number);
+            return SynchronizedConnectionTabState::Invalid(
+                SynchronizedConnectionInvalidReason::AlreadyInGroup { group_number },
             );
         }
 
@@ -713,9 +715,8 @@ impl Workspace {
                 presentation.recently_added = connection.recently_added;
             }
             for tab_id in tab_ids {
-                let groups = self.synchronized_tabs.summaries_for_tab(tab_id);
-                if !groups.is_empty() {
-                    presentation.groups_by_tab.insert(tab_id, groups);
+                if let Some(group) = self.synchronized_tabs.summary_for_tab(tab_id) {
+                    presentation.group_by_tab.insert(tab_id, group);
                 }
                 if self.synchronized_tabs.is_paused(tab_id) {
                     presentation.paused_tabs.insert(tab_id);
@@ -743,7 +744,9 @@ impl Workspace {
         source_tab: gpui::EntityId,
         cx: &mut Context<Self>,
     ) {
-        if !source_pane.read(cx).tab_is_document(source_tab) {
+        if !source_pane.read(cx).tab_is_document(source_tab)
+            || self.synchronized_tabs.group_for_tab(source_tab).is_some()
+        {
             return;
         }
         let reserved = self.synchronized_tabs.reserve_group();
@@ -774,10 +777,10 @@ impl Workspace {
         group_id: SynchronizedGroupId,
         cx: &mut Context<Self>,
     ) {
-        if !self.synchronized_tabs.contains(group_id, source_tab) {
+        if self.synchronized_tabs.group_for_tab(source_tab) != Some(group_id) {
             return;
         }
-        self.synchronized_tabs.select_for_tab(source_tab, group_id);
+        self.synchronized_tabs.select_for_tab(source_tab);
         let cursor = source_pane
             .read(cx)
             .tab_bounds(source_tab)
@@ -888,10 +891,9 @@ impl Workspace {
             return;
         }
 
-        let Some(group_id) = self.synchronized_tabs.group_for_tab_action(tab_id) else {
+        let Some(group_id) = self.synchronized_tabs.select_for_tab(tab_id) else {
             return;
         };
-        self.synchronized_tabs.select_for_tab(tab_id, group_id);
         if was_active {
             self.activate_synchronized_group(group_id, pane, window, cx);
         }
@@ -928,12 +930,9 @@ impl Workspace {
         delta: crate::document_view::SynchronizedScrollDelta,
         cx: &mut Context<Self>,
     ) {
-        let Some(group_id) = self.synchronized_tabs.current_group() else {
+        let Some(group_id) = self.synchronized_tabs.group_for_tab(source_tab) else {
             return;
         };
-        if !self.synchronized_tabs.contains(group_id, source_tab) {
-            return;
-        }
         if self.synchronized_tabs.is_paused(source_tab) {
             return;
         }
@@ -1376,6 +1375,15 @@ impl Workspace {
                     SynchronizedConnectionInvalidReason::NonDocument,
                 )) => (
                     crate::fl!("synchronized-tabs-connection-documents-only"),
+                    crate::fl!("synchronized-tabs-connection-finish"),
+                ),
+                Some(SynchronizedConnectionTabState::Invalid(
+                    SynchronizedConnectionInvalidReason::AlreadyInGroup { group_number },
+                )) => (
+                    crate::fl!(
+                        "synchronized-tabs-connection-already-member",
+                        number = group_number as i64
+                    ),
                     crate::fl!("synchronized-tabs-connection-finish"),
                 ),
                 Some(SynchronizedConnectionTabState::Invalid(
@@ -1974,7 +1982,7 @@ impl Workspace {
                     .into_iter()
                     .find(|pane| pane.read(cx).has_tab_id(original.entity_id()))
                 {
-                    self.synchronized_tabs.create_group(
+                    _ = self.synchronized_tabs.connect_tab_to_source_group(
                         original.entity_id(),
                         original_pane.entity_id(),
                         translated.entity_id(),
@@ -3172,6 +3180,155 @@ mod tests {
     }
 
     #[gpui::test]
+    fn disjoint_synchronized_groups_scroll_independently(cx: &mut TestAppContext) {
+        let document_path = temporary_pdf_path("independent-synchronized-groups");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+
+        let top_left = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        cx.run_until_parked();
+        let top_right = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Down, window, cx);
+        });
+        cx.run_until_parked();
+        let bottom_right = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.active_pane = top_left.clone();
+            workspace.split_active_pane(SplitDirection::Down, window, cx);
+        });
+        cx.run_until_parked();
+        let bottom_left = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        cx.simulate_resize(size(px(900.0), px(360.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let top_left_document = top_left.read(cx).active_document_view().unwrap();
+            let bottom_left_document = bottom_left.read(cx).active_document_view().unwrap();
+            let top_right_document = top_right.read(cx).active_document_view().unwrap();
+            let bottom_right_document = bottom_right.read(cx).active_document_view().unwrap();
+            let first_group = workspace
+                .synchronized_tabs
+                .create_group(
+                    top_left_document.entity_id(),
+                    top_left.entity_id(),
+                    bottom_left_document.entity_id(),
+                    bottom_left.entity_id(),
+                )
+                .unwrap();
+            let second_group = workspace
+                .synchronized_tabs
+                .create_group(
+                    top_right_document.entity_id(),
+                    top_right.entity_id(),
+                    bottom_right_document.entity_id(),
+                    bottom_right.entity_id(),
+                )
+                .unwrap();
+            workspace.refresh_synchronized_tab_presentation(cx);
+            assert_eq!(
+                workspace.synchronized_tabs.current_group(),
+                Some(second_group)
+            );
+
+            let first_target_before = bottom_left_document.read(cx).current_document_position();
+            let second_source_before = top_right_document.read(cx).current_document_position();
+            let second_target_before = bottom_right_document.read(cx).current_document_position();
+            workspace.propagate_synchronized_scroll(
+                top_left_document.entity_id(),
+                SynchronizedScrollDelta {
+                    x_pixels: 0.0,
+                    y_pixels: 48.0,
+                    mode: SynchronizedScrollMode::Immediate,
+                },
+                cx,
+            );
+            let first_target_after = bottom_left_document.read(cx).current_document_position();
+            assert!(first_target_after.scroll_y_doc > first_target_before.scroll_y_doc);
+            assert_eq!(
+                top_right_document.read(cx).current_document_position(),
+                second_source_before
+            );
+            assert_eq!(
+                bottom_right_document.read(cx).current_document_position(),
+                second_target_before
+            );
+            assert_eq!(
+                workspace.synchronized_tabs.current_group(),
+                Some(second_group)
+            );
+
+            workspace.handle_synchronized_tab_click(
+                &top_left,
+                top_left_document.entity_id(),
+                true,
+                window,
+                cx,
+            );
+            assert_eq!(
+                workspace.synchronized_tabs.current_group(),
+                Some(first_group)
+            );
+            let first_source_before = top_left_document.read(cx).current_document_position();
+            let first_target_before = bottom_left_document.read(cx).current_document_position();
+            workspace.propagate_synchronized_scroll(
+                top_right_document.entity_id(),
+                SynchronizedScrollDelta {
+                    x_pixels: 0.0,
+                    y_pixels: 48.0,
+                    mode: SynchronizedScrollMode::Immediate,
+                },
+                cx,
+            );
+            assert!(
+                bottom_right_document
+                    .read(cx)
+                    .current_document_position()
+                    .scroll_y_doc
+                    > second_target_before.scroll_y_doc
+            );
+            assert_eq!(
+                top_left_document.read(cx).current_document_position(),
+                first_source_before
+            );
+            assert_eq!(
+                bottom_left_document.read(cx).current_document_position(),
+                first_target_before
+            );
+            assert_eq!(
+                workspace.synchronized_tabs.current_group(),
+                Some(first_group)
+            );
+        });
+
+        fs::remove_file(document_path).unwrap();
+    }
+
+    #[gpui::test]
     fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
         cx: &mut TestAppContext,
     ) {
@@ -3224,12 +3381,15 @@ mod tests {
             assert_eq!(panes.len(), 3);
             let source = panes[0].read(cx).active_document_view().unwrap();
             let target = panes[1].read(cx).active_document_view().unwrap();
-            let group_id = workspace.synchronized_tabs.create_group(
-                source.entity_id(),
-                panes[0].entity_id(),
-                target.entity_id(),
-                panes[1].entity_id(),
-            );
+            let group_id = workspace
+                .synchronized_tabs
+                .create_group(
+                    source.entity_id(),
+                    panes[0].entity_id(),
+                    target.entity_id(),
+                    panes[1].entity_id(),
+                )
+                .unwrap();
             workspace.refresh_synchronized_tab_presentation(cx);
             panes[1].update(cx, |pane, cx| pane.open_new_tab(window, cx));
             workspace.handle_synchronized_tab_click(
@@ -3240,6 +3400,24 @@ mod tests {
                 cx,
             );
             assert_eq!(panes[1].read(cx).active_tab_id(), Some(target.entity_id()));
+            let represented_document = panes[1]
+                .read(cx)
+                .tab_ids()
+                .into_iter()
+                .find(|tab_id| {
+                    *tab_id != target.entity_id() && panes[1].read(cx).tab_is_document(*tab_id)
+                })
+                .unwrap();
+            let grouped_candidate = panes[2].read(cx).active_document_view().unwrap();
+            workspace
+                .synchronized_tabs
+                .create_group(
+                    represented_document,
+                    panes[1].entity_id(),
+                    grouped_candidate.entity_id(),
+                    panes[2].entity_id(),
+                )
+                .unwrap();
             workspace.start_connecting_synchronized_group(
                 panes[0].clone(),
                 source.entity_id(),
@@ -3254,16 +3432,6 @@ mod tests {
         let original_edge = workspace.read_with(cx, |workspace, cx| {
             let connection = workspace.synchronized_connection.as_ref().unwrap();
             assert_eq!(connection.edges.len(), 1);
-            let group_number = match connection.group {
-                SynchronizedConnectionGroup::Existing(group_id) => {
-                    workspace
-                        .synchronized_tabs
-                        .group_summary(group_id)
-                        .unwrap()
-                        .display_number
-                }
-                SynchronizedConnectionGroup::New(_) => unreachable!(),
-            };
             let panes = workspace.pane_group.panes();
             let source = panes[0].read(cx).active_document_view().unwrap();
             let target = panes[1].read(cx).active_document_view().unwrap();
@@ -3301,6 +3469,76 @@ mod tests {
                     *tab_id != target.entity_id() && panes[1].read(cx).tab_is_document(*tab_id)
                 })
                 .unwrap();
+            let other_group_number = workspace
+                .synchronized_tabs
+                .summary_for_tab(represented_document)
+                .unwrap()
+                .display_number;
+            assert_eq!(
+                panes[1]
+                    .read(cx)
+                    .synchronized_connection_tab_state(represented_document),
+                Some(SynchronizedConnectionTabState::Invalid(
+                    SynchronizedConnectionInvalidReason::AlreadyInGroup {
+                        group_number: other_group_number
+                    }
+                ))
+            );
+            let grouped_candidate = panes[2].read(cx).active_document_view().unwrap();
+            assert_eq!(
+                panes[2]
+                    .read(cx)
+                    .synchronized_connection_tab_state(grouped_candidate.entity_id()),
+                Some(SynchronizedConnectionTabState::Invalid(
+                    SynchronizedConnectionInvalidReason::AlreadyInGroup {
+                        group_number: other_group_number
+                    }
+                ))
+            );
+            connection.edges[0]
+        });
+
+        workspace.update_in(cx, |workspace, _, cx| {
+            let panes = workspace.pane_group.panes();
+            let target = panes[1].read(cx).active_document_view().unwrap();
+            let represented_document = panes[1]
+                .read(cx)
+                .tab_ids()
+                .into_iter()
+                .find(|tab_id| {
+                    *tab_id != target.entity_id() && panes[1].read(cx).tab_is_document(*tab_id)
+                })
+                .unwrap();
+            workspace
+                .synchronized_tabs
+                .leave_group(represented_document);
+            workspace.refresh_synchronized_tab_presentation(cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            let panes = workspace.pane_group.panes();
+            let connection = workspace.synchronized_connection.as_ref().unwrap();
+            let group_number = match connection.group {
+                SynchronizedConnectionGroup::Existing(group_id) => {
+                    workspace
+                        .synchronized_tabs
+                        .group_summary(group_id)
+                        .unwrap()
+                        .display_number
+                }
+                SynchronizedConnectionGroup::New(_) => unreachable!(),
+            };
+            let target = panes[1].read(cx).active_document_view().unwrap();
+            let represented_document = panes[1]
+                .read(cx)
+                .tab_ids()
+                .into_iter()
+                .find(|tab_id| {
+                    *tab_id != target.entity_id() && panes[1].read(cx).tab_is_document(*tab_id)
+                })
+                .unwrap();
             assert_eq!(
                 panes[1]
                     .read(cx)
@@ -3316,7 +3554,6 @@ mod tests {
                     .synchronized_connection_tab_state(eligible.entity_id()),
                 Some(SynchronizedConnectionTabState::Eligible)
             );
-            connection.edges[0]
         });
 
         let eligible_bounds = workspace.read_with(cx, |workspace, cx| {

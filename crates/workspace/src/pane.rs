@@ -16,9 +16,8 @@ use glyphst_translation_ui::{DocumentTranslationJobId, DocumentTranslationJobMan
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, AppContext, Axis, Bounds, Context,
     DismissEvent, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point,
-    Render, SharedString, Styled, Task, Window, WindowHandle, anchored, deferred, div, point,
-    prelude::*, px, relative, rgb,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString,
+    Styled, Task, Window, WindowHandle, anchored, deferred, div, point, prelude::*, px, relative,
 };
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Root, Selectable as _, Sizable as _, ThemeColor as Theme,
@@ -267,23 +266,12 @@ pub(crate) enum PaneEvent {
         was_active: bool,
     },
     CreateSynchronizedGroup(EntityId),
-    ConnectMoreSynchronizedTabs {
-        tab_id: EntityId,
-        group_id: SynchronizedGroupId,
-    },
-    SwitchSynchronizedGroup {
-        tab_id: EntityId,
-        group_id: SynchronizedGroupId,
-    },
+    ConnectMoreSynchronizedTabs(EntityId),
     SetSynchronizedScrollPaused {
         tab_id: EntityId,
         paused: bool,
     },
-    LeaveSynchronizedGroup {
-        tab_id: EntityId,
-        group_id: SynchronizedGroupId,
-    },
-    LeaveAllSynchronizedGroups(EntityId),
+    LeaveSynchronizedGroup(EntityId),
     FinishSynchronizedConnection,
     DocumentScrolled {
         tab_id: EntityId,
@@ -294,6 +282,7 @@ pub(crate) enum PaneEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SynchronizedConnectionInvalidReason {
     NonDocument,
+    AlreadyInGroup { group_number: u64 },
     PaneAlreadyRepresented { group_number: u64 },
 }
 
@@ -314,7 +303,7 @@ pub(crate) struct RecentlyAddedSynchronizedTab {
 
 #[derive(Clone, Default)]
 pub(crate) struct PaneSynchronizedPresentation {
-    pub(crate) groups_by_tab: HashMap<EntityId, Vec<SynchronizedGroupSummary>>,
+    pub(crate) group_by_tab: HashMap<EntityId, SynchronizedGroupSummary>,
     pub(crate) paused_tabs: HashSet<EntityId>,
     pub(crate) connection_tabs: HashMap<EntityId, SynchronizedConnectionTabState>,
     pub(crate) connection_color_slot: Option<usize>,
@@ -335,82 +324,6 @@ impl PaneTabBounds {
             (None, Some(suffix)) => Some(suffix),
             (None, None) => None,
         }
-    }
-}
-
-fn active_synchronized_group(
-    groups: &[SynchronizedGroupSummary],
-) -> Option<SynchronizedGroupSummary> {
-    groups.iter().find(|group| group.is_current).cloned()
-}
-
-const SYNCHRONIZED_GROUP_BADGE_MIN_CONTRAST: f32 = 7.0;
-const SYNCHRONIZED_GROUP_BADGE_CONTRAST_SEARCH_STEPS: usize = 20;
-
-fn color_relative_luminance(color: Hsla) -> f32 {
-    let color = color.to_rgb();
-    let linear_channel = |channel: f32| {
-        if channel <= 0.04045 {
-            channel / 12.92
-        } else {
-            ((channel + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    0.2126 * linear_channel(color.r)
-        + 0.7152 * linear_channel(color.g)
-        + 0.0722 * linear_channel(color.b)
-}
-
-fn color_contrast_ratio(left: Hsla, right: Hsla) -> f32 {
-    let left = color_relative_luminance(left);
-    let right = color_relative_luminance(right);
-    (left.max(right) + 0.05) / (left.min(right) + 0.05)
-}
-
-fn accessible_synchronized_group_badge_colors(background: Hsla) -> (Hsla, Hsla) {
-    let black: Hsla = rgb(0x000000).into();
-    let white: Hsla = rgb(0xffffff).into();
-    let black_contrast = color_contrast_ratio(background, black);
-    let white_contrast = color_contrast_ratio(background, white);
-    let (foreground, lighten_background, contrast) = if black_contrast >= white_contrast {
-        (black, true, black_contrast)
-    } else {
-        (white, false, white_contrast)
-    };
-    if contrast >= SYNCHRONIZED_GROUP_BADGE_MIN_CONTRAST {
-        return (background, foreground);
-    }
-
-    let mut passing_lightness = if lighten_background { 1.0 } else { 0.0 };
-    let mut failing_lightness = background.l;
-    for _ in 0..SYNCHRONIZED_GROUP_BADGE_CONTRAST_SEARCH_STEPS {
-        let lightness = (passing_lightness + failing_lightness) / 2.0;
-        let candidate = Hsla {
-            l: lightness,
-            ..background
-        };
-        if color_contrast_ratio(candidate, foreground) >= SYNCHRONIZED_GROUP_BADGE_MIN_CONTRAST {
-            passing_lightness = lightness;
-        } else {
-            failing_lightness = lightness;
-        }
-    }
-
-    (
-        Hsla {
-            l: passing_lightness,
-            ..background
-        },
-        foreground,
-    )
-}
-
-fn synchronized_group_badge_width(display_number: u64) -> f32 {
-    let digit_count = display_number.to_string().len();
-    if digit_count == 1 {
-        18.0
-    } else {
-        12.0 + digit_count as f32 * 5.0
     }
 }
 
@@ -1347,97 +1260,25 @@ impl Pane {
             return;
         };
         let is_document = self.tab_is_document(tab_id);
-        let groups = self
+        let group = self
             .synchronized_presentation
-            .groups_by_tab
+            .group_by_tab
             .get(&tab_id)
-            .cloned()
-            .unwrap_or_default();
-        let is_paused = self.synchronized_presentation.paused_tabs.contains(&tab_id);
-        let synchronized_theme = cx.global::<SettingsStore>().resolved_theme;
-        let preferred_group = groups
-            .iter()
-            .find(|group| group.is_current)
-            .or_else(|| groups.iter().find(|group| group.is_preferred))
-            .or_else(|| groups.last())
             .cloned();
+        let is_paused = self.synchronized_presentation.paused_tabs.contains(&tab_id);
         let pane = cx.entity();
-        let popup = PopupMenu::build(window, cx, move |mut menu, window, menu_cx| {
+        let popup = PopupMenu::build(window, cx, move |mut menu, _, _| {
             if is_document {
-                let create_pane = pane.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(crate::fl!("synchronized-tabs-create"))
-                        .icon(IconName::Link2)
-                        .on_click(move |_, _, cx| {
-                            create_pane.update(cx, |_, cx| {
-                                cx.emit(PaneEvent::CreateSynchronizedGroup(tab_id));
-                            });
-                        }),
-                );
-
-                if let Some(preferred_group) = preferred_group.clone() {
+                if group.is_some() {
                     let connect_pane = pane.clone();
-                    let group_id = preferred_group.id;
                     menu = menu.item(
                         PopupMenuItem::new(crate::fl!("synchronized-tabs-connect-more"))
                             .icon(IconName::Link2)
                             .on_click(move |_, _, cx| {
                                 connect_pane.update(cx, |_, cx| {
-                                    cx.emit(PaneEvent::ConnectMoreSynchronizedTabs {
-                                        tab_id,
-                                        group_id,
-                                    });
+                                    cx.emit(PaneEvent::ConnectMoreSynchronizedTabs(tab_id));
                                 });
                             }),
-                    );
-                }
-
-                if !groups.is_empty() {
-                    let switch_pane = pane.clone();
-                    let submenu_groups = groups.clone();
-                    menu = menu.submenu(
-                        crate::fl!("synchronized-tabs-switch-group"),
-                        window,
-                        menu_cx,
-                        move |mut submenu, _, _| {
-                            for group in &submenu_groups {
-                                let group_id = group.id;
-                                let item_pane = switch_pane.clone();
-                                let color = crate::synchronized_group_color(
-                                    synchronized_theme,
-                                    group.color_slot,
-                                );
-                                let label: SharedString = crate::fl!(
-                                    "synchronized-tabs-group-summary",
-                                    number = group.display_number,
-                                    count = group.member_count
-                                )
-                                .into();
-                                submenu = submenu.item(
-                                    PopupMenuItem::element({
-                                        let label = label.clone();
-                                        move |_, _| {
-                                            h_flex()
-                                                .gap_2()
-                                                .child(div().size(px(8.0)).rounded_full().bg(color))
-                                                .child(label.clone())
-                                        }
-                                    })
-                                    .checked(group.is_current)
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            item_pane.update(cx, |_, cx| {
-                                                cx.emit(PaneEvent::SwitchSynchronizedGroup {
-                                                    tab_id,
-                                                    group_id,
-                                                });
-                                            });
-                                        },
-                                    ),
-                                );
-                            }
-                            submenu
-                        },
                     );
 
                     let pause_pane = pane.clone();
@@ -1462,27 +1303,24 @@ impl Pane {
                         },
                     ));
 
-                    let leave_group = preferred_group.expect("group list is not empty");
                     let leave_pane = pane.clone();
                     menu = menu.separator().item(
-                        PopupMenuItem::new(crate::fl!("synchronized-tabs-leave-current"))
+                        PopupMenuItem::new(crate::fl!("synchronized-tabs-leave"))
                             .icon(IconName::Unlink2)
                             .on_click(move |_, _, cx| {
                                 leave_pane.update(cx, |_, cx| {
-                                    cx.emit(PaneEvent::LeaveSynchronizedGroup {
-                                        tab_id,
-                                        group_id: leave_group.id,
-                                    });
+                                    cx.emit(PaneEvent::LeaveSynchronizedGroup(tab_id));
                                 });
                             }),
                     );
-                    let leave_all_pane = pane.clone();
+                } else {
+                    let create_pane = pane.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(crate::fl!("synchronized-tabs-leave-all"))
-                            .icon(IconName::Unlink2)
+                        PopupMenuItem::new(crate::fl!("synchronized-tabs-create"))
+                            .icon(IconName::Link2)
                             .on_click(move |_, _, cx| {
-                                leave_all_pane.update(cx, |_, cx| {
-                                    cx.emit(PaneEvent::LeaveAllSynchronizedGroups(tab_id));
+                                create_pane.update(cx, |_, cx| {
+                                    cx.emit(PaneEvent::CreateSynchronizedGroup(tab_id));
                                 });
                             }),
                     );
@@ -1553,17 +1391,16 @@ impl Pane {
             .get(tab_ix)
             .map(Self::tab_entity_id)
             .unwrap_or_else(|| cx.entity_id());
-        let all_groups = self
+        let group = self
             .synchronized_presentation
-            .groups_by_tab
+            .group_by_tab
             .get(&tab_id)
-            .cloned()
-            .unwrap_or_default();
+            .cloned();
         let is_paused = self.synchronized_presentation.paused_tabs.contains(&tab_id);
         let synchronized_theme = cx.global::<SettingsStore>().resolved_theme;
-        let active_group = active_synchronized_group(&all_groups);
-        let current_color = active_group
+        let current_color = group
             .as_ref()
+            .filter(|group| group.is_current)
             .map(|group| crate::synchronized_group_color(synchronized_theme, group.color_slot));
         let connection_color = self
             .synchronized_presentation
@@ -1590,29 +1427,33 @@ impl Pane {
                 });
             });
 
-        let active_group_badge = active_group.map(|group| {
+        let group_marker = group.map(|group| {
             let color = crate::synchronized_group_color(synchronized_theme, group.color_slot);
-            let (badge_color, foreground) = accessible_synchronized_group_badge_colors(color);
-            let number = group.display_number.to_string();
-            let badge_width = synchronized_group_badge_width(group.display_number);
-            let badge_height = 18.0;
-            let badge = div()
-                .w(px(badge_width))
-                .h(px(badge_height))
+            let marker_width = 16.0;
+            let marker_height = 20.0;
+            let marker = div()
+                .id(("synchronized-tab-group-link", tab_id))
+                .w(px(marker_width))
+                .h(px(marker_height))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_full()
-                .bg(badge_color)
-                .text_color(foreground)
-                .text_size(ui_rems(10.0))
-                .font_weight(FontWeight::BOLD)
-                .child(number);
+                .debug_selector(|| "synchronized-tab-group-link".to_string())
+                .tooltip(glyphst_ui::tooltip::text_tooltip(crate::fl!(
+                    "synchronized-tabs-group-summary",
+                    number = group.display_number,
+                    count = group.member_count
+                )))
+                .child(
+                    Icon::new(IconName::Link2)
+                        .size(ui_rems(12.0))
+                        .text_color(color),
+                );
             let is_recently_added = recently_added
                 .is_some_and(|recent| recent.tab_id == tab_id && recent.group_id == group.id);
-            let badge = if is_recently_added {
+            if is_recently_added {
                 let sequence = recently_added.map_or(0, |recent| recent.sequence);
-                badge
+                marker
                     .with_animation(
                         ("synchronized-tab-added", sequence as usize),
                         glyphst_ui::motion::HOVER.animation(),
@@ -1623,38 +1464,23 @@ impl Pane {
                                 1.15 - (progress - 0.6) / 0.4 * 0.15
                             };
                             element
-                                .w(px(badge_width * scale))
-                                .h(px(badge_height * scale))
+                                .w(px(marker_width * scale))
+                                .h(px(marker_height * scale))
                                 .opacity(progress)
                         },
                     )
                     .into_any_element()
             } else {
-                badge.into_any_element()
-            };
-            div()
-                .id(("synchronized-tab-group-badge", tab_id))
-                .w(px(badge_width + 2.0))
-                .h(px(20.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .debug_selector(|| "synchronized-tab-group-badge".to_string())
-                .tooltip(glyphst_ui::tooltip::text_tooltip(crate::fl!(
-                    "synchronized-tabs-group-summary",
-                    number = group.display_number,
-                    count = group.member_count
-                )))
-                .child(badge)
-                .into_any_element()
+                marker.into_any_element()
+            }
         });
-        let group_badge = h_flex()
-            .children(active_group_badge)
+        let group_marker = h_flex()
+            .children(group_marker)
             .when(is_paused, |this| this.opacity(0.45));
         let suffix_bounds = self.tab_bounds.clone();
         let suffix = h_flex()
             .gap_1()
-            .child(group_badge)
+            .child(group_marker)
             .when(is_paused, |this| {
                 this.child(
                     div()

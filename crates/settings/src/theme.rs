@@ -256,14 +256,17 @@ impl Theme {
             highlight_orange: hsla_to_rgba_with_alpha(theme.warning, 0x66),
             match_highlight: hsla_to_rgb(theme.warning),
             synchronized_group_colors: [
-                hsla_to_rgb(theme.red),
-                hsla_to_rgb(theme.red.mix_oklab(theme.yellow, 0.5)),
-                hsla_to_rgb(theme.yellow),
-                hsla_to_rgb(theme.green),
-                hsla_to_rgb(theme.cyan),
+                // Follow the alternating hue cadence used by rainbow-bracket
+                // palettes so groups created next to each other are easy to
+                // distinguish.
                 hsla_to_rgb(theme.blue),
-                hsla_to_rgb(theme.blue.mix_oklab(theme.magenta, 0.5)),
+                hsla_to_rgb(theme.red.mix_oklab(theme.yellow, 0.5)),
                 hsla_to_rgb(theme.magenta),
+                hsla_to_rgb(theme.green),
+                hsla_to_rgb(theme.blue.mix_oklab(theme.magenta, 0.5)),
+                hsla_to_rgb(theme.yellow),
+                hsla_to_rgb(theme.cyan),
+                hsla_to_rgb(theme.red),
             ],
             page_gap: DEFAULT_PAGE_GAP,
         }

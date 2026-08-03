@@ -1,24 +1,15 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{fs, path::PathBuf, time::Duration};
 
-use gpui::{AppContext as _, EntityId, Hsla, TestAppContext, rgb};
+use gpui::{AppContext as _, EntityId, TestAppContext};
 use gpui_component::Root;
 
 use super::{
-    DraggedTab, LoadingDocumentView, Pane, SYNCHRONIZED_GROUP_BADGE_MIN_CONTRAST, Tab,
-    accessible_synchronized_group_badge_colors, active_synchronized_group, color_contrast_ratio,
-    loading_grid_opacity, parse_debug_file_open_min_duration, remaining_file_open_min_duration,
-    synchronized_group_badge_width,
+    DraggedTab, LoadingDocumentView, Pane, Tab, loading_grid_opacity,
+    parse_debug_file_open_min_duration, remaining_file_open_min_duration,
 };
 use crate::{
-    document_view::RenderCache,
-    library::LibraryStore,
-    settings::SettingsStore,
+    document_view::RenderCache, library::LibraryStore, settings::SettingsStore,
     synchronized_tabs::SynchronizedTabRegistry,
-    theme::{DEFAULT_DARK_THEME_ID, DEFAULT_LIGHT_THEME_ID, PartialTheme, ThemeCatalog},
 };
 use glyphst_translation_ui::DocumentTranslationJobManager;
 
@@ -76,7 +67,7 @@ fn loading_grid_opacity_spans_the_expected_wave() {
 }
 
 #[gpui::test]
-fn rendered_tab_suffix_tracks_bounds_and_pause_indicator(cx: &mut TestAppContext) {
+fn rendered_non_current_group_tab_has_link_marker_and_pause_indicator(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_component::init(cx);
         cx.set_global(SettingsStore::memory());
@@ -118,22 +109,34 @@ fn rendered_tab_suffix_tracks_bounds_and_pause_indicator(cx: &mut TestAppContext
     });
 
     let mut registry = SynchronizedTabRegistry::default();
-    registry.create_group(
-        tab_id,
-        pane.entity_id(),
-        EntityId::from(1001),
-        EntityId::from(1002),
-    );
+    registry
+        .create_group(
+            tab_id,
+            pane.entity_id(),
+            EntityId::from(1001),
+            EntityId::from(1002),
+        )
+        .unwrap();
+    registry
+        .create_group(
+            EntityId::from(2001),
+            EntityId::from(2002),
+            EntityId::from(2003),
+            EntityId::from(2004),
+        )
+        .unwrap();
+    let summary = registry.summary_for_tab(tab_id).unwrap();
+    assert!(!summary.is_current);
     pane.update_in(cx, |pane, _, cx| {
         pane.synchronized_presentation
-            .groups_by_tab
-            .insert(tab_id, registry.summaries_for_tab(tab_id));
+            .group_by_tab
+            .insert(tab_id, summary);
         cx.notify();
     });
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
-    assert!(cx.debug_bounds("synchronized-tab-group-badge").is_some());
+    assert!(cx.debug_bounds("synchronized-tab-group-link").is_some());
 
     pane.update_in(cx, |pane, _, cx| {
         pane.synchronized_presentation.paused_tabs.insert(tab_id);
@@ -143,93 +146,6 @@ fn rendered_tab_suffix_tracks_bounds_and_pause_indicator(cx: &mut TestAppContext
         _ = window.draw(cx);
     });
     assert!(cx.debug_bounds("synchronized-tab-paused").is_some());
-}
-
-#[test]
-fn active_group_badge_tracks_the_selected_group_without_reordering_memberships() {
-    let mut registry = SynchronizedTabRegistry::default();
-    let shared_tab = EntityId::from(99);
-    let first = registry.create_group(
-        EntityId::from(1),
-        EntityId::from(11),
-        shared_tab,
-        EntityId::from(19),
-    );
-    let second = registry.create_group(
-        EntityId::from(2),
-        EntityId::from(12),
-        shared_tab,
-        EntityId::from(19),
-    );
-    assert!(registry.select_for_tab(shared_tab, first));
-    let first_summaries = registry.summaries_for_tab(shared_tab);
-    assert_eq!(
-        first_summaries
-            .iter()
-            .map(|group| group.id)
-            .collect::<Vec<_>>(),
-        vec![first, second]
-    );
-    assert_eq!(
-        active_synchronized_group(&first_summaries).map(|group| group.display_number),
-        Some(1)
-    );
-
-    assert!(registry.select_for_tab(shared_tab, second));
-    let second_summaries = registry.summaries_for_tab(shared_tab);
-    assert_eq!(
-        active_synchronized_group(&second_summaries).map(|group| group.display_number),
-        Some(2)
-    );
-    assert!(active_synchronized_group(&registry.summaries_for_tab(EntityId::from(1))).is_none());
-}
-
-#[test]
-fn synchronized_group_badges_meet_aaa_contrast_in_default_themes() {
-    let catalog = ThemeCatalog::load(Path::new("/path/that/does/not/exist"));
-    for theme_id in [DEFAULT_LIGHT_THEME_ID, DEFAULT_DARK_THEME_ID] {
-        let theme = catalog.resolve(theme_id, PartialTheme::default());
-        for (color_slot, color) in theme.synchronized_group_colors.into_iter().enumerate() {
-            let base: Hsla = rgb(color).into();
-            let (background, foreground) = accessible_synchronized_group_badge_colors(base);
-            let contrast = color_contrast_ratio(background, foreground);
-            assert!(
-                contrast >= SYNCHRONIZED_GROUP_BADGE_MIN_CONTRAST,
-                "{theme_id} slot {color_slot} has only {contrast}:1 contrast"
-            );
-        }
-    }
-}
-
-#[test]
-fn synchronized_group_badge_adjusts_only_colors_below_aaa_contrast() {
-    let catalog = ThemeCatalog::load(Path::new("/path/that/does-not-exist"));
-    let theme = catalog.resolve(DEFAULT_LIGHT_THEME_ID, PartialTheme::default());
-    let red: Hsla = rgb(theme.synchronized_group_colors[0]).into();
-    let brown: Hsla = rgb(theme.synchronized_group_colors[1]).into();
-    let yellow: Hsla = rgb(theme.synchronized_group_colors[2]).into();
-    let green: Hsla = rgb(theme.synchronized_group_colors[3]).into();
-
-    let (red_background, red_foreground) = accessible_synchronized_group_badge_colors(red);
-    assert_eq!(red_foreground, rgb(0xffffff).into());
-    assert!(red_background.l < red.l);
-
-    for base in [brown, green] {
-        let (background, foreground) = accessible_synchronized_group_badge_colors(base);
-        assert_eq!(foreground, rgb(0x000000).into());
-        assert!(background.l > base.l);
-    }
-
-    let (yellow_background, yellow_foreground) = accessible_synchronized_group_badge_colors(yellow);
-    assert_eq!(yellow_foreground, rgb(0x000000).into());
-    assert_eq!(yellow_background, yellow);
-}
-
-#[test]
-fn synchronized_group_badge_expands_for_multi_digit_numbers() {
-    assert_eq!(synchronized_group_badge_width(1), 18.0);
-    assert_eq!(synchronized_group_badge_width(10), 22.0);
-    assert_eq!(synchronized_group_badge_width(100), 27.0);
 }
 
 #[test]

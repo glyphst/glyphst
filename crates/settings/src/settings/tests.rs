@@ -1272,18 +1272,37 @@ fn theme_resolution_layers_selected_theme_and_overrides() {
     assert_eq!(theme.page_gap, 48.0);
 }
 
+fn circular_hue_distance(left: u32, right: u32) -> f32 {
+    let left: gpui::Hsla = gpui::rgb(left).into();
+    let right: gpui::Hsla = gpui::rgb(right).into();
+    let difference = (left.h - right.h).abs();
+    difference.min(1.0 - difference)
+}
+
 #[test]
-fn synchronized_group_palette_is_distinct_and_accepts_overrides() {
+fn synchronized_group_palette_separates_creation_neighbors_and_accepts_overrides() {
     let catalog = ThemeCatalog::load(Path::new("/path/that/does/not/exist"));
-    let defaults = catalog.resolve(DEFAULT_LIGHT_THEME_ID, PartialTheme::default());
-    assert_eq!(
-        defaults
-            .synchronized_group_colors
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>()
-            .len(),
-        crate::theme::SYNCHRONIZED_GROUP_COLOR_COUNT
-    );
+    for theme_id in [DEFAULT_LIGHT_THEME_ID, DEFAULT_DARK_THEME_ID] {
+        let palette = catalog
+            .resolve(theme_id, PartialTheme::default())
+            .synchronized_group_colors;
+        assert_eq!(
+            palette
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            crate::theme::SYNCHRONIZED_GROUP_COLOR_COUNT
+        );
+        for index in 0..palette.len() {
+            let next = (index + 1) % palette.len();
+            assert!(
+                circular_hue_distance(palette[index], palette[next]) >= 0.2,
+                "{theme_id} synchronization colors {} and {} are too similar",
+                index + 1,
+                next + 1
+            );
+        }
+    }
 
     let mut overrides = PartialTheme::default();
     overrides.synchronized_group_colors[3] = Some(0x123456);
