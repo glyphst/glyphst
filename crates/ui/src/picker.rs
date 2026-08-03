@@ -328,15 +328,24 @@ impl<D: PickerDelegate> Render for Picker<D> {
                 div()
                     .h(px(INPUT_ROW_HEIGHT))
                     .flex_none()
+                    .flex()
+                    .items_center()
                     .border_b_1()
                     .border_color(cx.theme().border)
+                    .debug_selector(|| "picker-input-row".to_string())
                     .child(Input::new(&self.input).appearance(false).px_2()),
             )
             .child(
-                List::new(&self.list)
+                div()
                     .h(px(list_height))
                     .max_h(px(list_height))
-                    .scrollbar_visible(true),
+                    .debug_selector(|| "picker-list".to_string())
+                    .child(
+                        List::new(&self.list)
+                            .h(px(list_height))
+                            .max_h(px(list_height))
+                            .scrollbar_visible(true),
+                    ),
             )
     }
 }
@@ -672,6 +681,27 @@ mod tests {
             picker.update(cx, |picker, cx| picker.dismiss(window, cx));
             assert!(previous_focus_handle.is_focused(window));
         });
+    }
+
+    #[gpui::test]
+    fn picker_input_row_meets_the_list_without_extra_space(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let host = cx.new(|cx| PickerFocusHost::new(window, cx));
+            Root::new(host, window, cx)
+        });
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let input_row = cx
+            .debug_bounds("picker-input-row")
+            .expect("picker input row bounds");
+        let list = cx.debug_bounds("picker-list").expect("picker list bounds");
+        assert_eq!(input_row.size.height, px(INPUT_ROW_HEIGHT));
+        assert_eq!(input_row.bottom(), list.top());
     }
 
     #[test]

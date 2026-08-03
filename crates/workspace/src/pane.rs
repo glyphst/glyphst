@@ -1580,6 +1580,7 @@ impl Pane {
             .when(is_paused, |this| this.opacity(0.45));
         let suffix_bounds = self.tab_bounds.clone();
         let suffix = h_flex()
+            .flex_none()
             .gap_1()
             .children(occurrence.map(|(ordinal, total)| {
                 div()
@@ -1754,7 +1755,6 @@ impl Pane {
             }));
 
         ComponentTabBar::new(("pane-tab-bar", pane_id))
-            .segmented()
             .flex_none()
             .w_full()
             .h(ui_rems(PANE_TAB_BAR_HEIGHT))
@@ -2468,6 +2468,9 @@ impl PaneAxis {
                     .relative()
                     .size_full()
                     .overflow_hidden()
+                    .when(is_active_pane, |this| {
+                        this.debug_selector(|| "active-pane-bounds".to_string())
+                    })
                     .on_prepaint(move |bounds, _, _| {
                         if let Some(slot) = bounding_boxes.borrow_mut().get_mut(ix) {
                             *slot = Some(bounds);
@@ -2492,12 +2495,13 @@ impl PaneAxis {
                         this.child(
                             div()
                                 .absolute()
-                                .top_0()
-                                .right_0()
-                                .bottom_0()
-                                .left_0()
+                                .top(px(1.0))
+                                .right(px(1.0))
+                                .bottom(px(1.0))
+                                .left(px(1.0))
                                 .border_1()
-                                .border_color(theme.primary),
+                                .border_color(theme.primary)
+                                .debug_selector(|| "active-pane-outline".to_string()),
                         )
                     });
 

@@ -23,6 +23,7 @@ pub const SYNCHRONIZED_GROUP_COLOR_COUNT: usize = 8;
 const DEFAULT_COMPONENT_RADIUS: usize = 6;
 const DEFAULT_COMPONENT_RADIUS_LG: usize = 12;
 const DEFAULT_COMPONENT_SHADOW: bool = true;
+const DEFAULT_INACTIVE_TAB_OPACITY: f32 = 0.45;
 
 const MIN_PAGE_GAP: f32 = 0.0;
 const MAX_PAGE_GAP: f32 = 240.0;
@@ -823,6 +824,14 @@ pub fn apply_component_overrides(theme: &mut ComponentTheme, overrides: PartialT
     apply_rgb!(border_focused => ring);
     apply_rgb!(tab_bar_background => tab_bar);
     apply_rgb!(tab_active_background => tab_active);
+    if theme.colors.tab.a <= f32::EPSILON {
+        let tab = theme
+            .colors
+            .tab_active
+            .opacity(DEFAULT_INACTIVE_TAB_OPACITY);
+        theme.colors.tab = tab;
+        theme.tokens.tab = tab.into();
+    }
     apply_rgb!(tab_inactive_background => tab);
     apply_rgb!(element_hover => list_hover);
     apply_rgb!(element_selected => list_active);
@@ -906,5 +915,40 @@ fn mask_rgb_option(value: &mut Option<u32>) {
 fn mask_rgba_option(value: &mut Option<u32>) {
     if let Some(value) = value.as_mut() {
         mask_rgba(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transparent_inactive_tabs_receive_a_subtle_surface() {
+        let mut theme = ComponentTheme::default();
+        let active: Hsla = rgb(0x336699).into();
+        theme.colors.tab.a = 0.0;
+        theme.colors.tab_active = active;
+
+        apply_component_overrides(&mut theme, PartialTheme::default());
+
+        assert_eq!(
+            theme.colors.tab,
+            active.opacity(DEFAULT_INACTIVE_TAB_OPACITY)
+        );
+    }
+
+    #[test]
+    fn explicit_inactive_tab_surface_overrides_the_fallback() {
+        let mut theme = ComponentTheme::default();
+        theme.colors.tab.a = 0.0;
+        let overrides = PartialTheme {
+            tab_inactive_background: Some(0x123456),
+            ..PartialTheme::default()
+        };
+
+        apply_component_overrides(&mut theme, overrides);
+
+        let expected: Hsla = rgb(0x123456).into();
+        assert_eq!(theme.colors.tab, expected);
     }
 }

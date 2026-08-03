@@ -4532,6 +4532,71 @@ mod tests {
     }
 
     #[gpui::test]
+    fn active_split_pane_outline_stays_inside_its_pane(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        let left_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let pane = cx
+            .debug_bounds("active-pane-bounds")
+            .expect("active pane bounds");
+        let outline = cx
+            .debug_bounds("active-pane-outline")
+            .expect("active pane outline bounds");
+        assert_eq!(outline.left(), pane.left() + px(1.0));
+        assert_eq!(outline.top(), pane.top() + px(1.0));
+        assert_eq!(outline.right(), pane.right() - px(1.0));
+        assert_eq!(outline.bottom(), pane.bottom() - px(1.0));
+
+        let left_pane_bounds = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .pane_group
+                .bounding_box_for_pane(&left_pane)
+                .expect("left pane bounds")
+        });
+        cx.simulate_click(left_pane_bounds.center(), Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.active_pane, left_pane);
+        });
+        let pane = cx
+            .debug_bounds("active-pane-bounds")
+            .expect("clicked pane bounds");
+        let outline = cx
+            .debug_bounds("active-pane-outline")
+            .expect("clicked pane outline bounds");
+        assert_eq!(outline.left(), pane.left() + px(1.0));
+        assert_eq!(outline.top(), pane.top() + px(1.0));
+        assert_eq!(outline.right(), pane.right() - px(1.0));
+        assert_eq!(outline.bottom(), pane.bottom() - px(1.0));
+    }
+
+    #[gpui::test]
     fn open_sidebar_survives_document_tab_changes(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);

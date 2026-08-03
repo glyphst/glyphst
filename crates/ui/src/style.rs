@@ -15,7 +15,7 @@ pub const SURFACE_GAP: f32 = SPACE_XS;
 
 pub const CONTROL_SIZE: f32 = 28.0;
 pub const CONTROL_ICON_SIZE: f32 = 14.0;
-pub const INPUT_ROW_HEIGHT: f32 = 40.0;
+pub const INPUT_ROW_HEIGHT: f32 = 32.0;
 pub const SEARCH_BAR_HEIGHT: f32 = 36.0;
 
 /// The translucent tone used behind opaque inset application surfaces.
