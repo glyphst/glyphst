@@ -12,7 +12,7 @@ use glyphst_ui::activity::ActivityCenter;
 use glyphst_ui::root::render_overlays;
 use gpui::{
     AnyElement, App, Bounds, Context, DismissEvent, DragMoveEvent, Entity, EntityId, FocusHandle,
-    Focusable, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PathPromptOptions, Pixels, Point, Render, SharedString, Window, WindowAppearance,
     bounds, canvas, div, fill, point, prelude::*, px, size,
 };
@@ -463,6 +463,11 @@ impl Workspace {
                     }
                     this.refresh_synchronized_tab_presentation(cx);
                 }
+                PaneEvent::SetSynchronizedScrollPaused { tab_id, paused } => {
+                    if this.synchronized_tabs.set_paused(*tab_id, *paused) {
+                        this.refresh_synchronized_tab_presentation(cx);
+                    }
+                }
                 PaneEvent::LeaveSynchronizedGroup { tab_id, group_id } => {
                     this.synchronized_tabs.leave_group(*tab_id, *group_id);
                     this.refresh_synchronized_tab_presentation(cx);
@@ -525,6 +530,17 @@ impl Workspace {
         }
     }
 
+    fn synchronized_connection_display_number(&self, group: SynchronizedConnectionGroup) -> u64 {
+        match group {
+            SynchronizedConnectionGroup::New(reserved) => reserved.display_number,
+            SynchronizedConnectionGroup::Existing(group_id) => self
+                .synchronized_tabs
+                .group_summary(group_id)
+                .map(|group| group.display_number)
+                .unwrap_or_default(),
+        }
+    }
+
     fn synchronized_connection_tab_state(
         &self,
         connection: &SynchronizedConnection,
@@ -548,17 +564,12 @@ impl Workspace {
             );
         }
 
-        let (pane_is_represented, group_number) = match connection.group {
-            SynchronizedConnectionGroup::New(reserved) => (
-                pane_id == connection.source_pane.entity_id(),
-                reserved.id.number(),
-            ),
-            SynchronizedConnectionGroup::Existing(group_id) => (
-                !self
-                    .synchronized_tabs
-                    .can_add_member(group_id, tab_id, pane_id),
-                group_id.number(),
-            ),
+        let group_number = self.synchronized_connection_display_number(connection.group);
+        let pane_is_represented = match connection.group {
+            SynchronizedConnectionGroup::New(_) => pane_id == connection.source_pane.entity_id(),
+            SynchronizedConnectionGroup::Existing(group_id) => !self
+                .synchronized_tabs
+                .can_add_member(group_id, tab_id, pane_id),
         };
         if pane_is_represented {
             SynchronizedConnectionTabState::Invalid(
@@ -705,6 +716,9 @@ impl Workspace {
                 let groups = self.synchronized_tabs.summaries_for_tab(tab_id);
                 if !groups.is_empty() {
                     presentation.groups_by_tab.insert(tab_id, groups);
+                }
+                if self.synchronized_tabs.is_paused(tab_id) {
+                    presentation.paused_tabs.insert(tab_id);
                 }
                 if let Some(connection) = &self.synchronized_connection {
                     let state = self.synchronized_connection_tab_state(
@@ -920,6 +934,9 @@ impl Workspace {
         if !self.synchronized_tabs.contains(group_id, source_tab) {
             return;
         }
+        if self.synchronized_tabs.is_paused(source_tab) {
+            return;
+        }
         let source_is_displayed = self
             .pane_group
             .panes()
@@ -930,7 +947,7 @@ impl Workspace {
         }
 
         for member_tab in self.synchronized_tabs.member_tabs(group_id) {
-            if member_tab == source_tab {
+            if member_tab == source_tab || self.synchronized_tabs.is_paused(member_tab) {
                 continue;
             }
             let Some(pane) = self
@@ -949,19 +966,6 @@ impl Workspace {
                     document_view.apply_synchronized_scroll_delta(delta, cx);
                 });
             }
-        }
-    }
-
-    fn synchronized_group_color(theme: ThemeColor, color_slot: usize) -> Hsla {
-        match color_slot % 8 {
-            0 => theme.chart_1,
-            1 => theme.chart_2,
-            2 => theme.chart_3,
-            3 => theme.chart_4,
-            4 => theme.chart_5,
-            5 => theme.cyan,
-            6 => theme.magenta,
-            _ => theme.yellow,
         }
     }
 
@@ -1235,7 +1239,8 @@ impl Workspace {
 
         let viewport = bounds(point(px(0.0), px(0.0)), window.viewport_size());
         let curves = self.synchronized_connection_curves(&edges, viewport, cx);
-        let color = Self::synchronized_group_color(theme, color_slot);
+        let synchronized_theme = cx.global::<SettingsStore>().resolved_theme;
+        let color = crate::synchronized_group_color(synchronized_theme, color_slot);
         let handle_outline = theme.background;
         let network = (!curves.is_empty()).then(|| {
             canvas(
@@ -1354,10 +1359,7 @@ impl Workspace {
         }
 
         let hint = hint_data.map(|(cursor, group)| {
-            let group_number = match group {
-                SynchronizedConnectionGroup::New(reserved) => reserved.id.number(),
-                SynchronizedConnectionGroup::Existing(group_id) => group_id.number(),
-            };
+            let group_number = self.synchronized_connection_display_number(group);
             let (primary, secondary) = match hovered.map(|(state, _)| state) {
                 Some(SynchronizedConnectionTabState::Source) => (
                     crate::fl!("synchronized-tabs-connection-source"),
@@ -3253,7 +3255,13 @@ mod tests {
             let connection = workspace.synchronized_connection.as_ref().unwrap();
             assert_eq!(connection.edges.len(), 1);
             let group_number = match connection.group {
-                SynchronizedConnectionGroup::Existing(group_id) => group_id.number(),
+                SynchronizedConnectionGroup::Existing(group_id) => {
+                    workspace
+                        .synchronized_tabs
+                        .group_summary(group_id)
+                        .unwrap()
+                        .display_number
+                }
                 SynchronizedConnectionGroup::New(_) => unreachable!(),
             };
             let panes = workspace.pane_group.panes();
@@ -3395,6 +3403,66 @@ mod tests {
             );
             let after = target.read(cx).current_document_position();
             assert!(after.scroll_y_doc > before.scroll_y_doc);
+
+            assert!(
+                workspace
+                    .synchronized_tabs
+                    .set_paused(target.entity_id(), true)
+            );
+            workspace.refresh_synchronized_tab_presentation(cx);
+            let paused_target = target.read(cx).current_document_position();
+            workspace.propagate_synchronized_scroll(
+                source.entity_id(),
+                SynchronizedScrollDelta {
+                    x_pixels: 0.0,
+                    y_pixels: 48.0,
+                    mode: SynchronizedScrollMode::Immediate,
+                },
+                cx,
+            );
+            assert_eq!(target.read(cx).current_document_position(), paused_target);
+
+            assert!(
+                workspace
+                    .synchronized_tabs
+                    .set_paused(target.entity_id(), false)
+            );
+            workspace.refresh_synchronized_tab_presentation(cx);
+            assert_eq!(target.read(cx).current_document_position(), paused_target);
+            workspace.propagate_synchronized_scroll(
+                source.entity_id(),
+                SynchronizedScrollDelta {
+                    x_pixels: 0.0,
+                    y_pixels: 48.0,
+                    mode: SynchronizedScrollMode::Immediate,
+                },
+                cx,
+            );
+            let resumed_target = target.read(cx).current_document_position();
+            assert!(resumed_target.scroll_y_doc > paused_target.scroll_y_doc);
+
+            assert!(
+                workspace
+                    .synchronized_tabs
+                    .set_paused(source.entity_id(), true)
+            );
+            workspace.refresh_synchronized_tab_presentation(cx);
+            workspace.propagate_synchronized_scroll(
+                source.entity_id(),
+                SynchronizedScrollDelta {
+                    x_pixels: 0.0,
+                    y_pixels: 48.0,
+                    mode: SynchronizedScrollMode::Immediate,
+                },
+                cx,
+            );
+            assert_eq!(target.read(cx).current_document_position(), resumed_target);
+            assert!(
+                workspace
+                    .synchronized_tabs
+                    .set_paused(source.entity_id(), false)
+            );
+            workspace.refresh_synchronized_tab_presentation(cx);
 
             panes[1].update(cx, |pane, cx| pane.open_new_tab(window, cx));
             let hidden_before = target.read(cx).current_document_position();

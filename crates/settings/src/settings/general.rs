@@ -256,30 +256,6 @@ impl TabBarVisibility {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SynchronizedGroupIndicatorVisibility {
-    #[default]
-    AllMemberships,
-    CurrentGroupOnly,
-}
-
-impl SynchronizedGroupIndicatorVisibility {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::AllMemberships => "all_memberships",
-            Self::CurrentGroupOnly => "current_group_only",
-        }
-    }
-
-    pub(super) fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "all_memberships" => Some(Self::AllMemberships),
-            "current_group_only" => Some(Self::CurrentGroupOnly),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AppLanguage {
     #[default]
     System,

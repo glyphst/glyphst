@@ -40,6 +40,21 @@ macro_rules! component_color_setting {
     };
 }
 
+macro_rules! synchronized_group_color_setting {
+    ($index:literal, $label:literal) => {
+        ColorSetting {
+            id: concat!("synchronized_group_", stringify!($index)),
+            label: $label,
+            with_alpha: false,
+            override_value: |theme: &PartialTheme| theme.synchronized_group_colors[$index - 1],
+            resolved_value: |theme: &Theme, _| theme.synchronized_group_colors[$index - 1],
+            set_override: |theme: &mut PartialTheme, value| {
+                theme.synchronized_group_colors[$index - 1] = value
+            },
+        }
+    };
+}
+
 const DOCUMENT_COLORS: [ColorSetting; 9] = [
     document_color_setting!(background, "Document background", false),
     document_color_setting!(page, "Page", false),
@@ -81,6 +96,17 @@ const CONTROL_COLORS: [ColorSetting; 12] = [
     component_color_setting!(control_hover => button_hover, "Control hover", false),
     component_color_setting!(success => success, "Success", false),
     component_color_setting!(error => danger, "Error", false),
+];
+
+const SYNCHRONIZED_GROUP_COLORS: [ColorSetting; 8] = [
+    synchronized_group_color_setting!(1, "Group color 1"),
+    synchronized_group_color_setting!(2, "Group color 2"),
+    synchronized_group_color_setting!(3, "Group color 3"),
+    synchronized_group_color_setting!(4, "Group color 4"),
+    synchronized_group_color_setting!(5, "Group color 5"),
+    synchronized_group_color_setting!(6, "Group color 6"),
+    synchronized_group_color_setting!(7, "Group color 7"),
+    synchronized_group_color_setting!(8, "Group color 8"),
 ];
 
 impl SettingsWindow {
@@ -332,6 +358,9 @@ impl SettingsWindow {
         let control_colors = CONTROL_COLORS
             .into_iter()
             .map(|setting| Self::color_setting_item(setting, view.clone()));
+        let synchronized_group_colors = SYNCHRONIZED_GROUP_COLORS
+            .into_iter()
+            .map(|setting| Self::color_setting_item(setting, view.clone()));
 
         SettingPage::new(crate::fl!("settings-tab-appearance")).groups([
             SettingGroup::new()
@@ -350,6 +379,9 @@ impl SettingsWindow {
             SettingGroup::new()
                 .title("Text and controls")
                 .items(control_colors),
+            SettingGroup::new()
+                .title("Synchronized groups")
+                .items(synchronized_group_colors),
         ])
     }
 }

@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{EntityId, Pixels, Point};
 
+use crate::theme::SYNCHRONIZED_GROUP_COLOR_COUNT;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SynchronizedConnectionNode {
     pub(crate) tab_id: EntityId,
@@ -93,30 +95,27 @@ pub(crate) fn closest_synchronized_tab(
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct SynchronizedGroupId(u64);
 
-impl SynchronizedGroupId {
-    pub(crate) fn number(self) -> u64 {
-        self.0
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ReservedSynchronizedGroup {
     pub(crate) id: SynchronizedGroupId,
+    pub(crate) display_number: u64,
     pub(crate) color_slot: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SynchronizedGroupSummary {
     pub(crate) id: SynchronizedGroupId,
-    pub(crate) number: u64,
+    pub(crate) display_number: u64,
     pub(crate) color_slot: usize,
     pub(crate) member_count: usize,
     pub(crate) is_current: bool,
+    pub(crate) is_preferred: bool,
 }
 
 #[derive(Clone, Debug)]
 struct SynchronizedGroup {
     id: SynchronizedGroupId,
+    display_number: u64,
     color_slot: usize,
     members: HashMap<EntityId, EntityId>,
 }
@@ -126,23 +125,38 @@ pub(crate) struct SynchronizedTabRegistry {
     groups: HashMap<SynchronizedGroupId, SynchronizedGroup>,
     memberships: HashMap<EntityId, Vec<SynchronizedGroupId>>,
     preferred: HashMap<EntityId, SynchronizedGroupId>,
+    paused_tabs: HashSet<EntityId>,
     current_group: Option<SynchronizedGroupId>,
-    next_group_number: u64,
+    next_group_id: u64,
 }
 
 impl SynchronizedTabRegistry {
     pub(crate) fn reserve_group(&mut self) -> ReservedSynchronizedGroup {
-        self.next_group_number += 1;
-        let id = SynchronizedGroupId(self.next_group_number);
+        self.next_group_id += 1;
+        let id = SynchronizedGroupId(self.next_group_id);
+        let used_numbers = self
+            .groups
+            .values()
+            .map(|group| group.display_number)
+            .collect::<HashSet<_>>();
+        let display_number = (1_u64..)
+            .find(|number| !used_numbers.contains(number))
+            .expect("synchronized group display numbers are exhausted");
         let used_slots = self
             .groups
             .values()
             .map(|group| group.color_slot)
             .collect::<HashSet<_>>();
-        let color_slot = (0..8)
+        let color_slot = (0..SYNCHRONIZED_GROUP_COLOR_COUNT)
             .find(|slot| !used_slots.contains(slot))
-            .unwrap_or((self.next_group_number.saturating_sub(1) as usize) % 8);
-        ReservedSynchronizedGroup { id, color_slot }
+            .unwrap_or(
+                (display_number.saturating_sub(1) as usize) % SYNCHRONIZED_GROUP_COLOR_COUNT,
+            );
+        ReservedSynchronizedGroup {
+            id,
+            display_number,
+            color_slot,
+        }
     }
 
     pub(crate) fn create_group(
@@ -175,6 +189,7 @@ impl SynchronizedTabRegistry {
             reserved.id,
             SynchronizedGroup {
                 id: reserved.id,
+                display_number: reserved.display_number,
                 color_slot: reserved.color_slot,
                 members,
             },
@@ -255,6 +270,7 @@ impl SynchronizedTabRegistry {
     pub(crate) fn remove_tab(&mut self, tab_id: EntityId) {
         let memberships = self.memberships.remove(&tab_id).unwrap_or_default();
         self.preferred.remove(&tab_id);
+        self.paused_tabs.remove(&tab_id);
         for group_id in memberships {
             if let Some(group) = self.groups.get_mut(&group_id) {
                 group.members.remove(&tab_id);
@@ -273,6 +289,7 @@ impl SynchronizedTabRegistry {
             if memberships.is_empty() {
                 self.memberships.remove(&tab_id);
                 self.preferred.remove(&tab_id);
+                self.paused_tabs.remove(&tab_id);
             } else if self.preferred.get(&tab_id) == Some(&group_id) {
                 self.preferred
                     .insert(tab_id, memberships[memberships.len() - 1]);
@@ -300,14 +317,6 @@ impl SynchronizedTabRegistry {
         }
         self.current_group = Some(group_id);
         self.preferred.insert(tab_id, group_id);
-        if let Some(memberships) = self.memberships.get_mut(&tab_id)
-            && let Some(ix) = memberships
-                .iter()
-                .position(|candidate| *candidate == group_id)
-        {
-            let selected = memberships.remove(ix);
-            memberships.push(selected);
-        }
         true
     }
 
@@ -335,6 +344,21 @@ impl SynchronizedTabRegistry {
         self.current_group
     }
 
+    pub(crate) fn is_paused(&self, tab_id: EntityId) -> bool {
+        self.paused_tabs.contains(&tab_id)
+    }
+
+    pub(crate) fn set_paused(&mut self, tab_id: EntityId, paused: bool) -> bool {
+        if paused {
+            if !self.memberships.contains_key(&tab_id) {
+                return false;
+            }
+            self.paused_tabs.insert(tab_id)
+        } else {
+            self.paused_tabs.remove(&tab_id)
+        }
+    }
+
     pub(crate) fn contains(&self, group_id: SynchronizedGroupId, tab_id: EntityId) -> bool {
         self.groups
             .get(&group_id)
@@ -355,20 +379,28 @@ impl SynchronizedTabRegistry {
         let group = self.groups.get(&group_id)?;
         Some(SynchronizedGroupSummary {
             id: group.id,
-            number: group.id.number(),
+            display_number: group.display_number,
             color_slot: group.color_slot,
             member_count: group.members.len(),
             is_current: self.current_group == Some(group.id),
+            is_preferred: false,
         })
     }
 
     pub(crate) fn summaries_for_tab(&self, tab_id: EntityId) -> Vec<SynchronizedGroupSummary> {
-        self.memberships
+        let mut summaries = self
+            .memberships
             .get(&tab_id)
             .into_iter()
             .flatten()
-            .filter_map(|group_id| self.group_summary(*group_id))
-            .collect()
+            .filter_map(|group_id| {
+                let mut summary = self.group_summary(*group_id)?;
+                summary.is_preferred = self.preferred.get(&tab_id) == Some(group_id);
+                Some(summary)
+            })
+            .collect::<Vec<_>>();
+        summaries.sort_by_key(|group| group.display_number);
+        summaries
     }
 
     fn add_membership(&mut self, tab_id: EntityId, group_id: SynchronizedGroupId) {
@@ -395,6 +427,7 @@ impl SynchronizedTabRegistry {
                 if memberships.is_empty() {
                     self.memberships.remove(tab_id);
                     self.preferred.remove(tab_id);
+                    self.paused_tabs.remove(tab_id);
                 } else if self.preferred.get(tab_id) == Some(&group_id) {
                     self.preferred
                         .insert(*tab_id, memberships[memberships.len() - 1]);
@@ -409,11 +442,10 @@ impl SynchronizedTabRegistry {
             .is_some_and(|group_id| !self.groups.contains_key(&group_id))
         {
             self.current_group = self
-                .preferred
+                .groups
                 .values()
-                .find(|group_id| self.groups.contains_key(group_id))
-                .copied()
-                .or_else(|| self.groups.keys().next().copied());
+                .min_by_key(|group| group.display_number)
+                .map(|group| group.id);
         }
     }
 }
@@ -441,9 +473,50 @@ mod tests {
 
         assert_eq!(registry.summaries_for_tab(id(1)).len(), 2);
         assert_eq!(registry.group_for_tab_action(id(1)), Some(second));
+        assert!(
+            registry
+                .summaries_for_tab(id(1))
+                .into_iter()
+                .find(|group| group.id == second)
+                .unwrap()
+                .is_preferred
+        );
         assert!(registry.select_for_tab(id(1), first));
         assert_eq!(registry.current_group(), Some(first));
         assert_eq!(registry.group_for_tab_action(id(1)), Some(first));
+        assert!(
+            registry
+                .summaries_for_tab(id(1))
+                .into_iter()
+                .find(|group| group.id == first)
+                .unwrap()
+                .is_preferred
+        );
+    }
+
+    #[test]
+    fn display_numbers_reuse_gaps_without_reusing_internal_ids() {
+        let mut registry = SynchronizedTabRegistry::default();
+        let first = registry.create_group(id(1), id(11), id(2), id(12));
+        let second = registry.create_group(id(1), id(11), id(3), id(13));
+        let third = registry.create_group(id(1), id(11), id(4), id(14));
+
+        assert_eq!(registry.group_summary(first).unwrap().display_number, 1);
+        assert_eq!(registry.group_summary(second).unwrap().display_number, 2);
+        assert_eq!(registry.group_summary(third).unwrap().display_number, 3);
+
+        registry.leave_group(id(3), second);
+        assert_eq!(registry.group_summary(third).unwrap().display_number, 3);
+        registry.leave_group(id(4), third);
+        assert_eq!(registry.current_group(), Some(first));
+        let fourth = registry.create_group(id(1), id(11), id(5), id(15));
+        let fifth = registry.create_group(id(1), id(11), id(6), id(16));
+
+        assert_eq!(registry.group_summary(first).unwrap().display_number, 1);
+        assert_eq!(registry.group_summary(fourth).unwrap().display_number, 2);
+        assert_eq!(registry.group_summary(fifth).unwrap().display_number, 3);
+        assert_eq!(fourth.0, 4);
+        assert_eq!(fifth.0, 5);
     }
 
     #[test]
@@ -465,6 +538,29 @@ mod tests {
         assert!(registry.group_summary(group).is_none());
         assert!(registry.summaries_for_tab(id(1)).is_empty());
         assert_eq!(registry.current_group(), None);
+    }
+
+    #[test]
+    fn paused_state_clears_only_after_the_final_membership_is_removed() {
+        let mut registry = SynchronizedTabRegistry::default();
+        let first = registry.create_group(id(1), id(11), id(2), id(12));
+        let second = registry.create_group(id(1), id(11), id(3), id(13));
+
+        assert!(!registry.set_paused(id(99), true));
+        assert!(registry.set_paused(id(1), true));
+        assert!(registry.is_paused(id(1)));
+
+        registry.leave_group(id(2), first);
+        assert!(registry.is_paused(id(1)));
+
+        registry.leave_group(id(3), second);
+        assert!(!registry.is_paused(id(1)));
+        assert!(!registry.set_paused(id(1), true));
+
+        registry.create_group(id(1), id(11), id(4), id(14));
+        assert!(registry.set_paused(id(1), true));
+        registry.remove_tab(id(1));
+        assert!(!registry.is_paused(id(1)));
     }
 
     #[test]

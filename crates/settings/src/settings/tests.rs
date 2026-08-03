@@ -256,9 +256,32 @@ tabs {
     .unwrap();
 
     assert_eq!(settings.tab_bar_visibility, TabBarVisibility::Always);
+    let exported = settings.to_kdl_string();
+    assert!(!exported.contains("synchronized_group_indicators"));
+    assert_eq!(parse_settings(&exported).unwrap(), settings);
+}
+
+#[test]
+fn synchronized_group_color_overrides_round_trip() {
+    let settings = parse_settings(
+        r##"
+theme-overrides {
+    colors {
+        synchronized-group-1 "#123456"
+        synchronized-group-8 "#abcdef"
+    }
+}
+"##,
+    )
+    .unwrap();
+
     assert_eq!(
-        settings.synchronized_group_indicators,
-        SynchronizedGroupIndicatorVisibility::CurrentGroupOnly
+        settings.overrides.synchronized_group_colors[0],
+        Some(0x123456)
+    );
+    assert_eq!(
+        settings.overrides.synchronized_group_colors[7],
+        Some(0xabcdef)
     );
     assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
 }
@@ -1247,6 +1270,26 @@ fn theme_resolution_layers_selected_theme_and_overrides() {
 
     assert_eq!(theme.background, 0x101010);
     assert_eq!(theme.page_gap, 48.0);
+}
+
+#[test]
+fn synchronized_group_palette_is_distinct_and_accepts_overrides() {
+    let catalog = ThemeCatalog::load(Path::new("/path/that/does/not/exist"));
+    let defaults = catalog.resolve(DEFAULT_LIGHT_THEME_ID, PartialTheme::default());
+    assert_eq!(
+        defaults
+            .synchronized_group_colors
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        crate::theme::SYNCHRONIZED_GROUP_COLOR_COUNT
+    );
+
+    let mut overrides = PartialTheme::default();
+    overrides.synchronized_group_colors[3] = Some(0x123456);
+    let resolved = catalog.resolve(DEFAULT_LIGHT_THEME_ID, overrides);
+    assert_eq!(resolved.synchronized_group_color(3), 0x123456);
+    assert_eq!(resolved.synchronized_group_color(11), 0x123456);
 }
 
 #[test]

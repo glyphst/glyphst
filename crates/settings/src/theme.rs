@@ -9,14 +9,16 @@ use anyhow::{Context as _, Result};
 use glyphst_core::HighlightColor;
 use gpui::{App, Hsla, rgb, rgba};
 use gpui_component::{
-    Theme as ComponentTheme, ThemeConfig as ComponentThemeConfig, ThemeMode as ComponentThemeMode,
-    ThemeRegistry as ComponentThemeRegistry, ThemeSet as ComponentThemeSet,
+    Colorize as _, Theme as ComponentTheme, ThemeConfig as ComponentThemeConfig,
+    ThemeMode as ComponentThemeMode, ThemeRegistry as ComponentThemeRegistry,
+    ThemeSet as ComponentThemeSet,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
 
 pub const DEFAULT_LIGHT_THEME_ID: &str = "Default Light";
 pub const DEFAULT_DARK_THEME_ID: &str = "Default Dark";
 pub const DEFAULT_PAGE_GAP: f32 = 4.0;
+pub const SYNCHRONIZED_GROUP_COLOR_COUNT: usize = 8;
 
 const MIN_PAGE_GAP: f32 = 0.0;
 const MAX_PAGE_GAP: f32 = 240.0;
@@ -235,6 +237,7 @@ pub struct Theme {
     pub highlight_pink: u32,
     pub highlight_orange: u32,
     pub match_highlight: u32,
+    pub synchronized_group_colors: [u32; SYNCHRONIZED_GROUP_COLOR_COUNT],
     pub page_gap: f32,
 }
 
@@ -252,6 +255,16 @@ impl Theme {
             highlight_pink: hsla_to_rgba_with_alpha(theme.magenta, 0x66),
             highlight_orange: hsla_to_rgba_with_alpha(theme.warning, 0x66),
             match_highlight: hsla_to_rgb(theme.warning),
+            synchronized_group_colors: [
+                hsla_to_rgb(theme.red),
+                hsla_to_rgb(theme.red.mix_oklab(theme.yellow, 0.5)),
+                hsla_to_rgb(theme.yellow),
+                hsla_to_rgb(theme.green),
+                hsla_to_rgb(theme.cyan),
+                hsla_to_rgb(theme.blue),
+                hsla_to_rgb(theme.blue.mix_oklab(theme.magenta, 0.5)),
+                hsla_to_rgb(theme.magenta),
+            ],
             page_gap: DEFAULT_PAGE_GAP,
         }
     }
@@ -275,6 +288,16 @@ impl Theme {
         apply!(highlight_orange);
         apply!(match_highlight);
 
+        for (color, override_color) in self
+            .synchronized_group_colors
+            .iter_mut()
+            .zip(partial.synchronized_group_colors)
+        {
+            if let Some(override_color) = override_color {
+                *color = override_color;
+            }
+        }
+
         if let Some(page_gap) = partial.page_gap {
             self.page_gap = page_gap;
         }
@@ -293,6 +316,9 @@ impl Theme {
         mask_rgba(&mut self.highlight_pink);
         mask_rgba(&mut self.highlight_orange);
         mask_rgb(&mut self.match_highlight);
+        for color in &mut self.synchronized_group_colors {
+            mask_rgb(color);
+        }
         self.page_gap = self.page_gap.clamp(MIN_PAGE_GAP, MAX_PAGE_GAP);
     }
 
@@ -310,6 +336,10 @@ impl Theme {
         let base = self.highlight_color(color);
         let scale = |shift: u32| (((base >> shift) & 0xffu32) as f32 * 0.65) as u32;
         (scale(24) << 24) | (scale(16) << 16) | (scale(8) << 8) | 0xff
+    }
+
+    pub fn synchronized_group_color(self, color_slot: usize) -> u32 {
+        self.synchronized_group_colors[color_slot % SYNCHRONIZED_GROUP_COLOR_COUNT]
     }
 }
 
@@ -364,6 +394,7 @@ pub struct PartialTheme {
     pub control_hover: Option<u32>,
     pub success: Option<u32>,
     pub error: Option<u32>,
+    pub synchronized_group_colors: [Option<u32>; SYNCHRONIZED_GROUP_COLOR_COUNT],
     pub page_gap: Option<f32>,
 }
 
@@ -418,6 +449,9 @@ impl PartialTheme {
         mask_rgb_option(&mut self.control_hover);
         mask_rgb_option(&mut self.success);
         mask_rgb_option(&mut self.error);
+        for color in &mut self.synchronized_group_colors {
+            mask_rgb_option(color);
+        }
 
         if let Some(page_gap) = self.page_gap.as_mut() {
             *page_gap = page_gap.clamp(MIN_PAGE_GAP, MAX_PAGE_GAP);
@@ -482,6 +516,15 @@ impl PartialTheme {
         write_color!(control_hover, "control-hover", format_rgb_hex);
         write_color!(success, "success", format_rgb_hex);
         write_color!(error, "error", format_rgb_hex);
+        for (index, color) in self.synchronized_group_colors.into_iter().enumerate() {
+            if let Some(color) = color {
+                push_value_node(
+                    color_children,
+                    &format!("synchronized-group-{}", index + 1),
+                    format_rgb_hex(color),
+                );
+            }
+        }
 
         if !color_children.nodes().is_empty() {
             document.nodes_mut().push(colors);
@@ -539,6 +582,12 @@ impl PartialTheme {
         read_color!(control_hover, "control-hover", false);
         read_color!(success, "success", false);
         read_color!(error, "error", false);
+        for (index, color) in self.synchronized_group_colors.iter_mut().enumerate() {
+            *color = colors
+                .get_arg(&format!("synchronized-group-{}", index + 1))
+                .and_then(KdlValue::as_string)
+                .and_then(|value| parse_hex_color(value, false));
+        }
     }
 }
 

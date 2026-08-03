@@ -1,7 +1,7 @@
 use std::{
     cell::RefCell,
     cmp::Ordering,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
     time::{Duration, Instant},
@@ -15,9 +15,10 @@ use glyphst_core::DocumentFormat;
 use glyphst_translation_ui::{DocumentTranslationJobId, DocumentTranslationJobManager};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, AppContext, Axis, Bounds, Context,
-    DismissEvent, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Hsla,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString,
-    Styled, Task, Window, WindowHandle, anchored, deferred, div, point, prelude::*, px, relative,
+    DismissEvent, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
+    FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point,
+    Render, SharedString, Styled, Task, Window, WindowHandle, anchored, deferred, div, point,
+    prelude::*, px, relative, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Root, Selectable as _, Sizable as _, ThemeColor as Theme,
@@ -41,7 +42,7 @@ use crate::{
     icons::{Icon, IconName},
     library::{DocumentPosition, LibraryStore, normalize_path},
     new_tab::{NewTab, NewTabEvent},
-    settings::{SettingsStore, SynchronizedGroupIndicatorVisibility, TabBarVisibility, ui_rems},
+    settings::{SettingsStore, TabBarVisibility, ui_rems},
     synchronized_tabs::{SynchronizedGroupId, SynchronizedGroupSummary},
 };
 
@@ -274,6 +275,10 @@ pub(crate) enum PaneEvent {
         tab_id: EntityId,
         group_id: SynchronizedGroupId,
     },
+    SetSynchronizedScrollPaused {
+        tab_id: EntityId,
+        paused: bool,
+    },
     LeaveSynchronizedGroup {
         tab_id: EntityId,
         group_id: SynchronizedGroupId,
@@ -310,6 +315,7 @@ pub(crate) struct RecentlyAddedSynchronizedTab {
 #[derive(Clone, Default)]
 pub(crate) struct PaneSynchronizedPresentation {
     pub(crate) groups_by_tab: HashMap<EntityId, Vec<SynchronizedGroupSummary>>,
+    pub(crate) paused_tabs: HashSet<EntityId>,
     pub(crate) connection_tabs: HashMap<EntityId, SynchronizedConnectionTabState>,
     pub(crate) connection_color_slot: Option<usize>,
     pub(crate) recently_added: Option<RecentlyAddedSynchronizedTab>,
@@ -329,6 +335,82 @@ impl PaneTabBounds {
             (None, Some(suffix)) => Some(suffix),
             (None, None) => None,
         }
+    }
+}
+
+fn active_synchronized_group(
+    groups: &[SynchronizedGroupSummary],
+) -> Option<SynchronizedGroupSummary> {
+    groups.iter().find(|group| group.is_current).cloned()
+}
+
+const SYNCHRONIZED_GROUP_BADGE_MIN_CONTRAST: f32 = 7.0;
+const SYNCHRONIZED_GROUP_BADGE_CONTRAST_SEARCH_STEPS: usize = 20;
+
+fn color_relative_luminance(color: Hsla) -> f32 {
+    let color = color.to_rgb();
+    let linear_channel = |channel: f32| {
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear_channel(color.r)
+        + 0.7152 * linear_channel(color.g)
+        + 0.0722 * linear_channel(color.b)
+}
+
+fn color_contrast_ratio(left: Hsla, right: Hsla) -> f32 {
+    let left = color_relative_luminance(left);
+    let right = color_relative_luminance(right);
+    (left.max(right) + 0.05) / (left.min(right) + 0.05)
+}
+
+fn accessible_synchronized_group_badge_colors(background: Hsla) -> (Hsla, Hsla) {
+    let black: Hsla = rgb(0x000000).into();
+    let white: Hsla = rgb(0xffffff).into();
+    let black_contrast = color_contrast_ratio(background, black);
+    let white_contrast = color_contrast_ratio(background, white);
+    let (foreground, lighten_background, contrast) = if black_contrast >= white_contrast {
+        (black, true, black_contrast)
+    } else {
+        (white, false, white_contrast)
+    };
+    if contrast >= SYNCHRONIZED_GROUP_BADGE_MIN_CONTRAST {
+        return (background, foreground);
+    }
+
+    let mut passing_lightness = if lighten_background { 1.0 } else { 0.0 };
+    let mut failing_lightness = background.l;
+    for _ in 0..SYNCHRONIZED_GROUP_BADGE_CONTRAST_SEARCH_STEPS {
+        let lightness = (passing_lightness + failing_lightness) / 2.0;
+        let candidate = Hsla {
+            l: lightness,
+            ..background
+        };
+        if color_contrast_ratio(candidate, foreground) >= SYNCHRONIZED_GROUP_BADGE_MIN_CONTRAST {
+            passing_lightness = lightness;
+        } else {
+            failing_lightness = lightness;
+        }
+    }
+
+    (
+        Hsla {
+            l: passing_lightness,
+            ..background
+        },
+        foreground,
+    )
+}
+
+fn synchronized_group_badge_width(display_number: u64) -> f32 {
+    let digit_count = display_number.to_string().len();
+    if digit_count == 1 {
+        18.0
+    } else {
+        12.0 + digit_count as f32 * 5.0
     }
 }
 
@@ -1248,19 +1330,6 @@ impl Pane {
         }
     }
 
-    fn synchronized_group_color(theme: Theme, color_slot: usize) -> Hsla {
-        match color_slot % 8 {
-            0 => theme.chart_1,
-            1 => theme.chart_2,
-            2 => theme.chart_3,
-            3 => theme.chart_4,
-            4 => theme.chart_5,
-            5 => theme.cyan,
-            6 => theme.magenta,
-            _ => theme.yellow,
-        }
-    }
-
     fn open_tab_context_menu(
         &mut self,
         tab_ix: usize,
@@ -1284,9 +1353,12 @@ impl Pane {
             .get(&tab_id)
             .cloned()
             .unwrap_or_default();
+        let is_paused = self.synchronized_presentation.paused_tabs.contains(&tab_id);
+        let synchronized_theme = cx.global::<SettingsStore>().resolved_theme;
         let preferred_group = groups
             .iter()
             .find(|group| group.is_current)
+            .or_else(|| groups.iter().find(|group| group.is_preferred))
             .or_else(|| groups.last())
             .cloned();
         let pane = cx.entity();
@@ -1327,17 +1399,17 @@ impl Pane {
                         crate::fl!("synchronized-tabs-switch-group"),
                         window,
                         menu_cx,
-                        move |mut submenu, _, submenu_cx| {
+                        move |mut submenu, _, _| {
                             for group in &submenu_groups {
                                 let group_id = group.id;
                                 let item_pane = switch_pane.clone();
-                                let color = Self::synchronized_group_color(
-                                    submenu_cx.theme().colors,
+                                let color = crate::synchronized_group_color(
+                                    synchronized_theme,
                                     group.color_slot,
                                 );
                                 let label: SharedString = crate::fl!(
                                     "synchronized-tabs-group-summary",
-                                    number = group.number,
+                                    number = group.display_number,
                                     count = group.member_count
                                 )
                                 .into();
@@ -1367,6 +1439,28 @@ impl Pane {
                             submenu
                         },
                     );
+
+                    let pause_pane = pane.clone();
+                    let (pause_label, pause_icon, paused) = if is_paused {
+                        (
+                            crate::fl!("synchronized-tabs-resume-scroll"),
+                            IconName::Play,
+                            false,
+                        )
+                    } else {
+                        (
+                            crate::fl!("synchronized-tabs-pause-scroll"),
+                            IconName::Pause,
+                            true,
+                        )
+                    };
+                    menu = menu.item(PopupMenuItem::new(pause_label).icon(pause_icon).on_click(
+                        move |_, _, cx| {
+                            pause_pane.update(cx, |_, cx| {
+                                cx.emit(PaneEvent::SetSynchronizedScrollPaused { tab_id, paused });
+                            });
+                        },
+                    ));
 
                     let leave_group = preferred_group.expect("group list is not empty");
                     let leave_pane = pane.clone();
@@ -1465,35 +1559,16 @@ impl Pane {
             .get(&tab_id)
             .cloned()
             .unwrap_or_default();
-        let indicator_visibility = cx
-            .global::<SettingsStore>()
-            .settings
-            .synchronized_group_indicators;
-        let filtered_group_count = all_groups
-            .iter()
-            .filter(|group| {
-                indicator_visibility == SynchronizedGroupIndicatorVisibility::AllMemberships
-                    || group.is_current
-            })
-            .count();
-        let visible_groups = all_groups
-            .iter()
-            .filter(|group| {
-                indicator_visibility == SynchronizedGroupIndicatorVisibility::AllMemberships
-                    || group.is_current
-            })
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>();
-        let overflow_count = filtered_group_count.saturating_sub(visible_groups.len());
-        let current_color = all_groups
-            .iter()
-            .find(|group| group.is_current)
-            .map(|group| Self::synchronized_group_color(theme, group.color_slot));
+        let is_paused = self.synchronized_presentation.paused_tabs.contains(&tab_id);
+        let synchronized_theme = cx.global::<SettingsStore>().resolved_theme;
+        let active_group = active_synchronized_group(&all_groups);
+        let current_color = active_group
+            .as_ref()
+            .map(|group| crate::synchronized_group_color(synchronized_theme, group.color_slot));
         let connection_color = self
             .synchronized_presentation
             .connection_color_slot
-            .map(|color_slot| Self::synchronized_group_color(theme, color_slot));
+            .map(|color_slot| crate::synchronized_group_color(synchronized_theme, color_slot));
         let recently_added = self.synchronized_presentation.recently_added;
         let connection_state = self
             .synchronized_presentation
@@ -1515,61 +1590,87 @@ impl Pane {
                 });
             });
 
-        let membership_tags = h_flex()
-            .gap(px(3.0))
-            .children(visible_groups.into_iter().map(|group| {
-                let color = Self::synchronized_group_color(theme, group.color_slot);
-                let marker_width = if group.is_current { 10.0 } else { 7.0 };
-                let marker_height = if group.is_current { 5.0 } else { 4.0 };
-                let marker = div()
-                    .w(px(marker_width))
-                    .h(px(marker_height))
-                    .rounded_full()
-                    .bg(color);
-                let is_recently_added = recently_added
-                    .is_some_and(|recent| recent.tab_id == tab_id && recent.group_id == group.id);
-                let marker = if is_recently_added {
-                    let sequence = recently_added.map_or(0, |recent| recent.sequence);
-                    marker
-                        .with_animation(
-                            ("synchronized-tab-added", sequence as usize),
-                            glyphst_ui::motion::HOVER.animation(),
-                            move |element, progress| {
-                                let scale = if progress < 0.6 {
-                                    0.6 + progress / 0.6 * 0.55
-                                } else {
-                                    1.15 - (progress - 0.6) / 0.4 * 0.15
-                                };
-                                element
-                                    .w(px(marker_width * scale))
-                                    .h(px(marker_height * scale))
-                                    .opacity(progress)
-                            },
-                        )
-                        .into_any_element()
-                } else {
-                    marker.into_any_element()
-                };
-                div()
-                    .w(px(10.0))
-                    .h(px(8.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(marker)
-            }))
-            .when(overflow_count > 0, |this| {
-                this.child(
-                    div()
-                        .text_size(ui_rems(9.0))
-                        .text_color(theme.muted_foreground)
-                        .child(format!("+{overflow_count}")),
-                )
-            });
+        let active_group_badge = active_group.map(|group| {
+            let color = crate::synchronized_group_color(synchronized_theme, group.color_slot);
+            let (badge_color, foreground) = accessible_synchronized_group_badge_colors(color);
+            let number = group.display_number.to_string();
+            let badge_width = synchronized_group_badge_width(group.display_number);
+            let badge_height = 18.0;
+            let badge = div()
+                .w(px(badge_width))
+                .h(px(badge_height))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(badge_color)
+                .text_color(foreground)
+                .text_size(ui_rems(10.0))
+                .font_weight(FontWeight::BOLD)
+                .child(number);
+            let is_recently_added = recently_added
+                .is_some_and(|recent| recent.tab_id == tab_id && recent.group_id == group.id);
+            let badge = if is_recently_added {
+                let sequence = recently_added.map_or(0, |recent| recent.sequence);
+                badge
+                    .with_animation(
+                        ("synchronized-tab-added", sequence as usize),
+                        glyphst_ui::motion::HOVER.animation(),
+                        move |element, progress| {
+                            let scale = if progress < 0.6 {
+                                0.6 + progress / 0.6 * 0.55
+                            } else {
+                                1.15 - (progress - 0.6) / 0.4 * 0.15
+                            };
+                            element
+                                .w(px(badge_width * scale))
+                                .h(px(badge_height * scale))
+                                .opacity(progress)
+                        },
+                    )
+                    .into_any_element()
+            } else {
+                badge.into_any_element()
+            };
+            div()
+                .id(("synchronized-tab-group-badge", tab_id))
+                .w(px(badge_width + 2.0))
+                .h(px(20.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .debug_selector(|| "synchronized-tab-group-badge".to_string())
+                .tooltip(glyphst_ui::tooltip::text_tooltip(crate::fl!(
+                    "synchronized-tabs-group-summary",
+                    number = group.display_number,
+                    count = group.member_count
+                )))
+                .child(badge)
+                .into_any_element()
+        });
+        let group_badge = h_flex()
+            .children(active_group_badge)
+            .when(is_paused, |this| this.opacity(0.45));
         let suffix_bounds = self.tab_bounds.clone();
         let suffix = h_flex()
             .gap_1()
-            .child(membership_tags)
+            .child(group_badge)
+            .when(is_paused, |this| {
+                this.child(
+                    div()
+                        .w(px(12.0))
+                        .h(px(12.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .debug_selector(|| "synchronized-tab-paused".to_string())
+                        .child(
+                            Icon::new(IconName::Pause)
+                                .size(ui_rems(10.0))
+                                .text_color(theme.muted_foreground),
+                        ),
+                )
+            })
             .child(close_button)
             .on_prepaint(move |bounds, _, _| {
                 suffix_bounds.borrow_mut().entry(tab_id).or_default().suffix = Some(bounds);

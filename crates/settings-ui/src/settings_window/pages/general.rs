@@ -1,8 +1,8 @@
 use super::super::SettingsWindow;
 use glyphst_core::EpubTheme;
 use glyphst_settings::{
-    AppLanguage, CopyFormat, KeymapPreset, Settings, SettingsStore,
-    SynchronizedGroupIndicatorVisibility, TabBarVisibility, WindowBackgroundMode,
+    AppLanguage, CopyFormat, KeymapPreset, Settings, SettingsStore, TabBarVisibility,
+    WindowBackgroundMode,
 };
 use gpui::{App, Context, SharedString};
 use gpui_component::{
@@ -452,46 +452,6 @@ impl SettingsWindow {
             .default_value(defaults.tab_bar_visibility.as_str().to_string()),
         );
 
-        let synchronized_group_indicators = SettingItem::new(
-            crate::fl!("settings-synchronized-group-indicators"),
-            SettingField::dropdown(
-                vec![
-                    Self::setting_option(
-                        SynchronizedGroupIndicatorVisibility::AllMemberships.as_str(),
-                        crate::fl!("settings-synchronized-group-indicators-all"),
-                    ),
-                    Self::setting_option(
-                        SynchronizedGroupIndicatorVisibility::CurrentGroupOnly.as_str(),
-                        crate::fl!("settings-synchronized-group-indicators-current"),
-                    ),
-                ],
-                |cx: &App| {
-                    cx.global::<SettingsStore>()
-                        .settings
-                        .synchronized_group_indicators
-                        .as_str()
-                        .into()
-                },
-                {
-                    let view = view.clone();
-                    move |value: SharedString, cx: &mut App| {
-                        let visibility = if value.as_ref() == "current_group_only" {
-                            SynchronizedGroupIndicatorVisibility::CurrentGroupOnly
-                        } else {
-                            SynchronizedGroupIndicatorVisibility::AllMemberships
-                        };
-                        Self::update_settings(&view, cx, move |settings| {
-                            settings.synchronized_group_indicators = visibility;
-                        });
-                    }
-                },
-            )
-            .default_value(defaults.synchronized_group_indicators.as_str().to_string()),
-        )
-        .description(crate::fl!(
-            "settings-synchronized-group-indicators-description"
-        ));
-
         SettingPage::new(crate::fl!("settings-tab-general"))
             .default_open(true)
             .groups([
@@ -522,7 +482,7 @@ impl SettingsWindow {
                     .items([window_opacity, window_background]),
                 SettingGroup::new()
                     .title(crate::fl!("settings-section-tabs"))
-                    .items([tab_bar, synchronized_group_indicators]),
+                    .item(tab_bar),
                 SettingGroup::new()
                     .title(crate::fl!("settings-section-general"))
                     .item(export_settings),
