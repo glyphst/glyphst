@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, Context, Pixels, Task, Window, deferred, div, prelude::*, px};
 use gpui_component::{
-    Selectable as _, Sizable as _, ThemeColor,
+    ActiveTheme as _, Selectable as _, Sizable as _, ThemeColor,
     button::{Button, ButtonVariants as _},
     status_bar::StatusBar,
 };
@@ -16,7 +16,10 @@ use crate::{
     icons::IconName,
     library::{LibraryStore, SidebarWidths},
 };
-use glyphst_ui::motion::{LAYOUT, ScalarTween};
+use glyphst_ui::{
+    motion::{LAYOUT, ScalarTween},
+    style::{SURFACE_GAP, SURFACE_INSET},
+};
 
 const DOCK_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 const DOCK_SEPARATOR_WIDTH: f32 = 1.0;
@@ -660,10 +663,10 @@ impl Workspace {
         let center =
             self.pane_group
                 .render(&self.active_pane, theme, dim_inactive_panes, window, cx);
-        let mut dock_panels = Vec::with_capacity(4);
+        let mut main_panels = Vec::with_capacity(3);
 
         if let Some(document_view) = active_document_view.as_ref() {
-            dock_panels.push(self.render_tool_rail(document_view, theme, cx));
+            main_panels.push(self.render_tool_rail(document_view, theme, cx));
         }
 
         if let Some(sidebar) = self.docks.rendered_left_sidebar {
@@ -679,7 +682,7 @@ impl Workspace {
                 .unwrap_or_else(|| {
                     Self::render_dock_placeholder(Some(sidebar), loading, false, theme)
                 });
-            dock_panels.push(
+            main_panels.push(
                 div()
                     .id("workspace-left-dock")
                     .debug_selector(|| "workspace-left-dock".to_string())
@@ -705,7 +708,7 @@ impl Workspace {
             );
         }
 
-        dock_panels.push(
+        main_panels.push(
             div()
                 .id("workspace-dock-center")
                 .debug_selector(|| "workspace-dock-center".to_string())
@@ -717,7 +720,7 @@ impl Workspace {
                 .into_any_element(),
         );
 
-        if self.docks.render_ai_panel {
+        let ai_card = if self.docks.render_ai_panel {
             let content_width = snapshot.widths.ai.max(SIDEBAR_MIN_WIDTH);
             let content = active_document_view
                 .as_ref()
@@ -728,7 +731,7 @@ impl Workspace {
                     div().size_full().min_w_0().child(panel).into_any_element()
                 })
                 .unwrap_or_else(|| Self::render_dock_placeholder(None, loading, true, theme));
-            dock_panels.push(
+            Some(
                 div()
                     .id("workspace-ai-dock")
                     .debug_selector(|| "workspace-ai-dock".to_string())
@@ -744,6 +747,12 @@ impl Workspace {
                             .h_full()
                             .w(px(content_width))
                             .flex_none()
+                            .overflow_hidden()
+                            .rounded(cx.theme().radius_lg)
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.background)
+                            .when(cx.theme().shadow, |this| this.shadow_sm())
                             .child(content),
                     )
                     .when(snapshot.ai_panel_open, |this| {
@@ -753,20 +762,17 @@ impl Workspace {
                         ))
                     })
                     .into_any_element(),
-            );
-        }
+            )
+        } else {
+            None
+        };
 
-        let dock_row = div()
-            .id("workspace-dock-panels")
-            .debug_selector(|| "workspace-dock-panels".to_string())
+        let main_row = div()
+            .id("workspace-main-dock-panels")
+            .debug_selector(|| "workspace-main-dock-panels".to_string())
             .size_full()
             .flex()
-            .children(dock_panels)
-            .on_drag_move::<DraggedWorkspaceDock>(cx.listener(
-                |this, event: &DragMoveEvent<DraggedWorkspaceDock>, _, cx| {
-                    this.resize_dock_from_drag(event, cx);
-                },
-            ));
+            .children(main_panels);
         let footbar = active_document_view
             .map(|document_view| {
                 document_view.update(cx, |document_view, cx| {
@@ -775,15 +781,40 @@ impl Workspace {
             })
             .or_else(|| Self::render_workspace_status(theme, cx));
 
+        let main_card = div()
+            .id("workspace-main-card")
+            .debug_selector(|| "workspace-main-card".to_string())
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .when(cx.theme().shadow, |this| this.shadow_sm())
+            .child(div().flex_1().min_h_0().child(main_row))
+            .when_some(footbar, |this, footbar| this.child(footbar));
+
         div()
+            .id("workspace-dock-panels")
+            .debug_selector(|| "workspace-dock-panels".to_string())
             .size_full()
             .flex_1()
             .min_h_0()
             .flex()
-            .flex_col()
-            .bg(theme.tab_active)
-            .child(div().flex_1().min_h_0().child(dock_row))
-            .when_some(footbar, |this, footbar| this.child(footbar))
+            .gap(px(SURFACE_GAP))
+            .px(px(SURFACE_INSET))
+            .pb(px(SURFACE_INSET))
+            .child(main_card)
+            .children(ai_card)
+            .on_drag_move::<DraggedWorkspaceDock>(cx.listener(
+                |this, event: &DragMoveEvent<DraggedWorkspaceDock>, _, cx| {
+                    this.resize_dock_from_drag(event, cx);
+                },
+            ))
             .into_any_element()
     }
 }

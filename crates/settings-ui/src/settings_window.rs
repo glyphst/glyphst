@@ -10,11 +10,13 @@ use glyphst_pdf_translation_app::{
 };
 use glyphst_settings::{
     AiModel, AiProvider, AiThinkingLevel, ModelRef, OcrProvider, OcrSettings, ResolvedAiConfig,
-    Settings, SettingsStore, localize, setup_ui_font, sync_component_theme, ui_rems,
+    Settings, SettingsStore, WindowSettings, localize, setup_ui_font, sync_component_theme,
+    ui_rems,
 };
 use glyphst_ui::{
     activity::{ActivityCenter, BackgroundTaskEntry},
     root::{RootWindowHandle, render_overlays},
+    style::{SURFACE_INSET, apply_window_background, shell_background},
 };
 use gpui::{
     App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement, PromptButton,
@@ -207,11 +209,14 @@ pub struct SettingsWindow {
     _ocr_task: Option<Task<()>>,
     pub(super) translation_data_clear_pending: bool,
     pub(super) translation_data_clear_running: bool,
+    window_settings: WindowSettings,
+    transparency_enabled: bool,
 }
 
 impl SettingsWindow {
     pub fn new(open_keymap: fn(&mut App), cx: &mut Context<Self>) -> Self {
         let font_settings = &cx.global::<SettingsStore>().settings.font;
+        let window_settings = cx.global::<SettingsStore>().settings.window;
         let mut font_families = cx.text_system().all_font_names();
         font_families.extend(
             [".ZedSans", ".ZedMono", ".SystemUIFont"]
@@ -244,6 +249,8 @@ impl SettingsWindow {
             _ocr_task: None,
             translation_data_clear_pending: false,
             translation_data_clear_running: false,
+            window_settings,
+            transparency_enabled: window_settings.transparency_enabled_by_default(),
         }
     }
 
@@ -876,12 +883,57 @@ impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root_overlays = render_overlays(window, cx);
         let ui_font = setup_ui_font(window, cx);
+        let window_settings = cx.global::<SettingsStore>().settings.window;
+        if self.window_settings != window_settings {
+            self.window_settings = window_settings;
+            self.transparency_enabled = window_settings.transparency_enabled_by_default();
+        }
+        apply_window_background(window, window_settings, self.transparency_enabled);
+        let shell = shell_background(
+            cx.theme().colors,
+            window_settings,
+            self.transparency_enabled,
+        );
         let settings = ComponentSettings::new("glyphst-reader-settings")
             .with_size(Size::Small)
             .with_group_variant(GroupBoxVariant::Outline)
             .default_selected_index(self.initial_selection)
             .pages(self.setting_pages(cx));
         let show_footer = self.status.is_some() || self.save_error.is_some();
+        let footer = show_footer.then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .gap_2()
+                .px_4()
+                .py_3()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .when_some(self.status.clone(), |this, status| {
+                    this.child(div().text_color(cx.theme().success).child(status))
+                })
+                .when_some(self.save_error.clone(), |this, error| {
+                    this.child(div().text_color(cx.theme().danger).child(error))
+                })
+        });
+        let card = div()
+            .id("settings-main-card")
+            .debug_selector(|| "settings-main-card".to_string())
+            .flex_1()
+            .min_h_0()
+            .mx(px(SURFACE_INSET))
+            .mb(px(SURFACE_INSET))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .when(cx.theme().shadow, |this| this.shadow_sm())
+            .child(div().flex_1().min_h_0().child(settings))
+            .children(footer);
         div()
             .key_context("SettingsPanel")
             .track_focus(&self.focus_handle)
@@ -890,13 +942,13 @@ impl Render for SettingsWindow {
             .relative()
             .size_full()
             .overflow_hidden()
-            .bg(cx.theme().background)
+            .bg(shell)
             .font(ui_font)
             .text_color(cx.theme().foreground)
             .text_size(ui_rems(13.0))
             .on_action(cx.listener(Self::close))
             .child(
-                TitleBar::new().child(
+                TitleBar::new().border_b(px(0.0)).bg(shell).child(
                     div()
                         .h_full()
                         .min_w_0()
@@ -919,26 +971,7 @@ impl Render for SettingsWindow {
                         ),
                 ),
             )
-            .child(div().flex_1().min_h_0().child(settings))
-            .when(show_footer, |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_none()
-                        .gap_2()
-                        .px_4()
-                        .py_3()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .when_some(self.status.clone(), |this, status| {
-                            this.child(div().text_color(cx.theme().success).child(status))
-                        })
-                        .when_some(self.save_error.clone(), |this, error| {
-                            this.child(div().text_color(cx.theme().danger).child(error))
-                        }),
-                )
-            })
+            .child(card)
             .children(root_overlays)
     }
 }
@@ -1063,6 +1096,21 @@ mod tests {
         });
 
         assert!(cx.debug_bounds("background-activity").is_none());
+    }
+
+    #[gpui::test]
+    fn settings_window_renders_an_inset_main_surface(cx: &mut TestAppContext) {
+        initialize_ui_test(cx);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let settings = cx.new(|cx| SettingsWindow::new(|_| {}, cx));
+            Root::new(settings, window, cx)
+        });
+
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("settings-main-card").is_some());
     }
 
     #[gpui::test]

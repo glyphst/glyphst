@@ -106,6 +106,7 @@ pub mod document_viewer {
             OpenQuickAsk,
             OpenGoToPage,
             CloseTab,
+            DuplicateTab,
             AddBookmark,
             ToggleGridOverview,
             GridCursorUp,

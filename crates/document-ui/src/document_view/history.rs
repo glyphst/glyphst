@@ -9,15 +9,11 @@ impl DocumentView {
     }
 
     pub fn flush_current_history_position(&mut self, cx: &mut Context<Self>) {
-        self.stage_current_history_position(cx);
-        Self::persist_history_entry(&self.path, cx);
-    }
-
-    pub fn stage_current_history_position(&mut self, cx: &mut Context<Self>) {
+        // Navigation stages the latest position synchronously. Flushing a
+        // background view must not restage its potentially stale position and
+        // overwrite a newer view of the same path.
         self.position_save_task.take();
-        let position = self.current_document_position();
-        cx.global_mut::<LibraryStore>()
-            .record_history(&self.path, position);
+        Self::persist_history_entry(&self.path, cx);
     }
 
     pub(super) fn persist_history_entry(path: &Path, cx: &mut Context<Self>) {

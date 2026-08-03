@@ -72,11 +72,34 @@ impl DocumentView {
         })
     }
 
+    /// Capture the immutable document data needed to create another view.
+    ///
+    /// This intentionally excludes all view-local interaction state. The new
+    /// view receives fresh search, selection, overlay, navigation, and AI
+    /// state through [`Self::from_prepared`], while sharing the source
+    /// snapshot and renderer resources.
+    pub fn prepared_duplicate(&self) -> PreparedDocumentOpen {
+        PreparedDocumentOpen {
+            path: self.path.clone(),
+            file_name: self.file_name.clone(),
+            format: self.format,
+            capabilities: self.capabilities,
+            document_layout: self.document_layout,
+            epub_preferences: self.epub_preferences,
+            document_snapshot: self.document_snapshot.clone(),
+            render_session: self.render_session.clone(),
+            pages: self.pages.clone(),
+            page_count: self.page_count,
+            max_page_width: self.max_page_width,
+            content_height_doc: self.content_height_doc,
+            toc: self.toc.clone(),
+        }
+    }
+
     pub fn from_prepared(
         prepared: PreparedDocumentOpen,
         focus_handle: FocusHandle,
         behavior: BehaviorSettings,
-        window_settings: WindowSettings,
         options: DocumentOpenOptions,
     ) -> Result<Self> {
         let PreparedDocumentOpen {
@@ -212,8 +235,6 @@ impl DocumentView {
             jump_back: Vec::new(),
             jump_forward: Vec::new(),
             position_from_search: false,
-            transparency_enabled: window_settings.transparency_enabled_by_default(),
-            window_settings,
             search: SearchState::default(),
             pending_initial_position: options.initial_position,
             pending_semantic_position: None,
@@ -272,15 +293,8 @@ impl DocumentView {
         .detach();
 
         cx.observe_global::<SettingsStore>(|this, cx| {
-            let (page_gap, window_settings) = {
-                let store = cx.global::<SettingsStore>();
-                (store.resolved_theme.page_gap, store.settings.window)
-            };
+            let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
             this.recompute_layout(page_gap);
-            if this.window_settings != window_settings {
-                this.transparency_enabled = window_settings.transparency_enabled_by_default();
-                this.window_settings = window_settings;
-            }
             cx.notify();
         })
         .detach();

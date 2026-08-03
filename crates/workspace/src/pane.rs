@@ -261,6 +261,7 @@ pub(crate) enum PaneEvent {
         target: PaneDropTarget,
     },
     CloseTab(usize),
+    DuplicateTab(usize),
     TabClicked {
         tab_id: EntityId,
         was_active: bool,
@@ -396,7 +397,6 @@ impl Pane {
         self.tabs.len()
     }
 
-    #[cfg(test)]
     pub(crate) fn active_tab_ix(&self) -> usize {
         self.active_tab
     }
@@ -424,6 +424,74 @@ impl Pane {
                 None
             }
         }
+    }
+
+    pub(crate) fn duplicate_document_tab(
+        &mut self,
+        tab_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<EntityId>> {
+        let Some(Tab::Document(source)) = self.tabs.get(tab_ix) else {
+            return Ok(None);
+        };
+        let (path, position, prepared) = {
+            let source = source.read(cx);
+            (
+                source.path().to_path_buf(),
+                source.current_document_position(),
+                source.prepared_duplicate(),
+            )
+        };
+        let behavior = cx.global::<SettingsStore>().settings.behavior;
+        let annotations = DocumentAnnotations {
+            highlights: cx.global::<LibraryStore>().highlights_for(&path),
+            notes: cx.global::<LibraryStore>().notes_for(&path),
+        };
+        let target_language = cx
+            .global::<LibraryStore>()
+            .document_target_language(&path)
+            .unwrap_or_else(|| {
+                cx.global::<SettingsStore>()
+                    .settings
+                    .translation
+                    .target_language
+                    .clone()
+            });
+        let epub_preferences = cx
+            .global::<LibraryStore>()
+            .epub_reader_preferences(&path)
+            .unwrap_or_else(|| cx.global::<SettingsStore>().settings.reading);
+        let options = DocumentOpenOptions {
+            initial_position: Some(position.clone()),
+            annotations,
+            target_language,
+            epub_preferences,
+            rotation: cx.global::<LibraryStore>().document_rotation(&path),
+            document_translation_jobs: self.document_translation_jobs.clone(),
+        };
+        let mut duplicate =
+            DocumentView::from_prepared(prepared, self.focus_handle.clone(), behavior, options)?;
+        let duplicate = cx.new(|cx| {
+            duplicate.register_cache_eviction(cx);
+            duplicate.initialize_runtime(window, cx);
+            duplicate
+        });
+        self.subscribe_to_document_view(&duplicate, window, cx);
+
+        self.flush_active_tab(cx);
+        let insert_ix = (tab_ix + 1).min(self.tabs.len());
+        let tab = Tab::Document(duplicate);
+        let tab_id = Self::tab_entity_id(&tab);
+        self.register_tab_focus_handle(&tab, self.focus_handle.clone());
+        self.tabs.insert(insert_ix, tab);
+        self.active_tab = insert_ix;
+        self.sync_active_focus_handle();
+        self.focus(window, cx);
+        cx.global_mut::<LibraryStore>()
+            .record_history(&path, position);
+        cx.notify();
+        Ok(Some(tab_id))
     }
 
     pub(crate) fn active_document_view(&self) -> Option<Entity<DocumentView>> {
@@ -543,11 +611,38 @@ impl Pane {
 
     pub(crate) fn document_tab_ix(&self, path: &Path, cx: &App) -> Option<usize> {
         let path = normalize_path(path);
-        self.tabs.iter().position(|tab| match tab {
+        let matches = |tab: &Tab| match tab {
             Tab::Document(document_view) => document_view.read(cx).path() == path.as_path(),
             Tab::LoadingDocument(loading) => loading.read(cx).path == path,
             Tab::NewTab(_) | Tab::Keymap(_) => false,
-        })
+        };
+        if self.tabs.get(self.active_tab).is_some_and(matches) {
+            return Some(self.active_tab);
+        }
+        self.tabs.iter().position(matches)
+    }
+
+    fn document_tab_occurrence(&self, tab_ix: usize, cx: &App) -> Option<(usize, usize)> {
+        let Tab::Document(document_view) = self.tabs.get(tab_ix)? else {
+            return None;
+        };
+        let path = document_view.read(cx).path().to_path_buf();
+        let matching = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, tab)| match tab {
+                Tab::Document(candidate) if candidate.read(cx).path() == path => Some(ix),
+                Tab::NewTab(_) | Tab::LoadingDocument(_) | Tab::Document(_) | Tab::Keymap(_) => {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if matching.len() < 2 {
+            return None;
+        }
+        let ordinal = matching.iter().position(|ix| *ix == tab_ix)? + 1;
+        Some((ordinal, matching.len()))
     }
 
     pub(crate) fn activate_existing_document(
@@ -664,13 +759,9 @@ impl Pane {
         if !Self::is_supported_document_path(&path) {
             bail!("unsupported file type: {}", path.display());
         }
-        let (behavior, window_settings, document_theme) = {
+        let (behavior, document_theme) = {
             let store = cx.global::<SettingsStore>();
-            (
-                store.settings.behavior,
-                store.settings.window,
-                store.resolved_theme,
-            )
+            (store.settings.behavior, store.resolved_theme)
         };
         let initial_position = position
             .or_else(|| cx.global::<LibraryStore>().history_position(&path))
@@ -752,7 +843,6 @@ impl Pane {
                     path,
                     initial_position,
                     behavior,
-                    window_settings,
                     options,
                     result,
                     window,
@@ -958,16 +1048,6 @@ impl Pane {
         }
     }
 
-    pub(crate) fn stage_all_tab_positions(&mut self, cx: &mut Context<Self>) {
-        for tab in &self.tabs {
-            if let Tab::Document(document_view) = tab {
-                document_view.update(cx, |document_view, cx| {
-                    document_view.stage_current_history_position(cx);
-                });
-            }
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn finish_document_open(
         &mut self,
@@ -975,7 +1055,6 @@ impl Pane {
         path: PathBuf,
         initial_position: DocumentPosition,
         behavior: glyphst_settings::BehaviorSettings,
-        window_settings: glyphst_settings::WindowSettings,
         options: DocumentOpenOptions,
         result: std::result::Result<PreparedDocumentOpen, String>,
         window: &mut Window,
@@ -1011,7 +1090,6 @@ impl Pane {
             prepared,
             self.focus_handle.clone(),
             behavior,
-            window_settings,
             options,
         ) {
             Ok(document_view) => document_view,
@@ -1269,6 +1347,20 @@ impl Pane {
         let pane = cx.entity();
         let popup = PopupMenu::build(window, cx, move |mut menu, _, _| {
             if is_document {
+                let duplicate_pane = pane.clone();
+                menu = menu
+                    .item(
+                        PopupMenuItem::new(crate::fl!("toolbar-duplicate-tab"))
+                            .icon(IconName::Copy)
+                            .on_click(move |_, _, cx| {
+                                duplicate_pane.update(cx, |pane, cx| {
+                                    if let Some(tab_ix) = pane.tab_ix_for_entity_id(tab_id) {
+                                        cx.emit(PaneEvent::DuplicateTab(tab_ix));
+                                    }
+                                });
+                            }),
+                    )
+                    .separator();
                 if group.is_some() {
                     let connect_pane = pane.clone();
                     menu = menu.item(
@@ -1412,6 +1504,15 @@ impl Pane {
             .connection_tabs
             .get(&tab_id)
             .copied();
+        let occurrence = self.document_tab_occurrence(tab_ix, cx);
+        let accessible_label = occurrence.map(|(ordinal, total)| {
+            crate::fl!(
+                "tab-document-view-label",
+                name = label.to_string(),
+                index = ordinal as i64,
+                count = total as i64
+            )
+        });
         let close_pane = source_pane.clone();
         let close_button = Button::new(("pane-tab-close", tab_id))
             .small()
@@ -1480,6 +1581,28 @@ impl Pane {
         let suffix_bounds = self.tab_bounds.clone();
         let suffix = h_flex()
             .gap_1()
+            .children(occurrence.map(|(ordinal, total)| {
+                div()
+                    .id(("pane-tab-occurrence", tab_id))
+                    .min_w(px(16.0))
+                    .h(px(16.0))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(theme.muted)
+                    .text_size(ui_rems(10.0))
+                    .text_color(theme.muted_foreground)
+                    .debug_selector(move || format!("pane-tab-copy-index-{tab_ix}"))
+                    .tooltip(glyphst_ui::tooltip::text_tooltip(crate::fl!(
+                        "tab-document-view-label",
+                        name = label.to_string(),
+                        index = ordinal as i64,
+                        count = total as i64
+                    )))
+                    .child(ordinal.to_string())
+            }))
             .child(group_marker)
             .when(is_paused, |this| {
                 this.child(
@@ -1505,6 +1628,7 @@ impl Pane {
 
         ComponentTab::new()
             .label(label.clone())
+            .when_some(accessible_label, |this, label| this.aria_label(label))
             .suffix(suffix)
             .max_w(ui_rems(PANE_TAB_MAX_WIDTH))
             .min_w(ui_rems(PANE_TAB_MIN_WIDTH))
@@ -1630,6 +1754,7 @@ impl Pane {
             }));
 
         ComponentTabBar::new(("pane-tab-bar", pane_id))
+            .segmented()
             .flex_none()
             .w_full()
             .h(ui_rems(PANE_TAB_BAR_HEIGHT))

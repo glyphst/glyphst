@@ -31,7 +31,7 @@ use crate::scrollbar::{ManualScrollHandle, ScrollbarHandle, WithScrollbar as _};
 use crate::search::{SearchBar, SearchBarSnapshot, SearchEvent};
 use crate::settings::{
     BehaviorSettings, CopyFormat, PageImageQuality, PageTextFormat, SettingsStore,
-    TranslationBoxCorner, WindowSettings, ui_rems,
+    TranslationBoxCorner, ui_rems,
 };
 use crate::smooth_scroll::advance_toward;
 use crate::theme::Theme;
@@ -156,6 +156,7 @@ fn next_document_id() -> u64 {
     NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+#[derive(Clone)]
 struct DocumentPage {
     bounds: Rect,
     width: f32,
@@ -987,6 +988,7 @@ struct DocumentLink {
     target: LinkTarget,
 }
 
+#[derive(Clone)]
 struct TocEntry {
     title: SharedString,
     depth: usize,
@@ -1227,8 +1229,6 @@ pub struct DocumentView {
     jump_back: Vec<JumpPosition>,
     jump_forward: Vec<JumpPosition>,
     position_from_search: bool,
-    transparency_enabled: bool,
-    window_settings: WindowSettings,
     search: SearchState,
     pending_initial_position: Option<DocumentPosition>,
     pending_semantic_position: Option<DocumentPosition>,

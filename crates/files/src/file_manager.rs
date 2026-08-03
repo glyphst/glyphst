@@ -6,13 +6,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use glyphst_ui::scrollbar::WithScrollbar as _;
+use glyphst_ui::{
+    scrollbar::WithScrollbar as _,
+    settings::{SettingsStore, setup_ui_font, ui_rems},
+    style::{RADIUS_MD, SURFACE_INSET, apply_window_background, shell_background},
+};
 use gpui::{
     App, Context, FocusHandle, Focusable, IntoElement, KeyBinding, Render, ScrollStrategy,
     UniformListScrollHandle, Window, div, prelude::*, px, relative, transparent_black,
     uniform_list,
 };
-use gpui_component::{ActiveTheme as _, ThemeColor};
+use gpui_component::{ActiveTheme as _, ThemeColor, TitleBar};
 
 const KEY_CONTEXT: &str = "Files";
 const ROW_HEIGHT: f32 = 28.0;
@@ -583,26 +587,31 @@ impl FileManagerView {
         muted: bool,
         theme: ThemeColor,
     ) -> impl IntoElement {
-        div()
-            .h(px(ROW_HEIGHT))
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .px_2()
-            .bg(if selected {
-                theme.list_active
-            } else {
-                transparent_black()
-            })
-            .text_color(if selected {
-                theme.primary
-            } else if muted {
-                theme.muted_foreground
-            } else {
-                theme.foreground
-            })
-            .child(div().min_w_0().truncate().child(text))
+        div().h(px(ROW_HEIGHT)).w_full().min_w_0().p_1().child(
+            div()
+                .size_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .px_2()
+                .rounded(px(RADIUS_MD))
+                .bg(if selected {
+                    theme.list_active
+                } else {
+                    transparent_black()
+                })
+                .when(!selected, |this| {
+                    this.hover(|style| style.bg(theme.list_hover))
+                })
+                .text_color(if selected {
+                    theme.primary
+                } else if muted {
+                    theme.muted_foreground
+                } else {
+                    theme.foreground
+                })
+                .child(div().min_w_0().truncate().child(text)),
+        )
     }
 
     fn render_parent(
@@ -719,6 +728,8 @@ impl FileManagerView {
         let count = self.navigator.preview.row_count();
         let scroll = self.preview_scroll.clone();
         let message = self.navigator.preview.empty_message().map(str::to_owned);
+        let mono_font = cx.theme().mono_font_family.clone();
+        let mono_size = cx.theme().mono_font_size;
 
         div()
             .h_full()
@@ -726,6 +737,8 @@ impl FileManagerView {
             .min_w_0()
             .overflow_hidden()
             .bg(theme.tab_active)
+            .font_family(mono_font)
+            .text_size(mono_size)
             .when_some(message, |this, message| {
                 this.child(Self::render_message(&message, theme))
             })
@@ -766,8 +779,11 @@ impl Focusable for FileManagerView {
 impl Render for FileManagerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let mono_font = cx.theme().mono_font_family.clone();
-        let mono_size = cx.theme().mono_font_size;
+        let ui_font = setup_ui_font(window, cx);
+        let window_settings = cx.global::<SettingsStore>().settings.window;
+        let transparency_enabled = window_settings.transparency_enabled_by_default();
+        apply_window_background(window, window_settings, transparency_enabled);
+        let shell = shell_background(theme, window_settings, transparency_enabled);
         let current_path = self.navigator.current_dir.display().to_string();
         let status = self.navigator.status();
         let status_color = if self.navigator.notice.is_some() {
@@ -776,35 +792,21 @@ impl Render for FileManagerView {
             theme.muted_foreground
         };
 
-        div()
-            .id("glyphst-files")
-            .key_context(KEY_CONTEXT)
-            .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| {
-                this.select_previous(cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectNext, _, cx| {
-                this.select_next(cx);
-            }))
-            .on_action(cx.listener(|this, _: &LeaveDirectory, _, cx| {
-                this.leave_directory(cx);
-            }))
-            .on_action(cx.listener(|this, _: &EnterDirectory, _, cx| {
-                this.enter_directory(cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectFirst, _, cx| {
-                this.select_first(cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectLast, _, cx| {
-                this.select_last(cx);
-            }))
-            .size_full()
+        let card = div()
+            .id("files-main-card")
+            .debug_selector(|| "files-main-card".to_string())
+            .flex_1()
+            .min_h_0()
+            .mx(px(SURFACE_INSET))
+            .mb(px(SURFACE_INSET))
             .flex()
             .flex_col()
+            .overflow_hidden()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(theme.border)
             .bg(theme.background)
-            .text_color(theme.foreground)
-            .font_family(mono_font)
-            .text_size(mono_size)
+            .when(cx.theme().shadow, |this| this.shadow_sm())
             .child(
                 div()
                     .flex_none()
@@ -854,7 +856,51 @@ impl Render for FileManagerView {
                             .text_color(theme.muted_foreground)
                             .child("h/l parent/enter  j/k move  gg/G first/last"),
                     ),
+            );
+
+        div()
+            .id("glyphst-files")
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| {
+                this.select_previous(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectNext, _, cx| {
+                this.select_next(cx);
+            }))
+            .on_action(cx.listener(|this, _: &LeaveDirectory, _, cx| {
+                this.leave_directory(cx);
+            }))
+            .on_action(cx.listener(|this, _: &EnterDirectory, _, cx| {
+                this.enter_directory(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectFirst, _, cx| {
+                this.select_first(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectLast, _, cx| {
+                this.select_last(cx);
+            }))
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .bg(shell)
+            .text_color(theme.foreground)
+            .font(ui_font)
+            .text_size(ui_rems(13.0))
+            .child(
+                TitleBar::new().border_b(px(0.0)).bg(shell).child(
+                    div()
+                        .h_full()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .px_3()
+                        .child("Glyphst Files"),
+                ),
             )
+            .child(card)
     }
 }
 
@@ -959,9 +1005,12 @@ mod tests {
     };
 
     use super::{
-        EntryKind, Navigator, PREVIEW_MAX_BYTES, PREVIEW_MAX_LINES, Preview, StartupTarget,
-        load_entries, load_preview, read_text_preview,
+        EntryKind, FileManagerView, Navigator, PREVIEW_MAX_BYTES, PREVIEW_MAX_LINES, Preview,
+        StartupTarget, load_entries, load_preview, read_text_preview,
     };
+    use glyphst_ui::settings::{SettingsStore, sync_component_theme};
+    use gpui::{AppContext as _, TestAppContext};
+    use gpui_component::Root;
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -1000,6 +1049,27 @@ mod tests {
             .position(|entry| entry.display_name == name)
             .unwrap();
         navigator.set_selected(index);
+    }
+
+    #[gpui::test]
+    fn file_manager_renders_an_inset_main_surface(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let store = SettingsStore::memory();
+            store.install_theme_catalog(cx).unwrap();
+            cx.set_global(store);
+            sync_component_theme(cx);
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let files = cx.new(|cx| FileManagerView::new(None, cx));
+            Root::new(files, window, cx)
+        });
+
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("files-main-card").is_some());
     }
 
     #[test]

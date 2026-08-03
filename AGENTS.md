@@ -8,7 +8,7 @@ Glyphst is a workspace for desktop applications built with Rust, GPUI, and gpui-
 - The other crates in `crates/` contain shared UI, application services, and domain code.
 - `dependencies/gpui-component` is the maintained gpui-component fork used by Glyphst.
 - `references/` contains shallow, read-only reference repositories: Zed, Zathura, Sioyek,
-  Catppuccin, Cherry Studio, Lucide, Niri, Retain PDF, Typst, and Yazi.
+  Catppuccin, Cherry Studio, Comet, Lucide, Niri, Retain PDF, Typst, and Yazi.
 
 Update a reference with `git submodule update --remote --depth 1 <path>`, then review and commit its
 gitlink.

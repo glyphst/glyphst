@@ -13,12 +13,6 @@ impl DocumentView {
         self.close_epub_style_panel(cx);
     }
 
-    fn apply_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let settings = cx.global::<SettingsStore>().settings.window;
-        window.set_background_appearance(settings.background_appearance(self.transparency_enabled));
-        cx.notify();
-    }
-
     pub(super) fn toggle_quick_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(quick_ask) = self.quick_ask.clone() {
             self.quick_ask_visible = !self.quick_ask_visible;
@@ -74,11 +68,6 @@ impl DocumentView {
             self.focus_handle.focus(window, cx);
             cx.notify();
         }
-    }
-
-    pub(super) fn toggle_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.transparency_enabled = !self.transparency_enabled;
-        self.apply_transparency(window, cx);
     }
 
     pub(super) fn toggle_presentation_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {

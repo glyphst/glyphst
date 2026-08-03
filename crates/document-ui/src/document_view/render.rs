@@ -4,19 +4,8 @@ impl Render for DocumentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
         let prepaint_view = view.clone();
-        let (theme, window_settings) = {
-            let store = cx.global::<SettingsStore>();
-            (store.resolved_theme, store.settings.window)
-        };
+        let theme = cx.global::<SettingsStore>().resolved_theme;
         let ui_theme = cx.theme().colors;
-        if self.window_settings != window_settings {
-            self.transparency_enabled = window_settings.transparency_enabled_by_default();
-            self.window_settings = window_settings;
-            window.set_background_appearance(
-                window_settings.background_appearance(self.transparency_enabled),
-            );
-        }
-        let opacity = window_settings.effective_opacity(self.transparency_enabled);
 
         if !self.diff_flashes.is_empty() {
             window.request_animation_frame();
@@ -304,9 +293,6 @@ impl Render for DocumentView {
             .on_action(cx.listener(|this, _: &TogglePresentationMode, window, cx| {
                 this.toggle_presentation_mode(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleTransparency, window, cx| {
-                this.toggle_transparency(window, cx);
-            }))
             .on_action(cx.listener(|_, _: &OpenSettings, _, cx| {
                 cx.emit(DocumentViewEvent::OpenSettings);
             }))
@@ -560,7 +546,6 @@ impl Render for DocumentView {
                     .flex()
                     .flex_col()
                     .bg(rgb(theme.background))
-                    .when(opacity < 1.0, |this| this.opacity(opacity))
                     .child(
                         div()
                             .flex_1()

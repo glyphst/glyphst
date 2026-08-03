@@ -155,6 +155,29 @@ fn command_palette_is_available_in_workspace_and_page_overview() {
 }
 
 #[test]
+fn duplicate_tab_uses_the_workspace_shortcut_in_both_presets() {
+    let expected = vec![expand_platform_keystroke("primary-shift-d")];
+
+    for preset in [KeymapPreset::Modern, KeymapPreset::Vim] {
+        let binding = editable_bindings(preset, &[])
+            .into_iter()
+            .find(|binding| {
+                binding.action == "duplicate-tab"
+                    && binding.category == KeyBindingCategory::Workspace
+            })
+            .expect("duplicate-tab binding should exist");
+        assert_eq!(binding.keystrokes, expected);
+        assert_eq!(binding.default_keystrokes, expected);
+
+        let keymap = preset_keymap(preset);
+        assert_eq!(
+            first_action_for(&keymap, "primary-shift-d", &["Workspace"]),
+            DuplicateTab::name_for_type()
+        );
+    }
+}
+
+#[test]
 fn source_reflects_user_override_versus_default() {
     let preset = KeymapPreset::Modern;
     let defaults = editable_bindings(preset, &[]);

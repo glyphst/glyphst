@@ -20,6 +20,10 @@ pub const DEFAULT_DARK_THEME_ID: &str = "Default Dark";
 pub const DEFAULT_PAGE_GAP: f32 = 4.0;
 pub const SYNCHRONIZED_GROUP_COLOR_COUNT: usize = 8;
 
+const DEFAULT_COMPONENT_RADIUS: usize = 6;
+const DEFAULT_COMPONENT_RADIUS_LG: usize = 12;
+const DEFAULT_COMPONENT_SHADOW: bool = true;
+
 const MIN_PAGE_GAP: f32 = 0.0;
 const MAX_PAGE_GAP: f32 = 240.0;
 
@@ -745,7 +749,10 @@ impl ThemeCatalog {
             .map(|entry| entry.id.clone())
             .collect::<HashSet<_>>();
 
-        for config in set.themes {
+        for mut config in set.themes {
+            config.radius.get_or_insert(DEFAULT_COMPONENT_RADIUS);
+            config.radius_lg.get_or_insert(DEFAULT_COMPONENT_RADIUS_LG);
+            config.shadow.get_or_insert(DEFAULT_COMPONENT_SHADOW);
             let id = config.name.trim().to_string();
             if id.is_empty() || !known.insert(id.clone()) {
                 continue;

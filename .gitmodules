@@ -52,3 +52,8 @@
 	path = dependencies/gpui-component
 	url = ../gpui-component.git
 	branch = glyphst/main
+[submodule "references/comet"]
+	path = references/comet
+	url = https://github.com/zeronsh/comet.git
+	branch = main
+	shallow = true

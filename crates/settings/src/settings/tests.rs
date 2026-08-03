@@ -111,6 +111,15 @@ window {
 }
 
 #[test]
+fn window_defaults_to_subtle_blurred_glass() {
+    let window = WindowSettings::default();
+
+    assert_eq!(window.opacity, 0.94);
+    assert_eq!(window.background, WindowBackgroundMode::Blurred);
+    assert!(window.transparency_enabled_by_default());
+}
+
+#[test]
 fn exported_settings_are_reparseable() {
     let settings = Settings {
         behavior: BehaviorSettings {
@@ -1397,6 +1406,49 @@ fn loads_user_theme_from_themes_directory() {
     assert_eq!(metadata.name, "Solar");
     assert_eq!(metadata.appearance.as_str(), "light");
     assert_eq!(metadata.origin, ThemeOrigin::User(root.join("solar.json")));
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn theme_geometry_uses_modern_defaults_and_preserves_explicit_values() {
+    let root = unique_test_dir();
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("geometry.json"),
+        r##"
+{
+  "name": "Geometry test",
+  "themes": [
+    {
+      "name": "Implicit geometry",
+      "mode": "light",
+      "colors": { "background": "#ffffff" }
+    },
+    {
+      "name": "Explicit geometry",
+      "mode": "dark",
+      "radius": 0,
+      "radius.lg": 4,
+      "shadow": false,
+      "colors": { "background": "#000000" }
+    }
+  ]
+}
+"##,
+    )
+    .unwrap();
+
+    let catalog = ThemeCatalog::load(&root);
+    let implicit = catalog.config("Implicit geometry").unwrap();
+    assert_eq!(implicit.radius, Some(6));
+    assert_eq!(implicit.radius_lg, Some(12));
+    assert_eq!(implicit.shadow, Some(true));
+
+    let explicit = catalog.config("Explicit geometry").unwrap();
+    assert_eq!(explicit.radius, Some(0));
+    assert_eq!(explicit.radius_lg, Some(4));
+    assert_eq!(explicit.shadow, Some(false));
 
     fs::remove_dir_all(root).ok();
 }

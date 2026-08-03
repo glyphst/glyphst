@@ -8,8 +8,11 @@ use glyphst_translation_ui::{
     DocumentTranslationJobEvent, DocumentTranslationJobId, DocumentTranslationJobManager,
     DocumentTranslationNotification, document_translation_notification,
 };
-use glyphst_ui::activity::ActivityCenter;
-use glyphst_ui::root::render_overlays;
+use glyphst_ui::{
+    activity::ActivityCenter,
+    root::render_overlays,
+    style::{apply_window_background, shell_background},
+};
 use gpui::{
     AnyElement, App, Bounds, Context, DismissEvent, DragMoveEvent, Entity, EntityId, FocusHandle,
     Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -32,9 +35,9 @@ use crate::{
     command_palette::{CommandPalette, CommandPaletteDelegate},
     document_browser::{DocumentBrowser, DocumentBrowserEvent},
     document_view::{
-        CloseTab, DocumentSidebar, DocumentView, DocumentViewEvent, OpenFile, OpenKeybindings,
-        OpenNewTab, OpenSettings, OpenWithSystemPicker, ToggleAiPanel, ToggleCommandPalette,
-        ToggleNotes, ToggleThumbnailSidebar, ToggleToc,
+        CloseTab, DocumentSidebar, DocumentView, DocumentViewEvent, DuplicateTab, OpenFile,
+        OpenKeybindings, OpenNewTab, OpenSettings, OpenWithSystemPicker, ToggleAiPanel,
+        ToggleCommandPalette, ToggleNotes, ToggleThumbnailSidebar, ToggleToc, ToggleTransparency,
     },
     library::{DocumentPosition, normalize_path},
     pane::{
@@ -44,7 +47,7 @@ use crate::{
         SynchronizedConnectionTabState, TabTransfer,
     },
     picker::{Picker, PickerEvent},
-    settings::{SettingsStore, setup_ui_font, sync_component_theme},
+    settings::{SettingsStore, WindowSettings, setup_ui_font, sync_component_theme},
     synchronized_tabs::{
         ReservedSynchronizedGroup, SynchronizedConnectionNode, SynchronizedGroupId,
         SynchronizedTabRegistry, closest_synchronized_tab, synchronized_connection_tree,
@@ -77,6 +80,8 @@ pub struct Workspace {
     synchronized_connection: Option<SynchronizedConnection>,
     fading_synchronized_connection: Option<FadingSynchronizedConnection>,
     docks: WorkspaceDockState,
+    transparency_enabled: bool,
+    window_settings: WindowSettings,
 }
 
 #[derive(Clone, Copy)]
@@ -235,6 +240,9 @@ impl Workspace {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let docks = WorkspaceDockState::new(cx);
+        let window_settings = cx.global::<SettingsStore>().settings.window;
+        let transparency_enabled = window_settings.transparency_enabled_by_default();
+        apply_window_background(window, window_settings, transparency_enabled);
         let workspace = Self {
             pane_group: PaneGroup::new(pane.clone()),
             active_pane: pane.clone(),
@@ -256,6 +264,8 @@ impl Workspace {
             synchronized_connection: None,
             fading_synchronized_connection: None,
             docks,
+            transparency_enabled,
+            window_settings,
         };
 
         workspace.subscribe_to_pane(&pane, window, cx);
@@ -345,7 +355,7 @@ impl Workspace {
         .detach();
         cx.on_release(|this, cx| {
             for pane in this.pane_group.panes() {
-                pane.update(cx, |pane, cx| pane.stage_all_tab_positions(cx));
+                pane.update(cx, |pane, cx| pane.flush_all_tabs(cx));
             }
         })
         .detach();
@@ -435,6 +445,10 @@ impl Workspace {
                 PaneEvent::CloseTab(tab_ix) => {
                     this.active_pane = pane_for_events.clone();
                     this.close_tab_in_pane(&pane_for_events, Some(*tab_ix), window, cx);
+                }
+                PaneEvent::DuplicateTab(tab_ix) => {
+                    this.active_pane = pane_for_events.clone();
+                    this.duplicate_tab_in_pane(&pane_for_events, *tab_ix, window, cx);
                 }
                 PaneEvent::TabClicked { tab_id, was_active } => {
                     this.active_pane = pane_for_events.clone();
@@ -1638,7 +1652,13 @@ impl Workspace {
 
     fn document_location(&self, path: &Path, cx: &Context<Self>) -> Option<(Entity<Pane>, usize)> {
         let path = normalize_path(path);
+        if let Some(ix) = self.active_pane.read(cx).document_tab_ix(&path, cx) {
+            return Some((self.active_pane.clone(), ix));
+        }
         self.pane_group.panes().into_iter().find_map(|pane| {
+            if pane == self.active_pane {
+                return None;
+            }
             let ix = pane.read(cx).document_tab_ix(&path, cx)?;
             Some((pane, ix))
         })
@@ -1648,6 +1668,39 @@ impl Workspace {
         self.set_title_bar_menu_expanded(false, cx);
         let active_pane = self.active_pane.clone();
         self.close_tab_in_pane(&active_pane, None, window, cx);
+    }
+
+    fn duplicate_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.active_pane.clone();
+        let tab_ix = pane.read(cx).active_tab_ix();
+        self.duplicate_tab_in_pane(&pane, tab_ix, window, cx);
+    }
+
+    fn duplicate_tab_in_pane(
+        &mut self,
+        pane: &Entity<Pane>,
+        tab_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_title_bar_menu_expanded(false, cx);
+        match pane.update(cx, |pane, cx| {
+            pane.duplicate_document_tab(tab_ix, window, cx)
+        }) {
+            Ok(Some(_)) => {
+                self.active_pane = pane.clone();
+                self.refresh_synchronized_tab_presentation(cx);
+                cx.notify();
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("failed to duplicate document tab: {error:#}"),
+        }
+    }
+
+    fn toggle_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.transparency_enabled = !self.transparency_enabled;
+        apply_window_background(window, self.window_settings, self.transparency_enabled);
+        cx.notify();
     }
 
     fn close_tab_in_pane(
@@ -2734,6 +2787,13 @@ impl Render for Workspace {
         let root_overlays = render_overlays(window, cx);
         let ui_font = setup_ui_font(window, cx);
         let theme = cx.theme().colors;
+        let window_settings = cx.global::<SettingsStore>().settings.window;
+        if self.window_settings != window_settings {
+            self.window_settings = window_settings;
+            self.transparency_enabled = window_settings.transparency_enabled_by_default();
+            apply_window_background(window, window_settings, self.transparency_enabled);
+        }
+        let shell = shell_background(theme, window_settings, self.transparency_enabled);
         let dim_inactive_panes = cx
             .global::<SettingsStore>()
             .settings
@@ -2750,6 +2810,7 @@ impl Render for Workspace {
                 self.title_bar_open_menu,
                 self.title_bar_popup_menu.clone(),
                 self.active_tab_label(cx),
+                shell,
             )
         });
         let synchronized_connection = self.render_synchronized_connection(theme, window, cx);
@@ -2759,6 +2820,7 @@ impl Render for Workspace {
             .relative()
             .flex()
             .flex_col()
+            .bg(shell)
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
             .font(ui_font)
@@ -2810,6 +2872,12 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &OpenNewTab, window, cx| {
                 this.open_new_tab(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DuplicateTab, window, cx| {
+                this.duplicate_active_tab(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTransparency, window, cx| {
+                this.toggle_transparency(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 this.close_active_tab(window, cx);
@@ -2979,7 +3047,7 @@ mod tests {
         document_view::{
             DocumentSidebar, RenderCache, SynchronizedScrollDelta, SynchronizedScrollMode,
         },
-        library::LibraryStore,
+        library::{DocumentPosition, LibraryStore},
         settings::SettingsStore,
     };
 
@@ -3177,6 +3245,135 @@ mod tests {
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.active_pane.read(cx).active_tab_is_new_tab());
         });
+    }
+
+    #[gpui::test]
+    fn duplicate_tab_creates_an_independent_adjacent_view_without_stale_history(
+        cx: &mut TestAppContext,
+    ) {
+        let document_path = temporary_pdf_path("duplicate-tab");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+
+        let source_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            let target_pane = workspace.active_pane.clone();
+            let source = source_pane.read(cx).active_document_view().unwrap();
+            let target = target_pane.read(cx).active_document_view().unwrap();
+            assert!(
+                workspace
+                    .synchronized_tabs
+                    .create_group(
+                        source.entity_id(),
+                        source_pane.entity_id(),
+                        target.entity_id(),
+                        target_pane.entity_id(),
+                    )
+                    .is_some()
+            );
+            workspace.active_pane = source_pane.clone();
+            workspace.refresh_synchronized_tab_presentation(cx);
+            workspace.duplicate_active_tab(window, cx);
+        });
+        let (pane, source, duplicate) = workspace.read_with(cx, |workspace, cx| {
+            let pane = workspace.active_pane.clone();
+            let views = pane.read(cx).document_views();
+            assert_eq!(pane.read(cx).len(), 2);
+            assert_eq!(pane.read(cx).active_tab_ix(), 1);
+            assert_eq!(views.len(), 2);
+            assert_ne!(views[0].entity_id(), views[1].entity_id());
+            assert_eq!(views[0].read(cx).path(), views[1].read(cx).path());
+            assert_eq!(
+                views[0].read(cx).current_document_position(),
+                views[1].read(cx).current_document_position()
+            );
+            assert!(
+                workspace
+                    .synchronized_tabs
+                    .group_for_tab(views[0].entity_id())
+                    .is_some()
+            );
+            assert!(
+                workspace
+                    .synchronized_tabs
+                    .group_for_tab(views[1].entity_id())
+                    .is_none()
+            );
+            (pane, views[0].clone(), views[1].clone())
+        });
+
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("pane-tab-copy-index-0").is_some());
+        assert!(cx.debug_bounds("pane-tab-copy-index-1").is_some());
+
+        let source_position = source.read_with(cx, |source, _| source.current_document_position());
+        let duplicate_position = DocumentPosition::fixed(
+            source_position.scroll_x_doc,
+            source_position.scroll_y_doc,
+            1.6,
+            source_position.page,
+        );
+        duplicate.update(cx, |duplicate, cx| {
+            duplicate.navigate_to_document_position(duplicate_position.clone(), cx);
+        });
+        assert_eq!(
+            source.read_with(cx, |source, _| source.current_document_position()),
+            source_position
+        );
+        assert_eq!(
+            duplicate.read_with(cx, |duplicate, _| duplicate.current_document_position()),
+            duplicate_position
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .focus_or_open_document(document_path.clone(), None, false, window, cx)
+                .unwrap();
+            assert_eq!(pane.read(cx).len(), 2, "normal Open must still deduplicate");
+            assert_eq!(
+                pane.read(cx).active_tab_id(),
+                Some(duplicate.entity_id()),
+                "normal Open should keep the active matching copy"
+            );
+
+            workspace.close_tab_in_pane(&pane, Some(0), window, cx);
+            assert_eq!(pane.read(cx).len(), 1);
+            assert_eq!(pane.read(cx).active_tab_id(), Some(duplicate.entity_id()));
+            assert_eq!(
+                cx.global::<LibraryStore>()
+                    .history_position(&document_path)
+                    .unwrap(),
+                duplicate_position,
+                "closing a stale copy must not overwrite the newer same-path position"
+            );
+        });
+
+        fs::remove_file(document_path).unwrap();
     }
 
     #[gpui::test]
@@ -4306,6 +4503,7 @@ mod tests {
             _ = window.draw(cx);
         });
 
+        assert!(cx.debug_bounds("workspace-main-card").is_some());
         assert!(cx.debug_bounds("pane-tab-0").is_some());
         assert!(cx.debug_bounds("pane-tab-1").is_some());
 

@@ -1,6 +1,6 @@
 use gpui::{
-    Anchor, AnyElement, Entity, FocusHandle, IntoElement, MouseButton, RenderOnce, SharedString,
-    Styled as _, Window, anchored, deferred, div, prelude::*, px,
+    Anchor, AnyElement, Entity, FocusHandle, Hsla, IntoElement, MouseButton, RenderOnce,
+    SharedString, Styled as _, Window, anchored, deferred, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _, Selectable as _, Sizable as _, TitleBar,
@@ -9,7 +9,9 @@ use gpui_component::{
 };
 
 use crate::{
-    document_view::{CloseTab, OpenFile, OpenNewTab, OpenSettings, OpenWithSystemPicker},
+    document_view::{
+        CloseTab, DuplicateTab, OpenFile, OpenNewTab, OpenSettings, OpenWithSystemPicker,
+    },
     icons::IconName,
     pane::{SplitDown, SplitRight},
 };
@@ -53,6 +55,11 @@ fn tab_menu(menu: PopupMenu) -> PopupMenu {
         Box::new(OpenNewTab),
     )
     .menu_with_icon(
+        crate::fl!("toolbar-duplicate-tab"),
+        IconName::Copy,
+        Box::new(DuplicateTab),
+    )
+    .menu_with_icon(
         crate::fl!("toolbar-close-tab"),
         IconName::X,
         Box::new(CloseTab),
@@ -84,6 +91,7 @@ pub(super) struct WorkspaceTitleBar {
     open_menu: Option<WorkspaceMenu>,
     popup_menu: Option<Entity<PopupMenu>>,
     active_tab_label: Option<SharedString>,
+    shell_background: Hsla,
 }
 
 impl WorkspaceTitleBar {
@@ -92,12 +100,14 @@ impl WorkspaceTitleBar {
         open_menu: Option<WorkspaceMenu>,
         popup_menu: Option<Entity<PopupMenu>>,
         active_tab_label: Option<SharedString>,
+        shell_background: Hsla,
     ) -> Self {
         Self {
             workspace,
             open_menu,
             popup_menu,
             active_tab_label,
+            shell_background,
         }
     }
 
@@ -152,6 +162,7 @@ impl WorkspaceTitleBar {
 impl RenderOnce for WorkspaceTitleBar {
     fn render(self, _: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
         let workspace = self.workspace;
+        let shell_background = self.shell_background;
         let popup_for = |menu| {
             (self.open_menu == Some(menu))
                 .then(|| self.popup_menu.clone())
@@ -207,25 +218,28 @@ impl RenderOnce for WorkspaceTitleBar {
             .into_any_element();
         let collapse_workspace = workspace;
 
-        TitleBar::new().child(
-            div()
-                .h_full()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .child(controls)
-                .child(
-                    div()
-                        .h_full()
-                        .flex_1()
-                        .debug_selector(|| "workspace-title-bar-drag-region".to_string())
-                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                            collapse_workspace.update(cx, |workspace, cx| {
-                                workspace.set_title_bar_menu_expanded(false, cx);
-                            });
-                        }),
-                ),
-        )
+        TitleBar::new()
+            .border_b(px(0.0))
+            .bg(shell_background)
+            .child(
+                div()
+                    .h_full()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .child(controls)
+                    .child(
+                        div()
+                            .h_full()
+                            .flex_1()
+                            .debug_selector(|| "workspace-title-bar-drag-region".to_string())
+                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                collapse_workspace.update(cx, |workspace, cx| {
+                                    workspace.set_title_bar_menu_expanded(false, cx);
+                                });
+                            }),
+                    ),
+            )
     }
 }
