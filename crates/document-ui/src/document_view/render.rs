@@ -25,7 +25,7 @@ impl Render for DocumentView {
             if let Some(offset) = self.document_scroll.take_pending_offset() {
                 let scale = self.effective_scale().max(0.001);
                 let target = (-offset.y.as_f32() / scale).clamp(0.0, self.max_scroll_y_doc());
-                if self.set_scroll_doc(self.scroll_x_doc, target, cx) {
+                if self.set_scroll_doc_synchronized(self.scroll_x_doc, target, cx) {
                     self.mark_manual_navigation();
                 }
             }
@@ -472,7 +472,7 @@ impl Render for DocumentView {
                     let scale = this.effective_scale();
                     let delta_x = (event.position.x - pan.pointer_origin.x).as_f32();
                     let delta_y = (event.position.y - pan.pointer_origin.y).as_f32();
-                    if this.set_scroll_doc(
+                    if this.set_scroll_doc_synchronized(
                         pan.scroll_origin_x - delta_x / scale,
                         pan.scroll_origin_y - delta_y / scale,
                         cx,

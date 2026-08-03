@@ -7,6 +7,7 @@ pub struct Settings {
     pub font: FontSettings,
     pub window: WindowSettings,
     pub tab_bar_visibility: TabBarVisibility,
+    pub synchronized_group_indicators: SynchronizedGroupIndicatorVisibility,
     pub new_tab: NewTabSettings,
     pub language: AppLanguage,
     pub ai: AiSettings,
@@ -166,13 +167,21 @@ impl Settings {
             }
         }
 
-        if let Some(tabs) = document.get("tabs").and_then(KdlNode::children)
-            && let Some(value) = tabs
+        if let Some(tabs) = document.get("tabs").and_then(KdlNode::children) {
+            if let Some(value) = tabs
                 .get_arg("visibility")
                 .and_then(KdlValue::as_string)
                 .and_then(TabBarVisibility::from_str)
-        {
-            settings.tab_bar_visibility = value;
+            {
+                settings.tab_bar_visibility = value;
+            }
+            if let Some(value) = tabs
+                .get_arg("synchronized_group_indicators")
+                .and_then(KdlValue::as_string)
+                .and_then(SynchronizedGroupIndicatorVisibility::from_str)
+            {
+                settings.synchronized_group_indicators = value;
+            }
         }
 
         if let Some(new_tab) = document.get("new_tab").and_then(KdlNode::children)
@@ -596,6 +605,11 @@ impl Settings {
             tabs_children,
             "visibility",
             self.tab_bar_visibility.as_str(),
+        );
+        push_value_node(
+            tabs_children,
+            "synchronized_group_indicators",
+            self.synchronized_group_indicators.as_str(),
         );
         document.nodes_mut().push(tabs);
 

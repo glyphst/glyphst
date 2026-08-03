@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use glyphst_translation_ui::{
@@ -8,9 +11,10 @@ use glyphst_translation_ui::{
 use glyphst_ui::activity::ActivityCenter;
 use glyphst_ui::root::render_overlays;
 use gpui::{
-    App, Context, DismissEvent, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement,
-    MouseButton, MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString, Window,
-    WindowAppearance, div, point, prelude::*, px,
+    AnyElement, App, Bounds, Context, DismissEvent, DragMoveEvent, Entity, EntityId, FocusHandle,
+    Focusable, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathPromptOptions, Pixels, Point, Render, SharedString, Window, WindowAppearance,
+    bounds, canvas, div, fill, point, prelude::*, px, size,
 };
 use gpui_component::{ActiveTheme as _, ThemeColor, WindowExt as _, menu::PopupMenu};
 
@@ -34,11 +38,17 @@ use crate::{
     },
     library::{DocumentPosition, normalize_path},
     pane::{
-        DraggedTab, Pane, PaneDropTarget, PaneEvent, PaneGroup, SplitDirection, SplitDown,
-        SplitHorizontal, SplitLeft, SplitRight, SplitUp, SplitVertical, TabTransfer,
+        DraggedTab, Pane, PaneDropTarget, PaneEvent, PaneGroup, PaneSynchronizedPresentation,
+        RecentlyAddedSynchronizedTab, SplitDirection, SplitDown, SplitHorizontal, SplitLeft,
+        SplitRight, SplitUp, SplitVertical, SynchronizedConnectionInvalidReason,
+        SynchronizedConnectionTabState, TabTransfer,
     },
     picker::{Picker, PickerEvent},
     settings::{SettingsStore, setup_ui_font, sync_component_theme},
+    synchronized_tabs::{
+        ReservedSynchronizedGroup, SynchronizedConnectionNode, SynchronizedGroupId,
+        SynchronizedTabRegistry, closest_synchronized_tab, synchronized_connection_tree,
+    },
     theme::{ThemeAppearance, ThemeAppearanceMode},
     theme_selector::{ThemeSelector, ThemeSelectorDelegate},
 };
@@ -63,8 +73,55 @@ pub struct Workspace {
     title_bar_open_menu: Option<WorkspaceMenu>,
     title_bar_popup_menu: Option<Entity<PopupMenu>>,
     dragged_tab_outside_window: Option<DraggedTab>,
+    synchronized_tabs: SynchronizedTabRegistry,
+    synchronized_connection: Option<SynchronizedConnection>,
+    fading_synchronized_connection: Option<FadingSynchronizedConnection>,
     docks: WorkspaceDockState,
 }
+
+#[derive(Clone, Copy)]
+enum SynchronizedConnectionGroup {
+    New(ReservedSynchronizedGroup),
+    Existing(SynchronizedGroupId),
+}
+
+struct SynchronizedConnection {
+    source_tab: EntityId,
+    source_pane: Entity<Pane>,
+    group: SynchronizedConnectionGroup,
+    cursor: Point<Pixels>,
+    animation_started_at: Instant,
+    edges: Vec<SynchronizedConnectionEdge>,
+    recently_added: Option<RecentlyAddedSynchronizedTab>,
+    addition_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SynchronizedConnectionEdge {
+    from: EntityId,
+    to: EntityId,
+    added_at: Instant,
+}
+
+struct FadingSynchronizedConnection {
+    color_slot: usize,
+    edges: Vec<SynchronizedConnectionEdge>,
+    animation_started_at: Instant,
+    started_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct SynchronizedConnectionCurve {
+    start: Point<Pixels>,
+    control_a: Point<Pixels>,
+    control_b: Point<Pixels>,
+    end: Point<Pixels>,
+    added_at: Instant,
+}
+
+const SYNCHRONIZED_DOT_PERIOD: Duration = Duration::from_millis(1400);
+const SYNCHRONIZED_EDGE_FADE_IN: Duration = Duration::from_millis(180);
+const SYNCHRONIZED_NETWORK_FADE_OUT: Duration = Duration::from_millis(160);
 
 pub type WorkspaceWindowHandle = glyphst_ui::root::RootWindowHandle<Workspace>;
 
@@ -173,6 +230,9 @@ impl Workspace {
             title_bar_open_menu: None,
             title_bar_popup_menu: None,
             dragged_tab_outside_window: None,
+            synchronized_tabs: SynchronizedTabRegistry::default(),
+            synchronized_connection: None,
+            fading_synchronized_connection: None,
             docks,
         };
 
@@ -238,8 +298,11 @@ impl Workspace {
         )
         .detach();
         workspace.focus_active_pane(window, cx);
-        cx.observe_global::<SettingsStore>(|_, cx| cx.notify())
-            .detach();
+        cx.observe_global::<SettingsStore>(|this, cx| {
+            this.refresh_synchronized_tab_presentation(cx);
+            cx.notify();
+        })
+        .detach();
 
         let system_appearance = match window.appearance() {
             WindowAppearance::Light | WindowAppearance::VibrantLight => ThemeAppearance::Light,
@@ -351,6 +414,47 @@ impl Workspace {
                     this.active_pane = pane_for_events.clone();
                     this.close_tab_in_pane(&pane_for_events, Some(*tab_ix), window, cx);
                 }
+                PaneEvent::TabClicked { tab_id, was_active } => {
+                    this.active_pane = pane_for_events.clone();
+                    this.handle_synchronized_tab_click(
+                        &pane_for_events,
+                        *tab_id,
+                        *was_active,
+                        window,
+                        cx,
+                    );
+                }
+                PaneEvent::CreateSynchronizedGroup(tab_id) => {
+                    this.start_new_synchronized_group(pane_for_events.clone(), *tab_id, cx);
+                }
+                PaneEvent::ConnectMoreSynchronizedTabs { tab_id, group_id } => {
+                    this.start_connecting_synchronized_group(
+                        pane_for_events.clone(),
+                        *tab_id,
+                        *group_id,
+                        cx,
+                    );
+                }
+                PaneEvent::SwitchSynchronizedGroup { tab_id, group_id } => {
+                    if this.synchronized_tabs.select_for_tab(*tab_id, *group_id) {
+                        this.activate_synchronized_group(*group_id, &pane_for_events, window, cx);
+                    }
+                    this.refresh_synchronized_tab_presentation(cx);
+                }
+                PaneEvent::LeaveSynchronizedGroup { tab_id, group_id } => {
+                    this.synchronized_tabs.leave_group(*tab_id, *group_id);
+                    this.refresh_synchronized_tab_presentation(cx);
+                }
+                PaneEvent::LeaveAllSynchronizedGroups(tab_id) => {
+                    this.synchronized_tabs.leave_all(*tab_id);
+                    this.refresh_synchronized_tab_presentation(cx);
+                }
+                PaneEvent::FinishSynchronizedConnection => {
+                    this.finish_synchronized_connection(cx);
+                }
+                PaneEvent::DocumentScrolled { tab_id, delta } => {
+                    this.propagate_synchronized_scroll(*tab_id, *delta, cx);
+                }
             },
         )
         .detach();
@@ -386,6 +490,854 @@ impl Workspace {
                 pane.set_force_show_tab_bar(force_show_tab_bar, cx);
             });
         }
+    }
+
+    fn synchronized_connection_color_slot(&self, group: SynchronizedConnectionGroup) -> usize {
+        match group {
+            SynchronizedConnectionGroup::New(reserved) => reserved.color_slot,
+            SynchronizedConnectionGroup::Existing(group_id) => self
+                .synchronized_tabs
+                .group_summary(group_id)
+                .map(|group| group.color_slot)
+                .unwrap_or_default(),
+        }
+    }
+
+    fn synchronized_connection_tab_state(
+        &self,
+        connection: &SynchronizedConnection,
+        pane_id: EntityId,
+        tab_id: EntityId,
+        is_document: bool,
+    ) -> SynchronizedConnectionTabState {
+        if tab_id == connection.source_tab {
+            return SynchronizedConnectionTabState::Source;
+        }
+
+        if let SynchronizedConnectionGroup::Existing(group_id) = connection.group
+            && self.synchronized_tabs.contains(group_id, tab_id)
+        {
+            return SynchronizedConnectionTabState::Member;
+        }
+
+        if !is_document {
+            return SynchronizedConnectionTabState::Invalid(
+                SynchronizedConnectionInvalidReason::NonDocument,
+            );
+        }
+
+        let (pane_is_represented, group_number) = match connection.group {
+            SynchronizedConnectionGroup::New(reserved) => (
+                pane_id == connection.source_pane.entity_id(),
+                reserved.id.number(),
+            ),
+            SynchronizedConnectionGroup::Existing(group_id) => (
+                !self
+                    .synchronized_tabs
+                    .can_add_member(group_id, tab_id, pane_id),
+                group_id.number(),
+            ),
+        };
+        if pane_is_represented {
+            SynchronizedConnectionTabState::Invalid(
+                SynchronizedConnectionInvalidReason::PaneAlreadyRepresented { group_number },
+            )
+        } else {
+            SynchronizedConnectionTabState::Eligible
+        }
+    }
+
+    fn synchronized_connection_tab_bounds(
+        &self,
+        tab_id: EntityId,
+        cx: &Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        for pane in self.pane_group.panes() {
+            if !pane.read(cx).has_tab_id(tab_id) {
+                continue;
+            }
+            let tab_bounds = pane.read(cx).tab_bounds(tab_id)?;
+            let center = tab_bounds.center();
+            if self
+                .pane_group
+                .bounding_box_for_pane(&pane)
+                .is_some_and(|pane_bounds| !pane_bounds.contains(&center))
+            {
+                return None;
+            }
+            return Some(tab_bounds);
+        }
+        None
+    }
+
+    fn synchronized_connection_node(
+        &self,
+        tab_id: EntityId,
+        cx: &Context<Self>,
+    ) -> Option<SynchronizedConnectionNode> {
+        let tab_bounds = self.synchronized_connection_tab_bounds(tab_id, cx)?;
+        Some(SynchronizedConnectionNode {
+            tab_id,
+            center: tab_bounds.center(),
+        })
+    }
+
+    fn synchronized_group_connection_nodes(
+        &self,
+        group_id: SynchronizedGroupId,
+        cx: &Context<Self>,
+    ) -> Vec<SynchronizedConnectionNode> {
+        self.synchronized_tabs
+            .member_tabs(group_id)
+            .into_iter()
+            .filter_map(|tab_id| self.synchronized_connection_node(tab_id, cx))
+            .collect()
+    }
+
+    fn initial_synchronized_connection_edges(
+        &self,
+        group_id: SynchronizedGroupId,
+        added_at: Instant,
+        cx: &Context<Self>,
+    ) -> Vec<SynchronizedConnectionEdge> {
+        synchronized_connection_tree(&self.synchronized_group_connection_nodes(group_id, cx))
+            .into_iter()
+            .map(|(from, to)| SynchronizedConnectionEdge { from, to, added_at })
+            .collect()
+    }
+
+    fn closest_synchronized_connection_edge(
+        &self,
+        group_id: SynchronizedGroupId,
+        target_tab: EntityId,
+        added_at: Instant,
+        cx: &Context<Self>,
+    ) -> Option<SynchronizedConnectionEdge> {
+        let target = self.synchronized_connection_node(target_tab, cx)?;
+        let candidates = self
+            .synchronized_group_connection_nodes(group_id, cx)
+            .into_iter()
+            .filter(|candidate| candidate.tab_id != target_tab)
+            .collect::<Vec<_>>();
+        let from = closest_synchronized_tab(target, &candidates)?;
+        Some(SynchronizedConnectionEdge {
+            from,
+            to: target_tab,
+            added_at,
+        })
+    }
+
+    fn repair_synchronized_connection_edges(&mut self, cx: &Context<Self>) {
+        let Some(connection) = self.synchronized_connection.as_ref() else {
+            return;
+        };
+        let SynchronizedConnectionGroup::Existing(group_id) = connection.group else {
+            return;
+        };
+        let members = self.synchronized_tabs.member_tabs(group_id);
+        let needs_repair = connection
+            .edges
+            .iter()
+            .any(|edge| !members.contains(&edge.from) || !members.contains(&edge.to));
+        if !needs_repair {
+            return;
+        }
+
+        let now = Instant::now();
+        let repaired = self.initial_synchronized_connection_edges(group_id, now, cx);
+        if let Some(connection) = self.synchronized_connection.as_mut() {
+            connection.edges = repaired;
+            connection.animation_started_at = now;
+        }
+    }
+
+    fn refresh_synchronized_tab_presentation(&mut self, cx: &mut Context<Self>) {
+        let invalid_connection = self
+            .synchronized_connection
+            .as_ref()
+            .is_some_and(|connection| {
+                !connection
+                    .source_pane
+                    .read(cx)
+                    .has_tab_id(connection.source_tab)
+                    || matches!(
+                        connection.group,
+                        SynchronizedConnectionGroup::Existing(group_id)
+                            if self.synchronized_tabs.group_summary(group_id).is_none()
+                    )
+            });
+        if invalid_connection {
+            self.synchronized_connection = None;
+        }
+        self.repair_synchronized_connection_edges(cx);
+        for pane in self.pane_group.panes() {
+            let pane_id = pane.entity_id();
+            let tab_ids = pane.read(cx).tab_ids();
+            let mut presentation = PaneSynchronizedPresentation::default();
+            if let Some(connection) = &self.synchronized_connection {
+                presentation.connection_color_slot =
+                    Some(self.synchronized_connection_color_slot(connection.group));
+                presentation.recently_added = connection.recently_added;
+            }
+            for tab_id in tab_ids {
+                let groups = self.synchronized_tabs.summaries_for_tab(tab_id);
+                if !groups.is_empty() {
+                    presentation.groups_by_tab.insert(tab_id, groups);
+                }
+                if let Some(connection) = &self.synchronized_connection {
+                    let state = self.synchronized_connection_tab_state(
+                        connection,
+                        pane_id,
+                        tab_id,
+                        pane.read(cx).tab_is_document(tab_id),
+                    );
+                    presentation.connection_tabs.insert(tab_id, state);
+                }
+            }
+            pane.update(cx, |pane, cx| {
+                pane.set_synchronized_presentation(presentation, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn start_new_synchronized_group(
+        &mut self,
+        source_pane: Entity<Pane>,
+        source_tab: gpui::EntityId,
+        cx: &mut Context<Self>,
+    ) {
+        if !source_pane.read(cx).tab_is_document(source_tab) {
+            return;
+        }
+        let reserved = self.synchronized_tabs.reserve_group();
+        let cursor = source_pane
+            .read(cx)
+            .tab_bounds(source_tab)
+            .map(|bounds| bounds.center())
+            .unwrap_or_else(|| point(px(0.0), px(0.0)));
+        let now = Instant::now();
+        self.fading_synchronized_connection = None;
+        self.synchronized_connection = Some(SynchronizedConnection {
+            source_tab,
+            source_pane,
+            group: SynchronizedConnectionGroup::New(reserved),
+            cursor,
+            animation_started_at: now,
+            edges: Vec::new(),
+            recently_added: None,
+            addition_sequence: 0,
+        });
+        self.refresh_synchronized_tab_presentation(cx);
+    }
+
+    fn start_connecting_synchronized_group(
+        &mut self,
+        source_pane: Entity<Pane>,
+        source_tab: gpui::EntityId,
+        group_id: SynchronizedGroupId,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.synchronized_tabs.contains(group_id, source_tab) {
+            return;
+        }
+        self.synchronized_tabs.select_for_tab(source_tab, group_id);
+        let cursor = source_pane
+            .read(cx)
+            .tab_bounds(source_tab)
+            .map(|bounds| bounds.center())
+            .unwrap_or_else(|| point(px(0.0), px(0.0)));
+        let now = Instant::now();
+        let edges = self.initial_synchronized_connection_edges(group_id, now, cx);
+        self.fading_synchronized_connection = None;
+        self.synchronized_connection = Some(SynchronizedConnection {
+            source_tab,
+            source_pane,
+            group: SynchronizedConnectionGroup::Existing(group_id),
+            cursor,
+            animation_started_at: now,
+            edges,
+            recently_added: None,
+            addition_sequence: 0,
+        });
+        self.refresh_synchronized_tab_presentation(cx);
+    }
+
+    fn finish_synchronized_connection(&mut self, cx: &mut Context<Self>) {
+        let Some(connection) = self.synchronized_connection.take() else {
+            return;
+        };
+        if !cx.reduce_motion() && !connection.edges.is_empty() {
+            self.fading_synchronized_connection = Some(FadingSynchronizedConnection {
+                color_slot: self.synchronized_connection_color_slot(connection.group),
+                edges: connection.edges,
+                animation_started_at: connection.animation_started_at,
+                started_at: Instant::now(),
+            });
+        } else {
+            self.fading_synchronized_connection = None;
+        }
+        self.refresh_synchronized_tab_presentation(cx);
+    }
+
+    fn handle_synchronized_tab_click(
+        &mut self,
+        pane: &Entity<Pane>,
+        tab_id: gpui::EntityId,
+        was_active: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(connection) = self.synchronized_connection.as_ref() {
+            let source_tab = connection.source_tab;
+            let source_pane = connection.source_pane.clone();
+            let connection_group = connection.group;
+            let target_pane_id = pane.entity_id();
+            if tab_id == source_tab || !pane.read(cx).tab_is_document(tab_id) {
+                return;
+            }
+            let now = Instant::now();
+            let (added_group, first_edge) = match connection_group {
+                SynchronizedConnectionGroup::New(reserved) => {
+                    if target_pane_id == source_pane.entity_id()
+                        || !self.synchronized_tabs.commit_reserved_group(
+                            reserved,
+                            source_tab,
+                            source_pane.entity_id(),
+                            tab_id,
+                            target_pane_id,
+                        )
+                    {
+                        return;
+                    }
+                    (
+                        Some(reserved.id),
+                        Some(SynchronizedConnectionEdge {
+                            from: source_tab,
+                            to: tab_id,
+                            added_at: now,
+                        }),
+                    )
+                }
+                SynchronizedConnectionGroup::Existing(group_id) => (
+                    self.synchronized_tabs
+                        .add_member(group_id, tab_id, target_pane_id)
+                        .then_some(group_id),
+                    None,
+                ),
+            };
+            if let Some(group_id) = added_group {
+                let edge = first_edge.or_else(|| {
+                    self.closest_synchronized_connection_edge(group_id, tab_id, now, cx)
+                });
+                if let Some(connection) = self.synchronized_connection.as_mut() {
+                    connection.group = SynchronizedConnectionGroup::Existing(group_id);
+                    if let Some(edge) = edge
+                        && !connection.edges.iter().any(|candidate| {
+                            (candidate.from == edge.from && candidate.to == edge.to)
+                                || (candidate.from == edge.to && candidate.to == edge.from)
+                        })
+                    {
+                        connection.edges.push(edge);
+                    }
+                    connection.addition_sequence += 1;
+                    connection.recently_added = Some(RecentlyAddedSynchronizedTab {
+                        tab_id,
+                        group_id,
+                        sequence: connection.addition_sequence,
+                    });
+                }
+                self.refresh_synchronized_tab_presentation(cx);
+            }
+            return;
+        }
+
+        let Some(group_id) = self.synchronized_tabs.group_for_tab_action(tab_id) else {
+            return;
+        };
+        self.synchronized_tabs.select_for_tab(tab_id, group_id);
+        if was_active {
+            self.activate_synchronized_group(group_id, pane, window, cx);
+        }
+        self.refresh_synchronized_tab_presentation(cx);
+    }
+
+    fn activate_synchronized_group(
+        &mut self,
+        group_id: SynchronizedGroupId,
+        initiating_pane: &Entity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let members = self.synchronized_tabs.member_tabs(group_id);
+        for pane in self.pane_group.panes() {
+            let member = members
+                .iter()
+                .find(|tab_id| pane.read(cx).has_tab_id(**tab_id))
+                .copied();
+            if let Some(tab_id) = member {
+                pane.update(cx, |pane, cx| {
+                    pane.activate_tab_by_id(tab_id, false, window, cx);
+                });
+            }
+        }
+        self.active_pane = initiating_pane.clone();
+        initiating_pane.update(cx, |pane, cx| pane.focus(window, cx));
+        cx.notify();
+    }
+
+    fn propagate_synchronized_scroll(
+        &mut self,
+        source_tab: gpui::EntityId,
+        delta: crate::document_view::SynchronizedScrollDelta,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group_id) = self.synchronized_tabs.current_group() else {
+            return;
+        };
+        if !self.synchronized_tabs.contains(group_id, source_tab) {
+            return;
+        }
+        let source_is_displayed = self
+            .pane_group
+            .panes()
+            .into_iter()
+            .any(|pane| pane.read(cx).active_tab_id() == Some(source_tab));
+        if !source_is_displayed {
+            return;
+        }
+
+        for member_tab in self.synchronized_tabs.member_tabs(group_id) {
+            if member_tab == source_tab {
+                continue;
+            }
+            let Some(pane) = self
+                .pane_group
+                .panes()
+                .into_iter()
+                .find(|pane| pane.read(cx).has_tab_id(member_tab))
+            else {
+                continue;
+            };
+            if pane.read(cx).active_tab_id() != Some(member_tab) {
+                continue;
+            }
+            if let Some(document_view) = pane.read(cx).document_view_for_id(member_tab) {
+                document_view.update(cx, |document_view, cx| {
+                    document_view.apply_synchronized_scroll_delta(delta, cx);
+                });
+            }
+        }
+    }
+
+    fn synchronized_group_color(theme: ThemeColor, color_slot: usize) -> Hsla {
+        match color_slot % 8 {
+            0 => theme.chart_1,
+            1 => theme.chart_2,
+            2 => theme.chart_3,
+            3 => theme.chart_4,
+            4 => theme.chart_5,
+            5 => theme.cyan,
+            6 => theme.magenta,
+            _ => theme.yellow,
+        }
+    }
+
+    fn synchronized_connection_anchor(
+        tab_bounds: Bounds<Pixels>,
+        toward: Point<Pixels>,
+    ) -> Point<Pixels> {
+        let center = tab_bounds.center();
+        let dx = toward.x.as_f32() - center.x.as_f32();
+        let dy = toward.y.as_f32() - center.y.as_f32();
+        if dx.abs() >= dy.abs() {
+            point(
+                if dx >= 0.0 {
+                    tab_bounds.right()
+                } else {
+                    tab_bounds.left()
+                },
+                center.y,
+            )
+        } else {
+            point(
+                center.x,
+                if dy >= 0.0 {
+                    tab_bounds.bottom()
+                } else {
+                    tab_bounds.top()
+                },
+            )
+        }
+    }
+
+    fn synchronized_connection_curve(
+        from: Bounds<Pixels>,
+        to: Bounds<Pixels>,
+        added_at: Instant,
+    ) -> SynchronizedConnectionCurve {
+        let start = Self::synchronized_connection_anchor(from, to.center());
+        let end = Self::synchronized_connection_anchor(to, from.center());
+        let dx = end.x.as_f32() - start.x.as_f32();
+        let dy = end.y.as_f32() - start.y.as_f32();
+        let (control_a, control_b) = if dx.abs() >= dy.abs() {
+            let bend = (dx.abs() * 0.35).clamp(18.0, 110.0);
+            let direction = if dx >= 0.0 { 1.0 } else { -1.0 };
+            let bow = if dy.abs() < 20.0 {
+                (dx.abs() * 0.08).clamp(8.0, 24.0)
+            } else {
+                0.0
+            };
+            (
+                point(start.x + px(bend * direction), start.y + px(bow)),
+                point(end.x - px(bend * direction), end.y + px(bow)),
+            )
+        } else {
+            let bend = (dy.abs() * 0.35).clamp(18.0, 110.0);
+            let direction = if dy >= 0.0 { 1.0 } else { -1.0 };
+            let bow = if dx.abs() < 20.0 {
+                (dy.abs() * 0.06).clamp(6.0, 18.0)
+            } else {
+                0.0
+            };
+            (
+                point(start.x + px(bow), start.y + px(bend * direction)),
+                point(end.x + px(bow), end.y - px(bend * direction)),
+            )
+        };
+        SynchronizedConnectionCurve {
+            start,
+            control_a,
+            control_b,
+            end,
+            added_at,
+        }
+    }
+
+    fn cubic_point(curve: SynchronizedConnectionCurve, t: f32) -> Point<Pixels> {
+        let inverse = 1.0 - t;
+        let a = inverse * inverse * inverse;
+        let b = 3.0 * inverse * inverse * t;
+        let c = 3.0 * inverse * t * t;
+        let d = t * t * t;
+        point(
+            px(curve.start.x.as_f32() * a
+                + curve.control_a.x.as_f32() * b
+                + curve.control_b.x.as_f32() * c
+                + curve.end.x.as_f32() * d),
+            px(curve.start.y.as_f32() * a
+                + curve.control_a.y.as_f32() * b
+                + curve.control_b.y.as_f32() * c
+                + curve.end.y.as_f32() * d),
+        )
+    }
+
+    fn point_distance(left: Point<Pixels>, right: Point<Pixels>) -> f32 {
+        let dx = left.x.as_f32() - right.x.as_f32();
+        let dy = left.y.as_f32() - right.y.as_f32();
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    fn synchronized_connection_curves(
+        &self,
+        edges: &[SynchronizedConnectionEdge],
+        viewport: Bounds<Pixels>,
+        cx: &Context<Self>,
+    ) -> Vec<SynchronizedConnectionCurve> {
+        edges
+            .iter()
+            .filter_map(|edge| {
+                let from = self.synchronized_connection_tab_bounds(edge.from, cx)?;
+                let to = self.synchronized_connection_tab_bounds(edge.to, cx)?;
+                if !viewport.contains(&from.center()) || !viewport.contains(&to.center()) {
+                    return None;
+                }
+                Some(Self::synchronized_connection_curve(from, to, edge.added_at))
+            })
+            .collect()
+    }
+
+    fn hovered_synchronized_connection_tab(
+        &self,
+        cx: &App,
+    ) -> Option<(SynchronizedConnectionTabState, Bounds<Pixels>)> {
+        let connection = self.synchronized_connection.as_ref()?;
+        for pane in self.pane_group.panes() {
+            if self
+                .pane_group
+                .bounding_box_for_pane(&pane)
+                .is_some_and(|pane_bounds| !pane_bounds.contains(&connection.cursor))
+            {
+                continue;
+            }
+            for tab_id in pane.read(cx).tab_ids() {
+                let Some(tab_bounds) = pane.read(cx).tab_bounds(tab_id) else {
+                    continue;
+                };
+                if !tab_bounds.contains(&connection.cursor) {
+                    continue;
+                }
+                return Some((
+                    self.synchronized_connection_tab_state(
+                        connection,
+                        pane.entity_id(),
+                        tab_id,
+                        pane.read(cx).tab_is_document(tab_id),
+                    ),
+                    tab_bounds,
+                ));
+            }
+        }
+        None
+    }
+
+    fn synchronized_connection_hint_origin(
+        cursor: Point<Pixels>,
+        hovered_bounds: Option<Bounds<Pixels>>,
+        viewport: gpui::Size<Pixels>,
+    ) -> Point<Pixels> {
+        const HINT_WIDTH: f32 = 310.0;
+        const HINT_HEIGHT: f32 = 58.0;
+        const MARGIN: f32 = 8.0;
+        const OFFSET: f32 = 12.0;
+
+        let mut x = cursor.x.as_f32() + OFFSET;
+        let mut y = hovered_bounds.map_or(cursor.y.as_f32() + OFFSET, |bounds| {
+            bounds.bottom().as_f32() + MARGIN
+        });
+        if x + HINT_WIDTH + MARGIN > viewport.width.as_f32() {
+            x = cursor.x.as_f32() - HINT_WIDTH - OFFSET;
+        }
+        if y + HINT_HEIGHT + MARGIN > viewport.height.as_f32() {
+            y = hovered_bounds.map_or(cursor.y.as_f32() - HINT_HEIGHT - OFFSET, |bounds| {
+                bounds.top().as_f32() - HINT_HEIGHT - MARGIN
+            });
+        }
+        let max_x = (viewport.width.as_f32() - HINT_WIDTH - MARGIN).max(MARGIN);
+        let max_y = (viewport.height.as_f32() - HINT_HEIGHT - MARGIN).max(MARGIN);
+        point(px(x.clamp(MARGIN, max_x)), px(y.clamp(MARGIN, max_y)))
+    }
+
+    fn render_synchronized_connection(
+        &mut self,
+        theme: ThemeColor,
+        window: &mut Window,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let now = Instant::now();
+        let reduce_motion = cx.reduce_motion();
+        if reduce_motion
+            || self
+                .fading_synchronized_connection
+                .as_ref()
+                .is_some_and(|fade| {
+                    now.saturating_duration_since(fade.started_at) >= SYNCHRONIZED_NETWORK_FADE_OUT
+                })
+        {
+            self.fading_synchronized_connection = None;
+        }
+
+        let hovered = self.hovered_synchronized_connection_tab(cx);
+        let active = self.synchronized_connection.as_ref().map(|connection| {
+            (
+                connection.edges.clone(),
+                self.synchronized_connection_color_slot(connection.group),
+                connection.animation_started_at,
+                connection.cursor,
+                connection.group,
+            )
+        });
+        let (edges, color_slot, animation_started_at, overall_opacity, hint_data, fading) =
+            if let Some((edges, color_slot, animation_started_at, cursor, group)) = active {
+                (
+                    edges,
+                    color_slot,
+                    animation_started_at,
+                    1.0,
+                    Some((cursor, group)),
+                    false,
+                )
+            } else if let Some(fade) = &self.fading_synchronized_connection {
+                let progress = now.saturating_duration_since(fade.started_at).as_secs_f32()
+                    / SYNCHRONIZED_NETWORK_FADE_OUT.as_secs_f32();
+                (
+                    fade.edges.clone(),
+                    fade.color_slot,
+                    fade.animation_started_at,
+                    1.0 - progress.clamp(0.0, 1.0),
+                    None,
+                    true,
+                )
+            } else {
+                return None;
+            };
+
+        let viewport = bounds(point(px(0.0), px(0.0)), window.viewport_size());
+        let curves = self.synchronized_connection_curves(&edges, viewport, cx);
+        let color = Self::synchronized_group_color(theme, color_slot);
+        let network = (!curves.is_empty()).then(|| {
+            canvas(
+                move |_, _, _| curves,
+                move |_, curves, window, _| {
+                    let period = SYNCHRONIZED_DOT_PERIOD.as_secs_f32();
+                    let phase = now
+                        .saturating_duration_since(animation_started_at)
+                        .as_secs_f32()
+                        / period
+                        % 1.0;
+                    for curve in curves {
+                        let approximate_length = Self::point_distance(curve.start, curve.control_a)
+                            + Self::point_distance(curve.control_a, curve.control_b)
+                            + Self::point_distance(curve.control_b, curve.end);
+                        let dot_count = ((approximate_length / 9.0).ceil() as usize).clamp(2, 120);
+                        let edge_opacity = if reduce_motion {
+                            1.0
+                        } else {
+                            (now.saturating_duration_since(curve.added_at).as_secs_f32()
+                                / SYNCHRONIZED_EDGE_FADE_IN.as_secs_f32())
+                            .clamp(0.0, 1.0)
+                        };
+                        for index in 0..=dot_count {
+                            let t = index as f32 / dot_count as f32;
+                            let distance_from_end = t.min(1.0 - t) * 2.0;
+                            let pulse = if reduce_motion {
+                                0.0
+                            } else {
+                                (1.0 - (distance_from_end - phase).abs() / 0.22)
+                                    .clamp(0.0, 1.0)
+                                    .powi(2)
+                            };
+                            let diameter = if reduce_motion {
+                                3.0
+                            } else {
+                                2.7 + pulse * 1.6
+                            };
+                            let opacity = if reduce_motion {
+                                0.58
+                            } else {
+                                0.3 + pulse * 0.65
+                            };
+                            let center = Self::cubic_point(curve, t);
+                            let radius = diameter / 2.0;
+                            window.paint_quad(
+                                fill(
+                                    bounds(
+                                        point(center.x - px(radius), center.y - px(radius)),
+                                        size(px(diameter), px(diameter)),
+                                    ),
+                                    color.opacity(opacity * edge_opacity * overall_opacity),
+                                )
+                                .corner_radii(px(radius)),
+                            );
+                        }
+                    }
+                },
+            )
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .left_0()
+        });
+
+        if !reduce_motion && (!edges.is_empty() || fading) {
+            window.request_animation_frame();
+        }
+
+        let hint = hint_data.map(|(cursor, group)| {
+            let group_number = match group {
+                SynchronizedConnectionGroup::New(reserved) => reserved.id.number(),
+                SynchronizedConnectionGroup::Existing(group_id) => group_id.number(),
+            };
+            let (primary, secondary) = match hovered.map(|(state, _)| state) {
+                Some(SynchronizedConnectionTabState::Source) => (
+                    crate::fl!("synchronized-tabs-connection-source"),
+                    crate::fl!("synchronized-tabs-connection-finish"),
+                ),
+                Some(SynchronizedConnectionTabState::Member) => (
+                    crate::fl!(
+                        "synchronized-tabs-connection-already-member",
+                        number = group_number as i64
+                    ),
+                    crate::fl!("synchronized-tabs-connection-finish"),
+                ),
+                Some(SynchronizedConnectionTabState::Invalid(
+                    SynchronizedConnectionInvalidReason::NonDocument,
+                )) => (
+                    crate::fl!("synchronized-tabs-connection-documents-only"),
+                    crate::fl!("synchronized-tabs-connection-finish"),
+                ),
+                Some(SynchronizedConnectionTabState::Invalid(
+                    SynchronizedConnectionInvalidReason::PaneAlreadyRepresented { group_number },
+                )) => (
+                    crate::fl!(
+                        "synchronized-tabs-connection-pane-represented",
+                        number = group_number as i64
+                    ),
+                    crate::fl!("synchronized-tabs-connection-finish"),
+                ),
+                Some(SynchronizedConnectionTabState::Eligible) | None => match group {
+                    SynchronizedConnectionGroup::New(_) => (
+                        crate::fl!("synchronized-tabs-connection-select"),
+                        crate::fl!("synchronized-tabs-connection-finish"),
+                    ),
+                    SynchronizedConnectionGroup::Existing(group_id) => {
+                        let count = self
+                            .synchronized_tabs
+                            .group_summary(group_id)
+                            .map_or(0, |group| group.member_count);
+                        (
+                            crate::fl!(
+                                "synchronized-tabs-group-summary",
+                                number = group_number as i64,
+                                count = count as i64
+                            ),
+                            crate::fl!("synchronized-tabs-connection-continue"),
+                        )
+                    }
+                },
+            };
+            let origin = Self::synchronized_connection_hint_origin(
+                cursor,
+                hovered.map(|(_, bounds)| bounds),
+                window.viewport_size(),
+            );
+            div()
+                .absolute()
+                .left(origin.x)
+                .top(origin.y)
+                .w(px(310.0))
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.popover)
+                .text_color(theme.popover_foreground)
+                .shadow_lg()
+                .debug_selector(|| "synchronized-connection-hint".to_string())
+                .child(
+                    div().flex().flex_col().gap_1().child(primary).child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.muted_foreground)
+                            .child(secondary),
+                    ),
+                )
+        });
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .left_0()
+                .debug_selector(|| "synchronized-connection-overlay".to_string())
+                .children(network)
+                .children(hint)
+                .into_any_element(),
+        )
     }
 
     fn create_empty_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Pane> {
@@ -586,6 +1538,20 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let closed_tab_id = match tab_ix {
+            Some(tab_ix) => pane.read(cx).tab_id_at(tab_ix),
+            None => pane.read(cx).active_tab_id(),
+        };
+        if let Some(tab_id) = closed_tab_id {
+            self.synchronized_tabs.remove_tab(tab_id);
+            if self
+                .synchronized_connection
+                .as_ref()
+                .is_some_and(|connection| connection.source_tab == tab_id)
+            {
+                self.synchronized_connection = None;
+            }
+        }
         let empty = pane.update(cx, |pane, cx| match tab_ix {
             Some(tab_ix) => pane.close_tab_at(tab_ix, cx),
             None => pane.close_active_tab(cx),
@@ -595,6 +1561,7 @@ impl Workspace {
         } else {
             pane.update(cx, |pane, cx| pane.focus(window, cx));
         }
+        self.refresh_synchronized_tab_presentation(cx);
         cx.notify();
     }
 
@@ -622,6 +1589,16 @@ impl Workspace {
             .iter()
             .position(|candidate| candidate == pane)
             .unwrap_or(0);
+        for tab_id in pane.read(cx).tab_ids() {
+            self.synchronized_tabs.remove_tab(tab_id);
+        }
+        if self
+            .synchronized_connection
+            .as_ref()
+            .is_some_and(|connection| connection.source_pane == *pane)
+        {
+            self.synchronized_connection = None;
+        }
         self.cancel_pending_translation_splits_for_pane(pane, cx);
         if !self.pane_group.remove(pane, cx) {
             return;
@@ -638,6 +1615,7 @@ impl Workspace {
         self.sync_tab_bar_visibility(cx);
         self.active_pane
             .update(cx, |pane, cx| pane.focus(window, cx));
+        self.refresh_synchronized_tab_presentation(cx);
         cx.notify();
     }
 
@@ -879,11 +1857,25 @@ impl Workspace {
                     });
                     return true;
                 };
+                if let Some(original_pane) = self
+                    .pane_group
+                    .panes()
+                    .into_iter()
+                    .find(|pane| pane.read(cx).has_tab_id(original.entity_id()))
+                {
+                    self.synchronized_tabs.create_group(
+                        original.entity_id(),
+                        original_pane.entity_id(),
+                        translated.entity_id(),
+                        translated_pane.entity_id(),
+                    );
+                }
                 self.link_translation_views(original, translated, window, cx);
                 translated_pane.update(cx, |pane, cx| pane.focus(window, cx));
                 self.document_translation_jobs.update(cx, |jobs, cx| {
                     jobs.finish_open(job_id, Ok(()), cx);
                 });
+                self.refresh_synchronized_tab_presentation(cx);
                 cx.notify();
             }
         };
@@ -902,13 +1894,6 @@ impl Workspace {
             &original,
             window,
             move |_, _, event: &DocumentViewEvent, _, cx| match event {
-                DocumentViewEvent::ViewportChanged(viewport) => {
-                    if let Some(translated_target) = translated_target.upgrade() {
-                        translated_target.update(cx, |view, cx| {
-                            view.apply_linked_viewport(*viewport, cx);
-                        });
-                    }
-                }
                 DocumentViewEvent::BlockHovered(block_id) => {
                     if let Some(translated_target) = translated_target.upgrade() {
                         translated_target.update(cx, |view, cx| {
@@ -925,7 +1910,8 @@ impl Workspace {
                 }
                 DocumentViewEvent::OpenDocument { .. }
                 | DocumentViewEvent::OpenSettings
-                | DocumentViewEvent::AiPanelDismissed => {}
+                | DocumentViewEvent::AiPanelDismissed
+                | DocumentViewEvent::SynchronizedScroll(_) => {}
             },
         )
         .detach();
@@ -935,13 +1921,6 @@ impl Workspace {
             &translated,
             window,
             move |_, _, event: &DocumentViewEvent, _, cx| match event {
-                DocumentViewEvent::ViewportChanged(viewport) => {
-                    if let Some(original_target) = original_target.upgrade() {
-                        original_target.update(cx, |view, cx| {
-                            view.apply_linked_viewport(*viewport, cx);
-                        });
-                    }
-                }
                 DocumentViewEvent::BlockHovered(block_id) => {
                     if let Some(original_target) = original_target.upgrade() {
                         original_target.update(cx, |view, cx| {
@@ -958,7 +1937,8 @@ impl Workspace {
                 }
                 DocumentViewEvent::OpenDocument { .. }
                 | DocumentViewEvent::OpenSettings
-                | DocumentViewEvent::AiPanelDismissed => {}
+                | DocumentViewEvent::AiPanelDismissed
+                | DocumentViewEvent::SynchronizedScroll(_) => {}
             },
         )
         .detach();
@@ -1035,6 +2015,16 @@ impl Workspace {
         for pane in self.pane_group.panes() {
             if pane != self.active_pane {
                 self.cancel_pending_translation_splits_for_pane(&pane, cx);
+                for tab_id in pane.read(cx).tab_ids() {
+                    self.synchronized_tabs.remove_tab(tab_id);
+                }
+                if self
+                    .synchronized_connection
+                    .as_ref()
+                    .is_some_and(|connection| connection.source_pane == pane)
+                {
+                    self.synchronized_connection = None;
+                }
                 pane.update(cx, |pane, cx| pane.flush_all_tabs(cx));
             }
         }
@@ -1042,6 +2032,7 @@ impl Workspace {
         self.sync_tab_bar_visibility(cx);
         self.active_pane
             .update(cx, |pane, cx| pane.focus(window, cx));
+        self.refresh_synchronized_tab_presentation(cx);
         cx.notify();
     }
 
@@ -1159,6 +2150,17 @@ impl Workspace {
                 window,
                 cx,
             );
+            let _ = source_window.update(cx, |source, _, cx| {
+                source.synchronized_tabs.remove_tab(dragged_tab.tab_id);
+                if source
+                    .synchronized_connection
+                    .as_ref()
+                    .is_some_and(|connection| connection.source_tab == dragged_tab.tab_id)
+                {
+                    source.synchronized_connection = None;
+                }
+                source.refresh_synchronized_tab_presentation(cx);
+            });
         }
 
         cx.notify();
@@ -1186,6 +2188,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !matches!(destination.target, PaneDropTarget::Content(Some(_)))
+            && !self
+                .synchronized_tabs
+                .can_move_tab(tab_id, destination.pane.entity_id())
+        {
+            return false;
+        }
         let transfer = source_pane.update(cx, |pane, cx| pane.take_tab_for_transfer(tab_id, cx));
         let Some(transfer) = transfer else {
             return false;
@@ -1199,6 +2208,21 @@ impl Workspace {
             window,
             cx,
         );
+        if let Some(actual_pane) = self
+            .pane_group
+            .panes()
+            .into_iter()
+            .find(|pane| pane.read(cx).has_tab_id(tab_id))
+        {
+            self.synchronized_tabs
+                .move_tab(tab_id, actual_pane.entity_id());
+            if let Some(connection) = self.synchronized_connection.as_mut()
+                && connection.source_tab == tab_id
+            {
+                connection.source_pane = actual_pane;
+            }
+        }
+        self.refresh_synchronized_tab_presentation(cx);
         true
     }
 
@@ -1335,6 +2359,8 @@ impl Workspace {
         }
 
         self.complete_transferred_tab_removal(&dragged_tab.source_pane, window, cx);
+        self.synchronized_tabs.remove_tab(dragged_tab.tab_id);
+        self.refresh_synchronized_tab_presentation(cx);
         cx.stop_propagation();
     }
 
@@ -1607,6 +2633,7 @@ impl Render for Workspace {
                 self.active_tab_label(cx),
             )
         });
+        let synchronized_connection = self.render_synchronized_connection(theme, window, cx);
         div()
             .id("workspace")
             .size_full()
@@ -1616,6 +2643,29 @@ impl Render for Workspace {
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
             .font(ui_font)
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if event.button == MouseButton::Right && this.synchronized_connection.is_some() {
+                    this.finish_synchronized_connection(cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.synchronized_connection.is_some()
+                    && !event.keystroke.modifiers.modified()
+                    && event.keystroke.key.as_str() == "escape"
+                {
+                    this.finish_synchronized_connection(cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if let Some(connection) = this.synchronized_connection.as_mut() {
+                    connection.cursor = event.position;
+                    cx.notify();
+                }
+            }))
             .on_drag_move::<DraggedTab>(cx.listener(
                 |this, event: &DragMoveEvent<DraggedTab>, window, cx| {
                     this.track_dragged_tab_outside_window(event, window, cx);
@@ -1756,6 +2806,7 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(self.render_body(theme, dim_inactive_panes, window, cx)),
             )
+            .children(synchronized_connection)
             .when_some(self.command_palette.clone(), |this, palette| {
                 this.child(Self::render_top_aligned_overlay(
                     palette,
@@ -1795,10 +2846,14 @@ mod tests {
     use gpui_component::{Root, WindowExt as _};
 
     use super::{
-        Workspace, WorkspaceCallbacks, WorkspaceMenu, WorkspaceWindowHandle, WorkspaceWindowRequest,
+        SplitDirection, SynchronizedConnectionGroup, SynchronizedConnectionInvalidReason,
+        SynchronizedConnectionTabState, Workspace, WorkspaceCallbacks, WorkspaceMenu,
+        WorkspaceWindowHandle, WorkspaceWindowRequest,
     };
     use crate::{
-        document_view::{DocumentSidebar, RenderCache},
+        document_view::{
+            DocumentSidebar, RenderCache, SynchronizedScrollDelta, SynchronizedScrollMode,
+        },
         library::LibraryStore,
         settings::SettingsStore,
     };
@@ -1876,6 +2931,270 @@ mod tests {
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.active_pane.read(cx).active_tab_is_new_tab());
         });
+    }
+
+    #[gpui::test]
+    fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
+        cx: &mut TestAppContext,
+    ) {
+        let document_path = temporary_pdf_path("synchronized-connection");
+        let other_document_path = temporary_pdf_path("synchronized-connection-other");
+        write_minimal_pdf(&document_path);
+        write_minimal_pdf(&other_document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .focus_or_open_document(other_document_path.clone(), None, false, window, cx)
+                .unwrap();
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_resize(size(px(1200.0), px(300.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panes = workspace.pane_group.panes();
+            assert_eq!(panes.len(), 3);
+            let source = panes[0].read(cx).active_document_view().unwrap();
+            let target = panes[1].read(cx).active_document_view().unwrap();
+            let group_id = workspace.synchronized_tabs.create_group(
+                source.entity_id(),
+                panes[0].entity_id(),
+                target.entity_id(),
+                panes[1].entity_id(),
+            );
+            workspace.refresh_synchronized_tab_presentation(cx);
+            panes[1].update(cx, |pane, cx| pane.open_new_tab(window, cx));
+            workspace.handle_synchronized_tab_click(
+                &panes[0],
+                source.entity_id(),
+                true,
+                window,
+                cx,
+            );
+            assert_eq!(panes[1].read(cx).active_tab_id(), Some(target.entity_id()));
+            workspace.start_connecting_synchronized_group(
+                panes[0].clone(),
+                source.entity_id(),
+                group_id,
+                cx,
+            );
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("synchronized-connection-hint").is_some());
+        let original_edge = workspace.read_with(cx, |workspace, cx| {
+            let connection = workspace.synchronized_connection.as_ref().unwrap();
+            assert_eq!(connection.edges.len(), 1);
+            let group_number = match connection.group {
+                SynchronizedConnectionGroup::Existing(group_id) => group_id.number(),
+                SynchronizedConnectionGroup::New(_) => unreachable!(),
+            };
+            let panes = workspace.pane_group.panes();
+            let source = panes[0].read(cx).active_document_view().unwrap();
+            let target = panes[1].read(cx).active_document_view().unwrap();
+            assert_eq!(
+                panes[0]
+                    .read(cx)
+                    .synchronized_connection_tab_state(source.entity_id()),
+                Some(SynchronizedConnectionTabState::Source)
+            );
+            assert_eq!(
+                panes[1]
+                    .read(cx)
+                    .synchronized_connection_tab_state(target.entity_id()),
+                Some(SynchronizedConnectionTabState::Member)
+            );
+            let non_document = panes[1]
+                .read(cx)
+                .tab_ids()
+                .into_iter()
+                .find(|tab_id| !panes[1].read(cx).tab_is_document(*tab_id))
+                .unwrap();
+            assert_eq!(
+                panes[1]
+                    .read(cx)
+                    .synchronized_connection_tab_state(non_document),
+                Some(SynchronizedConnectionTabState::Invalid(
+                    SynchronizedConnectionInvalidReason::NonDocument
+                ))
+            );
+            let represented_document = panes[1]
+                .read(cx)
+                .tab_ids()
+                .into_iter()
+                .find(|tab_id| {
+                    *tab_id != target.entity_id() && panes[1].read(cx).tab_is_document(*tab_id)
+                })
+                .unwrap();
+            assert_eq!(
+                panes[1]
+                    .read(cx)
+                    .synchronized_connection_tab_state(represented_document),
+                Some(SynchronizedConnectionTabState::Invalid(
+                    SynchronizedConnectionInvalidReason::PaneAlreadyRepresented { group_number }
+                ))
+            );
+            let eligible = panes[2].read(cx).active_document_view().unwrap();
+            assert_eq!(
+                panes[2]
+                    .read(cx)
+                    .synchronized_connection_tab_state(eligible.entity_id()),
+                Some(SynchronizedConnectionTabState::Eligible)
+            );
+            connection.edges[0]
+        });
+
+        let eligible_bounds = workspace.read_with(cx, |workspace, cx| {
+            let pane = &workspace.pane_group.panes()[2];
+            let eligible = pane.read(cx).active_document_view().unwrap();
+            pane.read(cx).tab_bounds(eligible.entity_id()).unwrap()
+        });
+        cx.simulate_mouse_move(eligible_bounds.center(), None, Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(matches!(
+                workspace.hovered_synchronized_connection_tab(cx),
+                Some((SynchronizedConnectionTabState::Eligible, _))
+            ));
+        });
+        cx.simulate_click(eligible_bounds.center(), Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            let connection = workspace.synchronized_connection.as_ref().unwrap();
+            assert_eq!(connection.edges.len(), 2);
+            assert!(connection.edges.contains(&original_edge));
+            let pane = &workspace.pane_group.panes()[2];
+            let added = pane.read(cx).active_document_view().unwrap();
+            assert_eq!(
+                pane.read(cx)
+                    .synchronized_connection_tab_state(added.entity_id()),
+                Some(SynchronizedConnectionTabState::Member)
+            );
+            let group_id = match connection.group {
+                SynchronizedConnectionGroup::Existing(group_id) => group_id,
+                SynchronizedConnectionGroup::New(_) => unreachable!(),
+            };
+            assert_eq!(
+                workspace
+                    .synchronized_tabs
+                    .group_summary(group_id)
+                    .unwrap()
+                    .member_count,
+                3
+            );
+        });
+
+        cx.simulate_keystrokes("escape");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.synchronized_connection.is_none());
+            assert!(workspace.fading_synchronized_connection.is_none());
+        });
+
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        workspace.update_in(cx, |workspace, _, cx| {
+            let group_id = workspace.synchronized_tabs.current_group().unwrap();
+            let source_pane = workspace.pane_group.panes()[0].clone();
+            let source_tab = source_pane
+                .read(cx)
+                .active_document_view()
+                .unwrap()
+                .entity_id();
+            workspace.start_connecting_synchronized_group(source_pane, source_tab, group_id, cx);
+        });
+        let position = point(px(30.0), px(120.0));
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.synchronized_connection.is_none());
+            assert!(workspace.fading_synchronized_connection.is_some());
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panes = workspace.pane_group.panes();
+            let source = panes[0].read(cx).active_document_view().unwrap();
+            let target = panes[1].read(cx).active_document_view().unwrap();
+            let before = target.read(cx).current_document_position();
+            workspace.propagate_synchronized_scroll(
+                source.entity_id(),
+                SynchronizedScrollDelta {
+                    x_pixels: 0.0,
+                    y_pixels: 48.0,
+                    mode: SynchronizedScrollMode::Immediate,
+                },
+                cx,
+            );
+            let after = target.read(cx).current_document_position();
+            assert!(after.scroll_y_doc > before.scroll_y_doc);
+
+            panes[1].update(cx, |pane, cx| pane.open_new_tab(window, cx));
+            let hidden_before = target.read(cx).current_document_position();
+            workspace.propagate_synchronized_scroll(
+                source.entity_id(),
+                SynchronizedScrollDelta {
+                    x_pixels: 0.0,
+                    y_pixels: 48.0,
+                    mode: SynchronizedScrollMode::Immediate,
+                },
+                cx,
+            );
+            assert_eq!(target.read(cx).current_document_position(), hidden_before);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panes = workspace.pane_group.panes();
+            let source_pane = panes[0].clone();
+            let target_pane = panes[1].clone();
+            let group_id = workspace.synchronized_tabs.current_group().unwrap();
+            let target_tab = workspace
+                .synchronized_tabs
+                .member_tabs(group_id)
+                .into_iter()
+                .find(|tab_id| target_pane.read(cx).has_tab_id(*tab_id))
+                .unwrap();
+            let target_ix = target_pane
+                .read(cx)
+                .tab_ix_for_entity_id(target_tab)
+                .unwrap();
+            workspace.close_tab_in_pane(&source_pane, None, window, cx);
+            workspace.close_tab_in_pane(&target_pane, Some(target_ix), window, cx);
+            assert!(workspace.synchronized_tabs.current_group().is_none());
+        });
+        fs::remove_file(document_path).unwrap();
+        fs::remove_file(other_document_path).unwrap();
     }
 
     #[gpui::test]

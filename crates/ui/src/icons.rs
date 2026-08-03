@@ -30,6 +30,7 @@ pub enum IconName {
     Info,
     LayoutGrid,
     LayoutList,
+    Link2,
     LocateFixed,
     Menu,
     NotebookTabs,
@@ -49,6 +50,7 @@ pub enum IconName {
     TextWrap,
     Trash2,
     TriangleAlert,
+    Unlink2,
     X,
 }
 
@@ -76,6 +78,7 @@ impl IconName {
             Self::Info => "info",
             Self::LayoutGrid => "layout-grid",
             Self::LayoutList => "layout-list",
+            Self::Link2 => "link-2",
             Self::LocateFixed => "locate-fixed",
             Self::Menu => "menu",
             Self::NotebookTabs => "notebook-tabs",
@@ -95,6 +98,7 @@ impl IconName {
             Self::TextWrap => "text-wrap",
             Self::Trash2 => "trash-2",
             Self::TriangleAlert => "triangle-alert",
+            Self::Unlink2 => "unlink-2",
             Self::X => "x",
         };
 

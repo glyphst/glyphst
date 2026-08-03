@@ -14,14 +14,16 @@ use anyhow::{Result, bail};
 use glyphst_core::DocumentFormat;
 use glyphst_translation_ui::{DocumentTranslationJobId, DocumentTranslationJobManager};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, AppContext, Axis, Bounds, Context, DragMoveEvent,
-    Entity, EntityId, EventEmitter, FocusHandle, IntoElement, MouseDownEvent, ParentElement,
-    Pixels, Point, Render, SharedString, Styled, Task, Window, WindowHandle, div, point,
-    prelude::*, px, relative,
+    Anchor, Animation, AnimationExt, AnyElement, App, AppContext, Axis, Bounds, Context,
+    DismissEvent, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Hsla,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString,
+    Styled, Task, Window, WindowHandle, anchored, deferred, div, point, prelude::*, px, relative,
 };
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Root, Selectable as _, Sizable as _, ThemeColor as Theme,
     button::{Button, ButtonVariants as _},
+    h_flex,
+    menu::{PopupMenu, PopupMenuItem},
     resizable::{ResizablePanelGroup, ResizableState, resizable_panel},
     tab::{Tab as ComponentTab, TabBar as ComponentTabBar},
 };
@@ -34,12 +36,13 @@ use crate::{
     KeymapEditor,
     document_view::{
         DocumentAnnotations, DocumentOpenOptions, DocumentView, DocumentViewEvent,
-        PreparedDocumentOpen,
+        PreparedDocumentOpen, SynchronizedScrollDelta,
     },
     icons::{Icon, IconName},
     library::{DocumentPosition, LibraryStore, normalize_path},
     new_tab::{NewTab, NewTabEvent},
-    settings::{SettingsStore, TabBarVisibility, ui_rems},
+    settings::{SettingsStore, SynchronizedGroupIndicatorVisibility, TabBarVisibility, ui_rems},
+    synchronized_tabs::{SynchronizedGroupId, SynchronizedGroupSummary},
 };
 
 pub(crate) const PANE_TAB_BAR_HEIGHT: f32 = 32.0;
@@ -258,6 +261,58 @@ pub(crate) enum PaneEvent {
         target: PaneDropTarget,
     },
     CloseTab(usize),
+    TabClicked {
+        tab_id: EntityId,
+        was_active: bool,
+    },
+    CreateSynchronizedGroup(EntityId),
+    ConnectMoreSynchronizedTabs {
+        tab_id: EntityId,
+        group_id: SynchronizedGroupId,
+    },
+    SwitchSynchronizedGroup {
+        tab_id: EntityId,
+        group_id: SynchronizedGroupId,
+    },
+    LeaveSynchronizedGroup {
+        tab_id: EntityId,
+        group_id: SynchronizedGroupId,
+    },
+    LeaveAllSynchronizedGroups(EntityId),
+    FinishSynchronizedConnection,
+    DocumentScrolled {
+        tab_id: EntityId,
+        delta: SynchronizedScrollDelta,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SynchronizedConnectionInvalidReason {
+    NonDocument,
+    PaneAlreadyRepresented { group_number: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SynchronizedConnectionTabState {
+    Source,
+    Member,
+    Eligible,
+    Invalid(SynchronizedConnectionInvalidReason),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RecentlyAddedSynchronizedTab {
+    pub(crate) tab_id: EntityId,
+    pub(crate) group_id: SynchronizedGroupId,
+    pub(crate) sequence: u64,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct PaneSynchronizedPresentation {
+    pub(crate) groups_by_tab: HashMap<EntityId, Vec<SynchronizedGroupSummary>>,
+    pub(crate) connection_tabs: HashMap<EntityId, SynchronizedConnectionTabState>,
+    pub(crate) connection_color_slot: Option<usize>,
+    pub(crate) recently_added: Option<RecentlyAddedSynchronizedTab>,
 }
 
 pub(crate) struct Pane {
@@ -268,6 +323,10 @@ pub(crate) struct Pane {
     tab_focus_handles: HashMap<EntityId, FocusHandle>,
     drag_split_direction: Option<SplitDirection>,
     force_show_tab_bar: bool,
+    synchronized_presentation: PaneSynchronizedPresentation,
+    tab_bounds: Rc<RefCell<HashMap<EntityId, Bounds<Pixels>>>>,
+    context_menu_position: Option<Point<Pixels>>,
+    context_menu_popup: Option<Entity<PopupMenu>>,
 }
 
 impl Pane {
@@ -288,6 +347,10 @@ impl Pane {
             tab_focus_handles: HashMap::new(),
             drag_split_direction: None,
             force_show_tab_bar: false,
+            synchronized_presentation: PaneSynchronizedPresentation::default(),
+            tab_bounds: Rc::new(RefCell::new(HashMap::new())),
+            context_menu_position: None,
+            context_menu_popup: None,
         }
     }
 
@@ -375,6 +438,80 @@ impl Pane {
                 Tab::NewTab(_) | Tab::LoadingDocument(_) | Tab::Keymap(_) => None,
             })
             .collect()
+    }
+
+    pub(crate) fn tab_ids(&self) -> Vec<EntityId> {
+        self.tabs.iter().map(Self::tab_entity_id).collect()
+    }
+
+    pub(crate) fn active_tab_id(&self) -> Option<EntityId> {
+        self.tabs.get(self.active_tab).map(Self::tab_entity_id)
+    }
+
+    pub(crate) fn tab_id_at(&self, tab_ix: usize) -> Option<EntityId> {
+        self.tabs.get(tab_ix).map(Self::tab_entity_id)
+    }
+
+    pub(crate) fn tab_is_document(&self, tab_id: EntityId) -> bool {
+        self.tab_ix_for_entity_id(tab_id)
+            .and_then(|tab_ix| self.tabs.get(tab_ix))
+            .is_some_and(|tab| matches!(tab, Tab::Document(_)))
+    }
+
+    pub(crate) fn document_view_for_id(&self, tab_id: EntityId) -> Option<Entity<DocumentView>> {
+        let tab_ix = self.tab_ix_for_entity_id(tab_id)?;
+        match self.tabs.get(tab_ix) {
+            Some(Tab::Document(document_view)) => Some(document_view.clone()),
+            Some(Tab::NewTab(_)) | Some(Tab::LoadingDocument(_)) | Some(Tab::Keymap(_)) | None => {
+                None
+            }
+        }
+    }
+
+    pub(crate) fn activate_tab_by_id(
+        &mut self,
+        tab_id: EntityId,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab_ix) = self.tab_ix_for_entity_id(tab_id) else {
+            return false;
+        };
+        if self.active_tab != tab_ix {
+            self.flush_active_tab(cx);
+            self.active_tab = tab_ix;
+        }
+        self.sync_active_focus_handle();
+        if focus {
+            self.focus(window, cx);
+        }
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn set_synchronized_presentation(
+        &mut self,
+        presentation: PaneSynchronizedPresentation,
+        cx: &mut Context<Self>,
+    ) {
+        self.synchronized_presentation = presentation;
+        cx.notify();
+    }
+
+    pub(crate) fn tab_bounds(&self, tab_id: EntityId) -> Option<Bounds<Pixels>> {
+        self.tab_bounds.borrow().get(&tab_id).copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synchronized_connection_tab_state(
+        &self,
+        tab_id: EntityId,
+    ) -> Option<SynchronizedConnectionTabState> {
+        self.synchronized_presentation
+            .connection_tabs
+            .get(&tab_id)
+            .copied()
     }
 
     pub(crate) fn set_force_show_tab_bar(
@@ -654,6 +791,9 @@ impl Pane {
 
         self.flush_tab(tab_ix, cx);
         let removed_tab = self.tabs.remove(tab_ix);
+        self.tab_bounds
+            .borrow_mut()
+            .remove(&Self::tab_entity_id(&removed_tab));
         if let Tab::LoadingDocument(loading) = &removed_tab {
             let job_ids = loading.read(cx).job_ids.clone();
             for job_id in job_ids {
@@ -698,6 +838,7 @@ impl Pane {
         let tab_ix = self.tab_ix_for_entity_id(tab_id)?;
         self.flush_tab(tab_ix, cx);
         let tab = self.tabs.remove(tab_ix);
+        self.tab_bounds.borrow_mut().remove(&tab_id);
         let focus_handle = self.tab_focus_handles.remove(&tab_id);
         let active_tab = self.active_tab;
         if self.active_tab > tab_ix {
@@ -884,6 +1025,9 @@ impl Pane {
 
         let tab = Tab::Document(document_view);
         let replaced_tab = std::mem::replace(&mut self.tabs[tab_ix], tab.clone());
+        self.tab_bounds
+            .borrow_mut()
+            .remove(&Self::tab_entity_id(&replaced_tab));
         self.remove_tab_focus_handle(&replaced_tab);
         self.register_tab_focus_handle(&tab, self.focus_handle.clone());
         if self.active_tab == tab_ix {
@@ -973,9 +1117,13 @@ impl Pane {
                     DocumentViewEvent::AiPanelDismissed => {
                         cx.emit(PaneEvent::AiPanelDismissed(document_view_id))
                     }
-                    DocumentViewEvent::ViewportChanged(_)
-                    | DocumentViewEvent::BlockHovered(_)
-                    | DocumentViewEvent::BlockSelected(_) => {}
+                    DocumentViewEvent::SynchronizedScroll(delta) => {
+                        cx.emit(PaneEvent::DocumentScrolled {
+                            tab_id: document_view_id,
+                            delta: *delta,
+                        });
+                    }
+                    DocumentViewEvent::BlockHovered(_) | DocumentViewEvent::BlockSelected(_) => {}
                 }
             },
         )
@@ -1079,6 +1227,183 @@ impl Pane {
         }
     }
 
+    fn synchronized_group_color(theme: Theme, color_slot: usize) -> Hsla {
+        match color_slot % 8 {
+            0 => theme.chart_1,
+            1 => theme.chart_2,
+            2 => theme.chart_3,
+            3 => theme.chart_4,
+            4 => theme.chart_5,
+            5 => theme.cyan,
+            6 => theme.magenta,
+            _ => theme.yellow,
+        }
+    }
+
+    fn open_tab_context_menu(
+        &mut self,
+        tab_ix: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.synchronized_presentation.connection_tabs.is_empty() {
+            cx.emit(PaneEvent::FinishSynchronizedConnection);
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
+        let Some(tab_id) = self.tab_id_at(tab_ix) else {
+            return;
+        };
+        let is_document = self.tab_is_document(tab_id);
+        let groups = self
+            .synchronized_presentation
+            .groups_by_tab
+            .get(&tab_id)
+            .cloned()
+            .unwrap_or_default();
+        let preferred_group = groups
+            .iter()
+            .find(|group| group.is_current)
+            .or_else(|| groups.last())
+            .cloned();
+        let pane = cx.entity();
+        let popup = PopupMenu::build(window, cx, move |mut menu, window, menu_cx| {
+            if is_document {
+                let create_pane = pane.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(crate::fl!("synchronized-tabs-create"))
+                        .icon(IconName::Link2)
+                        .on_click(move |_, _, cx| {
+                            create_pane.update(cx, |_, cx| {
+                                cx.emit(PaneEvent::CreateSynchronizedGroup(tab_id));
+                            });
+                        }),
+                );
+
+                if let Some(preferred_group) = preferred_group.clone() {
+                    let connect_pane = pane.clone();
+                    let group_id = preferred_group.id;
+                    menu = menu.item(
+                        PopupMenuItem::new(crate::fl!("synchronized-tabs-connect-more"))
+                            .icon(IconName::Link2)
+                            .on_click(move |_, _, cx| {
+                                connect_pane.update(cx, |_, cx| {
+                                    cx.emit(PaneEvent::ConnectMoreSynchronizedTabs {
+                                        tab_id,
+                                        group_id,
+                                    });
+                                });
+                            }),
+                    );
+                }
+
+                if !groups.is_empty() {
+                    let switch_pane = pane.clone();
+                    let submenu_groups = groups.clone();
+                    menu = menu.submenu(
+                        crate::fl!("synchronized-tabs-switch-group"),
+                        window,
+                        menu_cx,
+                        move |mut submenu, _, submenu_cx| {
+                            for group in &submenu_groups {
+                                let group_id = group.id;
+                                let item_pane = switch_pane.clone();
+                                let color = Self::synchronized_group_color(
+                                    submenu_cx.theme().colors,
+                                    group.color_slot,
+                                );
+                                let label: SharedString = crate::fl!(
+                                    "synchronized-tabs-group-summary",
+                                    number = group.number,
+                                    count = group.member_count
+                                )
+                                .into();
+                                submenu = submenu.item(
+                                    PopupMenuItem::element({
+                                        let label = label.clone();
+                                        move |_, _| {
+                                            h_flex()
+                                                .gap_2()
+                                                .child(div().size(px(8.0)).rounded_full().bg(color))
+                                                .child(label.clone())
+                                        }
+                                    })
+                                    .checked(group.is_current)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            item_pane.update(cx, |_, cx| {
+                                                cx.emit(PaneEvent::SwitchSynchronizedGroup {
+                                                    tab_id,
+                                                    group_id,
+                                                });
+                                            });
+                                        },
+                                    ),
+                                );
+                            }
+                            submenu
+                        },
+                    );
+
+                    let leave_group = preferred_group.expect("group list is not empty");
+                    let leave_pane = pane.clone();
+                    menu = menu.separator().item(
+                        PopupMenuItem::new(crate::fl!("synchronized-tabs-leave-current"))
+                            .icon(IconName::Unlink2)
+                            .on_click(move |_, _, cx| {
+                                leave_pane.update(cx, |_, cx| {
+                                    cx.emit(PaneEvent::LeaveSynchronizedGroup {
+                                        tab_id,
+                                        group_id: leave_group.id,
+                                    });
+                                });
+                            }),
+                    );
+                    let leave_all_pane = pane.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(crate::fl!("synchronized-tabs-leave-all"))
+                            .icon(IconName::Unlink2)
+                            .on_click(move |_, _, cx| {
+                                leave_all_pane.update(cx, |_, cx| {
+                                    cx.emit(PaneEvent::LeaveAllSynchronizedGroups(tab_id));
+                                });
+                            }),
+                    );
+                }
+                menu = menu.separator();
+            }
+
+            let close_pane = pane.clone();
+            menu.item(
+                PopupMenuItem::new(crate::fl!("toolbar-close-tab"))
+                    .icon(IconName::X)
+                    .on_click(move |_, _, cx| {
+                        close_pane.update(cx, |pane, cx| {
+                            if let Some(tab_ix) = pane.tab_ix_for_entity_id(tab_id) {
+                                cx.emit(PaneEvent::CloseTab(tab_ix));
+                            }
+                        });
+                    }),
+            )
+        });
+        cx.subscribe_in(&popup, window, |this, popup, _: &DismissEvent, _, cx| {
+            if this.context_menu_popup.as_ref() == Some(popup) {
+                this.context_menu_popup = None;
+                this.context_menu_position = None;
+                cx.notify();
+            }
+        })
+        .detach();
+        self.context_menu_position = Some(position);
+        self.context_menu_popup = Some(popup.clone());
+        popup.focus_handle(cx).focus(window, cx);
+        window.prevent_default();
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn tab_entity_id(tab: &Tab) -> EntityId {
         match tab {
             Tab::NewTab(new_tab) => new_tab.entity_id(),
@@ -1113,6 +1438,47 @@ impl Pane {
             .get(tab_ix)
             .map(Self::tab_entity_id)
             .unwrap_or_else(|| cx.entity_id());
+        let all_groups = self
+            .synchronized_presentation
+            .groups_by_tab
+            .get(&tab_id)
+            .cloned()
+            .unwrap_or_default();
+        let indicator_visibility = cx
+            .global::<SettingsStore>()
+            .settings
+            .synchronized_group_indicators;
+        let filtered_group_count = all_groups
+            .iter()
+            .filter(|group| {
+                indicator_visibility == SynchronizedGroupIndicatorVisibility::AllMemberships
+                    || group.is_current
+            })
+            .count();
+        let visible_groups = all_groups
+            .iter()
+            .filter(|group| {
+                indicator_visibility == SynchronizedGroupIndicatorVisibility::AllMemberships
+                    || group.is_current
+            })
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>();
+        let overflow_count = filtered_group_count.saturating_sub(visible_groups.len());
+        let current_color = all_groups
+            .iter()
+            .find(|group| group.is_current)
+            .map(|group| Self::synchronized_group_color(theme, group.color_slot));
+        let connection_color = self
+            .synchronized_presentation
+            .connection_color_slot
+            .map(|color_slot| Self::synchronized_group_color(theme, color_slot));
+        let recently_added = self.synchronized_presentation.recently_added;
+        let connection_state = self
+            .synchronized_presentation
+            .connection_tabs
+            .get(&tab_id)
+            .copied();
         let close_pane = source_pane.clone();
         let close_button = Button::new(("pane-tab-close", tab_id))
             .small()
@@ -1128,14 +1494,108 @@ impl Pane {
                 });
             });
 
+        let membership_tags = h_flex()
+            .gap(px(3.0))
+            .children(visible_groups.into_iter().map(|group| {
+                let color = Self::synchronized_group_color(theme, group.color_slot);
+                let marker_width = if group.is_current { 10.0 } else { 7.0 };
+                let marker_height = if group.is_current { 5.0 } else { 4.0 };
+                let marker = div()
+                    .w(px(marker_width))
+                    .h(px(marker_height))
+                    .rounded_full()
+                    .bg(color);
+                let is_recently_added = recently_added
+                    .is_some_and(|recent| recent.tab_id == tab_id && recent.group_id == group.id);
+                let marker = if is_recently_added {
+                    let sequence = recently_added.map_or(0, |recent| recent.sequence);
+                    marker
+                        .with_animation(
+                            ("synchronized-tab-added", sequence as usize),
+                            glyphst_ui::motion::HOVER.animation(),
+                            move |element, progress| {
+                                let scale = if progress < 0.6 {
+                                    0.6 + progress / 0.6 * 0.55
+                                } else {
+                                    1.15 - (progress - 0.6) / 0.4 * 0.15
+                                };
+                                element
+                                    .w(px(marker_width * scale))
+                                    .h(px(marker_height * scale))
+                                    .opacity(progress)
+                            },
+                        )
+                        .into_any_element()
+                } else {
+                    marker.into_any_element()
+                };
+                div()
+                    .w(px(10.0))
+                    .h(px(8.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(marker)
+            }))
+            .when(overflow_count > 0, |this| {
+                this.child(
+                    div()
+                        .text_size(ui_rems(9.0))
+                        .text_color(theme.muted_foreground)
+                        .child(format!("+{overflow_count}")),
+                )
+            });
+        let suffix = h_flex().gap_1().child(membership_tags).child(close_button);
+        let tab_bounds = self.tab_bounds.clone();
+
         ComponentTab::new()
             .label(label.clone())
-            .suffix(close_button)
+            .suffix(suffix)
             .max_w(ui_rems(PANE_TAB_MAX_WIDTH))
             .min_w(ui_rems(PANE_TAB_MIN_WIDTH))
             .debug_selector(move || format!("pane-tab-{tab_ix}"))
+            .on_prepaint(move |bounds, _, _| {
+                tab_bounds.borrow_mut().insert(tab_id, bounds);
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |pane, event: &MouseDownEvent, window, cx| {
+                    pane.open_tab_context_menu(tab_ix, event.position, window, cx);
+                }),
+            )
+            .when_some(current_color, |this, color| {
+                this.border_b(px(2.0)).border_color(color)
+            })
+            .when_some(connection_state, |this, state| match state {
+                SynchronizedConnectionTabState::Source | SynchronizedConnectionTabState::Member => {
+                    this.when_some(connection_color, |this, color| {
+                        this.border_b(px(2.0)).border_color(color)
+                    })
+                }
+                SynchronizedConnectionTabState::Eligible => {
+                    let color = connection_color.unwrap_or(theme.primary);
+                    let hover_group = format!("synchronized-candidate-{}", tab_id.as_u64());
+                    let highlight = div()
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .left_0()
+                        .rounded_sm()
+                        .group_hover(hover_group.clone(), move |style| {
+                            style.bg(color.opacity(0.12)).border_2().border_color(color)
+                        });
+                    this.opacity(0.72)
+                        .cursor_pointer()
+                        .group(hover_group)
+                        .prefix(highlight)
+                }
+                SynchronizedConnectionTabState::Invalid(_) => {
+                    this.opacity(0.25).cursor_not_allowed()
+                }
+            })
             .when_some(
-                source_window.filter(|_| draggable),
+                source_window.filter(|_| draggable && connection_state.is_none()),
                 |this, source_window| {
                     let drag_source_pane = source_pane.clone();
                     this.on_drag(
@@ -1225,7 +1685,12 @@ impl Pane {
             .suffix(new_tab_button)
             .on_click(move |tab_ix, window, cx| {
                 activate_pane.update(cx, |pane, cx| {
+                    let was_active = pane.active_tab == *tab_ix;
+                    let tab_id = pane.tab_id_at(*tab_ix);
                     pane.activate_tab(*tab_ix, window, cx);
+                    if let Some(tab_id) = tab_id {
+                        cx.emit(PaneEvent::TabClicked { tab_id, was_active });
+                    }
                 });
             })
             .into_any_element()
@@ -1324,6 +1789,19 @@ impl Render for Pane {
         let show_tab_bar = tab_bar_visibility == TabBarVisibility::Always
             || self.force_show_tab_bar
             || self.tabs.len() >= 2;
+        let context_menu = self
+            .context_menu_position
+            .zip(self.context_menu_popup.clone())
+            .map(|(position, popup)| {
+                deferred(
+                    anchored()
+                        .snap_to_window_with_margin(px(8.0))
+                        .position(position)
+                        .anchor(Anchor::TopLeft)
+                        .child(popup),
+                )
+                .with_priority(20)
+            });
 
         div()
             .size_full()
@@ -1348,6 +1826,7 @@ impl Render for Pane {
                     .child(self.active_tab_content())
                     .child(self.render_drop_overlay(theme, cx)),
             )
+            .children(context_menu)
     }
 }
 
@@ -1842,7 +2321,7 @@ impl PaneAxis {
         }
     }
 
-    fn bounding_box_for_pane(&self, pane: &Entity<Pane>) -> Option<Bounds<Pixels>> {
+    pub(crate) fn bounding_box_for_pane(&self, pane: &Entity<Pane>) -> Option<Bounds<Pixels>> {
         for (idx, member) in self.members.iter().enumerate() {
             match member {
                 Member::Pane(found) if found == pane => return self.bounding_boxes.borrow()[idx],

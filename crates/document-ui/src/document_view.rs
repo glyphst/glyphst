@@ -679,13 +679,17 @@ enum DocumentViewLanguage {
     Translated,
 }
 
-#[derive(Clone, Copy)]
-pub struct LinkedViewport {
-    pub page_idx: usize,
-    pub y_in_page: f32,
-    pub zoom: f32,
-    pub rotation: DocumentRotation,
-    pub generation: u64,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SynchronizedScrollMode {
+    Immediate,
+    Target,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SynchronizedScrollDelta {
+    pub x_pixels: f32,
+    pub y_pixels: f32,
+    pub mode: SynchronizedScrollMode,
 }
 
 #[derive(Clone, Copy)]
@@ -882,7 +886,7 @@ pub enum DocumentViewEvent {
     },
     OpenSettings,
     AiPanelDismissed,
-    ViewportChanged(LinkedViewport),
+    SynchronizedScroll(SynchronizedScrollDelta),
     BlockHovered(Option<LinkedBlockAnchor>),
     BlockSelected(Option<LinkedBlockSelection>),
 }
@@ -1135,7 +1139,6 @@ pub struct DocumentView {
     translated_text_layouts: HashMap<TranslatedTextLayoutKey, CachedTranslatedTextLayout>,
     translated_text_layout_frame: u64,
     view_language: DocumentViewLanguage,
-    linked_viewport_generation: u64,
     linked_selection_generation: u64,
     suppress_linked_events: bool,
     external_hovered_block: Option<u32>,

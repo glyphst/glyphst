@@ -22,6 +22,7 @@ pub mod command_palette;
 pub mod document_browser;
 pub mod new_tab;
 pub mod pane;
+mod synchronized_tabs;
 pub mod theme_selector;
 pub mod workspace;
 

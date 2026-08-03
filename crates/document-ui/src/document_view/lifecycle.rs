@@ -124,7 +124,6 @@ impl DocumentView {
             translated_text_layouts: HashMap::new(),
             translated_text_layout_frame: 0,
             view_language: DocumentViewLanguage::Original,
-            linked_viewport_generation: 0,
             linked_selection_generation: 0,
             suppress_linked_events: false,
             external_hovered_block: None,

@@ -52,7 +52,7 @@ impl DocumentTranslationJobAction {
             Self::Open if open_error => "Open again",
             Self::Open => match open_mode {
                 DocumentTranslationOpenMode::Document => "Open output",
-                DocumentTranslationOpenMode::Split => "Open split",
+                DocumentTranslationOpenMode::Split => "Open in synchronized tabs",
             },
             Self::CopyError if has_warnings && !open_error => "Copy warning",
             Self::CopyError => "Copy error",

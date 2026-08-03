@@ -39,6 +39,15 @@ fn page_counter_uses_generated_pages_for_any_document_format() {
 }
 
 #[test]
+fn synchronized_scroll_preserves_screen_distance_across_zoom_levels() {
+    let screen_delta = 96.0;
+    for scale in [0.5, 1.0, 1.75, 3.0] {
+        let document_delta = DocumentView::synchronized_document_delta(screen_delta, scale);
+        assert!((document_delta * scale - screen_delta).abs() < f32::EPSILON);
+    }
+}
+
+#[test]
 fn completed_text_index_does_not_restart() {
     let mut state = TextIndexState::Pending;
 

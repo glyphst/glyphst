@@ -108,23 +108,6 @@ impl DocumentView {
         self.rotate_to(self.rotation.counterclockwise(), cx);
     }
 
-    pub fn apply_linked_viewport(&mut self, viewport: LinkedViewport, cx: &mut Context<Self>) {
-        if self.pages.get(viewport.page_idx).is_none() {
-            return;
-        }
-        self.suppress_linked_events = true;
-        self.set_rotation_state(viewport.rotation, cx);
-        self.zoom = viewport.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-        let page = &self.pages[viewport.page_idx];
-        let (_, page_height) = self.page_dimensions(viewport.page_idx);
-        self.set_scroll_doc(
-            self.scroll_x_doc,
-            page.offset_y + viewport.y_in_page.max(0.0).min(page_height),
-            cx,
-        );
-        self.suppress_linked_events = false;
-    }
-
     fn linked_block_anchor(&self, block_id: u32) -> Option<LinkedBlockAnchor> {
         let block = self.text_blocks.iter().find(|block| block.id == block_id)?;
         Some(LinkedBlockAnchor {
@@ -177,23 +160,6 @@ impl DocumentView {
             self.external_selected_block = block_id;
             cx.notify();
         }
-    }
-
-    pub(super) fn emit_linked_viewport(&mut self, cx: &mut Context<Self>) {
-        if self.suppress_linked_events || self.pages.is_empty() {
-            return;
-        }
-        self.linked_viewport_generation = self.linked_viewport_generation.wrapping_add(1);
-        let page_idx = self.page_index_for_scroll_y(self.target_scroll_y_doc);
-        let page = &self.pages[page_idx];
-        let (_, page_height) = self.page_dimensions(page_idx);
-        cx.emit(DocumentViewEvent::ViewportChanged(LinkedViewport {
-            page_idx,
-            y_in_page: (self.target_scroll_y_doc - page.offset_y).clamp(0.0, page_height),
-            zoom: self.zoom,
-            rotation: self.rotation,
-            generation: self.linked_viewport_generation,
-        }));
     }
 
     pub(super) fn set_hovered_text_block(&mut self, block_id: Option<u32>, cx: &mut Context<Self>) {

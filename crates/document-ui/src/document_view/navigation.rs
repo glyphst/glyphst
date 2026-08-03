@@ -20,7 +20,6 @@ impl DocumentView {
         self.hovered_link = None;
         self.pending_link = None;
         self.schedule_position_save(cx);
-        self.emit_linked_viewport(cx);
         cx.notify();
     }
 
@@ -186,7 +185,7 @@ impl DocumentView {
             .map(|page| page.offset_y)
             .unwrap_or_else(|| self.max_scroll_y_doc());
 
-        if self.set_scroll_doc_target(self.target_scroll_x_doc, target, cx) {
+        if self.set_scroll_doc_target_synchronized(self.target_scroll_x_doc, target, cx) {
             self.mark_manual_navigation();
         }
     }
@@ -363,7 +362,7 @@ impl DocumentView {
         }
 
         let delta = self.viewport_height / (2.0 * self.effective_scale());
-        if self.set_scroll_doc_target(
+        if self.set_scroll_doc_target_synchronized(
             self.target_scroll_x_doc,
             self.target_scroll_y_doc + direction * delta,
             cx,
@@ -379,7 +378,7 @@ impl DocumentView {
         }
 
         let delta = SCROLL_LINE_STEP_PX / self.effective_scale();
-        if self.set_scroll_doc_target(
+        if self.set_scroll_doc_target_synchronized(
             self.target_scroll_x_doc,
             self.target_scroll_y_doc + direction * delta,
             cx,
@@ -430,7 +429,7 @@ impl DocumentView {
             }
 
             let scale = self.effective_scale();
-            if self.set_scroll_doc_target(
+            if self.set_scroll_doc_target_synchronized(
                 self.target_scroll_x_doc - delta_x / scale,
                 self.target_scroll_y_doc - delta_y / scale,
                 cx,

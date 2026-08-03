@@ -249,12 +249,17 @@ fn parses_and_exports_tab_settings() {
         r##"
 tabs {
     visibility "always"
+    synchronized_group_indicators "current_group_only"
 }
 "##,
     )
     .unwrap();
 
     assert_eq!(settings.tab_bar_visibility, TabBarVisibility::Always);
+    assert_eq!(
+        settings.synchronized_group_indicators,
+        SynchronizedGroupIndicatorVisibility::CurrentGroupOnly
+    );
     assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
 }
 

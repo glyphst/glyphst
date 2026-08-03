@@ -1107,11 +1107,16 @@ fn command_specs() -> &'static [CommandSpec] {
                 ),
                 spec::<OpenTranslationSplit>(
                     "open-translation-split",
-                    "Open Translation Split",
+                    "Open Translation in Synchronized Tabs",
                     KeyBindingCategory::DocumentView,
                     &[],
                     &[],
-                    &["translation-split", "translated-pane"],
+                    &[
+                        "translation-split",
+                        "translated-pane",
+                        "synchronized-tabs",
+                        "sync-tabs",
+                    ],
                     true,
                 ),
                 spec::<SelectAll>(
