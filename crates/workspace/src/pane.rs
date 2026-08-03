@@ -48,7 +48,7 @@ use crate::{
 pub(crate) const PANE_TAB_BAR_HEIGHT: f32 = 32.0;
 const PANE_TAB_MAX_WIDTH: f32 = 220.0;
 const PANE_TAB_MIN_WIDTH: f32 = 120.0;
-const HANDLE_HITBOX_SIZE: f32 = 4.0;
+const PANE_DIRECTION_PROBE_DISTANCE: f32 = glyphst_ui::style::SURFACE_GAP + 1.0;
 const HORIZONTAL_MIN_SIZE: f32 = 120.0;
 const VERTICAL_MIN_SIZE: f32 = 140.0;
 const DROP_TARGET_SIZE: f32 = 0.25;
@@ -225,10 +225,11 @@ pub(crate) struct TabTransfer {
 }
 
 impl Render for DraggedTab {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         ComponentTab::new()
             .label(self.label.clone())
             .selected(true)
+            .corner_radius(cx.theme().radius)
             .max_w(ui_rems(PANE_TAB_MAX_WIDTH))
             .min_w(ui_rems(PANE_TAB_MIN_WIDTH))
     }
@@ -1631,6 +1632,7 @@ impl Pane {
             .label(label.clone())
             .when_some(accessible_label, |this, label| this.aria_label(label))
             .suffix(suffix)
+            .corner_radius(cx.theme().radius)
             .max_w(ui_rems(PANE_TAB_MAX_WIDTH))
             .min_w(ui_rems(PANE_TAB_MIN_WIDTH))
             .debug_selector(move || format!("pane-tab-{tab_ix}"))
@@ -1758,6 +1760,8 @@ impl Pane {
             .flex_none()
             .w_full()
             .h(ui_rems(PANE_TAB_BAR_HEIGHT))
+            .px(px(2.0))
+            .tab_gap(px(2.0))
             .selected_index(self.active_tab)
             .menu(true)
             .children(tabs)
@@ -2016,7 +2020,7 @@ impl PaneGroup {
     ) -> Option<Entity<Pane>> {
         let bounding_box = self.bounding_box_for_pane(active_pane)?;
         let center = bounding_box.center();
-        let distance = px(HANDLE_HITBOX_SIZE);
+        let distance = px(PANE_DIRECTION_PROBE_DISTANCE);
         let target = match direction {
             SplitDirection::Left => point(bounding_box.left() - distance, center.y),
             SplitDirection::Right => point(bounding_box.right() + distance, center.y),
@@ -2104,8 +2108,17 @@ impl PaneGroup {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
+        let show_active_outline = matches!(&self.root, Member::Axis(_));
         self.root
-            .render(0, active_pane, theme, dim_inactive_panes, window, cx)
+            .render(
+                0,
+                active_pane,
+                theme,
+                dim_inactive_panes,
+                show_active_outline,
+                window,
+                cx,
+            )
             .element
     }
 
@@ -2179,24 +2192,55 @@ impl Member {
         active_pane: &Entity<Pane>,
         theme: Theme,
         dim_inactive_panes: bool,
+        show_active_outline: bool,
         window: &mut Window,
         cx: &mut App,
     ) -> PaneRenderResult {
         match self {
-            Member::Pane(pane) => PaneRenderResult {
-                element: div()
-                    .relative()
-                    .flex_1()
-                    .size_full()
-                    .child(pane.clone())
-                    .into_any_element(),
-                contains_active_pane: pane == active_pane,
-            },
+            Member::Pane(pane) => {
+                let is_active_pane = pane == active_pane;
+                let pane_id = pane.entity_id().as_u64();
+                let radius = cx.theme().radius;
+                PaneRenderResult {
+                    element: div()
+                        .relative()
+                        .flex_1()
+                        .size_full()
+                        .overflow_hidden()
+                        .rounded(radius)
+                        .border_1()
+                        .border_color(if show_active_outline && is_active_pane {
+                            theme.primary
+                        } else {
+                            theme.border
+                        })
+                        .bg(theme.background)
+                        .debug_selector(move || format!("pane-surface-{pane_id}"))
+                        .when(show_active_outline && is_active_pane, |this| {
+                            this.debug_selector(|| "active-pane-surface".to_string())
+                        })
+                        .child(pane.clone())
+                        .when(dim_inactive_panes && !is_active_pane, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .bottom_0()
+                                    .left_0()
+                                    .bg(theme.overlay),
+                            )
+                        })
+                        .into_any_element(),
+                    contains_active_pane: is_active_pane,
+                }
+            }
             Member::Axis(axis) => axis.render(
                 basis + 1,
                 active_pane,
                 theme,
                 dim_inactive_panes,
+                show_active_outline,
                 window,
                 cx,
             ),
@@ -2437,6 +2481,7 @@ impl PaneAxis {
         active_pane: &Entity<Pane>,
         theme: Theme,
         dim_inactive_panes: bool,
+        show_active_outline: bool,
         window: &mut Window,
         cx: &mut App,
     ) -> PaneRenderResult {
@@ -2450,13 +2495,12 @@ impl PaneAxis {
             .iter()
             .enumerate()
             .map(|(ix, member)| {
-                let is_leaf_pane = matches!(member, Member::Pane(_));
-                let is_active_pane = matches!(member, Member::Pane(pane) if pane == active_pane);
                 let result = member.render(
                     (basis + ix) * 10,
                     active_pane,
                     theme,
                     dim_inactive_panes,
+                    show_active_outline,
                     window,
                     cx,
                 );
@@ -2467,43 +2511,12 @@ impl PaneAxis {
                 let child = div()
                     .relative()
                     .size_full()
-                    .overflow_hidden()
-                    .when(is_active_pane, |this| {
-                        this.debug_selector(|| "active-pane-bounds".to_string())
-                    })
                     .on_prepaint(move |bounds, _, _| {
                         if let Some(slot) = bounding_boxes.borrow_mut().get_mut(ix) {
                             *slot = Some(bounds);
                         }
                     })
-                    .child(result.element)
-                    .when(
-                        dim_inactive_panes && is_leaf_pane && !is_active_pane,
-                        |this| {
-                            this.child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .right_0()
-                                    .bottom_0()
-                                    .left_0()
-                                    .bg(theme.overlay),
-                            )
-                        },
-                    )
-                    .when(is_active_pane, |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .top(px(1.0))
-                                .right(px(1.0))
-                                .bottom(px(1.0))
-                                .left(px(1.0))
-                                .border_1()
-                                .border_color(theme.primary)
-                                .debug_selector(|| "active-pane-outline".to_string()),
-                        )
-                    });
+                    .child(result.element);
 
                 resizable_panel()
                     .size_range(min_size..Pixels::MAX)
@@ -2514,6 +2527,7 @@ impl PaneAxis {
         let element = ResizablePanelGroup::new(("pane-axis", basis))
             .with_state(&self.state)
             .axis(self.axis)
+            .gap(px(glyphst_ui::style::SURFACE_GAP))
             .children(panels)
             .into_any_element();
 

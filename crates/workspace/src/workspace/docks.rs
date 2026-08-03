@@ -22,7 +22,6 @@ use glyphst_ui::{
 };
 
 const DOCK_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
-const DOCK_SEPARATOR_WIDTH: f32 = 1.0;
 const TOOL_RAIL_WIDTH: f32 = 44.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,11 +86,14 @@ impl WorkspaceDockState {
         } else {
             0.0
         };
-        let (left_width, right_width) = fit_dock_widths(
-            left_preferred,
-            right_preferred,
-            workspace_width - tool_rail_width,
-        );
+        let left_navigation_visible = tool_rail_visible || left_sidebar.is_some();
+        let surface_gap_count = usize::from(left_navigation_visible) + usize::from(ai_panel_open);
+        let dock_width_budget = workspace_width
+            - SURFACE_INSET * 2.0
+            - tool_rail_width
+            - SURFACE_GAP * surface_gap_count as f32;
+        let (left_width, right_width) =
+            fit_dock_widths(left_preferred, right_preferred, dock_width_budget);
 
         if let (Some(sidebar), Some(width)) = (left_sidebar, left_width) {
             sidebar.set_width(&mut widths, width);
@@ -150,18 +152,16 @@ impl WorkspaceDockState {
 fn fit_dock_widths(
     left_preferred: Option<f32>,
     right_preferred: Option<f32>,
-    workspace_width: f32,
+    available_width: f32,
 ) -> (Option<f32>, Option<f32>) {
     // Match Zed's fixed dock model while keeping DocumentDockSnapshot aligned
     // with the width actually rendered. These reductions are snapshot-only;
     // passive window resizing never writes them back to preferred_widths.
-    let open_count = usize::from(left_preferred.is_some()) + usize::from(right_preferred.is_some());
-    let workspace_width = if workspace_width.is_finite() {
-        workspace_width.max(0.0)
+    let available = if available_width.is_finite() {
+        available_width.max(0.0)
     } else {
         0.0
     };
-    let available = (workspace_width - DOCK_SEPARATOR_WIDTH * open_count as f32).max(0.0);
     let normalize = |width: f32| {
         if width.is_finite() {
             width.max(SIDEBAR_MIN_WIDTH)
@@ -206,14 +206,8 @@ fn fit_dock_widths(
     }
 }
 
-fn clamp_dragged_dock_width(
-    candidate: f32,
-    workspace_width: f32,
-    opposite_width: f32,
-    open_count: usize,
-) -> f32 {
-    let max_width = (workspace_width - opposite_width - DOCK_SEPARATOR_WIDTH * open_count as f32)
-        .max(SIDEBAR_MIN_WIDTH);
+fn clamp_dragged_dock_width(candidate: f32, available_width: f32, opposite_width: f32) -> f32 {
+    let max_width = (available_width - opposite_width).max(SIDEBAR_MIN_WIDTH);
     candidate.clamp(SIDEBAR_MIN_WIDTH, max_width)
 }
 
@@ -298,9 +292,14 @@ impl Workspace {
         let pointer_x = (event.event.position.x - event.bounds.left())
             .as_f32()
             .clamp(0.0, workspace_width);
+        let tool_rail_width = if self.active_pane.read(cx).active_document_view().is_some() {
+            TOOL_RAIL_WIDTH
+        } else {
+            0.0
+        };
         let candidate = match position {
-            WorkspaceDockPosition::Left => pointer_x,
-            WorkspaceDockPosition::Right => workspace_width - pointer_x,
+            WorkspaceDockPosition::Left => pointer_x - SURFACE_INSET - tool_rail_width,
+            WorkspaceDockPosition::Right => workspace_width - SURFACE_INSET - pointer_x,
         };
         let opposite_width = match position {
             WorkspaceDockPosition::Left if self.docks.ai_panel_open => {
@@ -313,10 +312,14 @@ impl Workspace {
                 .unwrap_or_default(),
             _ => 0.0,
         };
-        let open_count =
-            usize::from(self.docks.left_sidebar.is_some()) + usize::from(self.docks.ai_panel_open);
-        let width =
-            clamp_dragged_dock_width(candidate, workspace_width, opposite_width, open_count);
+        let left_navigation_visible = tool_rail_width > 0.0 || self.docks.left_sidebar.is_some();
+        let surface_gap_count =
+            usize::from(left_navigation_visible) + usize::from(self.docks.ai_panel_open);
+        let available_width = workspace_width
+            - SURFACE_INSET * 2.0
+            - tool_rail_width
+            - SURFACE_GAP * surface_gap_count as f32;
+        let width = clamp_dragged_dock_width(candidate, available_width, opposite_width);
         self.set_preferred_dock_width(position, width, cx);
     }
 
@@ -552,6 +555,7 @@ impl Workspace {
             .map(|activity| {
                 StatusBar::new()
                     .right(activity)
+                    .border_t(px(0.0))
                     .bg(theme.status_bar)
                     .into_any_element()
             })
@@ -663,7 +667,7 @@ impl Workspace {
         let center =
             self.pane_group
                 .render(&self.active_pane, theme, dim_inactive_panes, window, cx);
-        let mut main_panels = Vec::with_capacity(3);
+        let mut main_panels = Vec::with_capacity(2);
 
         if let Some(document_view) = active_document_view.as_ref() {
             main_panels.push(self.render_tool_rail(document_view, theme, cx));
@@ -708,18 +712,6 @@ impl Workspace {
             );
         }
 
-        main_panels.push(
-            div()
-                .id("workspace-dock-center")
-                .debug_selector(|| "workspace-dock-center".to_string())
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .overflow_hidden()
-                .child(center)
-                .into_any_element(),
-        );
-
         let ai_card = if self.docks.render_ai_panel {
             let content_width = snapshot.widths.ai.max(SIDEBAR_MIN_WIDTH);
             let content = active_document_view
@@ -748,11 +740,10 @@ impl Workspace {
                             .w(px(content_width))
                             .flex_none()
                             .overflow_hidden()
-                            .rounded(cx.theme().radius_lg)
+                            .rounded(cx.theme().radius)
                             .border_1()
                             .border_color(theme.border)
                             .bg(theme.background)
-                            .when(cx.theme().shadow, |this| this.shadow_sm())
                             .child(content),
                     )
                     .when(snapshot.ai_panel_open, |this| {
@@ -767,12 +758,6 @@ impl Workspace {
             None
         };
 
-        let main_row = div()
-            .id("workspace-main-dock-panels")
-            .debug_selector(|| "workspace-main-dock-panels".to_string())
-            .size_full()
-            .flex()
-            .children(main_panels);
         let footbar = active_document_view
             .map(|document_view| {
                 document_view.update(cx, |document_view, cx| {
@@ -781,22 +766,55 @@ impl Workspace {
             })
             .or_else(|| Self::render_workspace_status(theme, cx));
 
-        let main_card = div()
-            .id("workspace-main-card")
-            .debug_selector(|| "workspace-main-card".to_string())
+        let footbar = footbar.map(|footbar| {
+            div()
+                .id("workspace-pane-footbar")
+                .debug_selector(|| "workspace-pane-footbar".to_string())
+                .w_full()
+                .flex_none()
+                .overflow_hidden()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.status_bar)
+                .child(footbar)
+                .into_any_element()
+        });
+
+        let center_column = div()
+            .id("workspace-pane-column")
+            .debug_selector(|| "workspace-pane-column".to_string())
             .flex_1()
             .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
-            .overflow_hidden()
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .when(cx.theme().shadow, |this| this.shadow_sm())
-            .child(div().flex_1().min_h_0().child(main_row))
-            .when_some(footbar, |this, footbar| this.child(footbar));
+            .gap(px(SURFACE_GAP))
+            .child(
+                div()
+                    .id("workspace-dock-center")
+                    .debug_selector(|| "workspace-dock-center".to_string())
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(center),
+            )
+            .children(footbar);
+
+        let left_navigation = if main_panels.is_empty() {
+            None
+        } else {
+            Some(
+                div()
+                    .id("workspace-left-navigation")
+                    .debug_selector(|| "workspace-left-navigation".to_string())
+                    .h_full()
+                    .flex_none()
+                    .flex()
+                    .children(main_panels)
+                    .into_any_element(),
+            )
+        };
 
         div()
             .id("workspace-dock-panels")
@@ -808,7 +826,8 @@ impl Workspace {
             .gap(px(SURFACE_GAP))
             .px(px(SURFACE_INSET))
             .pb(px(SURFACE_INSET))
-            .child(main_card)
+            .children(left_navigation)
+            .child(center_column)
             .children(ai_card)
             .on_drag_move::<DraggedWorkspaceDock>(cx.listener(
                 |this, event: &DragMoveEvent<DraggedWorkspaceDock>, _, cx| {
@@ -847,7 +866,7 @@ mod tests {
 
         assert!(left > SIDEBAR_MIN_WIDTH);
         assert!(right > SIDEBAR_MIN_WIDTH);
-        assert_close(left + right, 498.0);
+        assert_close(left + right, 500.0);
         assert_close(
             (left - SIDEBAR_MIN_WIDTH) / (right - SIDEBAR_MIN_WIDTH),
             130.0 / 210.0,
@@ -858,20 +877,20 @@ mod tests {
     fn physically_impossible_minimums_fit_without_overflowing() {
         let (left, right) = fit_dock_widths(Some(280.0), Some(360.0), 250.0);
 
-        assert_eq!(left, Some(124.0));
-        assert_eq!(right, Some(124.0));
+        assert_eq!(left, Some(125.0));
+        assert_eq!(right, Some(125.0));
 
         let (left, right) = fit_dock_widths(Some(280.0), None, 100.0);
-        assert_eq!(left, Some(99.0));
+        assert_eq!(left, Some(100.0));
         assert_eq!(right, None);
     }
 
     #[test]
     fn dragging_is_not_limited_to_half_the_workspace() {
-        assert_eq!(clamp_dragged_dock_width(800.0, 1_000.0, 0.0, 1), 800.0);
-        assert_eq!(clamp_dragged_dock_width(800.0, 1_000.0, 360.0, 2), 638.0);
+        assert_eq!(clamp_dragged_dock_width(800.0, 1_000.0, 0.0), 800.0);
+        assert_eq!(clamp_dragged_dock_width(800.0, 1_000.0, 360.0), 640.0);
         assert_eq!(
-            clamp_dragged_dock_width(20.0, 1_000.0, 0.0, 1),
+            clamp_dragged_dock_width(20.0, 1_000.0, 0.0),
             SIDEBAR_MIN_WIDTH
         );
     }

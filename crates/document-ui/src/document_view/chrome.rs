@@ -18,8 +18,6 @@ impl DocumentView {
             .flex_none()
             .h(ui_rems(FOOTBAR_HEIGHT))
             .px_3()
-            .border_t(px(1.0))
-            .border_color(theme.border)
             .bg(theme.status_bar)
             .text_size(ui_rems(12.0))
             .text_color(theme.muted_foreground)

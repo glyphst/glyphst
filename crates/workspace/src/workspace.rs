@@ -4147,6 +4147,17 @@ mod tests {
             cx.debug_bounds("workspace-ai-dock").unwrap().size.width,
             px(360.0)
         );
+        let navigation = cx.debug_bounds("workspace-left-navigation").unwrap();
+        let pane_column = cx.debug_bounds("workspace-pane-column").unwrap();
+        let pane_area = cx.debug_bounds("workspace-dock-center").unwrap();
+        let footbar = cx.debug_bounds("workspace-pane-footbar").unwrap();
+        let ai = cx.debug_bounds("workspace-ai-dock").unwrap();
+        assert!(cx.debug_bounds("workspace-main-card").is_none());
+        assert_eq!(pane_column.left() - navigation.right(), px(4.0));
+        assert_eq!(ai.left() - pane_column.right(), px(4.0));
+        assert_eq!(footbar.top() - pane_area.bottom(), px(4.0));
+        assert_eq!(footbar.left(), pane_area.left());
+        assert_eq!(footbar.right(), pane_area.right());
 
         cx.simulate_resize(size(px(1_600.0), px(900.0)));
         cx.update(|window, cx| {
@@ -4179,8 +4190,8 @@ mod tests {
             .as_f32();
         assert!(constrained_left < 280.0);
         assert!(constrained_right < 360.0);
-        // The 44 px document tool rail and two 1 px dock separators remain fixed.
-        assert!((constrained_left + constrained_right - 454.0).abs() < 0.1);
+        // Insets, the 44 px tool rail, and two 4 px surface gutters remain fixed.
+        assert!((constrained_left + constrained_right - 432.0).abs() < 0.1);
         workspace.read_with(cx, |workspace, _| {
             assert_eq!(workspace.docks.preferred_widths.toc, 280.0);
             assert_eq!(workspace.docks.preferred_widths.ai, 360.0);
@@ -4341,12 +4352,12 @@ mod tests {
             Modifiers::default(),
         );
         cx.simulate_mouse_move(
-            point(px(800.0), handle.y),
+            point(px(852.0), handle.y),
             MouseButton::Left,
             Modifiers::default(),
         );
         cx.simulate_mouse_up(
-            point(px(800.0), handle.y),
+            point(px(852.0), handle.y),
             MouseButton::Left,
             Modifiers::default(),
         );
@@ -4503,9 +4514,14 @@ mod tests {
             _ = window.draw(cx);
         });
 
-        assert!(cx.debug_bounds("workspace-main-card").is_some());
+        assert!(cx.debug_bounds("workspace-main-card").is_none());
+        assert!(cx.debug_bounds("workspace-pane-column").is_some());
         assert!(cx.debug_bounds("pane-tab-0").is_some());
         assert!(cx.debug_bounds("pane-tab-1").is_some());
+        assert!(cx.debug_bounds("active-pane-surface").is_none());
+        let first_tab_bounds = cx.debug_bounds("pane-tab-0").unwrap();
+        let second_tab_bounds = cx.debug_bounds("pane-tab-1").unwrap();
+        assert_eq!(second_tab_bounds.left() - first_tab_bounds.right(), px(2.0));
 
         let first_tab = cx.debug_bounds("pane-tab-0").unwrap().center();
         cx.simulate_click(first_tab, Modifiers::default());
@@ -4532,7 +4548,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn active_split_pane_outline_stays_inside_its_pane(cx: &mut TestAppContext) {
+    fn split_pane_cards_keep_nested_gutters_and_move_the_active_border(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
@@ -4551,49 +4567,87 @@ mod tests {
         let workspace = root.read_with(cx, |root, _| {
             root.view().clone().downcast::<Workspace>().unwrap()
         });
-        let left_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        let top_left = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.split_active_pane(SplitDirection::Right, window, cx);
         });
+        let top_right = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Down, window, cx);
+        });
+        let bottom_right = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.active_pane = top_left.clone();
+            workspace.split_active_pane(SplitDirection::Down, window, cx);
+        });
+        let bottom_left = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
 
-        let pane = cx
-            .debug_bounds("active-pane-bounds")
-            .expect("active pane bounds");
-        let outline = cx
-            .debug_bounds("active-pane-outline")
-            .expect("active pane outline bounds");
-        assert_eq!(outline.left(), pane.left() + px(1.0));
-        assert_eq!(outline.top(), pane.top() + px(1.0));
-        assert_eq!(outline.right(), pane.right() - px(1.0));
-        assert_eq!(outline.bottom(), pane.bottom() - px(1.0));
-
-        let left_pane_bounds = workspace.read_with(cx, |workspace, _| {
-            workspace
-                .pane_group
-                .bounding_box_for_pane(&left_pane)
-                .expect("left pane bounds")
-        });
-        cx.simulate_click(left_pane_bounds.center(), Modifiers::default());
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-        });
-
+        let (top_left_bounds, top_right_bounds, bottom_left_bounds, bottom_right_bounds) =
+            workspace.read_with(cx, |workspace, _| {
+                let bounds = |pane| {
+                    workspace
+                        .pane_group
+                        .bounding_box_for_pane(pane)
+                        .expect("pane bounds")
+                };
+                (
+                    bounds(&top_left),
+                    bounds(&top_right),
+                    bounds(&bottom_left),
+                    bounds(&bottom_right),
+                )
+            });
+        assert_eq!(top_right_bounds.left() - top_left_bounds.right(), px(4.0));
+        assert_eq!(
+            bottom_right_bounds.left() - bottom_left_bounds.right(),
+            px(4.0)
+        );
+        assert_eq!(bottom_left_bounds.top() - top_left_bounds.bottom(), px(4.0));
+        assert_eq!(
+            bottom_right_bounds.top() - top_right_bounds.bottom(),
+            px(4.0)
+        );
         workspace.read_with(cx, |workspace, _| {
-            assert_eq!(workspace.active_pane, left_pane);
+            assert_eq!(
+                workspace
+                    .pane_group
+                    .find_pane_in_direction(&top_left, SplitDirection::Right),
+                Some(top_right.clone())
+            );
+            assert_eq!(
+                workspace
+                    .pane_group
+                    .find_pane_in_direction(&top_right, SplitDirection::Left),
+                Some(top_left.clone())
+            );
+            assert_eq!(
+                workspace
+                    .pane_group
+                    .find_pane_in_direction(&top_left, SplitDirection::Down),
+                Some(bottom_left.clone())
+            );
         });
-        let pane = cx
-            .debug_bounds("active-pane-bounds")
-            .expect("clicked pane bounds");
-        let outline = cx
-            .debug_bounds("active-pane-outline")
-            .expect("clicked pane outline bounds");
-        assert_eq!(outline.left(), pane.left() + px(1.0));
-        assert_eq!(outline.top(), pane.top() + px(1.0));
-        assert_eq!(outline.right(), pane.right() - px(1.0));
-        assert_eq!(outline.bottom(), pane.bottom() - px(1.0));
+
+        let active_surface = cx
+            .debug_bounds("active-pane-surface")
+            .expect("active pane surface");
+        assert_eq!(active_surface, bottom_left_bounds);
+
+        cx.simulate_click(top_right_bounds.center(), Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.active_pane, top_right);
+        });
+
+        let active_surface = cx
+            .debug_bounds("active-pane-surface")
+            .expect("clicked pane surface");
+        assert_eq!(active_surface, top_right_bounds);
     }
 
     #[gpui::test]
