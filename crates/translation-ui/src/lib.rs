@@ -11,7 +11,8 @@ use glyphst_pdf_translation_app::{
 use glyphst_settings::{Settings, SettingsStore};
 use glyphst_translation::TARGET_LANGUAGES;
 use glyphst_ui::activity::{
-    ActivityCenter, BackgroundTaskEntry, BackgroundTaskId, CenterAction, TaskProgress,
+    ActivityCenter, ActivityNoticeEntry, ActivityNoticeId, ActivityNoticeLevel,
+    BackgroundTaskEntry, BackgroundTaskId, CenterAction, TaskProgress,
 };
 use gpui::{
     ClipboardItem, Context, EventEmitter, IntoElement, ParentElement as _, SharedString, Styled,
@@ -189,6 +190,7 @@ pub struct DocumentTranslationJobManager {
     next_id: DocumentTranslationJobId,
     active_job_id: Option<DocumentTranslationJobId>,
     background_tasks: HashMap<DocumentTranslationJobId, BackgroundTaskId>,
+    activity_notices: HashMap<DocumentTranslationJobId, ActivityNoticeId>,
 }
 
 impl EventEmitter<DocumentTranslationJobEvent> for DocumentTranslationJobManager {}
@@ -211,6 +213,7 @@ impl DocumentTranslationJobManager {
             next_id: 1,
             active_job_id: None,
             background_tasks: HashMap::new(),
+            activity_notices: HashMap::new(),
         }
     }
 
@@ -426,6 +429,7 @@ impl DocumentTranslationJobManager {
             cx.notify();
             return;
         }
+        self.remove_activity_notice(id, cx);
         self.remove_job_notification(id, cx);
         self.register_background_task(id, cx);
         self.start_next(cx);
@@ -451,6 +455,7 @@ impl DocumentTranslationJobManager {
         }) else {
             return;
         };
+        self.remove_activity_notice(id, cx);
         if let Some(job) = self.job_mut(id) {
             job.snapshot.status = DocumentTranslationJobStatus::Opening {
                 output_path: output_path.clone(),
@@ -546,7 +551,6 @@ impl DocumentTranslationJobManager {
             }
         }
         if publish_error {
-            self.remove_background_task(id, cx);
             self.publish_terminal_notification(id, cx);
         }
         cx.notify();
@@ -571,7 +575,6 @@ impl DocumentTranslationJobManager {
                 detailed_message: "Document translation is unavailable.".into(),
                 retryable: false,
             };
-            self.remove_background_task(id, cx);
             self.publish_terminal_notification(id, cx);
             return;
         }
@@ -681,7 +684,6 @@ impl DocumentTranslationJobManager {
                 }
             }
         }
-        self.remove_background_task(id, cx);
         self.publish_terminal_notification(id, cx);
         self.start_next(cx);
         cx.notify();
@@ -761,6 +763,25 @@ impl DocumentTranslationJobManager {
         cx.emit(DocumentTranslationJobEvent::RemoveNotification { id });
     }
 
+    fn remove_activity_notice(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+        let Some(notice_id) = self.activity_notices.remove(&id) else {
+            return;
+        };
+        if let Some(center) = ActivityCenter::try_global(cx) {
+            center.update(cx, |center, cx| center.dismiss_notice(notice_id, cx));
+        }
+    }
+
+    fn activity_notice_removed(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+        if self.activity_notices.remove(&id).is_none() {
+            return;
+        }
+        if self.job(id).is_some_and(|job| !job.snapshot.is_active()) {
+            self.jobs.retain(|job| job.snapshot.id != id);
+            cx.notify();
+        }
+    }
+
     fn publish_terminal_notification(
         &mut self,
         id: DocumentTranslationJobId,
@@ -769,6 +790,16 @@ impl DocumentTranslationJobManager {
         let Some(snapshot) = self.job(id).map(|job| job.snapshot.clone()) else {
             return;
         };
+        self.remove_activity_notice(id, cx);
+        let task_id = self.background_tasks.remove(&id);
+        if let Some(center) = ActivityCenter::try_global(cx) {
+            let notice = document_translation_activity_notice(&snapshot, cx.weak_entity());
+            let notice_id = center.update(cx, |center, cx| match task_id {
+                Some(task_id) => center.finish_task(task_id, notice, cx),
+                None => center.add_notice(notice, cx),
+            });
+            self.activity_notices.insert(id, notice_id);
+        }
         cx.emit(DocumentTranslationJobEvent::ShowNotification { snapshot });
     }
 
@@ -776,12 +807,71 @@ impl DocumentTranslationJobManager {
         let Some(job) = self.job(id) else {
             return;
         };
-        if !job.snapshot.is_active() {
+        if !job.snapshot.is_active() && !self.activity_notices.contains_key(&id) {
             self.remove_background_task(id, cx);
             self.jobs.retain(|job| job.snapshot.id != id);
             cx.notify();
         }
     }
+}
+
+fn document_translation_activity_notice(
+    snapshot: &DocumentTranslationJobSnapshot,
+    manager: WeakEntity<DocumentTranslationJobManager>,
+) -> ActivityNoticeEntry {
+    let id = snapshot.id;
+    let level = match &snapshot.status {
+        DocumentTranslationJobStatus::Succeeded {
+            open_error: None,
+            warnings,
+            ..
+        } if warnings.is_empty() => ActivityNoticeLevel::Success,
+        DocumentTranslationJobStatus::Succeeded {
+            open_error: None, ..
+        } => ActivityNoticeLevel::Warning,
+        DocumentTranslationJobStatus::Failed { .. }
+        | DocumentTranslationJobStatus::Cancelled
+        | DocumentTranslationJobStatus::Succeeded {
+            open_error: Some(_),
+            ..
+        } => ActivityNoticeLevel::Error,
+        _ => ActivityNoticeLevel::Info,
+    };
+    let (status, detail, _, _) = job_status_content(snapshot);
+    let open_error = matches!(
+        snapshot.status,
+        DocumentTranslationJobStatus::Succeeded {
+            open_error: Some(_),
+            ..
+        }
+    );
+    let has_warnings = matches!(
+        &snapshot.status,
+        DocumentTranslationJobStatus::Succeeded { warnings, .. } if !warnings.is_empty()
+    );
+    let mut notice = ActivityNoticeEntry::new(
+        level,
+        format!("Translate {}", snapshot.title()),
+        format!("{status} · {detail}"),
+    );
+    notice.actions = job_actions(&snapshot.status)
+        .into_iter()
+        .map(|action| {
+            let manager = manager.clone();
+            let label = action.label(snapshot.open_mode, open_error, has_warnings);
+            CenterAction::new(label, move |_, cx| {
+                _ = manager.update(cx, |manager, cx| match action {
+                    DocumentTranslationJobAction::Retry => manager.retry(id, cx),
+                    DocumentTranslationJobAction::Open => manager.open(id, cx),
+                    DocumentTranslationJobAction::CopyError => manager.copy_error(id, cx),
+                });
+            })
+        })
+        .collect();
+    let cleanup_manager = manager;
+    notice.on_remove(move |cx| {
+        _ = cleanup_manager.update(cx, |manager, cx| manager.activity_notice_removed(id, cx));
+    })
 }
 
 /// Build the window-scoped gpui-component notification for a terminal
@@ -1200,13 +1290,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn preflight_errors_remain_until_notification_is_closed(cx: &mut TestAppContext) {
+    fn preflight_errors_remain_until_activity_notice_is_dismissed(cx: &mut TestAppContext) {
         cx.update(glyphst_ui::activity::init);
         let center = cx.update(|cx| ActivityCenter::global(cx));
         let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
         let (_recorder, events) = record_job_events(&manager, cx);
 
-        manager.update(cx, |manager, cx| {
+        let (id, notice_id) = manager.update(cx, |manager, cx| {
             let id = manager.report_preflight_error(
                 "/tmp/source.pdf".into(),
                 DocumentTranslationOpenMode::Document,
@@ -1225,9 +1315,13 @@ mod tests {
             ));
 
             manager.notification_closed(id, cx);
-            assert!(manager.jobs.is_empty());
+            assert_eq!(manager.jobs.len(), 1);
             assert_eq!(center.read(cx).active_task_count(), 0);
+            assert_eq!(center.read(cx).notice_count(), 1);
+            (id, manager.activity_notices[&id])
         });
+        center.update(cx, |center, cx| center.dismiss_notice(notice_id, cx));
+        assert!(cx.update(|cx| manager.read(cx).job(id).is_none()));
         cx.run_until_parked();
         assert_eq!(show_notification_count(&events.borrow()), 1);
     }

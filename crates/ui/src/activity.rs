@@ -1,23 +1,42 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use gpui::{
     Anchor, AnyElement, App, Context, Entity, Global, IntoElement, SharedString, Window, div,
     prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Sizable as _, Size,
+    ActiveTheme as _, Icon, IconName, Sizable as _, Size, StyledExt as _,
     button::{Button, ButtonVariants as _},
     group_box::{GroupBox, GroupBoxVariants as _},
+    h_flex,
     popover::Popover,
     progress::{Progress, ProgressCircle},
     scroll::ScrollableElement as _,
     v_flex,
 };
 
+const MAX_ACTIVITY_NOTICES: usize = 50;
+
 pub type UiCallback = Arc<dyn Fn(&mut Window, &mut App) + 'static>;
+pub type ActivityCleanup = Arc<dyn Fn(&mut App) + 'static>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BackgroundTaskId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ActivityNoticeId(u64);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ActivityNoticeLevel {
+    #[default]
+    Info,
+    Success,
+    Warning,
+    Error,
+}
 
 #[derive(Clone)]
 pub struct CenterAction {
@@ -62,24 +81,56 @@ impl BackgroundTaskEntry {
     }
 }
 
+#[derive(Clone)]
+pub struct ActivityNoticeEntry {
+    pub level: ActivityNoticeLevel,
+    pub title: SharedString,
+    pub detail: SharedString,
+    pub actions: Vec<CenterAction>,
+    pub created_at: SystemTime,
+    pub unread: bool,
+    pub on_remove: Option<ActivityCleanup>,
+}
+
+impl ActivityNoticeEntry {
+    pub fn new(
+        level: ActivityNoticeLevel,
+        title: impl Into<SharedString>,
+        detail: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            level,
+            title: title.into(),
+            detail: detail.into(),
+            actions: Vec::new(),
+            created_at: SystemTime::now(),
+            unread: true,
+            on_remove: None,
+        }
+    }
+
+    pub fn on_remove(mut self, callback: impl Fn(&mut App) + 'static) -> Self {
+        self.on_remove = Some(Arc::new(callback));
+        self
+    }
+}
+
 struct GlobalActivityCenter(Entity<ActivityCenter>);
 
 impl Global for GlobalActivityCenter {}
 
-/// App-wide registry for long-running work.
-///
-/// Notifications themselves are window-scoped and owned by gpui-component's
-/// `Root`; this registry only keeps task state that may be surfaced from any
-/// Glyphst window.
+/// App-wide registry for long-running work and retained feedback.
 pub struct ActivityCenter {
     next_id: u64,
     tasks: Vec<(BackgroundTaskId, BackgroundTaskEntry)>,
+    notices: Vec<(ActivityNoticeId, ActivityNoticeEntry)>,
 }
 
 pub fn init(cx: &mut App) {
     let center = cx.new(|_| ActivityCenter {
         next_id: 1,
         tasks: Vec::new(),
+        notices: Vec::new(),
     });
     cx.set_global(GlobalActivityCenter(center));
 }
@@ -96,6 +147,17 @@ impl ActivityCenter {
 
     pub fn active_task_count(&self) -> usize {
         self.tasks.len()
+    }
+
+    pub fn notice_count(&self) -> usize {
+        self.notices.len()
+    }
+
+    pub fn unread_notice_count(&self) -> usize {
+        self.notices
+            .iter()
+            .filter(|(_, notice)| notice.unread)
+            .count()
     }
 
     fn next_id(&mut self) -> u64 {
@@ -136,25 +198,104 @@ impl ActivityCenter {
         cx.notify();
     }
 
+    pub fn add_notice(
+        &mut self,
+        notice: ActivityNoticeEntry,
+        cx: &mut Context<Self>,
+    ) -> ActivityNoticeId {
+        let id = ActivityNoticeId(self.next_id());
+        self.notices.push((id, notice));
+        while self.notices.len() > MAX_ACTIVITY_NOTICES {
+            let (_, mut removed) = self.notices.remove(0);
+            if let Some(cleanup) = removed.on_remove.take() {
+                cleanup(cx);
+            }
+        }
+        cx.notify();
+        id
+    }
+
+    pub fn finish_task(
+        &mut self,
+        task_id: BackgroundTaskId,
+        notice: ActivityNoticeEntry,
+        cx: &mut Context<Self>,
+    ) -> ActivityNoticeId {
+        self.tasks.retain(|(candidate, _)| *candidate != task_id);
+        self.add_notice(notice, cx)
+    }
+
+    pub fn dismiss_notice(&mut self, id: ActivityNoticeId, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .notices
+            .iter()
+            .position(|(candidate, _)| *candidate == id)
+        else {
+            return;
+        };
+        let (_, mut notice) = self.notices.remove(index);
+        if let Some(cleanup) = notice.on_remove.take() {
+            cleanup(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn clear_notices(&mut self, cx: &mut Context<Self>) {
+        let notices = std::mem::take(&mut self.notices);
+        for (_, mut notice) in notices {
+            if let Some(cleanup) = notice.on_remove.take() {
+                cleanup(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn mark_all_read(&mut self, cx: &mut Context<Self>) {
+        let mut changed = false;
+        for (_, notice) in &mut self.notices {
+            if notice.unread {
+                notice.unread = false;
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     pub fn render_activity(&self) -> Option<AnyElement> {
-        let (_, primary) = self.tasks.last()?.clone();
-        let additional = self.tasks.len().saturating_sub(1);
-        let label = if additional == 0 {
-            primary.title
+        if self.tasks.is_empty() && self.notices.is_empty() {
+            return None;
+        }
+
+        let unread = self.unread_notice_count();
+        let label: SharedString = if let Some((_, primary)) = self.tasks.last() {
+            let additional = self.tasks.len().saturating_sub(1);
+            if additional == 0 {
+                primary.title.clone()
+            } else {
+                format!("{} + {additional} more", primary.title).into()
+            }
+        } else if unread > 0 {
+            crate::fl!("activity-unread", count = unread as i64).into()
         } else {
-            format!("{} + {additional} more", primary.title).into()
+            crate::fl!("activity-title").into()
         };
         let tasks = self.tasks.clone();
+        let notices = self.notices.clone();
 
         Some(
             Popover::new("background-activity-popover")
                 .anchor(Anchor::BottomRight)
                 .trigger(
                     Button::new("background-activity")
-                        .icon(
-                            ProgressCircle::new("background-activity-progress-circle")
-                                .loading(true),
-                        )
+                        .when(!tasks.is_empty(), |button| {
+                            button.icon(
+                                ProgressCircle::new("background-activity-progress-circle")
+                                    .loading(true),
+                            )
+                        })
+                        .when(tasks.is_empty(), |button| button.icon(IconName::Bell))
                         .child(
                             div()
                                 .min_w_0()
@@ -162,26 +303,202 @@ impl ActivityCenter {
                                 .truncate()
                                 .child(label.clone()),
                         )
+                        .when(unread > 0, |button| {
+                            button.child(
+                                div()
+                                    .min_w_4()
+                                    .h_4()
+                                    .px_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .text_xs()
+                                    .bg(gpui::red())
+                                    .text_color(gpui::white())
+                                    .child(unread.min(99).to_string()),
+                            )
+                        })
                         .tooltip(label)
                         .with_size(Size::XSmall)
                         .ghost(),
                 )
+                .on_open_change(|open, _, cx| {
+                    if *open && let Some(center) = ActivityCenter::try_global(cx) {
+                        center.update(cx, |center, cx| center.mark_all_read(cx));
+                    }
+                })
                 .content(move |_, _, cx| {
-                    v_flex()
+                    let center = ActivityCenter::try_global(cx);
+                    let mut content = v_flex()
                         .w_112()
                         .max_w_full()
                         .max_h_96()
                         .gap_2()
-                        .overflow_y_scrollbar()
-                        .children(
-                            tasks
-                                .iter()
-                                .rev()
-                                .cloned()
-                                .map(|(id, task)| render_task_card(id, task, cx)),
-                        )
+                        .overflow_y_scrollbar();
+
+                    if !notices.is_empty() {
+                        let clear_center = center.clone();
+                        content = content
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_semibold()
+                                            .child(crate::fl!("activity-notifications")),
+                                    )
+                                    .when_some(clear_center, |header, center| {
+                                        header.child(
+                                            Button::new("activity-clear-all")
+                                                .label(crate::fl!("activity-clear-all"))
+                                                .with_size(Size::XSmall)
+                                                .ghost()
+                                                .on_click(move |_, _, cx| {
+                                                    center.update(cx, |center, cx| {
+                                                        center.clear_notices(cx)
+                                                    });
+                                                    cx.stop_propagation();
+                                                }),
+                                        )
+                                    }),
+                            )
+                            .children(
+                                notices
+                                    .iter()
+                                    .rev()
+                                    .cloned()
+                                    .map(|(id, notice)| render_notice_card(id, notice, cx)),
+                            );
+                    }
+
+                    if !tasks.is_empty() {
+                        content = content
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .child(crate::fl!("activity-in-progress")),
+                            )
+                            .children(
+                                tasks
+                                    .iter()
+                                    .rev()
+                                    .cloned()
+                                    .map(|(id, task)| render_task_card(id, task, cx)),
+                            );
+                    }
+
+                    content
                 })
                 .into_any_element(),
+        )
+    }
+}
+
+fn render_notice_card(id: ActivityNoticeId, notice: ActivityNoticeEntry, cx: &App) -> AnyElement {
+    let icon = match notice.level {
+        ActivityNoticeLevel::Info => Icon::new(IconName::Info).text_color(cx.theme().info),
+        ActivityNoticeLevel::Success => {
+            Icon::new(IconName::CircleCheck).text_color(cx.theme().success)
+        }
+        ActivityNoticeLevel::Warning => {
+            Icon::new(IconName::TriangleAlert).text_color(cx.theme().warning)
+        }
+        ActivityNoticeLevel::Error => Icon::new(IconName::CircleX).text_color(cx.theme().danger),
+    };
+    let actions = notice
+        .actions
+        .into_iter()
+        .enumerate()
+        .map(|(index, action)| {
+            let callback = action.callback;
+            Button::new(format!("activity-notice-{}-{index}", id.0))
+                .label(action.label)
+                .with_size(Size::XSmall)
+                .on_click(move |_, window, cx| {
+                    callback(window, cx);
+                    cx.stop_propagation();
+                })
+        })
+        .collect::<Vec<_>>();
+    let dismiss_center = ActivityCenter::try_global(cx);
+    let age = activity_age(notice.created_at);
+
+    GroupBox::new()
+        .id(format!("activity-notice-{}", id.0))
+        .outline()
+        .title(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    h_flex().min_w_0().flex_1().gap_2().child(icon).child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(cx.theme().foreground)
+                            .child(notice.title),
+                    ),
+                )
+                .when_some(dismiss_center, |title, center| {
+                    title.child(
+                        Button::new(format!("activity-notice-dismiss-{}", id.0))
+                            .icon(IconName::Close)
+                            .with_size(Size::XSmall)
+                            .ghost()
+                            .on_click(move |_, _, cx| {
+                                center.update(cx, |center, cx| center.dismiss_notice(id, cx));
+                                cx.stop_propagation();
+                            }),
+                    )
+                }),
+        )
+        .child(
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(notice.detail),
+                )
+                .child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(age),
+                        )
+                        .child(h_flex().items_center().gap_1().children(actions)),
+                ),
+        )
+        .into_any_element()
+}
+
+fn activity_age(created_at: SystemTime) -> String {
+    let elapsed = SystemTime::now()
+        .duration_since(created_at)
+        .unwrap_or(Duration::ZERO);
+    if elapsed < Duration::from_secs(60) {
+        crate::fl!("activity-just-now")
+    } else if elapsed < Duration::from_secs(60 * 60) {
+        crate::fl!(
+            "activity-minutes-ago",
+            count = elapsed.as_secs() as i64 / 60
+        )
+    } else {
+        crate::fl!(
+            "activity-hours-ago",
+            count = elapsed.as_secs() as i64 / 3600
         )
     }
 }
@@ -253,7 +570,7 @@ fn render_task_card(id: BackgroundTaskId, task: BackgroundTaskEntry, cx: &App) -
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(if progress.indeterminate {
-                                "Working…".to_string()
+                                crate::fl!("activity-working")
                             } else {
                                 format!("{:.0}%", fraction * 100.0)
                             }),
@@ -281,6 +598,46 @@ mod tests {
 
             center.remove_task(task, cx);
             assert_eq!(center.active_task_count(), 0);
+        });
+    }
+
+    #[gpui::test]
+    fn notices_are_bounded_and_marked_read(cx: &mut TestAppContext) {
+        cx.update(init);
+        let center = cx.update(|cx| ActivityCenter::global(cx));
+        center.update(cx, |center, cx| {
+            for index in 0..=MAX_ACTIVITY_NOTICES {
+                center.add_notice(
+                    ActivityNoticeEntry::new(
+                        ActivityNoticeLevel::Info,
+                        format!("Notice {index}"),
+                        "Detail",
+                    ),
+                    cx,
+                );
+            }
+            assert_eq!(center.notice_count(), MAX_ACTIVITY_NOTICES);
+            assert_eq!(center.unread_notice_count(), MAX_ACTIVITY_NOTICES);
+            assert_eq!(center.notices[0].1.title, "Notice 1");
+
+            center.mark_all_read(cx);
+            assert_eq!(center.unread_notice_count(), 0);
+        });
+    }
+
+    #[gpui::test]
+    fn finishing_a_task_moves_it_to_notice_history(cx: &mut TestAppContext) {
+        cx.update(init);
+        let center = cx.update(|cx| ActivityCenter::global(cx));
+        center.update(cx, |center, cx| {
+            let task = center.add_task(BackgroundTaskEntry::new("Work", "Running"), cx);
+            center.finish_task(
+                task,
+                ActivityNoticeEntry::new(ActivityNoticeLevel::Success, "Done", "Finished"),
+                cx,
+            );
+            assert_eq!(center.active_task_count(), 0);
+            assert_eq!(center.notice_count(), 1);
         });
     }
 }

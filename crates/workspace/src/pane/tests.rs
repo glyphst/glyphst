@@ -8,7 +8,9 @@ use super::{
     parse_debug_file_open_min_duration, remaining_file_open_min_duration,
 };
 use crate::{
-    document_view::RenderCache, library::LibraryStore, settings::SettingsStore,
+    document_view::RenderCache,
+    library::{DocumentPosition, LibraryStore},
+    settings::SettingsStore,
     synchronized_tabs::SynchronizedTabRegistry,
 };
 use glyphst_translation_ui::DocumentTranslationJobManager;
@@ -192,6 +194,8 @@ fn loading_document_view_switches_from_animated_grid_to_error(cx: &mut TestAppCo
     let (root, cx) = cx.add_window_view(|window, cx| {
         let loading = cx.new(|cx| LoadingDocumentView {
             path: PathBuf::from("/tmp/example.pdf"),
+            initial_position: DocumentPosition::fixed(0.0, 0.0, 1.0, 1),
+            restore_tab_id: None,
             focus_handle: cx.focus_handle(),
             job_ids: Vec::new(),
             error: None,

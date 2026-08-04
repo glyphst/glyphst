@@ -70,8 +70,8 @@ pub use ai::{
 };
 pub use general::{
     AppLanguage, BehaviorSettings, CopyFormat, FontSettings, KeyBindingOverride, KeymapPreset,
-    NewTabSettings, NewTabViewMode, TabBarVisibility, WindowBackgroundMode, WindowSettings,
-    ui_rems,
+    NewTabSettings, NewTabViewMode, RestoreOnStartup, TabBarVisibility, WindowBackgroundMode,
+    WindowSettings, ui_rems,
 };
 pub use model::Settings;
 pub use ocr::{OcrMode, OcrProvider, OcrSettings, PaddleOcrSettings, UnlimitedOcrSettings};

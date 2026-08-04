@@ -1,8 +1,8 @@
 use super::super::SettingsWindow;
 use glyphst_core::EpubTheme;
 use glyphst_settings::{
-    AppLanguage, CopyFormat, KeymapPreset, Settings, SettingsStore, TabBarVisibility,
-    WindowBackgroundMode,
+    AppLanguage, CopyFormat, KeymapPreset, RestoreOnStartup, Settings, SettingsStore,
+    TabBarVisibility, WindowBackgroundMode,
 };
 use gpui::{App, Context, SharedString};
 use gpui_component::{
@@ -66,6 +66,43 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.language.as_str().to_string()),
+        );
+
+        let restore_on_startup = SettingItem::new(
+            crate::fl!("settings-restore-on-startup"),
+            SettingField::dropdown(
+                vec![
+                    Self::setting_option(
+                        RestoreOnStartup::LastSession.as_str(),
+                        crate::fl!("settings-restore-last-session"),
+                    ),
+                    Self::setting_option(
+                        RestoreOnStartup::None.as_str(),
+                        crate::fl!("settings-restore-none"),
+                    ),
+                ],
+                |cx: &App| {
+                    cx.global::<SettingsStore>()
+                        .settings
+                        .restore_on_startup
+                        .as_str()
+                        .into()
+                },
+                {
+                    let view = view.clone();
+                    move |value: SharedString, cx: &mut App| {
+                        let restore = if value.as_ref() == "none" {
+                            RestoreOnStartup::None
+                        } else {
+                            RestoreOnStartup::LastSession
+                        };
+                        Self::update_settings(&view, cx, move |settings| {
+                            settings.restore_on_startup = restore;
+                        });
+                    }
+                },
+            )
+            .default_value(defaults.restore_on_startup.as_str().to_string()),
         );
 
         let default_zoom = SettingItem::new(
@@ -455,6 +492,9 @@ impl SettingsWindow {
         SettingPage::new(crate::fl!("settings-tab-general"))
             .default_open(true)
             .groups([
+                SettingGroup::new()
+                    .title(crate::fl!("settings-section-startup"))
+                    .item(restore_on_startup),
                 SettingGroup::new()
                     .title(crate::fl!("settings-section-language"))
                     .item(language),

@@ -1246,7 +1246,7 @@ fn missing_space_glyphs() -> Vec<Glyph> {
 }
 
 #[test]
-fn glyph_line_rect_uses_line_bounds_for_height() {
+fn glyph_line_rect_uses_nominal_glyph_height() {
     let mut glyph = test_glyph('x', 2.0, 7.0);
     glyph.quad = Quad::new(
         Point::new(2.0, 2.0),
@@ -1258,8 +1258,47 @@ fn glyph_line_rect_uses_line_bounds_for_height() {
 
     assert_eq!(
         DocumentView::glyph_line_rect(&glyph),
-        Rect::new(2.0, 0.0, 7.0, 8.0)
+        Rect::new(2.0, 2.0, 7.0, 4.0)
     );
+}
+
+#[test]
+fn stored_annotation_height_is_normalized_to_matching_glyphs() {
+    let mut glyphs = vec![test_glyph('A', 0.0, 5.0), test_glyph('g', 5.0, 10.0)];
+    glyphs[0].line_rect = Rect::new(0.0, 0.0, 10.0, 6.0);
+    glyphs[1].line_rect = glyphs[0].line_rect;
+    let lines = vec![TextLine {
+        glyph_range: 0..2,
+        bounds: glyphs[0].line_rect,
+    }];
+    let stored = HighlightRect {
+        page_idx: 0,
+        x0: 0.0,
+        y0: 2.0,
+        x1: 10.0,
+        y1: 4.0,
+    };
+
+    assert_eq!(
+        DocumentView::normalize_stored_annotation_rect(&glyphs, &lines, stored),
+        HighlightRect {
+            y0: 0.0,
+            y1: 6.0,
+            ..stored
+        }
+    );
+}
+
+#[test]
+fn dotted_underlines_keep_a_fixed_cadence() {
+    let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(14.0), px(12.0)));
+    let segments = DocumentView::dotted_underline_segments(bounds, px(3.0));
+
+    assert_eq!(segments.len(), 3);
+    assert_eq!(segments[0].origin, point(px(10.0), px(28.0)));
+    assert_eq!(segments[1].origin.x, px(16.0));
+    assert_eq!(segments[2].origin.x, px(22.0));
+    assert_eq!(segments[2].size.width, px(2.0));
 }
 
 #[test]

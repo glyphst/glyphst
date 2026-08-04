@@ -841,6 +841,7 @@ impl DocumentBrowser {
             .child(
                 div()
                     .id(("document-browser-entry", display_index))
+                    .debug_selector(move || format!("document-browser-entry-{display_index}"))
                     .size_full()
                     .rounded(px(8.0))
                     .flex()
@@ -848,13 +849,16 @@ impl DocumentBrowser {
                     .gap(px(8.0))
                     .px(px(8.0))
                     .cursor_pointer()
+                    .border_1()
+                    .border_color(if selected {
+                        theme.list_active_border
+                    } else {
+                        transparent_black()
+                    })
                     .bg(if selected {
                         theme.list_active
                     } else {
                         transparent_black()
-                    })
-                    .when(selected, |row| {
-                        row.border_1().border_color(theme.list_active_border)
                     })
                     .hover(move |style| style.bg(theme.list_hover))
                     .on_mouse_down(
@@ -884,6 +888,9 @@ impl DocumentBrowser {
                     )
                     .child(
                         div()
+                            .debug_selector(move || {
+                                format!("document-browser-entry-label-{display_index}")
+                            })
                             .flex_1()
                             .min_w_0()
                             .truncate()
@@ -938,15 +945,21 @@ impl DocumentBrowser {
                     .gap(px(8.0))
                     .cursor_pointer()
                     .text_size(ui_rems(12.5))
+                    .border_1()
+                    .border_color(if selected {
+                        theme.list_active_border
+                    } else {
+                        transparent_black()
+                    })
+                    .bg(if selected {
+                        theme.list_active
+                    } else {
+                        transparent_black()
+                    })
                     .text_color(if selected {
                         theme.foreground
                     } else {
                         theme.muted_foreground
-                    })
-                    .when(selected, |row| {
-                        row.bg(theme.list_active)
-                            .border_1()
-                            .border_color(theme.list_active_border)
                     })
                     .when(!selected, |row| {
                         row.hover(|style| style.bg(theme.list_hover))
@@ -1288,7 +1301,11 @@ impl Render for DocumentBrowser {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{AppContext as _, TestAppContext};
+    use gpui_component::Root;
+
     use super::*;
+    use crate::settings::SettingsStore;
 
     fn entry(name: &str, kind: EntryKind) -> BrowserEntry {
         BrowserEntry {
@@ -1362,6 +1379,94 @@ mod tests {
             }
         );
         assert_eq!(fit_browser_size(preferred, 1200.0, 800.0), preferred);
+    }
+
+    #[gpui::test]
+    fn moving_selection_does_not_shift_document_entry_content(cx: &mut TestAppContext) {
+        let root_dir = std::env::temp_dir().join(format!(
+            "glyphst-document-browser-selection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root_dir).unwrap();
+        fs::write(root_dir.join("alpha.pdf"), b"").unwrap();
+        fs::write(root_dir.join("beta.pdf"), b"").unwrap();
+
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+        });
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let browser = cx.new(|cx| DocumentBrowser::new(root_dir.clone(), window, cx));
+            Root::new(browser, window, cx)
+        });
+        let browser = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<DocumentBrowser>().unwrap()
+        });
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        browser.read_with(cx, |browser, _| {
+            assert_eq!(browser.filtered.len(), 2);
+            assert_eq!(browser.selected, 0);
+        });
+
+        let first_row = cx.debug_bounds("document-browser-entry-0").unwrap();
+        let second_row = cx.debug_bounds("document-browser-entry-1").unwrap();
+        let first_label = cx.debug_bounds("document-browser-entry-label-0").unwrap();
+        let second_label = cx.debug_bounds("document-browser-entry-label-1").unwrap();
+        let first_offset = first_label.left() - first_row.left();
+        let second_offset = second_label.left() - second_row.left();
+        assert_eq!(first_offset, second_offset);
+
+        cx.simulate_keystrokes("down");
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        browser.read_with(cx, |browser, _| assert_eq!(browser.selected, 1));
+
+        let first_row_after_down = cx.debug_bounds("document-browser-entry-0").unwrap();
+        let second_row_after_down = cx.debug_bounds("document-browser-entry-1").unwrap();
+        let first_label_after_down = cx.debug_bounds("document-browser-entry-label-0").unwrap();
+        let second_label_after_down = cx.debug_bounds("document-browser-entry-label-1").unwrap();
+        assert_eq!(first_row_after_down, first_row);
+        assert_eq!(second_row_after_down, second_row);
+        assert_eq!(
+            first_label_after_down.left() - first_row_after_down.left(),
+            first_offset
+        );
+        assert_eq!(
+            second_label_after_down.left() - second_row_after_down.left(),
+            second_offset
+        );
+
+        cx.simulate_keystrokes("up");
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        browser.read_with(cx, |browser, _| assert_eq!(browser.selected, 0));
+        assert_eq!(
+            cx.debug_bounds("document-browser-entry-label-0")
+                .unwrap()
+                .left()
+                - cx.debug_bounds("document-browser-entry-0").unwrap().left(),
+            first_offset
+        );
+        assert_eq!(
+            cx.debug_bounds("document-browser-entry-label-1")
+                .unwrap()
+                .left()
+                - cx.debug_bounds("document-browser-entry-1").unwrap().left(),
+            second_offset
+        );
+
+        fs::remove_dir_all(root_dir).unwrap();
     }
 
     #[test]

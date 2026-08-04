@@ -12,8 +12,8 @@ pub use settings::{
     KeyBindingOverride, KeymapPreset, ModelRef, NewTabSettings, NewTabViewMode, OcrMode,
     OcrProvider, OcrSettings, PaddleOcrSettings, PageImageQuality, PageTextFormat,
     PdfContentReviewMode, PdfContentReviewSettings, PinnedTranslationSettings, QuickAskSettings,
-    ResolvedAiConfig, Settings, SettingsStore, TabBarVisibility, TranslationBoxCorner,
-    TranslationProvider, TranslationProviderConfig, TranslationSettings, UnlimitedOcrSettings,
-    WindowBackgroundMode, WindowSettings, parse_settings, setup_ui_font, sync_component_theme,
-    ui_rems, user_themes_dir,
+    ResolvedAiConfig, RestoreOnStartup, Settings, SettingsStore, TabBarVisibility,
+    TranslationBoxCorner, TranslationProvider, TranslationProviderConfig, TranslationSettings,
+    UnlimitedOcrSettings, WindowBackgroundMode, WindowSettings, parse_settings, setup_ui_font,
+    sync_component_theme, ui_rems, user_themes_dir,
 };

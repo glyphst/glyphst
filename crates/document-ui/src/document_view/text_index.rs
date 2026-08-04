@@ -264,7 +264,7 @@ impl DocumentView {
             page.glyph_range = glyph_range;
         }
 
-        self.refresh_semantic_annotations();
+        self.refresh_annotation_geometry();
         self.refresh_notes_sidebar_entries();
         if let Some(position) = self.pending_semantic_position.take() {
             self.restore_position(position);

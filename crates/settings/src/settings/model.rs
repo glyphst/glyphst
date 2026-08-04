@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub behavior: BehaviorSettings,
+    pub restore_on_startup: RestoreOnStartup,
     pub reading: EpubReaderPreferences,
     pub font: FontSettings,
     pub window: WindowSettings,
@@ -104,6 +105,15 @@ impl Settings {
             && let Some(value) = motion.get_arg("reduce").and_then(KdlValue::as_bool)
         {
             settings.behavior.reduce_motion = value;
+        }
+
+        if let Some(session) = document.get("session").and_then(KdlNode::children)
+            && let Some(value) = session
+                .get_arg("restore_on_startup")
+                .and_then(KdlValue::as_string)
+                .and_then(RestoreOnStartup::from_str)
+        {
+            settings.restore_on_startup = value;
         }
 
         if let Some(reading) = document.get("reading").and_then(KdlNode::children) {
@@ -513,6 +523,15 @@ impl Settings {
         let motion_children = motion.ensure_children();
         push_value_node(motion_children, "reduce", self.behavior.reduce_motion);
         document.nodes_mut().push(motion);
+
+        let mut session = KdlNode::new("session");
+        let session_children = session.ensure_children();
+        push_value_node(
+            session_children,
+            "restore_on_startup",
+            self.restore_on_startup.as_str(),
+        );
+        document.nodes_mut().push(session);
 
         let mut reading = KdlNode::new("reading");
         let reading_children = reading.ensure_children();

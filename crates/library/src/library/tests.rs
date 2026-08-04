@@ -1273,6 +1273,75 @@ fn persists_document_browser_size() {
 }
 
 #[test]
+fn persists_reader_session_with_duplicate_document_tabs() {
+    let database_path = temp_library_path("reader-session");
+    let document_path = PathBuf::from("/tmp/reader-session.pdf");
+    let session = ReaderSessionSnapshot {
+        windows: vec![ReaderWindowSession {
+            bounds: ReaderWindowBounds {
+                x: -20.0,
+                y: 40.0,
+                width: 1200.0,
+                height: 800.0,
+                state: ReaderWindowState::Maximized,
+            },
+            pane_tree: ReaderPaneTree::Split {
+                axis: ReaderSplitAxis::Horizontal,
+                ratios: vec![0.35, 0.65],
+                children: vec![
+                    ReaderPaneTree::Pane(ReaderPaneSession {
+                        id: 1,
+                        tabs: vec![
+                            ReaderTabSession {
+                                id: 1,
+                                kind: ReaderTabKind::Document {
+                                    path: document_path.clone(),
+                                    position: position(2),
+                                },
+                            },
+                            ReaderTabSession {
+                                id: 2,
+                                kind: ReaderTabKind::Document {
+                                    path: document_path.clone(),
+                                    position: position(7),
+                                },
+                            },
+                        ],
+                        active_tab: Some(2),
+                    }),
+                    ReaderPaneTree::Pane(ReaderPaneSession {
+                        id: 2,
+                        tabs: vec![ReaderTabSession {
+                            id: 3,
+                            kind: ReaderTabKind::NewTab,
+                        }],
+                        active_tab: Some(3),
+                    }),
+                ],
+            },
+            active_pane: 1,
+            left_sidebar: Some(ReaderSidebar::Notes),
+            ai_panel_open: true,
+            transparency_enabled: false,
+            synchronized_groups: vec![ReaderSynchronizedGroup {
+                tabs: vec![2, 3],
+                paused_tabs: vec![3],
+            }],
+        }],
+    };
+
+    {
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        store.set_reader_session(session.clone()).unwrap();
+    }
+
+    let store = LibraryStore::open(database_path.clone()).unwrap();
+    assert_eq!(store.reader_session(), Some(&session));
+
+    let _ = fs::remove_file(database_path);
+}
+
+#[test]
 fn persists_document_target_language() {
     let database_path = temp_library_path("document-language");
     let document_path = Path::new("/tmp/translated.pdf");

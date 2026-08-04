@@ -519,6 +519,17 @@ keybinding-command-workspace-resize-pane-down = Resize Pane Down
 keybinding-command-workspace-reset-pane-sizes = Reset Pane Sizes
 keybinding-command-workspace-close-other-panes = Close Other Panes
 keybinding-command-document-view-copy-selection = Copy Selection
+
+# Activity center
+activity-title = Activity
+activity-unread = { $count } unread
+activity-notifications = Notifications
+activity-in-progress = In progress
+activity-clear-all = Clear all
+activity-just-now = Just now
+activity-minutes-ago = { $count } min ago
+activity-hours-ago = { $count } hr ago
+activity-working = Working…
 keybinding-command-document-view-undo = Undo
 keybinding-command-document-view-redo = Redo
 keybinding-command-document-view-select-all = Select All
@@ -586,3 +597,9 @@ keybinding-command-new-tab-previous-half-page = Previous Half Page
 keybinding-command-new-tab-enter-select = Enter Selection Mode
 keybinding-command-new-tab-cancel-select = Cancel Selection
 keybinding-command-new-tab-delete-selected = Remove Selected from Recents
+settings-section-startup = Startup
+settings-restore-on-startup = Restore on startup
+settings-restore-last-session = Last reader session
+settings-restore-none = New window
+reader-session-missing-title = Some tabs were not restored
+reader-session-missing-detail = { $count } document tab(s) were skipped because the file is missing or unsupported.

@@ -1,8 +1,11 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Result, anyhow};
 use futures::{StreamExt, channel::mpsc};
-use gpui::{App, AppContext, Bounds, Pixels, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    App, AppContext, Bounds, Context, Entity, Global, Pixels, Task, Window, WindowBounds,
+    WindowOptions, point, px, size,
+};
 use gpui_component::{Root, TitleBar};
 use gpui_platform::application;
 use tikv_jemalloc_sys as _;
@@ -16,11 +19,17 @@ mod instance;
 
 use glyphst_document_ui::document_view::RenderCache;
 use glyphst_keymap::keybindings;
-use glyphst_library::{DocumentPosition, LibraryStore};
+use glyphst_library::{
+    DocumentPosition, LibraryStore, ReaderSessionSnapshot, ReaderWindowBounds, ReaderWindowSession,
+    ReaderWindowState,
+};
 use glyphst_pdf_translation_app::{PdfTranslationService, run_typst_worker_if_requested};
-use glyphst_settings::{SettingsStore, localize, sync_component_theme};
+use glyphst_settings::{RestoreOnStartup, SettingsStore, localize, sync_component_theme};
 use glyphst_translation::TranslationService;
-use glyphst_ui::assets;
+use glyphst_ui::{
+    activity::{ActivityCenter, ActivityNoticeEntry, ActivityNoticeLevel},
+    assets,
+};
 use glyphst_workspace::{
     NewTab, Workspace, WorkspaceCallbacks, WorkspaceWindowHandle, WorkspaceWindowRequest,
 };
@@ -28,6 +37,57 @@ use glyphst_workspace::{
 const APP_ID: &str = "glyphst-reader";
 const READER_WINDOW_MIN_WIDTH: f32 = 900.0;
 const READER_WINDOW_MIN_HEIGHT: f32 = 600.0;
+const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+
+#[derive(Clone)]
+struct ReaderSessionPersistence(Entity<ReaderSessionPersistenceState>);
+
+impl Global for ReaderSessionPersistence {}
+
+struct ReaderSessionPersistenceState {
+    suspended: bool,
+    generation: u64,
+    save_task: Option<Task<()>>,
+}
+
+impl ReaderSessionPersistenceState {
+    fn observe_workspace(
+        &mut self,
+        workspace: &Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.observe(workspace, |this, _, cx| this.schedule_save(cx))
+            .detach();
+        cx.observe_window_bounds(window, |this, _, cx| this.schedule_save(cx))
+            .detach();
+    }
+
+    fn resume(&mut self, cx: &mut Context<Self>) {
+        self.suspended = false;
+        self.schedule_save(cx);
+    }
+
+    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        if self.suspended {
+            return;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SESSION_SAVE_DEBOUNCE).await;
+            _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.save_task = None;
+                if let Err(error) = persist_reader_session(cx) {
+                    eprintln!("failed to save reader session: {error:#}");
+                }
+            });
+        }));
+    }
+}
 
 fn main() {
     if let Some(exit_code) = run_typst_worker_if_requested() {
@@ -74,6 +134,12 @@ fn main() {
             sync_component_theme(cx);
             cx.set_global(LibraryStore::load());
             cx.set_global(RenderCache::new());
+            let session_persistence = cx.new(|_| ReaderSessionPersistenceState {
+                suspended: true,
+                generation: 0,
+                save_task: None,
+            });
+            cx.set_global(ReaderSessionPersistence(session_persistence));
             match TranslationService::new() {
                 Ok(service) => {
                     cx.set_global(service.clone());
@@ -93,6 +159,9 @@ fn main() {
                 Err(error) => eprintln!("failed to initialize translation service: {error:#}"),
             }
             cx.on_app_quit(|cx| {
+                if let Err(error) = persist_reader_session(cx) {
+                    eprintln!("failed to save reader session: {error:#}");
+                }
                 if let Err(error) = cx.global_mut::<SettingsStore>().save() {
                     eprintln!("failed to save settings: {error:#}");
                 }
@@ -105,6 +174,11 @@ fn main() {
                 async {}
             })
             .detach();
+            cx.on_window_closed(|cx, _| {
+                let persistence = cx.global::<ReaderSessionPersistence>().0.clone();
+                persistence.update(cx, |persistence, cx| persistence.schedule_save(cx));
+            })
+            .detach();
 
             let (keymap_preset, keybinding_overrides) = {
                 let store = cx.global::<SettingsStore>();
@@ -115,10 +189,40 @@ fn main() {
             };
             keybindings::apply(cx, keymap_preset, &keybinding_overrides);
 
-            if let Err(error) = open_workspace_window(request.path.clone(), cx) {
-                eprintln!("failed to open workspace window: {error:#}");
-                return;
+            let restore_session = should_restore_reader_session(
+                &request,
+                cx.global::<SettingsStore>().settings.restore_on_startup,
+            );
+            let restored = if restore_session {
+                cx.global::<LibraryStore>().reader_session().cloned()
+            } else {
+                None
+            };
+            let startup_result = if let Some(session) = restored
+                && !session.windows.is_empty()
+            {
+                restore_reader_session(session, cx)
+            } else {
+                open_workspace_window(request.path.clone(), cx).map(|_| 0)
+            };
+            match startup_result {
+                Ok(missing_documents) => {
+                    if missing_documents > 0 {
+                        show_missing_session_documents_notice(missing_documents, cx);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("failed to open workspace window: {error:#}");
+                    if let Err(fallback_error) = open_workspace_window(None, cx) {
+                        eprintln!("failed to open fallback workspace window: {fallback_error:#}");
+                        return;
+                    }
+                }
             }
+            cx.global::<ReaderSessionPersistence>()
+                .0
+                .clone()
+                .update(cx, |persistence, cx| persistence.resume(cx));
 
             cx.activate(true);
 
@@ -167,6 +271,78 @@ fn handle_open_request(request: instance::OpenRequest, cx: &mut App) {
             cx.activate(true);
         }
     }
+}
+
+fn should_restore_reader_session(
+    request: &instance::OpenRequest,
+    restore_on_startup: RestoreOnStartup,
+) -> bool {
+    !request.new && request.path.is_none() && restore_on_startup == RestoreOnStartup::LastSession
+}
+
+fn persist_reader_session(cx: &mut App) -> Result<()> {
+    let mut windows = Vec::new();
+    for window in cx.windows() {
+        let Some(workspace) = WorkspaceWindowHandle::from_any(window, cx) else {
+            continue;
+        };
+        let snapshot = workspace.update(cx, |workspace, window, cx| {
+            if workspace.reader_session_restore_pending() {
+                None
+            } else {
+                Some(workspace.reader_window_session(window, cx))
+            }
+        })?;
+        let Some(snapshot) = snapshot else {
+            // Do not replace a complete session with an intermediate tree while
+            // its asynchronously opened document tabs are still resolving.
+            return Ok(());
+        };
+        windows.push(snapshot);
+    }
+    if windows.is_empty() {
+        // Closing the final reader window is also how the application exits;
+        // retain its last non-empty snapshot for the next launch.
+        return Ok(());
+    }
+    cx.global_mut::<LibraryStore>()
+        .set_reader_session(ReaderSessionSnapshot { windows })
+}
+
+fn restore_reader_session(session: ReaderSessionSnapshot, cx: &mut App) -> Result<usize> {
+    let mut opened = 0_usize;
+    let mut missing_documents = 0_usize;
+    let mut last_error = None;
+    for window_session in session.windows {
+        match open_reader_session_window(window_session, cx) {
+            Ok(missing) => {
+                opened += 1;
+                missing_documents += missing;
+            }
+            Err(error) => {
+                eprintln!("failed to restore reader window: {error:#}");
+                last_error = Some(error);
+            }
+        }
+    }
+    if opened == 0 {
+        return Err(last_error.unwrap_or_else(|| anyhow!("reader session contains no windows")));
+    }
+    Ok(missing_documents)
+}
+
+fn show_missing_session_documents_notice(missing_documents: usize, cx: &mut App) {
+    let notice = ActivityNoticeEntry::new(
+        ActivityNoticeLevel::Warning,
+        glyphst_workspace::fl!("reader-session-missing-title"),
+        glyphst_workspace::fl!(
+            "reader-session-missing-detail",
+            count = missing_documents as i64
+        ),
+    );
+    ActivityCenter::global(cx).update(cx, |center, cx| {
+        center.add_notice(notice, cx);
+    });
 }
 
 fn active_workspace_window(cx: &App) -> Option<WorkspaceWindowHandle> {
@@ -280,10 +456,111 @@ fn open_workspace_window_inner(
                     )
                 }
             });
+            let persistence = cx.global::<ReaderSessionPersistence>().0.clone();
+            persistence.update(cx, |persistence, cx| {
+                persistence.observe_workspace(&workspace, window, cx);
+            });
             cx.new(|cx| Root::new(workspace, window, cx))
         },
     )?;
 
     WorkspaceWindowHandle::from_root(root, cx)
         .ok_or_else(|| anyhow!("new Root window does not host a Workspace"))
+}
+
+fn open_reader_session_window(session: ReaderWindowSession, cx: &mut App) -> Result<usize> {
+    let window_bounds = reader_window_bounds(session.bounds);
+    let window_settings = cx.global::<SettingsStore>().settings.window;
+    let transparency_enabled = session.transparency_enabled;
+    let root = cx.open_window(
+        WindowOptions {
+            titlebar: Some(TitleBar::title_bar_options()),
+            window_bounds: Some(window_bounds),
+            window_min_size: Some(size(
+                px(READER_WINDOW_MIN_WIDTH),
+                px(READER_WINDOW_MIN_HEIGHT),
+            )),
+            window_background: window_settings.background_appearance(transparency_enabled),
+            ..Default::default()
+        },
+        move |window, cx| {
+            window.set_app_id(APP_ID);
+            let workspace = cx.new(|cx| {
+                Workspace::from_reader_session(session.clone(), workspace_callbacks(), window, cx)
+            });
+            let persistence = cx.global::<ReaderSessionPersistence>().0.clone();
+            persistence.update(cx, |persistence, cx| {
+                persistence.observe_workspace(&workspace, window, cx);
+            });
+            cx.new(|cx| Root::new(workspace, window, cx))
+        },
+    )?;
+    let workspace = WorkspaceWindowHandle::from_root(root, cx)
+        .ok_or_else(|| anyhow!("restored Root window does not host a Workspace"))?;
+    workspace.update(cx, |workspace, _, _| {
+        workspace.restored_missing_document_count()
+    })
+}
+
+fn reader_window_bounds(bounds: ReaderWindowBounds) -> WindowBounds {
+    let state = bounds.state;
+    let bounds = Bounds {
+        origin: point(px(bounds.x), px(bounds.y)),
+        size: size(px(bounds.width), px(bounds.height)),
+    };
+    match state {
+        ReaderWindowState::Windowed => WindowBounds::Windowed(bounds),
+        ReaderWindowState::Maximized => WindowBounds::Maximized(bounds),
+        ReaderWindowState::Fullscreen => WindowBounds::Fullscreen(bounds),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_session_restore_is_bypassed_by_paths_and_new_windows() {
+        let empty = instance::OpenRequest {
+            new: false,
+            path: None,
+        };
+        assert!(should_restore_reader_session(
+            &empty,
+            RestoreOnStartup::LastSession
+        ));
+        assert!(!should_restore_reader_session(
+            &empty,
+            RestoreOnStartup::None
+        ));
+        assert!(!should_restore_reader_session(
+            &instance::OpenRequest {
+                new: true,
+                path: None,
+            },
+            RestoreOnStartup::LastSession,
+        ));
+        assert!(!should_restore_reader_session(
+            &instance::OpenRequest {
+                new: false,
+                path: Some(PathBuf::from("book.pdf")),
+            },
+            RestoreOnStartup::LastSession,
+        ));
+    }
+
+    #[test]
+    fn restored_window_bounds_preserve_window_state() {
+        let bounds = ReaderWindowBounds {
+            x: -10.0,
+            y: 20.0,
+            width: 1200.0,
+            height: 800.0,
+            state: ReaderWindowState::Maximized,
+        };
+        assert!(matches!(
+            reader_window_bounds(bounds),
+            WindowBounds::Maximized(_)
+        ));
+    }
 }

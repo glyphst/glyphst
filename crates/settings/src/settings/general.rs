@@ -5,6 +5,30 @@ pub fn ui_rems(px: f32) -> gpui::Rems {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RestoreOnStartup {
+    #[default]
+    LastSession,
+    None,
+}
+
+impl RestoreOnStartup {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LastSession => "last_session",
+            Self::None => "none",
+        }
+    }
+
+    pub(super) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "last_session" | "last" => Some(Self::LastSession),
+            "none" | "new_window" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NewTabViewMode {
     #[default]
     Grid,

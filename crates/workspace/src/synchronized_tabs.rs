@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use glyphst_library::ReaderSynchronizedGroup;
 use gpui::{EntityId, Pixels, Point};
 
 use crate::theme::SYNCHRONIZED_GROUP_COLOR_COUNT;
@@ -129,6 +130,36 @@ pub(crate) struct SynchronizedTabRegistry {
 }
 
 impl SynchronizedTabRegistry {
+    pub(crate) fn reader_session_groups(
+        &self,
+        runtime_tab_ids: &HashMap<EntityId, u64>,
+    ) -> Vec<ReaderSynchronizedGroup> {
+        let mut groups = self.groups.values().collect::<Vec<_>>();
+        groups.sort_by_key(|group| group.display_number);
+        groups
+            .into_iter()
+            .filter_map(|group| {
+                let mut tabs = group
+                    .members
+                    .keys()
+                    .filter_map(|tab_id| runtime_tab_ids.get(tab_id).copied())
+                    .collect::<Vec<_>>();
+                tabs.sort_unstable();
+                if tabs.len() < 2 {
+                    return None;
+                }
+                let mut paused_tabs = group
+                    .members
+                    .keys()
+                    .filter(|tab_id| self.paused_tabs.contains(tab_id))
+                    .filter_map(|tab_id| runtime_tab_ids.get(tab_id).copied())
+                    .collect::<Vec<_>>();
+                paused_tabs.sort_unstable();
+                Some(ReaderSynchronizedGroup { tabs, paused_tabs })
+            })
+            .collect()
+    }
+
     pub(crate) fn reserve_group(&mut self) -> ReservedSynchronizedGroup {
         self.next_group_id += 1;
         let id = SynchronizedGroupId(self.next_group_id);

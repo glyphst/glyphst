@@ -495,6 +495,17 @@ keybinding-command-workspace-resize-pane-down = 向下调整窗格大小
 keybinding-command-workspace-reset-pane-sizes = 重置窗格大小
 keybinding-command-workspace-close-other-panes = 关闭其他窗格
 keybinding-command-document-view-copy-selection = 复制选区
+
+# 活动中心
+activity-title = 活动
+activity-unread = { $count } 条未读
+activity-notifications = 通知
+activity-in-progress = 进行中
+activity-clear-all = 全部清除
+activity-just-now = 刚刚
+activity-minutes-ago = { $count } 分钟前
+activity-hours-ago = { $count } 小时前
+activity-working = 处理中…
 keybinding-command-document-view-undo = 撤销
 keybinding-command-document-view-redo = 重做
 keybinding-command-document-view-select-all = 全选
@@ -562,3 +573,9 @@ keybinding-command-new-tab-previous-half-page = 上半页
 keybinding-command-new-tab-enter-select = 进入选择模式
 keybinding-command-new-tab-cancel-select = 取消选择
 keybinding-command-new-tab-delete-selected = 从最近记录中移除所选项
+settings-section-startup = 启动
+settings-restore-on-startup = 启动时恢复
+settings-restore-last-session = 上次阅读会话
+settings-restore-none = 新窗口
+reader-session-missing-title = 部分标签页未恢复
+reader-session-missing-detail = 有 { $count } 个文档标签页因文件缺失或格式不受支持而被跳过。

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -39,7 +40,10 @@ use crate::{
         OpenKeybindings, OpenNewTab, OpenSettings, OpenWithSystemPicker, ToggleAiPanel,
         ToggleCommandPalette, ToggleNotes, ToggleThumbnailSidebar, ToggleToc, ToggleTransparency,
     },
-    library::{DocumentPosition, normalize_path},
+    library::{
+        DocumentPosition, ReaderSidebar, ReaderSynchronizedGroup, ReaderWindowBounds,
+        ReaderWindowSession, ReaderWindowState, normalize_path,
+    },
     pane::{
         DraggedTab, Pane, PaneDropTarget, PaneEvent, PaneGroup, PaneSynchronizedPresentation,
         RecentlyAddedSynchronizedTab, SplitDirection, SplitDown, SplitHorizontal, SplitLeft,
@@ -77,6 +81,10 @@ pub struct Workspace {
     title_bar_popup_menu: Option<Entity<PopupMenu>>,
     dragged_tab_outside_window: Option<DraggedTab>,
     synchronized_tabs: SynchronizedTabRegistry,
+    restored_tab_ids: HashMap<u64, (EntityId, EntityId)>,
+    pending_restored_documents: usize,
+    pending_synchronized_groups: Vec<ReaderSynchronizedGroup>,
+    restored_missing_documents: usize,
     synchronized_connection: Option<SynchronizedConnection>,
     fading_synchronized_connection: Option<FadingSynchronizedConnection>,
     docks: WorkspaceDockState,
@@ -231,6 +239,73 @@ impl Workspace {
         Self::with_pane(pane, document_translation_jobs, callbacks, window, cx)
     }
 
+    pub fn from_reader_session(
+        session: ReaderWindowSession,
+        callbacks: WorkspaceCallbacks,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let document_translation_jobs = cx.new(DocumentTranslationJobManager::new);
+        let restored = PaneGroup::restore(
+            &session.pane_tree,
+            document_translation_jobs.clone(),
+            window,
+            cx,
+        );
+        let first_pane = restored
+            .panes
+            .first()
+            .map(|(_, pane)| pane.clone())
+            .expect("restoring a pane tree always creates at least one pane");
+        let mut workspace = Self::with_pane(
+            first_pane.clone(),
+            document_translation_jobs,
+            callbacks,
+            window,
+            cx,
+        );
+        workspace.pane_group = restored.pane_group;
+        workspace.active_pane = restored
+            .panes
+            .iter()
+            .find(|(id, _)| *id == session.active_pane)
+            .map(|(_, pane)| pane.clone())
+            .unwrap_or_else(|| first_pane.clone());
+        for (_, pane) in restored
+            .panes
+            .iter()
+            .filter(|(_, pane)| *pane != first_pane)
+        {
+            workspace.subscribe_to_pane(pane, window, cx);
+        }
+        workspace.restored_tab_ids = restored
+            .tab_ids
+            .into_iter()
+            .map(|(session_id, tab_id, pane_id)| (session_id, (tab_id, pane_id)))
+            .collect();
+        workspace.pending_restored_documents = restored.pending_documents;
+        workspace.pending_synchronized_groups = session.synchronized_groups;
+        workspace.restored_missing_documents = restored.missing_documents;
+        workspace.docks.left_sidebar = session.left_sidebar.map(|sidebar| match sidebar {
+            ReaderSidebar::Thumbnails => DocumentSidebar::Thumbnails,
+            ReaderSidebar::TableOfContents => DocumentSidebar::Toc,
+            ReaderSidebar::Notes => DocumentSidebar::Notes,
+        });
+        workspace.docks.ai_panel_open = session.ai_panel_open;
+        workspace.transparency_enabled = session.transparency_enabled;
+        apply_window_background(
+            window,
+            workspace.window_settings,
+            workspace.transparency_enabled,
+        );
+        if workspace.pending_restored_documents == 0 {
+            workspace.finish_reader_session_restore(cx);
+        }
+        workspace.sync_tab_bar_visibility(cx);
+        workspace.focus_active_pane(window, cx);
+        workspace
+    }
+
     fn with_pane(
         pane: Entity<Pane>,
         document_translation_jobs: Entity<DocumentTranslationJobManager>,
@@ -261,6 +336,10 @@ impl Workspace {
             title_bar_popup_menu: None,
             dragged_tab_outside_window: None,
             synchronized_tabs: SynchronizedTabRegistry::default(),
+            restored_tab_ids: HashMap::new(),
+            pending_restored_documents: 0,
+            pending_synchronized_groups: Vec::new(),
+            restored_missing_documents: 0,
             synchronized_connection: None,
             fading_synchronized_connection: None,
             docks,
@@ -373,6 +452,95 @@ impl Workspace {
         self.focus_or_open_document(path, None, replace_active_new_tab, window, cx)
     }
 
+    pub fn reader_session_restore_pending(&self) -> bool {
+        self.pending_restored_documents > 0
+    }
+
+    pub fn restored_missing_document_count(&self) -> usize {
+        self.restored_missing_documents
+    }
+
+    pub fn reader_window_session(
+        &self,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> ReaderWindowSession {
+        let panes = self.pane_group.session_snapshot(&self.active_pane, cx);
+        let window_bounds = window.window_bounds();
+        let state = match window_bounds {
+            gpui::WindowBounds::Windowed(_) => ReaderWindowState::Windowed,
+            gpui::WindowBounds::Maximized(_) => ReaderWindowState::Maximized,
+            gpui::WindowBounds::Fullscreen(_) => ReaderWindowState::Fullscreen,
+        };
+        let bounds = window_bounds.get_bounds();
+        ReaderWindowSession {
+            bounds: ReaderWindowBounds {
+                x: bounds.origin.x.as_f32(),
+                y: bounds.origin.y.as_f32(),
+                width: bounds.size.width.as_f32(),
+                height: bounds.size.height.as_f32(),
+                state,
+            },
+            pane_tree: panes.pane_tree,
+            active_pane: panes.active_pane,
+            left_sidebar: self.docks.left_sidebar.map(|sidebar| match sidebar {
+                DocumentSidebar::Thumbnails => ReaderSidebar::Thumbnails,
+                DocumentSidebar::Toc => ReaderSidebar::TableOfContents,
+                DocumentSidebar::Notes => ReaderSidebar::Notes,
+            }),
+            ai_panel_open: self.docks.ai_panel_open,
+            transparency_enabled: self.transparency_enabled,
+            synchronized_groups: self
+                .synchronized_tabs
+                .reader_session_groups(&panes.runtime_tab_ids),
+        }
+    }
+
+    fn finish_reader_session_restore(&mut self, cx: &mut Context<Self>) {
+        let groups = std::mem::take(&mut self.pending_synchronized_groups);
+        for group in groups {
+            let members = group
+                .tabs
+                .iter()
+                .filter_map(|session_id| {
+                    let (tab_id, pane_id) = self.restored_tab_ids.get(session_id).copied()?;
+                    let is_document = self
+                        .pane_group
+                        .panes()
+                        .into_iter()
+                        .find(|pane| pane.entity_id() == pane_id)
+                        .is_some_and(|pane| pane.read(cx).tab_is_document(tab_id));
+                    is_document.then_some((*session_id, tab_id, pane_id))
+                })
+                .collect::<Vec<_>>();
+            let Some((_, source_tab, source_pane)) = members.first().copied() else {
+                continue;
+            };
+            let Some((_, target_tab, target_pane)) = members.get(1).copied() else {
+                continue;
+            };
+            let Some(group_id) = self.synchronized_tabs.create_group(
+                source_tab,
+                source_pane,
+                target_tab,
+                target_pane,
+            ) else {
+                continue;
+            };
+            for (_, tab_id, pane_id) in members.iter().skip(2).copied() {
+                self.synchronized_tabs.add_member(group_id, tab_id, pane_id);
+            }
+            for paused_session_id in &group.paused_tabs {
+                if let Some((tab_id, _)) = self.restored_tab_ids.get(paused_session_id) {
+                    self.synchronized_tabs.set_paused(*tab_id, true);
+                }
+            }
+        }
+        self.restored_tab_ids.clear();
+        self.refresh_synchronized_tab_presentation(cx);
+        cx.notify();
+    }
+
     fn open_settings_window(&mut self, cx: &mut Context<Self>) {
         self.set_title_bar_menu_expanded(false, cx);
         (self.callbacks.open_settings_window)(cx);
@@ -415,6 +583,26 @@ impl Workspace {
                         this.document_translation_jobs.update(cx, |jobs, cx| {
                             jobs.finish_open(*job_id, result.clone(), cx);
                         });
+                    }
+                }
+                PaneEvent::RestoredDocumentFinished {
+                    session_tab_id,
+                    document_tab_id,
+                } => {
+                    if let Some(document_tab_id) = document_tab_id {
+                        this.restored_tab_ids.insert(
+                            *session_tab_id,
+                            (*document_tab_id, pane_for_events.entity_id()),
+                        );
+                    } else {
+                        this.restored_tab_ids.remove(session_tab_id);
+                    }
+                    this.pending_restored_documents =
+                        this.pending_restored_documents.saturating_sub(1);
+                    if this.pending_restored_documents == 0 {
+                        this.finish_reader_session_restore(cx);
+                    } else {
+                        cx.notify();
                     }
                 }
                 PaneEvent::OpenSettings => this.open_settings_window(cx),
@@ -3047,7 +3235,11 @@ mod tests {
         document_view::{
             DocumentSidebar, RenderCache, SynchronizedScrollDelta, SynchronizedScrollMode,
         },
-        library::{DocumentPosition, LibraryStore},
+        library::{
+            DocumentPosition, LibraryStore, ReaderPaneSession, ReaderPaneTree, ReaderSidebar,
+            ReaderSplitAxis, ReaderSynchronizedGroup, ReaderTabKind, ReaderTabSession,
+            ReaderWindowBounds, ReaderWindowSession, ReaderWindowState,
+        },
         settings::SettingsStore,
     };
 
@@ -3245,6 +3437,191 @@ mod tests {
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.active_pane.read(cx).active_tab_is_new_tab());
         });
+    }
+
+    #[gpui::test]
+    fn reader_session_restores_split_tabs_active_pane_and_docks(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let session = ReaderWindowSession {
+            bounds: ReaderWindowBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1200.0,
+                height: 800.0,
+                state: ReaderWindowState::Windowed,
+            },
+            pane_tree: ReaderPaneTree::Split {
+                axis: ReaderSplitAxis::Horizontal,
+                ratios: vec![0.3, 0.7],
+                children: vec![
+                    ReaderPaneTree::Pane(ReaderPaneSession {
+                        id: 1,
+                        tabs: vec![ReaderTabSession {
+                            id: 1,
+                            kind: ReaderTabKind::NewTab,
+                        }],
+                        active_tab: Some(1),
+                    }),
+                    ReaderPaneTree::Pane(ReaderPaneSession {
+                        id: 2,
+                        tabs: vec![ReaderTabSession {
+                            id: 2,
+                            kind: ReaderTabKind::Keymap,
+                        }],
+                        active_tab: Some(2),
+                    }),
+                ],
+            },
+            active_pane: 2,
+            left_sidebar: Some(ReaderSidebar::Notes),
+            ai_panel_open: true,
+            transparency_enabled: false,
+            synchronized_groups: Vec::new(),
+        };
+
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace =
+                cx.new(|cx| Workspace::from_reader_session(session, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.pane_group.panes().len(), 2);
+            assert_eq!(workspace.active_pane, workspace.pane_group.panes()[1]);
+            assert_eq!(workspace.active_pane.read(cx).active_tab_ix(), 0);
+            assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Notes));
+            assert!(workspace.docks.ai_panel_open);
+            assert!(!workspace.transparency_enabled);
+            assert!(!workspace.reader_session_restore_pending());
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let snapshot = workspace.reader_window_session(window, cx);
+            assert_eq!(snapshot.active_pane, 2);
+            assert_eq!(snapshot.left_sidebar, Some(ReaderSidebar::Notes));
+            let ReaderPaneTree::Split {
+                axis,
+                ratios,
+                children,
+            } = snapshot.pane_tree
+            else {
+                panic!("expected restored split tree");
+            };
+            assert_eq!(axis, ReaderSplitAxis::Horizontal);
+            assert_eq!(children.len(), 2);
+            assert_eq!(ratios.len(), 2);
+            assert!((ratios[0] - 0.3).abs() < 0.001);
+        });
+    }
+
+    #[gpui::test]
+    fn reader_session_restores_duplicate_documents_and_synchronized_groups(
+        cx: &mut TestAppContext,
+    ) {
+        let document_path = temporary_pdf_path("restore-duplicates");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let document_tab = |id, zoom| ReaderTabSession {
+            id,
+            kind: ReaderTabKind::Document {
+                path: document_path.clone(),
+                position: DocumentPosition::fixed(0.0, 0.0, zoom, 1),
+            },
+        };
+        let session = ReaderWindowSession {
+            bounds: ReaderWindowBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1200.0,
+                height: 800.0,
+                state: ReaderWindowState::Windowed,
+            },
+            pane_tree: ReaderPaneTree::Split {
+                axis: ReaderSplitAxis::Horizontal,
+                ratios: vec![0.5, 0.5],
+                children: vec![
+                    ReaderPaneTree::Pane(ReaderPaneSession {
+                        id: 1,
+                        tabs: vec![document_tab(1, 1.0), document_tab(2, 1.5)],
+                        active_tab: Some(2),
+                    }),
+                    ReaderPaneTree::Pane(ReaderPaneSession {
+                        id: 2,
+                        tabs: vec![document_tab(3, 2.0)],
+                        active_tab: Some(3),
+                    }),
+                ],
+            },
+            active_pane: 1,
+            left_sidebar: None,
+            ai_panel_open: false,
+            transparency_enabled: true,
+            synchronized_groups: vec![ReaderSynchronizedGroup {
+                tabs: vec![2, 3],
+                paused_tabs: vec![3],
+            }],
+        };
+
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace =
+                cx.new(|cx| Workspace::from_reader_session(session, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.reader_session_restore_pending());
+            let panes = workspace.pane_group.panes();
+            let left = panes[0].read(cx);
+            let right = panes[1].read(cx);
+            let left_views = left.document_views();
+            let right_views = right.document_views();
+            assert_eq!(left_views.len(), 2);
+            assert_eq!(right_views.len(), 1);
+            assert_ne!(left_views[0], left_views[1]);
+            assert_eq!(left.active_tab_ix(), 1);
+            let left_group = workspace
+                .synchronized_tabs
+                .group_for_tab(left_views[1].entity_id())
+                .unwrap();
+            assert_eq!(
+                workspace
+                    .synchronized_tabs
+                    .group_for_tab(right_views[0].entity_id()),
+                Some(left_group)
+            );
+            assert!(
+                workspace
+                    .synchronized_tabs
+                    .is_paused(right_views[0].entity_id())
+            );
+        });
+
+        fs::remove_file(document_path).ok();
     }
 
     #[gpui::test]

@@ -646,6 +646,18 @@ impl AiPanel {
         cx: &mut Context<Self>,
     ) {
         self.validation_notice = Some(message.clone());
+        if let Some(center) = ActivityCenter::try_global(cx) {
+            center.update(cx, |center, cx| {
+                center.add_notice(
+                    ActivityNoticeEntry::new(
+                        ActivityNoticeLevel::Error,
+                        "AI request could not be sent",
+                        message.clone(),
+                    ),
+                    cx,
+                );
+            });
+        }
         window.push_notification(
             Notification::error(message).id::<AiValidationNotification>(),
             cx,

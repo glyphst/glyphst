@@ -26,6 +26,7 @@ use glyphst_settings::{
     ui_rems,
 };
 use glyphst_ui::{
+    activity::{ActivityCenter, ActivityNoticeEntry, ActivityNoticeLevel},
     icons::{Icon, IconName, toolbar_icon_button},
     markdown::{Markdown, MarkdownContextMenuRequest, MarkdownElement, MarkdownStyle},
     picker::fuzzy_match,

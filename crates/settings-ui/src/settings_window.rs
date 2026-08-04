@@ -14,7 +14,7 @@ use glyphst_settings::{
     ui_rems,
 };
 use glyphst_ui::{
-    activity::{ActivityCenter, BackgroundTaskEntry},
+    activity::{ActivityCenter, ActivityNoticeEntry, ActivityNoticeLevel, BackgroundTaskEntry},
     root::{RootWindowHandle, render_overlays},
     style::{SURFACE_INSET, apply_window_background, shell_background},
 };
@@ -797,8 +797,20 @@ impl SettingsWindow {
                         .map_err(|error| format!("{error:#}"))
                 })
                 .await;
+            let activity_notice = match &result {
+                Ok(()) => ActivityNoticeEntry::new(
+                    ActivityNoticeLevel::Success,
+                    "Translation data cleared",
+                    "Cached responses, generated PDFs, OCR results, and checkpoints were removed.",
+                ),
+                Err(error) => ActivityNoticeEntry::new(
+                    ActivityNoticeLevel::Error,
+                    "Could not clear translation data",
+                    error.clone(),
+                ),
+            };
             activity_center.update(cx, |center, cx| {
-                center.remove_task(task_id, cx);
+                center.finish_task(task_id, activity_notice, cx);
             });
             _ = this.update_in(cx, |this, window, cx| {
                 this.translation_data_clear_pending = false;

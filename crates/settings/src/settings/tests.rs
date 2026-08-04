@@ -149,6 +149,29 @@ fn exported_settings_are_reparseable() {
 }
 
 #[test]
+fn session_restore_setting_round_trips() {
+    let parsed = parse_settings(
+        r#"
+session {
+    restore_on_startup "none"
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(parsed.restore_on_startup, RestoreOnStartup::None);
+
+    let exported = parsed.to_kdl_string();
+    assert_eq!(
+        parse_settings(&exported).unwrap().restore_on_startup,
+        RestoreOnStartup::None
+    );
+    assert_eq!(
+        Settings::default().restore_on_startup,
+        RestoreOnStartup::LastSession
+    );
+}
+
+#[test]
 fn parses_and_exports_keymap_settings() {
     let settings = parse_settings(
         r##"

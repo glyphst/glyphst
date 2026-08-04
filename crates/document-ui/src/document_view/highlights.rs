@@ -321,8 +321,27 @@ impl DocumentView {
     }
 
     pub(super) fn glyph_line_rect(glyph: &Glyph) -> Rect {
-        let rect = Self::quad_rect(&glyph.quad);
-        Rect::new(rect.x0, glyph.line_rect.y0, rect.x1, glyph.line_rect.y1)
+        Self::quad_rect(&glyph.quad)
+    }
+
+    pub(super) fn dotted_underline_segments(
+        bounds: Bounds<Pixels>,
+        dot: Pixels,
+    ) -> Vec<Bounds<Pixels>> {
+        let dot = px(dot.as_f32().max(0.5));
+        let gap = dot;
+        let step = dot + gap;
+        let inset = dot / 3.0;
+        let y = bounds.bottom() - dot - inset;
+        let right = bounds.right();
+        let mut x = bounds.left();
+        let mut segments = Vec::new();
+        while x < right {
+            let width = (right - x).min(dot);
+            segments.push(Bounds::new(point(x, y), size(width, dot)));
+            x += step;
+        }
+        segments
     }
 
     pub(super) fn union_rect(a: Rect, b: Rect) -> Rect {

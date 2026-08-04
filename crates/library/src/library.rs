@@ -61,6 +61,7 @@ const AI_SESSIONS_V4_VERSION: u8 = 4;
 const AI_SESSIONS_V4_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v4");
 const SIDEBAR_WIDTHS_KEY: &str = "sidebar_widths";
 const DOCUMENT_BROWSER_SIZE_KEY: &str = "document_browser_size";
+const READER_SESSION_KEY: &str = "reader_session";
 const MAX_AI_SESSIONS: usize = 200;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -732,6 +733,187 @@ struct StoredDocumentBrowserSizeV1 {
     size: DocumentBrowserSize,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderSessionV1 {
+    version: u8,
+    windows: Vec<StoredReaderWindowSessionV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderWindowSessionV1 {
+    bounds: ReaderWindowBounds,
+    pane_tree: StoredReaderPaneTreeV1,
+    active_pane: u64,
+    left_sidebar: Option<ReaderSidebar>,
+    ai_panel_open: bool,
+    transparency_enabled: bool,
+    synchronized_groups: Vec<ReaderSynchronizedGroup>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum StoredReaderPaneTreeV1 {
+    Pane {
+        id: u64,
+        tabs: Vec<StoredReaderTabV1>,
+        active_tab: Option<u64>,
+    },
+    Split {
+        axis: ReaderSplitAxis,
+        ratios: Vec<f32>,
+        children: Vec<StoredReaderPaneTreeV1>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderTabV1 {
+    id: u64,
+    kind: StoredReaderTabKindV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum StoredReaderTabKindV1 {
+    NewTab,
+    Document {
+        path: StoredPathV1,
+        position: DocumentPosition,
+    },
+    Keymap,
+}
+
+impl From<&ReaderSessionSnapshot> for StoredReaderSessionV1 {
+    fn from(session: &ReaderSessionSnapshot) -> Self {
+        Self {
+            version: STORAGE_SCHEMA_VERSION,
+            windows: session
+                .windows
+                .iter()
+                .map(StoredReaderWindowSessionV1::from)
+                .collect(),
+        }
+    }
+}
+
+impl StoredReaderSessionV1 {
+    fn into_domain(self) -> Result<ReaderSessionSnapshot> {
+        require_storage_version(self.version, STORAGE_SCHEMA_VERSION)?;
+        Ok(ReaderSessionSnapshot {
+            windows: self
+                .windows
+                .into_iter()
+                .map(StoredReaderWindowSessionV1::into_domain)
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
+impl From<&ReaderWindowSession> for StoredReaderWindowSessionV1 {
+    fn from(window: &ReaderWindowSession) -> Self {
+        Self {
+            bounds: window.bounds,
+            pane_tree: StoredReaderPaneTreeV1::from(&window.pane_tree),
+            active_pane: window.active_pane,
+            left_sidebar: window.left_sidebar,
+            ai_panel_open: window.ai_panel_open,
+            transparency_enabled: window.transparency_enabled,
+            synchronized_groups: window.synchronized_groups.clone(),
+        }
+    }
+}
+
+impl StoredReaderWindowSessionV1 {
+    fn into_domain(self) -> Result<ReaderWindowSession> {
+        Ok(ReaderWindowSession {
+            bounds: self.bounds.sanitized(),
+            pane_tree: self.pane_tree.into_domain()?,
+            active_pane: self.active_pane,
+            left_sidebar: self.left_sidebar,
+            ai_panel_open: self.ai_panel_open,
+            transparency_enabled: self.transparency_enabled,
+            synchronized_groups: self.synchronized_groups,
+        })
+    }
+}
+
+impl From<&ReaderPaneTree> for StoredReaderPaneTreeV1 {
+    fn from(tree: &ReaderPaneTree) -> Self {
+        match tree {
+            ReaderPaneTree::Pane(pane) => Self::Pane {
+                id: pane.id,
+                tabs: pane.tabs.iter().map(StoredReaderTabV1::from).collect(),
+                active_tab: pane.active_tab,
+            },
+            ReaderPaneTree::Split {
+                axis,
+                ratios,
+                children,
+            } => Self::Split {
+                axis: *axis,
+                ratios: ratios.clone(),
+                children: children.iter().map(Self::from).collect(),
+            },
+        }
+    }
+}
+
+impl StoredReaderPaneTreeV1 {
+    fn into_domain(self) -> Result<ReaderPaneTree> {
+        match self {
+            Self::Pane {
+                id,
+                tabs,
+                active_tab,
+            } => Ok(ReaderPaneTree::Pane(ReaderPaneSession {
+                id,
+                tabs: tabs
+                    .into_iter()
+                    .map(StoredReaderTabV1::into_domain)
+                    .collect::<Result<_>>()?,
+                active_tab,
+            })),
+            Self::Split {
+                axis,
+                ratios,
+                children,
+            } => Ok(ReaderPaneTree::Split {
+                axis,
+                ratios: sanitize_ratios(ratios, children.len()),
+                children: children
+                    .into_iter()
+                    .map(Self::into_domain)
+                    .collect::<Result<_>>()?,
+            }),
+        }
+    }
+}
+
+impl From<&ReaderTabSession> for StoredReaderTabV1 {
+    fn from(tab: &ReaderTabSession) -> Self {
+        let kind = match &tab.kind {
+            ReaderTabKind::NewTab => StoredReaderTabKindV1::NewTab,
+            ReaderTabKind::Document { path, position } => StoredReaderTabKindV1::Document {
+                path: StoredPathV1::from_path(path),
+                position: position.clone(),
+            },
+            ReaderTabKind::Keymap => StoredReaderTabKindV1::Keymap,
+        };
+        Self { id: tab.id, kind }
+    }
+}
+
+impl StoredReaderTabV1 {
+    fn into_domain(self) -> Result<ReaderTabSession> {
+        let kind = match self.kind {
+            StoredReaderTabKindV1::NewTab => ReaderTabKind::NewTab,
+            StoredReaderTabKindV1::Document { path, position } => ReaderTabKind::Document {
+                path: normalize_path(&path.into_path()?),
+                position,
+            },
+            StoredReaderTabKindV1::Keymap => ReaderTabKind::Keymap,
+        };
+        Ok(ReaderTabSession { id: self.id, kind })
+    }
+}
+
 impl From<DocumentBrowserSize> for StoredDocumentBrowserSizeV1 {
     fn from(size: DocumentBrowserSize) -> Self {
         Self {
@@ -1234,6 +1416,128 @@ pub struct DocumentBrowserSize {
     pub height: f32,
 }
 
+/// Durable reader state used to restore windows when the next launch has no
+/// explicit file argument. Transient overlays, searches, and dialogs are not
+/// represented here.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReaderSessionSnapshot {
+    pub windows: Vec<ReaderWindowSession>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReaderWindowSession {
+    pub bounds: ReaderWindowBounds,
+    pub pane_tree: ReaderPaneTree,
+    pub active_pane: u64,
+    pub left_sidebar: Option<ReaderSidebar>,
+    pub ai_panel_open: bool,
+    pub transparency_enabled: bool,
+    pub synchronized_groups: Vec<ReaderSynchronizedGroup>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReaderWindowState {
+    #[default]
+    Windowed,
+    Maximized,
+    Fullscreen,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReaderWindowBounds {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub state: ReaderWindowState,
+}
+
+impl ReaderWindowBounds {
+    fn sanitized(self) -> Self {
+        Self {
+            x: finite_or(self.x, 0.0),
+            y: finite_or(self.y, 0.0),
+            width: finite_or(self.width, 1100.0).clamp(320.0, 16_384.0),
+            height: finite_or(self.height, 800.0).clamp(240.0, 16_384.0),
+            state: self.state,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReaderSplitAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReaderPaneTree {
+    Pane(ReaderPaneSession),
+    Split {
+        axis: ReaderSplitAxis,
+        ratios: Vec<f32>,
+        children: Vec<ReaderPaneTree>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReaderPaneSession {
+    pub id: u64,
+    pub tabs: Vec<ReaderTabSession>,
+    pub active_tab: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReaderTabSession {
+    pub id: u64,
+    pub kind: ReaderTabKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReaderTabKind {
+    NewTab,
+    Document {
+        path: PathBuf,
+        position: DocumentPosition,
+    },
+    Keymap,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReaderSidebar {
+    Thumbnails,
+    TableOfContents,
+    Notes,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderSynchronizedGroup {
+    pub tabs: Vec<u64>,
+    pub paused_tabs: Vec<u64>,
+}
+
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() { value } else { fallback }
+}
+
+fn sanitize_ratios(ratios: Vec<f32>, child_count: usize) -> Vec<f32> {
+    if child_count == 0 {
+        return Vec::new();
+    }
+    if ratios.len() != child_count
+        || ratios
+            .iter()
+            .any(|ratio| !ratio.is_finite() || *ratio <= 0.0)
+    {
+        return vec![1.0 / child_count as f32; child_count];
+    }
+    let total = ratios.iter().sum::<f32>();
+    if !total.is_finite() || total <= f32::EPSILON {
+        return vec![1.0 / child_count as f32; child_count];
+    }
+    ratios.into_iter().map(|ratio| ratio / total).collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentPreferences {
     pub path: PathBuf,
@@ -1259,6 +1563,7 @@ pub struct Library {
     pub ai_sessions: Vec<AiSession>,
     pub sidebar_widths: Option<SidebarWidths>,
     pub document_browser_size: Option<DocumentBrowserSize>,
+    pub reader_session: Option<ReaderSessionSnapshot>,
     pub document_preferences: Vec<DocumentPreferences>,
     next_bookmark_id: u64,
     next_highlight_id: u64,
@@ -1397,6 +1702,7 @@ mod edits;
 mod history;
 mod model;
 mod preferences;
+mod reader_session;
 mod sidebar;
 mod storage;
 mod storage_helpers;

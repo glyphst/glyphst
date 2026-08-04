@@ -631,30 +631,16 @@ impl Render for DocumentView {
 
                                             for (note, color) in paint_data.note_underlines {
                                                 let dot = px(3.0);
-                                                let gap = px(3.0);
-                                                let step = dot + gap;
-                                                let y = note.origin.y + note.size.height
-                                                    - dot
-                                                    - px(1.0);
-                                                let right = note.origin.x + note.size.width;
-                                                let mut x = note.origin.x;
-                                                while x < right {
-                                                    let width = if x + dot > right {
-                                                        right - x
-                                                    } else {
-                                                        dot
-                                                    };
+                                                for segment in Self::dotted_underline_segments(
+                                                    note, dot,
+                                                ) {
                                                     window.paint_quad(
                                                         fill(
-                                                            Bounds::new(
-                                                                point(x, y),
-                                                                size(width, dot),
-                                                            ),
+                                                            segment,
                                                             rgba(theme.note_color(color)),
                                                         )
                                                         .corner_radii(Corners::all(dot / 2.0)),
                                                     );
-                                                    x += step;
                                                 }
                                             }
 

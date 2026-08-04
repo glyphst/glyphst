@@ -329,8 +329,12 @@ impl DocumentView {
         next_block_idx: &mut u32,
     ) -> Result<Range<usize>> {
         let start = glyphs.len();
-        let text_page = display_list
-            .to_text_page(TextPageFlags::PRESERVE_WHITESPACE | TextPageFlags::ACCURATE_BBOXES)?;
+        // Annotation and selection geometry should follow the font's nominal
+        // ascender/descender box, not the outline of whichever character
+        // happens to be on a line. MuPDF's accurate boxes are ink bounds and
+        // therefore make otherwise-identical lines containing `g`, `A`, or
+        // punctuation different heights.
+        let text_page = display_list.to_text_page(TextPageFlags::PRESERVE_WHITESPACE)?;
 
         for block in text_page.blocks() {
             if block.r#type() != TextBlockType::Text {

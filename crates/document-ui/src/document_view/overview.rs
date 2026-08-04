@@ -287,23 +287,13 @@ impl DocumentView {
                     .max(bounds.size.height.as_f32() / GRID_OVERVIEW_BASE_THUMBNAIL_MAX_HEIGHT)
                     .clamp(1.0, 3.0);
                 let dot = px(underline_scale);
-                let gap = dot;
-                let step = dot + gap;
                 for (rect, color) in &overlays.note_underlines {
                     let note = overlay_bounds(*rect);
-                    let y = note.origin.y + note.size.height - dot - px(0.5);
-                    let right = note.origin.x + note.size.width;
-                    let mut x = note.origin.x;
-                    while x < right {
-                        let width = (right - x).min(dot);
+                    for segment in Self::dotted_underline_segments(note, dot) {
                         window.paint_quad(
-                            fill(
-                                Bounds::new(point(x, y), size(width, dot)),
-                                rgba(document_theme.note_color(*color)),
-                            )
-                            .corner_radii(Corners::all(dot / 2.0)),
+                            fill(segment, rgba(document_theme.note_color(*color)))
+                                .corner_radii(Corners::all(dot / 2.0)),
                         );
-                        x += step;
                     }
                 }
 

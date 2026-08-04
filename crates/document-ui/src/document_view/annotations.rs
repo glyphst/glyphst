@@ -1,7 +1,7 @@
 use super::*;
 
 impl DocumentView {
-    pub(super) fn refresh_semantic_annotations(&mut self) {
+    pub(super) fn refresh_annotation_geometry(&mut self) {
         let highlight_ranges = self
             .highlights
             .iter()
@@ -30,6 +30,80 @@ impl DocumentView {
             .collect::<Vec<_>>();
         for (ix, range) in note_ranges {
             self.notes[ix].rects = self.highlight_rects_for_range(range);
+        }
+
+        let glyphs = &self.glyphs;
+        let text_lines = &self.text_lines;
+        for highlight in self
+            .highlights
+            .iter_mut()
+            .filter(|highlight| highlight.semantic_range.is_none())
+        {
+            for rect in &mut highlight.rects {
+                *rect = Self::normalize_stored_annotation_rect(glyphs, text_lines, *rect);
+            }
+        }
+        for note in self
+            .notes
+            .iter_mut()
+            .filter(|note| note.semantic_range.is_none())
+        {
+            for rect in &mut note.rects {
+                *rect = Self::normalize_stored_annotation_rect(glyphs, text_lines, *rect);
+            }
+        }
+    }
+
+    pub(super) fn normalize_stored_annotation_rect(
+        glyphs: &[Glyph],
+        text_lines: &[TextLine],
+        stored: HighlightRect,
+    ) -> HighlightRect {
+        let stored_center_y = (stored.y0 + stored.y1) * 0.5;
+        let mut best: Option<(f32, f32, Rect)> = None;
+
+        for line in text_lines {
+            let Some(first) = glyphs.get(line.glyph_range.start) else {
+                continue;
+            };
+            if first.page_idx != stored.page_idx {
+                continue;
+            }
+
+            let horizontal_overlap =
+                (stored.x1.min(line.bounds.x1) - stored.x0.max(line.bounds.x0)).max(0.0);
+            if horizontal_overlap <= f32::EPSILON {
+                continue;
+            }
+
+            let mut selected_bounds: Option<Rect> = None;
+            for glyph in glyphs.get(line.glyph_range.clone()).into_iter().flatten() {
+                let glyph_rect = Self::glyph_line_rect(glyph);
+                let overlaps = glyph_rect.x1 > stored.x0 && glyph_rect.x0 < stored.x1;
+                if overlaps {
+                    selected_bounds = Some(match selected_bounds {
+                        Some(bounds) => Self::union_rect(bounds, glyph_rect),
+                        None => glyph_rect,
+                    });
+                }
+            }
+            let candidate = selected_bounds.unwrap_or(line.bounds);
+            let vertical_distance = ((candidate.y0 + candidate.y1) * 0.5 - stored_center_y).abs();
+            let score = (vertical_distance, -horizontal_overlap);
+            if best.as_ref().is_none_or(|(distance, inverse_overlap, _)| {
+                score.0 < *distance || (score.0 == *distance && score.1 < *inverse_overlap)
+            }) {
+                best = Some((score.0, score.1, candidate));
+            }
+        }
+
+        let Some((_, _, nominal)) = best else {
+            return stored;
+        };
+        HighlightRect {
+            y0: nominal.y0,
+            y1: nominal.y1,
+            ..stored
         }
     }
 
@@ -65,8 +139,8 @@ impl DocumentView {
             };
             self.highlights = highlights;
             self.notes = notes;
-            if self.capabilities.reflow && !self.glyphs.is_empty() {
-                self.refresh_semantic_annotations();
+            if !self.glyphs.is_empty() {
+                self.refresh_annotation_geometry();
             }
 
             let highlight_ids = self

@@ -289,6 +289,20 @@ impl LibraryStore {
         Ok(())
     }
 
+    pub(super) fn write_reader_session(&self, session: &ReaderSessionSnapshot) -> Result<()> {
+        let Some(database) = &self.database else {
+            return Ok(());
+        };
+        let write_txn = database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(UI_STATE_V1_TABLE)?;
+            let encoded = encode(&StoredReaderSessionV1::from(session))?;
+            table.insert(READER_SESSION_KEY, encoded.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
     pub(super) fn write_document_preferences(
         &self,
         preferences: &DocumentPreferences,

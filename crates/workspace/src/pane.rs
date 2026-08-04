@@ -39,7 +39,10 @@ use crate::{
         PreparedDocumentOpen, SynchronizedScrollDelta,
     },
     icons::{Icon, IconName},
-    library::{DocumentPosition, LibraryStore, normalize_path},
+    library::{
+        DocumentPosition, LibraryStore, ReaderPaneSession, ReaderPaneTree, ReaderSplitAxis,
+        ReaderTabKind, ReaderTabSession, normalize_path,
+    },
     new_tab::{NewTab, NewTabEvent},
     settings::{SettingsStore, TabBarVisibility, ui_rems},
     synchronized_tabs::{SynchronizedGroupId, SynchronizedGroupSummary},
@@ -127,6 +130,8 @@ pub(crate) enum Tab {
 
 pub(crate) struct LoadingDocumentView {
     path: PathBuf,
+    initial_position: DocumentPosition,
+    restore_tab_id: Option<u64>,
     focus_handle: FocusHandle,
     job_ids: Vec<DocumentTranslationJobId>,
     error: Option<SharedString>,
@@ -255,6 +260,10 @@ pub(crate) enum PaneEvent {
         job_id: DocumentTranslationJobId,
         result: std::result::Result<(), SharedString>,
     },
+    RestoredDocumentFinished {
+        session_tab_id: u64,
+        document_tab_id: Option<EntityId>,
+    },
     OpenSettings,
     AiPanelDismissed(EntityId),
     TabDrop {
@@ -343,6 +352,21 @@ pub(crate) struct Pane {
     context_menu_popup: Option<Entity<PopupMenu>>,
 }
 
+#[derive(Default)]
+struct RestoredPaneTabs {
+    tab_ids: Vec<(u64, EntityId)>,
+    pending_documents: usize,
+    missing_documents: usize,
+}
+
+pub(crate) struct RestoredPaneGroup {
+    pub(crate) pane_group: PaneGroup,
+    pub(crate) panes: Vec<(u64, Entity<Pane>)>,
+    pub(crate) tab_ids: Vec<(u64, EntityId, EntityId)>,
+    pub(crate) pending_documents: usize,
+    pub(crate) missing_documents: usize,
+}
+
 impl Pane {
     pub(crate) fn focus_handle(&self) -> FocusHandle {
         self.active_tab_focus_handle()
@@ -366,6 +390,205 @@ impl Pane {
             context_menu_position: None,
             context_menu_popup: None,
         }
+    }
+
+    fn session_snapshot(
+        &self,
+        pane_id: u64,
+        next_tab_id: &mut u64,
+        runtime_tab_ids: &mut HashMap<EntityId, u64>,
+        cx: &App,
+    ) -> ReaderPaneSession {
+        let mut tabs = Vec::with_capacity(self.tabs.len());
+        let mut active_tab = None;
+        for (tab_ix, tab) in self.tabs.iter().enumerate() {
+            *next_tab_id = next_tab_id.saturating_add(1);
+            let id = *next_tab_id;
+            runtime_tab_ids.insert(Self::tab_entity_id(tab), id);
+            if tab_ix == self.active_tab {
+                active_tab = Some(id);
+            }
+            let kind = match tab {
+                Tab::NewTab(_) => ReaderTabKind::NewTab,
+                Tab::LoadingDocument(loading) => {
+                    let loading = loading.read(cx);
+                    ReaderTabKind::Document {
+                        path: loading.path.clone(),
+                        position: loading.initial_position.clone(),
+                    }
+                }
+                Tab::Document(document_view) => {
+                    let document_view = document_view.read(cx);
+                    ReaderTabKind::Document {
+                        path: document_view.path().to_path_buf(),
+                        position: document_view.current_document_position(),
+                    }
+                }
+                Tab::Keymap(_) => ReaderTabKind::Keymap,
+            };
+            tabs.push(ReaderTabSession { id, kind });
+        }
+        ReaderPaneSession {
+            id: pane_id,
+            tabs,
+            active_tab,
+        }
+    }
+
+    fn restore_tabs(
+        &mut self,
+        session: &ReaderPaneSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> RestoredPaneTabs {
+        let mut restored = RestoredPaneTabs::default();
+        for tab in &session.tabs {
+            let runtime_tab = match &tab.kind {
+                ReaderTabKind::NewTab => Some(self.create_new_tab(window, cx)),
+                ReaderTabKind::Keymap => Some(self.create_keymap_tab(window, cx)),
+                ReaderTabKind::Document { path, position } => {
+                    if !path.exists() || !Self::is_supported_document_path(path) {
+                        restored.missing_documents += 1;
+                        None
+                    } else {
+                        match self.append_restored_document(
+                            tab.id,
+                            path.clone(),
+                            position.clone(),
+                            window,
+                            cx,
+                        ) {
+                            Ok(tab) => {
+                                restored.pending_documents += 1;
+                                Some(tab)
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "failed to restore document {}: {error:#}",
+                                    path.display()
+                                );
+                                restored.missing_documents += 1;
+                                None
+                            }
+                        }
+                    }
+                }
+            };
+            let Some(runtime_tab) = runtime_tab else {
+                continue;
+            };
+            let runtime_id = Self::tab_entity_id(&runtime_tab);
+            self.tabs.push(runtime_tab);
+            restored.tab_ids.push((tab.id, runtime_id));
+        }
+
+        if self.tabs.is_empty() {
+            let tab = self.create_new_tab(window, cx);
+            self.tabs.push(tab);
+        }
+        self.active_tab = session
+            .active_tab
+            .and_then(|active| {
+                restored
+                    .tab_ids
+                    .iter()
+                    .position(|(session_id, _)| *session_id == active)
+            })
+            .unwrap_or(0)
+            .min(self.tabs.len().saturating_sub(1));
+        self.sync_active_focus_handle();
+        cx.notify();
+        restored
+    }
+
+    fn append_restored_document(
+        &mut self,
+        session_tab_id: u64,
+        path: PathBuf,
+        position: DocumentPosition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Tab> {
+        let path = normalize_path(&path);
+        if !path.exists() {
+            bail!("document no longer exists: {}", path.display());
+        }
+        if !Self::is_supported_document_path(&path) {
+            bail!("unsupported file type: {}", path.display());
+        }
+        let (behavior, document_theme) = {
+            let store = cx.global::<SettingsStore>();
+            (store.settings.behavior, store.resolved_theme)
+        };
+        let annotations = DocumentAnnotations {
+            highlights: cx.global::<LibraryStore>().highlights_for(&path),
+            notes: cx.global::<LibraryStore>().notes_for(&path),
+        };
+        let target_language = cx
+            .global::<LibraryStore>()
+            .document_target_language(&path)
+            .unwrap_or_else(|| {
+                cx.global::<SettingsStore>()
+                    .settings
+                    .translation
+                    .target_language
+                    .clone()
+            });
+        let epub_preferences = cx
+            .global::<LibraryStore>()
+            .epub_reader_preferences(&path)
+            .unwrap_or_else(|| cx.global::<SettingsStore>().settings.reading);
+        let options = DocumentOpenOptions {
+            initial_position: Some(position.clone()),
+            annotations,
+            target_language,
+            epub_preferences,
+            rotation: cx.global::<LibraryStore>().document_rotation(&path),
+            document_translation_jobs: self.document_translation_jobs.clone(),
+        };
+        let loading = cx.new(|_| LoadingDocumentView {
+            path: path.clone(),
+            initial_position: position.clone(),
+            restore_tab_id: Some(session_tab_id),
+            focus_handle: self.focus_handle.clone(),
+            job_ids: Vec::new(),
+            error: None,
+            _task: None,
+        });
+        let loading_id = loading.entity_id();
+        let tab = Tab::LoadingDocument(loading.clone());
+        self.register_tab_focus_handle(&tab, loading.read(cx).focus_handle.clone());
+        self.subscribe_to_tab(&tab, window, cx);
+
+        let prepare_path = path.clone();
+        let prepare_preferences = epub_preferences;
+        let loading_started_at = Instant::now();
+        let minimum_loading_duration = debug_file_open_min_duration();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    DocumentView::prepare_open(
+                        prepare_path,
+                        prepare_preferences,
+                        document_theme.page_gap,
+                    )
+                    .map_err(|error| format!("{error:#}"))
+                })
+                .await;
+            if let Some(remaining) = remaining_file_open_min_duration(
+                minimum_loading_duration,
+                loading_started_at.elapsed(),
+            ) {
+                cx.background_executor().timer(remaining).await;
+            }
+            _ = this.update_in(cx, |this, window, cx| {
+                this.finish_document_open(
+                    loading_id, path, position, behavior, options, result, window, cx,
+                );
+            });
+        });
+        loading.update(cx, |loading, _| loading._task = Some(task));
+        Ok(tab)
     }
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -796,6 +1019,8 @@ impl Pane {
         };
         let loading = cx.new(|_cx| LoadingDocumentView {
             path: path.clone(),
+            initial_position: initial_position.clone(),
+            restore_tab_id: None,
             focus_handle: self.focus_handle.clone(),
             job_ids: job_id.into_iter().collect(),
             error: None,
@@ -902,11 +1127,20 @@ impl Pane {
             .borrow_mut()
             .remove(&Self::tab_entity_id(&removed_tab));
         if let Tab::LoadingDocument(loading) = &removed_tab {
-            let job_ids = loading.read(cx).job_ids.clone();
+            let (job_ids, restore_tab_id) = {
+                let loading = loading.read(cx);
+                (loading.job_ids.clone(), loading.restore_tab_id)
+            };
             for job_id in job_ids {
                 cx.emit(PaneEvent::DocumentOpenFinished {
                     job_id,
                     result: Err("Opening the translated document was cancelled.".into()),
+                });
+            }
+            if let Some(session_tab_id) = restore_tab_id {
+                cx.emit(PaneEvent::RestoredDocumentFinished {
+                    session_tab_id,
+                    document_tab_id: None,
                 });
             }
         }
@@ -1064,8 +1298,11 @@ impl Pane {
         let Some(tab_ix) = self.tab_ix_for_entity_id(loading_id) else {
             return;
         };
-        let job_ids = match self.tabs.get(tab_ix) {
-            Some(Tab::LoadingDocument(loading)) => loading.read(cx).job_ids.clone(),
+        let (job_ids, restore_tab_id) = match self.tabs.get(tab_ix) {
+            Some(Tab::LoadingDocument(loading)) => {
+                let loading = loading.read(cx);
+                (loading.job_ids.clone(), loading.restore_tab_id)
+            }
             _ => return,
         };
         let prepared = match result {
@@ -1080,8 +1317,15 @@ impl Pane {
                 if let Some(Tab::LoadingDocument(loading)) = self.tabs.get(tab_ix) {
                     loading.update(cx, |loading, cx| {
                         loading.error = Some(error.into());
+                        loading.restore_tab_id = None;
                         loading._task = None;
                         cx.notify();
+                    });
+                }
+                if let Some(session_tab_id) = restore_tab_id {
+                    cx.emit(PaneEvent::RestoredDocumentFinished {
+                        session_tab_id,
+                        document_tab_id: None,
                     });
                 }
                 return;
@@ -1104,8 +1348,15 @@ impl Pane {
                 if let Some(Tab::LoadingDocument(loading)) = self.tabs.get(tab_ix) {
                     loading.update(cx, |loading, cx| {
                         loading.error = Some(format!("{error:#}").into());
+                        loading.restore_tab_id = None;
                         loading._task = None;
                         cx.notify();
+                    });
+                }
+                if let Some(session_tab_id) = restore_tab_id {
+                    cx.emit(PaneEvent::RestoredDocumentFinished {
+                        session_tab_id,
+                        document_tab_id: None,
                     });
                 }
                 return;
@@ -1118,6 +1369,7 @@ impl Pane {
         });
         self.subscribe_to_document_view(&document_view, window, cx);
 
+        let document_tab_id = document_view.entity_id();
         let tab = Tab::Document(document_view);
         let replaced_tab = std::mem::replace(&mut self.tabs[tab_ix], tab.clone());
         self.tab_bounds
@@ -1136,6 +1388,12 @@ impl Pane {
             cx.emit(PaneEvent::DocumentOpenFinished {
                 job_id,
                 result: Ok(()),
+            });
+        }
+        if let Some(session_tab_id) = restore_tab_id {
+            cx.emit(PaneEvent::RestoredDocumentFinished {
+                session_tab_id,
+                document_tab_id: Some(document_tab_id),
             });
         }
         cx.notify();
@@ -1940,10 +2198,69 @@ pub(crate) struct PaneGroup {
     root: Member,
 }
 
+pub(crate) struct PaneGroupSessionSnapshot {
+    pub(crate) pane_tree: ReaderPaneTree,
+    pub(crate) active_pane: u64,
+    pub(crate) runtime_tab_ids: HashMap<EntityId, u64>,
+}
+
 impl PaneGroup {
     pub(crate) fn new(pane: Entity<Pane>) -> Self {
         Self {
             root: Member::Pane(pane),
+        }
+    }
+
+    pub(crate) fn session_snapshot(
+        &self,
+        active_pane: &Entity<Pane>,
+        cx: &App,
+    ) -> PaneGroupSessionSnapshot {
+        let mut next_pane_id = 0_u64;
+        let mut next_tab_id = 0_u64;
+        let mut active_pane_id = 0_u64;
+        let mut runtime_tab_ids = HashMap::new();
+        let pane_tree = self.root.session_snapshot(
+            active_pane,
+            &mut next_pane_id,
+            &mut next_tab_id,
+            &mut active_pane_id,
+            &mut runtime_tab_ids,
+            cx,
+        );
+        PaneGroupSessionSnapshot {
+            pane_tree,
+            active_pane: active_pane_id,
+            runtime_tab_ids,
+        }
+    }
+
+    pub(crate) fn restore(
+        session: &ReaderPaneTree,
+        document_translation_jobs: Entity<DocumentTranslationJobManager>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> RestoredPaneGroup {
+        let mut panes = Vec::new();
+        let mut tab_ids = Vec::new();
+        let mut pending_documents = 0;
+        let mut missing_documents = 0;
+        let root = Member::restore(
+            session,
+            &document_translation_jobs,
+            &mut panes,
+            &mut tab_ids,
+            &mut pending_documents,
+            &mut missing_documents,
+            window,
+            cx,
+        );
+        RestoredPaneGroup {
+            pane_group: Self { root },
+            panes,
+            tab_ids,
+            pending_documents,
+            missing_documents,
         }
     }
 
@@ -2142,6 +2459,147 @@ struct PaneRenderResult {
 }
 
 impl Member {
+    #[allow(clippy::too_many_arguments)]
+    fn session_snapshot(
+        &self,
+        active_pane: &Entity<Pane>,
+        next_pane_id: &mut u64,
+        next_tab_id: &mut u64,
+        active_pane_id: &mut u64,
+        runtime_tab_ids: &mut HashMap<EntityId, u64>,
+        cx: &App,
+    ) -> ReaderPaneTree {
+        match self {
+            Self::Pane(pane) => {
+                *next_pane_id = next_pane_id.saturating_add(1);
+                let pane_id = *next_pane_id;
+                if pane == active_pane {
+                    *active_pane_id = pane_id;
+                }
+                ReaderPaneTree::Pane(pane.read(cx).session_snapshot(
+                    pane_id,
+                    next_tab_id,
+                    runtime_tab_ids,
+                    cx,
+                ))
+            }
+            Self::Axis(axis) => {
+                let children = axis
+                    .members
+                    .iter()
+                    .map(|member| {
+                        member.session_snapshot(
+                            active_pane,
+                            next_pane_id,
+                            next_tab_id,
+                            active_pane_id,
+                            runtime_tab_ids,
+                            cx,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let sizes = axis.state.read(cx).sizes();
+                let total = sizes.iter().map(|size| size.as_f32()).sum::<f32>();
+                let ratios =
+                    if sizes.len() == children.len() && total.is_finite() && total > f32::EPSILON {
+                        sizes.iter().map(|size| size.as_f32() / total).collect()
+                    } else {
+                        vec![1.0 / children.len().max(1) as f32; children.len()]
+                    };
+                ReaderPaneTree::Split {
+                    axis: match axis.axis {
+                        Axis::Horizontal => ReaderSplitAxis::Horizontal,
+                        Axis::Vertical => ReaderSplitAxis::Vertical,
+                    },
+                    ratios,
+                    children,
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn restore(
+        session: &ReaderPaneTree,
+        document_translation_jobs: &Entity<DocumentTranslationJobManager>,
+        panes: &mut Vec<(u64, Entity<Pane>)>,
+        tab_ids: &mut Vec<(u64, EntityId, EntityId)>,
+        pending_documents: &mut usize,
+        missing_documents: &mut usize,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        match session {
+            ReaderPaneTree::Pane(pane_session) => {
+                let pane =
+                    cx.new(|cx| Pane::empty(cx.focus_handle(), document_translation_jobs.clone()));
+                let restored =
+                    pane.update(cx, |pane, cx| pane.restore_tabs(pane_session, window, cx));
+                let pane_entity_id = pane.entity_id();
+                tab_ids.extend(
+                    restored
+                        .tab_ids
+                        .into_iter()
+                        .map(|(session_id, tab_id)| (session_id, tab_id, pane_entity_id)),
+                );
+                *pending_documents += restored.pending_documents;
+                *missing_documents += restored.missing_documents;
+                panes.push((pane_session.id, pane.clone()));
+                Self::Pane(pane)
+            }
+            ReaderPaneTree::Split {
+                axis,
+                ratios,
+                children,
+            } if !children.is_empty() => {
+                let members = children
+                    .iter()
+                    .map(|child| {
+                        Self::restore(
+                            child,
+                            document_translation_jobs,
+                            panes,
+                            tab_ids,
+                            pending_documents,
+                            missing_documents,
+                            window,
+                            cx,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let axis = PaneAxis::new(
+                    match axis {
+                        ReaderSplitAxis::Horizontal => Axis::Horizontal,
+                        ReaderSplitAxis::Vertical => Axis::Vertical,
+                    },
+                    members,
+                    cx,
+                );
+                axis.state.update(cx, |state, cx| {
+                    state.restore_panel_ratios(ratios, cx);
+                });
+                Self::Axis(axis)
+            }
+            ReaderPaneTree::Split { .. } => {
+                let pane_session = ReaderPaneSession {
+                    id: 1,
+                    tabs: Vec::new(),
+                    active_tab: None,
+                };
+                Self::restore(
+                    &ReaderPaneTree::Pane(pane_session),
+                    document_translation_jobs,
+                    panes,
+                    tab_ids,
+                    pending_documents,
+                    missing_documents,
+                    window,
+                    cx,
+                )
+            }
+        }
+    }
+
     fn new_axis(
         old_pane: Entity<Pane>,
         new_pane: Entity<Pane>,
