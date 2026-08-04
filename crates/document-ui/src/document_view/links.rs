@@ -358,7 +358,6 @@ impl DocumentView {
                             line_idx,
                             block_idx,
                             font_size: ch.size(),
-                            color: ch.argb() & 0x00ff_ffff,
                             is_bold: ch.flags().contains(TextCharFlags::BOLD)
                                 || ch.font().is_some_and(|font| font.is_bold()),
                             inferred_space_after: false,

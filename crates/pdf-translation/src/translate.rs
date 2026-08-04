@@ -26,6 +26,8 @@ const MAX_UNIT_ATTEMPTS: usize = 3;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranslationUnit {
     pub id: String,
+    #[serde(default)]
+    pub page_index: usize,
     pub member_block_ids: Vec<String>,
     pub role: BlockRole,
     pub source_text: String,
@@ -374,6 +376,10 @@ pub struct TranslationQueueStats {
     pub peak_active_requests: usize,
     pub peak_active_complex_requests: usize,
     #[serde(default)]
+    pub peak_active_earliest_page_requests: usize,
+    #[serde(default)]
+    pub peak_active_later_page_requests: usize,
+    #[serde(default)]
     pub elapsed_ms: u64,
     #[serde(default)]
     pub total_request_latency_ms: u64,
@@ -384,6 +390,8 @@ pub struct TranslationQueueStats {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranslationFailureDiagnostic {
     pub id: String,
+    #[serde(default)]
+    pub phase: TranslationFailurePhase,
     pub reason: String,
     pub attempts: usize,
     pub retryable: bool,
@@ -401,6 +409,16 @@ pub struct TranslationFailureDiagnostic {
     pub rejected_output_excerpt: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationFailurePhase {
+    Ocr,
+    #[default]
+    Translation,
+    Layout,
+    Preview,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TranslationRunProgress {
     pub translated: usize,
@@ -413,6 +431,14 @@ pub struct TranslationRunProgress {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranslationRunSnapshot {
     pub resolved_units: Vec<TranslatedUnit>,
+    pub failures: Vec<TranslationFailureDiagnostic>,
+    pub progress: TranslationRunProgress,
+    pub queue: TranslationQueueStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranslationRunOutcome {
+    pub document: TranslatedDocument,
     pub failures: Vec<TranslationFailureDiagnostic>,
     pub progress: TranslationRunProgress,
     pub queue: TranslationQueueStats,
@@ -439,20 +465,69 @@ pub fn translate_document(
 }
 
 pub fn translate_document_resuming(
+    document: DocumentV1,
+    backend: &dyn TranslationBackend,
+    cancellation: &CancellationToken,
+    resumed_units: Vec<TranslatedUnit>,
+    on_update: impl FnMut(&TranslationRunSnapshot) -> Result<(), String>,
+) -> Result<TranslatedDocument, TranslationDocumentError> {
+    let outcome = translate_document_partial_resuming(
+        document,
+        backend,
+        cancellation,
+        resumed_units,
+        on_update,
+    )?;
+    if outcome.failures.is_empty() {
+        return Ok(outcome.document);
+    }
+
+    let retryable = outcome.failures.iter().any(|failure| failure.retryable);
+    Err(TranslationDocumentError {
+        message: format!(
+            "{} translation unit(s) remain unresolved after recovery; export is blocked",
+            outcome.failures.len()
+        ),
+        unresolved_unit_ids: outcome
+            .failures
+            .iter()
+            .map(|failure| failure.id.clone())
+            .collect(),
+        retryable,
+    })
+}
+
+pub fn translate_document_partial_resuming(
     mut document: DocumentV1,
     backend: &dyn TranslationBackend,
     cancellation: &CancellationToken,
     resumed_units: Vec<TranslatedUnit>,
     mut on_update: impl FnMut(&TranslationRunSnapshot) -> Result<(), String>,
-) -> Result<TranslatedDocument, TranslationDocumentError> {
+) -> Result<TranslationRunOutcome, TranslationDocumentError> {
     let started_at = Instant::now();
     enforce_unmapped_glyph_policy(&mut document);
     let units = build_translation_units(&document);
     let total = units.len();
     if total == 0 {
-        return Ok(TranslatedDocument {
-            document,
-            units: Vec::new(),
+        let snapshot = TranslationRunSnapshot {
+            resolved_units: Vec::new(),
+            failures: Vec::new(),
+            progress: TranslationRunProgress::default(),
+            queue: TranslationQueueStats::default(),
+        };
+        on_update(&snapshot).map_err(|message| TranslationDocumentError {
+            message,
+            unresolved_unit_ids: Vec::new(),
+            retryable: false,
+        })?;
+        return Ok(TranslationRunOutcome {
+            document: TranslatedDocument {
+                document,
+                units: Vec::new(),
+            },
+            failures: Vec::new(),
+            progress: TranslationRunProgress::default(),
+            queue: TranslationQueueStats::default(),
         });
     }
 
@@ -516,6 +591,7 @@ pub fn translate_document_resuming(
         let (sender, receiver) = mpsc::channel::<CompletedRequest>();
         let mut active = 0usize;
         let mut active_complex = 0usize;
+        let mut active_by_page = HashMap::<usize, usize>::new();
         let mut cancelled = false;
 
         while !pending.is_empty() || active > 0 {
@@ -524,17 +600,22 @@ pub fn translate_document_resuming(
                 pending.clear();
             }
             while !cancelled && active < MAX_ACTIVE_REQUESTS {
-                let Some(index) = next_dispatchable_request(&pending, active_complex) else {
+                let Some(index) =
+                    next_dispatchable_request(&pending, &active_by_page, active, active_complex)
+                else {
                     break;
                 };
                 let request = pending.remove(index).expect("pending request exists");
                 let is_complex = request.plan.complex;
+                let page_index = request.plan.page_index();
                 active += 1;
                 active_complex += usize::from(is_complex);
+                *active_by_page.entry(page_index).or_default() += 1;
                 queue.dispatched_requests += 1;
                 queue.peak_active_requests = queue.peak_active_requests.max(active);
                 queue.peak_active_complex_requests =
                     queue.peak_active_complex_requests.max(active_complex);
+                update_page_allocation_peaks(&mut queue, &active_by_page);
                 let sender = sender.clone();
                 scope.spawn(move || {
                     let request_started_at = Instant::now();
@@ -586,6 +667,13 @@ pub fn translate_document_resuming(
             };
             active -= 1;
             active_complex -= usize::from(completed.request.plan.complex);
+            let completed_page = completed.request.plan.page_index();
+            if let Some(count) = active_by_page.get_mut(&completed_page) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    active_by_page.remove(&completed_page);
+                }
+            }
             queue.completed_requests += 1;
             queue.total_request_latency_ms = queue
                 .total_request_latency_ms
@@ -628,32 +716,26 @@ pub fn translate_document_resuming(
     });
     scheduler_result?;
 
-    let unresolved = units
-        .iter()
-        .filter(|unit| !resolved.contains_key(&unit.id))
-        .map(|unit| unit.id.clone())
-        .collect::<Vec<_>>();
-    if !unresolved.is_empty() {
-        let retryable = unresolved
-            .iter()
-            .any(|id| failures.get(id).is_some_and(|failure| failure.retryable));
-        return Err(TranslationDocumentError {
-            message: format!(
-                "{} translation unit(s) remain unresolved after recovery; export is blocked",
-                unresolved.len()
-            ),
-            unresolved_unit_ids: unresolved,
-            retryable,
-        });
-    }
-
+    let snapshot = translation_snapshot(
+        &units,
+        &resolved,
+        &failures,
+        &retrying_ids,
+        &cached_ids,
+        queue_snapshot(&queue, started_at),
+    );
     let translated = units
         .iter()
         .filter_map(|unit| resolved.remove(&unit.id))
         .collect();
-    Ok(TranslatedDocument {
-        document,
-        units: translated,
+    Ok(TranslationRunOutcome {
+        document: TranslatedDocument {
+            document,
+            units: translated,
+        },
+        failures: snapshot.failures,
+        progress: snapshot.progress,
+        queue: snapshot.queue,
     })
 }
 
@@ -661,6 +743,16 @@ pub fn translate_document_resuming(
 struct PlannedRequest {
     units: Vec<TranslationUnit>,
     complex: bool,
+}
+
+impl PlannedRequest {
+    fn page_index(&self) -> usize {
+        self.units
+            .iter()
+            .map(|unit| unit.page_index)
+            .min()
+            .unwrap_or_default()
+    }
 }
 
 struct PendingRequest {
@@ -818,6 +910,7 @@ fn process_completed_request(
                     unit.id.clone(),
                     TranslationFailureDiagnostic {
                         id: unit.id.clone(),
+                        phase: TranslationFailurePhase::Translation,
                         reason: failure.message,
                         attempts: attempt,
                         retryable: failure.retryable,
@@ -1005,13 +1098,63 @@ fn retry_delay(attempt: usize, retry_after: Option<Duration>) -> Duration {
 
 fn next_dispatchable_request(
     pending: &VecDeque<PendingRequest>,
+    active_by_page: &HashMap<usize, usize>,
+    active: usize,
     active_complex: usize,
 ) -> Option<usize> {
     let now = Instant::now();
-    pending.iter().position(|request| {
+    let dispatchable = |request: &PendingRequest| {
         request.ready_at <= now
             && (!request.plan.complex || active_complex < MAX_ACTIVE_COMPLEX_REQUESTS)
-    })
+    };
+    let earliest_page = pending
+        .iter()
+        .map(|request| request.plan.page_index())
+        .chain(active_by_page.keys().copied())
+        .min()?;
+    let earliest_active = active_by_page
+        .get(&earliest_page)
+        .copied()
+        .unwrap_or_default();
+    let later_active = active.saturating_sub(earliest_active);
+    let earliest = pending
+        .iter()
+        .position(|request| request.plan.page_index() == earliest_page && dispatchable(request));
+    let later = pending
+        .iter()
+        .position(|request| request.plan.page_index() != earliest_page && dispatchable(request));
+
+    if earliest_active < 4 && earliest.is_some() {
+        return earliest;
+    }
+    if later_active < 2 && later.is_some() {
+        return later;
+    }
+
+    // Keep the queue work-conserving when one reservation has no ready work,
+    // including while a page-priority retry is waiting for its backoff.
+    earliest.or(later)
+}
+
+fn update_page_allocation_peaks(
+    queue: &mut TranslationQueueStats,
+    active_by_page: &HashMap<usize, usize>,
+) {
+    let Some(earliest_page) = active_by_page.keys().copied().min() else {
+        return;
+    };
+    let earliest = active_by_page
+        .get(&earliest_page)
+        .copied()
+        .unwrap_or_default();
+    let later = active_by_page
+        .iter()
+        .filter(|(page, _)| **page != earliest_page)
+        .map(|(_, count)| *count)
+        .sum();
+    queue.peak_active_earliest_page_requests =
+        queue.peak_active_earliest_page_requests.max(earliest);
+    queue.peak_active_later_page_requests = queue.peak_active_later_page_requests.max(later);
 }
 
 fn next_ready_delay(pending: &VecDeque<PendingRequest>, active_complex: usize) -> Option<Duration> {

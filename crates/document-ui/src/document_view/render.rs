@@ -109,9 +109,17 @@ impl Render for DocumentView {
             };
             container.child(card)
         });
+        self.update_translation_hover_animation(
+            cx.global::<SettingsStore>().settings.behavior.reduce_motion,
+            window,
+        );
+        let translation_session_panel = self.render_translation_session_panel(window, cx);
+        let translation_hover_tools = self.render_translation_hover_tools(cx);
 
         div()
+            .id("document-view-root")
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .cursor_text()
@@ -138,6 +146,23 @@ impl Render for DocumentView {
                 "DocumentView"
             })
             .track_focus(&self.focus_handle)
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered
+                    && this.translation_view_role == TranslationViewRole::Translation
+                    && this.translation_pair_active
+                {
+                    this.schedule_translation_hover_clear(cx);
+                }
+            }))
+            .on_drag_move(cx.listener(
+                |this, event: &DragMoveEvent<TranslationPanelDragToken>, _, cx| {
+                    if event.drag(cx).0 == this.doc_id
+                        && this.update_translation_panel_drag(event.event.position, cx)
+                    {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             .on_action(cx.listener(|this, _: &Undo, _, cx| {
                 this.undo_document_edit(cx);
             }))
@@ -150,17 +175,13 @@ impl Render for DocumentView {
             .on_action(cx.listener(|this, _: &TranslateSelection, _, cx| {
                 this.close_context_menu(cx);
                 this.translate_selection(
-                    this.selection_bounds()
-                        .and_then(|(start, end)| {
-                            this.highlight_bounds_for_range(start..end + 1)
-                                .last()
-                                .map(|bounds| {
-                                    point(
-                                        bounds.right() + px(4.0),
-                                        bounds.bottom() + px(4.0),
-                                    )
-                                })
-                        }),
+                    this.selection_bounds().and_then(|(start, end)| {
+                        this.highlight_bounds_for_range(start..end + 1)
+                            .last()
+                            .map(|bounds| {
+                                point(bounds.right() + px(4.0), bounds.bottom() + px(4.0))
+                            })
+                    }),
                     false,
                     cx,
                 );
@@ -173,22 +194,19 @@ impl Render for DocumentView {
             .when(
                 self.document_translation_jobs
                     .read(cx)
-                    .has_job_for_source(&self.path),
+                    .has_active_session_for_source(&self.path)
+                    || self
+                        .document_translation_jobs
+                        .read(cx)
+                        .has_job_for_source(&self.path),
                 |this| {
-                this.on_action(
-                    cx.listener(|this, _: &CancelDocumentTranslation, _, cx| {
+                    this.on_action(cx.listener(|this, _: &CancelDocumentTranslation, _, cx| {
                         this.cancel_document_translation(cx);
-                    }),
-                )
+                    }))
                 },
             )
             .on_action(cx.listener(|this, _: &TogglePinnedTranslation, _, cx| {
                 this.toggle_pinned_translation(cx);
-            }))
-            .on_action(cx.listener(|this, _: &OpenTranslationSplit, _, cx| {
-                if this.capabilities.translation_split {
-                    this.open_translation_split(cx);
-                }
             }))
             .on_action(cx.listener(|this, _: &ToggleRegionSelection, _, cx| {
                 this.toggle_region_selection(cx);
@@ -439,6 +457,10 @@ impl Render for DocumentView {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if this.update_translation_panel_drag(event.position, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
                 if let Some(mut drag) = this.region_drag {
                     if !event.dragging() {
                         this.region_drag = None;
@@ -471,12 +493,17 @@ impl Render for DocumentView {
                 if !this.dragging {
                     this.update_hovered_link(event.position, cx);
                     this.update_hovered_note(event.position, cx);
-                    this.set_hovered_text_block(
-                        this.glyph_at_screen(event.position)
-                            .and_then(|glyph_ix| this.glyphs.get(glyph_ix))
-                            .map(|glyph| glyph.block_idx),
-                        cx,
-                    );
+                    if this.translation_view_role == TranslationViewRole::Translation
+                        && this.translation_pair_active
+                    {
+                        if let Some(region_id) =
+                            this.translation_hover_region_at_screen(event.position)
+                        {
+                            this.set_hovered_translation_region(region_id, cx);
+                        } else {
+                            this.schedule_translation_hover_clear(cx);
+                        }
+                    }
                     return;
                 }
 
@@ -485,7 +512,11 @@ impl Render for DocumentView {
                     this.pending_selection_anchor = None;
                     this.update_hovered_link(event.position, cx);
                     this.update_hovered_note(event.position, cx);
-                    this.set_hovered_text_block(None, cx);
+                    if this.translation_view_role == TranslationViewRole::Translation
+                        && this.translation_pair_active
+                    {
+                        this.schedule_translation_hover_clear(cx);
+                    }
                     return;
                 }
 
@@ -497,13 +528,16 @@ impl Render for DocumentView {
                     } else if let Some(anchor) = this.pending_selection_anchor {
                         this.selection = Some(Selection { anchor, head: ix });
                     }
-                    this.emit_linked_selection(cx);
                     cx.notify();
                 }
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                    if this.finish_translation_panel_drag(event.position, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if let Some(mut drag) = this.region_drag.take() {
                         if let Some(current) = this.screen_to_document(event.position) {
                             drag.current = current;
@@ -525,11 +559,17 @@ impl Render for DocumentView {
                         }
                         cx.notify();
                     }
-                    if this.pinned_translation.is_some() && this.selected_text().is_some()
-                    {
+                    if this.pinned_translation.is_some() && this.selected_text().is_some() {
                         this.translate_selection(None, true, cx);
                     }
-                    this.emit_linked_selection(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                    if this.finish_translation_panel_drag(event.position, cx) {
+                        cx.stop_propagation();
+                    }
                 }),
             )
             .on_mouse_up(
@@ -566,7 +606,7 @@ impl Render for DocumentView {
                                                 .expect("failed to render PDF")
                                             })
                                         },
-                                        move |_, paint_data, window, cx| {
+                                        move |_, paint_data, window, _cx| {
                                             for page in paint_data.pages {
                                                 window
                                                     .paint_quad(fill(page.bounds, rgb(theme.page)));
@@ -580,35 +620,6 @@ impl Render for DocumentView {
                                                         0,
                                                         false,
                                                     );
-                                                }
-                                            }
-
-                                            for overlay in paint_data.translated_text_overlays {
-                                                window.paint_quad(fill(
-                                                    overlay.mask,
-                                                    rgb(theme.page),
-                                                ));
-                                                let mut y = overlay.bounds.top();
-                                                for line in &overlay.prepared.lines {
-                                                    if y >= overlay.bounds.bottom() {
-                                                        break;
-                                                    }
-                                                    if let Err(error) = line.as_ref().paint(
-                                                        point(overlay.bounds.left(), y),
-                                                        overlay.prepared.line_height,
-                                                        TextAlign::Left,
-                                                        Some(overlay.bounds),
-                                                        window,
-                                                        cx,
-                                                    ) {
-                                                        eprintln!(
-                                                            "failed to paint translated PDF text: {error:#}"
-                                                        );
-                                                        break;
-                                                    }
-                                                    y += line
-                                                        .size(overlay.prepared.line_height)
-                                                        .height;
                                                 }
                                             }
 
@@ -631,9 +642,9 @@ impl Render for DocumentView {
 
                                             for (note, color) in paint_data.note_underlines {
                                                 let dot = px(3.0);
-                                                for segment in Self::dotted_underline_segments(
-                                                    note, dot,
-                                                ) {
+                                                for segment in
+                                                    Self::dotted_underline_segments(note, dot)
+                                                {
                                                     window.paint_quad(
                                                         fill(
                                                             segment,
@@ -657,43 +668,49 @@ impl Render for DocumentView {
                                             for highlight in paint_data.active_search_highlights {
                                                 window.paint_quad(fill(
                                                     highlight,
-                                                    ui_theme
-                                                        .primary
-                                                        .opacity(0x99 as f32 / 255.0),
+                                                    ui_theme.primary.opacity(0x99 as f32 / 255.0),
                                                 ));
                                             }
 
                                             for highlight in paint_data.link_highlights {
                                                 window.paint_quad(fill(
                                                     highlight,
-                                                    ui_theme
-                                                        .primary
-                                                        .opacity(0x33 as f32 / 255.0),
+                                                    ui_theme.primary.opacity(0x33 as f32 / 255.0),
+                                                ));
+                                            }
+
+                                            for highlight in
+                                                paint_data.failed_translation_highlights
+                                            {
+                                                window.paint_quad(fill(
+                                                    highlight,
+                                                    ui_theme.warning.opacity(0x22 as f32 / 255.0),
+                                                ));
+                                                window.paint_quad(fill(
+                                                    Bounds::new(
+                                                        highlight.origin,
+                                                        size(px(2.0), highlight.size.height),
+                                                    ),
+                                                    ui_theme.warning.opacity(0xdd as f32 / 255.0),
                                                 ));
                                             }
 
                                             for highlight in paint_data.linked_hover_highlights {
-                                                window.paint_quad(fill(
-                                                    highlight,
-                                                    ui_theme
-                                                        .primary
-                                                        .opacity(0x44 as f32 / 255.0),
-                                                ));
-                                            }
-
-                                            for highlight in paint_data.linked_selection_highlights {
-                                                window.paint_quad(fill(
-                                                    highlight,
-                                                    ui_theme
-                                                        .primary
-                                                        .opacity(0x66 as f32 / 255.0),
-                                                ));
+                                                window.paint_quad(
+                                                    fill(
+                                                        highlight.bounds,
+                                                        ui_theme.primary.opacity(
+                                                            (0x44 as f32 / 255.0)
+                                                                * highlight.opacity,
+                                                        ),
+                                                    )
+                                                    .corner_radii(Corners::all(px(5.0))),
+                                                );
                                             }
 
                                             for border in paint_data.selected_highlight_borders {
-                                                let color = ui_theme
-                                                    .primary
-                                                    .opacity(0xdd as f32 / 255.0);
+                                                let color =
+                                                    ui_theme.primary.opacity(0xdd as f32 / 255.0);
                                                 let thickness = px(1.0);
                                                 window.paint_quad(fill(
                                                     Bounds::new(
@@ -743,15 +760,11 @@ impl Render for DocumentView {
                                             for region in paint_data.region_overlays {
                                                 window.paint_quad(fill(
                                                     region,
-                                                    ui_theme
-                                                        .primary
-                                                        .opacity(0x33 as f32 / 255.0),
+                                                    ui_theme.primary.opacity(0x33 as f32 / 255.0),
                                                 ));
                                                 window.paint_quad(outline(
                                                     region,
-                                                    ui_theme
-                                                        .primary
-                                                        .opacity(0xee as f32 / 255.0),
+                                                    ui_theme.primary.opacity(0xee as f32 / 255.0),
                                                     BorderStyle::Solid,
                                                 ));
                                             }
@@ -803,6 +816,8 @@ impl Render for DocumentView {
             })
             .when_some(translation_popup, |this, popup| this.child(popup))
             .when_some(pinned_translation, |this, pinned| this.child(pinned))
+            .when_some(translation_session_panel, |this, panel| this.child(panel))
+            .when_some(translation_hover_tools, |this, tools| this.child(tools))
             .when_some(self.notes_palette.clone(), |this, palette| {
                 this.child(Self::render_centered_overlay(
                     palette,

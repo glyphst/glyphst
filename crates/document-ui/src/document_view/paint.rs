@@ -32,34 +32,46 @@ impl DocumentView {
             .collect()
     }
 
-    fn assemble_paint_data(&mut self, pages: Vec<PaintPage>, window: &mut Window) -> PaintData {
+    fn assemble_paint_data(
+        &mut self,
+        pages: Vec<PaintPage>,
+        reduce_motion: bool,
+        window: &mut Window,
+    ) -> PaintData {
         let (highlight_overlays, selected_highlight_borders) = self.highlight_overlays();
         let note_underlines = self.note_underlines();
         let selection_highlights = self.selection_highlights();
         let (search_highlights, active_search_highlights) = self.search_highlights();
         let link_highlights = self.link_highlights();
-        let linked_hover_highlights = self.external_block_highlights(self.external_hovered_block);
-        let linked_selection_highlights =
-            self.external_block_highlights(self.external_selected_block);
+        let linked_hover_highlights = self.translation_hover_highlights(reduce_motion, window);
+        let failed_translation_highlights = if translation_toolbar_enabled(
+            self.translation_view_role,
+            self.translation_pair_active,
+        ) {
+            self.translation_failed_hover_regions
+                .iter()
+                .flat_map(|region_id| self.translation_hover_region_highlights(region_id))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let now = Instant::now();
         self.diff_flashes
             .retain(|flash| now.saturating_duration_since(flash.started_at) < DIFF_FLASH_DURATION);
         let diff_flash_overlays = self.diff_flash_overlays(now);
-        let translated_text_overlays = self.translated_text_overlays(window);
         let region_overlays = self
             .active_region_reference()
             .map_or_else(Vec::new, |reference| self.region_overlay_bounds(&reference));
 
         PaintData {
             pages,
-            translated_text_overlays,
             diff_flash_overlays,
             highlight_overlays,
             selected_highlight_borders,
             note_underlines,
             link_highlights,
             linked_hover_highlights,
-            linked_selection_highlights,
+            failed_translation_highlights,
             selection_highlights,
             search_highlights,
             active_search_highlights,
@@ -67,158 +79,64 @@ impl DocumentView {
         }
     }
 
-    pub(super) fn translated_text_overlays(
+    fn translation_hover_highlights(
         &mut self,
+        reduce_motion: bool,
         window: &mut Window,
-    ) -> Vec<TranslatedTextOverlay> {
-        if self.view_language != DocumentViewLanguage::Translated {
-            return Vec::new();
-        }
-        self.translated_text_layout_frame = self.translated_text_layout_frame.wrapping_add(1);
-        let frame = self.translated_text_layout_frame;
-        let font = window.text_style().font();
-        let translated_blocks = self
-            .page_block_ranges
-            .iter()
-            .enumerate()
-            .filter(|(page_idx, _)| {
-                self.page_image_bounds
-                    .get(*page_idx)
-                    .is_some_and(Option::is_some)
-            })
-            .flat_map(|(_, range)| &self.text_blocks[range.clone()])
-            .filter_map(|block| self.translated_blocks.get(&block.id))
-            .cloned()
-            .collect::<Vec<_>>();
-        let overlays = translated_blocks
-            .iter()
-            .filter_map(|block| {
-                let image_bounds = *self
-                    .page_image_bounds
-                    .get(block.source.page_idx)
-                    .and_then(Option::as_ref)?;
-                let bounds = self.pdf_rect_to_screen(
-                    block.source.page_idx,
-                    block.source.bounds,
-                    image_bounds,
-                );
-                let scale = bounds.size.height.as_f32()
-                    / (block.source.bounds.y1 - block.source.bounds.y0).max(1.0);
-                let padding = px(1.0);
-                let font_size = px((block.source.font_size * scale * 0.92).max(6.0));
-                let key = TranslatedTextLayoutKey {
-                    block_id: block.source.id,
-                    text: block.text.clone().into(),
-                    font: font.clone(),
-                    color: block.source.color,
-                    font_size_bits: font_size.as_f32().to_bits(),
-                    width_bits: bounds.size.width.as_f32().to_bits(),
-                    height_bits: bounds.size.height.as_f32().to_bits(),
-                };
-                let prepared = if let Some(cached) = self.translated_text_layouts.get_mut(&key) {
-                    cached.last_used_frame = frame;
-                    cached.prepared.clone()
-                } else {
-                    let prepared = Arc::new(Self::prepare_translated_text(
-                        block.text.clone().into(),
-                        font.clone(),
-                        block.source.color,
-                        font_size,
-                        bounds,
-                        window,
-                    )?);
-                    self.translated_text_layouts.insert(
-                        key,
-                        CachedTranslatedTextLayout {
-                            prepared: prepared.clone(),
-                            last_used_frame: frame,
-                        },
-                    );
-                    prepared
-                };
-                Some(TranslatedTextOverlay {
-                    mask: Bounds::new(
-                        point(bounds.left() - padding, bounds.top() - padding),
-                        size(
-                            bounds.size.width + padding * 2.0,
-                            bounds.size.height + padding * 2.0,
-                        ),
-                    ),
-                    bounds,
-                    prepared,
-                })
-            })
-            .collect::<Vec<_>>();
-        self.prune_translated_text_layouts(frame);
-        overlays
+    ) -> Vec<TranslationHoverHighlight> {
+        self.update_translation_hover_animation(reduce_motion, window)
+            .into_iter()
+            .collect()
     }
 
-    fn prepare_translated_text(
-        text: SharedString,
-        font: Font,
-        color: u32,
-        requested_font_size: Pixels,
-        bounds: Bounds<Pixels>,
+    pub(super) fn update_translation_hover_animation(
+        &mut self,
+        reduce_motion: bool,
         window: &mut Window,
-    ) -> Option<PreparedTranslatedText> {
-        let mut font_size = requested_font_size;
-        for _ in 0..12 {
-            let run = TextRun {
-                len: text.len(),
-                font: font.clone(),
-                color: rgb(color).into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let lines = match window.text_system().shape_text(
-                text.clone(),
-                font_size,
-                &[run],
-                Some(bounds.size.width),
-                None,
-            ) {
-                Ok(lines) => lines,
-                Err(error) => {
-                    eprintln!("failed to shape translated PDF text: {error:#}");
-                    return None;
-                }
-            };
-            let line_height = font_size * 1.15;
-            let height: Pixels = lines.iter().map(|line| line.size(line_height).height).sum();
-            if height <= bounds.size.height || font_size <= px(6.0) {
-                return Some(PreparedTranslatedText {
-                    lines: lines.into_iter().map(Arc::new).collect(),
-                    line_height,
-                });
-            }
-            font_size = (font_size * 0.9).max(px(6.0));
+    ) -> Option<TranslationHoverHighlight> {
+        if !translation_pair_highlights_enabled(
+            self.translation_view_role,
+            self.translation_pair_active,
+        ) {
+            self.translation_hover_animation = None;
+            return None;
         }
-        None
-    }
-
-    fn prune_translated_text_layouts(&mut self, frame: u64) {
-        self.translated_text_layouts.retain(|_, cached| {
-            cached.last_used_frame == frame
-                || frame.saturating_sub(cached.last_used_frame) <= TRANSLATED_LAYOUT_KEEP_FRAMES
+        let region_id = match self.translation_view_role {
+            TranslationViewRole::Translation => self.hovered_translation_region.as_ref(),
+            TranslationViewRole::SourceMirror => self.external_hovered_translation_region.as_ref(),
+            TranslationViewRole::None => None,
+        }
+        .cloned();
+        let target = region_id.as_ref().and_then(|region_id| {
+            self.translation_hover_region_highlights(region_id)
+                .into_iter()
+                .reduce(|left, right| left.union(&right))
         });
-        if self.translated_text_layouts.len() <= MAX_CACHED_TRANSLATED_LAYOUTS {
-            return;
+        let now = Instant::now();
+        if let (Some(region_id), Some(target)) = (region_id, target) {
+            let animation = self
+                .translation_hover_animation
+                .get_or_insert_with(|| TranslationHoverAnimation::new(region_id.clone(), target));
+            animation.retarget(region_id, target, now, reduce_motion);
+        } else if let Some(animation) = self.translation_hover_animation.as_mut() {
+            // Keep the geometry after the fade completes. A later target can
+            // then retarget the existing box instead of recreating it at the
+            // destination and producing an instant disappear/reappear jump.
+            animation.fade_out(now, reduce_motion);
         }
 
-        let mut candidates = self
-            .translated_text_layouts
-            .iter()
-            .map(|(key, cached)| (key.clone(), cached.last_used_frame))
-            .collect::<Vec<_>>();
-        candidates.sort_by_key(|(_, last_used_frame)| *last_used_frame);
-        let remove_count = self
-            .translated_text_layouts
-            .len()
-            .saturating_sub(MAX_CACHED_TRANSLATED_LAYOUTS);
-        for (key, _) in candidates.into_iter().take(remove_count) {
-            self.translated_text_layouts.remove(&key);
+        let animation = self.translation_hover_animation.as_ref()?;
+        if animation.is_animating(now) {
+            window.request_animation_frame();
         }
+        let opacity = animation.opacity.value(now).clamp(0.0, 1.0);
+        if opacity <= 0.001 && !animation.opacity.is_animating(now) {
+            return None;
+        }
+        Some(TranslationHoverHighlight {
+            bounds: animation.bounds(now),
+            opacity,
+        })
     }
 
     fn presentation_scale_for_page(&self, page_idx: usize) -> f32 {
@@ -298,6 +216,7 @@ impl DocumentView {
                 bounds: image_bounds,
                 image,
             }],
+            cx.global::<SettingsStore>().settings.behavior.reduce_motion,
             window,
         )
     }
@@ -310,8 +229,15 @@ impl DocumentView {
         cx: &mut Context<Self>,
     ) -> Result<PaintData> {
         let viewport_width = bounds.size.width.as_f32().max(1.0);
+        let viewport_height = bounds.size.height.as_f32().max(1.0);
+        let viewport_changed = (self.viewport_width - viewport_width).abs() > 0.5
+            || (self.viewport_height - viewport_height).abs() > 0.5;
+        self.viewport_origin = bounds.origin;
         self.viewport_width = viewport_width;
-        self.viewport_height = bounds.size.height.as_f32().max(1.0);
+        self.viewport_height = viewport_height;
+        if viewport_changed {
+            self.translation_panel_viewport_changed();
+        }
         self.schedule_reflow_for_viewport(viewport_width, cx);
         self.base_scale = if self.capabilities.reflow {
             1.0
@@ -406,6 +332,10 @@ impl DocumentView {
             self.start_text_indexing(cx);
         }
 
-        Ok(self.assemble_paint_data(pages, window))
+        Ok(self.assemble_paint_data(
+            pages,
+            cx.global::<SettingsStore>().settings.behavior.reduce_motion,
+            window,
+        ))
     }
 }

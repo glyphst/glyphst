@@ -99,7 +99,9 @@ impl DocumentView {
         }
 
         let has_pending_render = self.pending_renders.iter().any(|pending| {
-            pending.key.page_idx == key.page_idx && pending.key.rotation == key.rotation
+            pending.key.page_idx == key.page_idx
+                && pending.key.source_revision == key.source_revision
+                && pending.key.rotation == key.rotation
         });
         let (page_width, _) = self.page_dimensions(key.page_idx);
         let render_scale = key.physical_width as f32 / page_width;
@@ -159,7 +161,9 @@ impl DocumentView {
             return;
         }
         if self.pending_renders.iter().any(|pending| {
-            pending.key.page_idx == key.page_idx && pending.key.rotation == key.rotation
+            pending.key.page_idx == key.page_idx
+                && pending.key.source_revision == key.source_revision
+                && pending.key.rotation == key.rotation
         }) {
             return;
         }
@@ -174,17 +178,24 @@ impl DocumentView {
         let source_page_width = page.width;
         let source_page_height = page.height;
         let (page_width, page_height) = Self::page_dimensions_for(page, key.rotation);
-        let cached_display_list = cx
-            .global_mut::<RenderCache>()
-            .display_list(self.doc_id, key.page_idx);
-        let render_session = self.render_session.clone();
+        let cached_display_list = cx.global_mut::<RenderCache>().display_list(
+            self.doc_id,
+            key.page_idx,
+            key.source_revision,
+        );
+        let (render_session, render_page_idx) = self
+            .page_render_sources
+            .get(&key.page_idx)
+            .filter(|source| source.revision == key.source_revision)
+            .map(|source| (source.render_session.clone(), 0))
+            .unwrap_or_else(|| (self.render_session.clone(), key.page_idx));
 
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     let display_list = match cached_display_list {
                         Some(display_list) => display_list,
-                        None => render_session.create_display_list(key.page_idx, page_bounds)?,
+                        None => render_session.create_display_list(render_page_idx, page_bounds)?,
                     };
                     let image = Self::render_page(
                         &display_list,
@@ -215,6 +226,7 @@ impl DocumentView {
                             cx.global_mut::<RenderCache>().insert_display_list(
                                 key.doc_id,
                                 key.page_idx,
+                                key.source_revision,
                                 display_list,
                             );
                             let previous_image = this.take_previous_render_for_diff(key, cx);
@@ -250,10 +262,14 @@ impl DocumentView {
         page_idx: usize,
         cx: &mut Context<Self>,
     ) -> Result<RetainedDisplayList> {
-        if let Some(display_list) = cx
-            .global_mut::<RenderCache>()
-            .display_list(self.doc_id, page_idx)
-        {
+        if let Some(display_list) = cx.global_mut::<RenderCache>().display_list(
+            self.doc_id,
+            page_idx,
+            self.page_render_sources
+                .get(&page_idx)
+                .map(|source| source.revision)
+                .unwrap_or_default(),
+        ) {
             return Ok(display_list);
         }
 
@@ -262,12 +278,18 @@ impl DocumentView {
             .get(page_idx)
             .ok_or_else(|| anyhow::anyhow!("PDF page index {page_idx} is out of bounds"))?
             .bounds;
-        let display_list = self
-            .render_session
-            .create_display_list(page_idx, page_bounds)?;
-        Ok(cx
-            .global_mut::<RenderCache>()
-            .insert_display_list(self.doc_id, page_idx, display_list))
+        let (render_session, render_page_idx, source_revision) = self
+            .page_render_sources
+            .get(&page_idx)
+            .map(|source| (source.render_session.clone(), 0, source.revision))
+            .unwrap_or_else(|| (self.render_session.clone(), page_idx, 0));
+        let display_list = render_session.create_display_list(render_page_idx, page_bounds)?;
+        Ok(cx.global_mut::<RenderCache>().insert_display_list(
+            self.doc_id,
+            page_idx,
+            source_revision,
+            display_list,
+        ))
     }
 
     fn take_previous_render_for_diff(

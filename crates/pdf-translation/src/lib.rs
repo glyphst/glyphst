@@ -27,7 +27,7 @@ pub use document::{
 pub use layout::{
     FontWeight, LayoutDocument, LayoutItem, LayoutOptions, LayoutPage, LayoutWarning,
     OverflowPolicy, TableOfContentsLayout, build_layout, build_layout_with_options,
-    split_text_for_layout_boxes,
+    source_text_regions, split_text_for_layout_boxes,
 };
 pub use native::{
     OcrFusionDecision, OcrFusionPageReport, OcrFusionRelation, OcrFusionReport, OcrFusionResult,
@@ -36,7 +36,7 @@ pub use native::{
 };
 pub use paddle::{
     PaddleClient, PaddleClientConfig, PaddleError, PaddleErrorCategory, PaddleJobProgress,
-    PaddleProbeResult, normalize_paddle_payload,
+    PaddleProbeResult, normalize_paddle_payload, reconcile_provider_continuations,
 };
 pub use policy::{
     POLICY_REVIEW_CONFIDENCE_THRESHOLD, PolicyReviewBlock, PolicyReviewContextBlock,
@@ -51,8 +51,9 @@ pub use translate::{
     ProtectedText, ProtectedToken, ProtectedTokenKind, StyleDefinition, StyledRun,
     TranslatedDocument, TranslatedUnit, TranslationBackend, TranslationBackendError,
     TranslationDocumentError, TranslationErrorCategory, TranslationFailureDiagnostic,
-    TranslationQueueStats, TranslationRunProgress, TranslationRunSnapshot, TranslationUnit,
-    TranslationUnitOutput, protect_text, translate_document, translate_document_resuming,
+    TranslationFailurePhase, TranslationQueueStats, TranslationRunOutcome, TranslationRunProgress,
+    TranslationRunSnapshot, TranslationUnit, TranslationUnitOutput, protect_text,
+    translate_document, translate_document_partial_resuming, translate_document_resuming,
 };
 pub use typst::{
     TypstCompiler, TypstCompilerConfig, TypstError, TypstErrorKind, TypstExecutionMode,

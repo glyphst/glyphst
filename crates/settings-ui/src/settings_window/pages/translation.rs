@@ -1,7 +1,7 @@
 use super::super::SettingsWindow;
 use glyphst_settings::{
-    ModelRef, PdfContentReviewMode, Settings, SettingsStore, TranslationBoxCorner,
-    TranslationProvider,
+    DocumentTranslationMode, ModelRef, PdfContentReviewMode, Settings, SettingsStore,
+    TranslationBoxCorner, TranslationProvider,
 };
 use glyphst_translation_ui::target_language_options;
 use gpui::{App, Context, SharedString};
@@ -199,6 +199,38 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.translation.target_language.clone()),
+        );
+
+        let document_mode = SettingItem::new(
+            "Document translation mode",
+            SettingField::dropdown(
+                DocumentTranslationMode::ALL
+                    .into_iter()
+                    .map(|mode| Self::setting_option(mode.as_str(), mode.label()))
+                    .collect(),
+                |cx: &App| {
+                    cx.global::<SettingsStore>()
+                        .settings
+                        .translation
+                        .document_mode
+                        .as_str()
+                        .into()
+                },
+                {
+                    let view = view.clone();
+                    move |value: SharedString, cx: &mut App| {
+                        let mode =
+                            DocumentTranslationMode::parse(value.as_ref()).unwrap_or_default();
+                        Self::update_settings(&view, cx, move |settings| {
+                            settings.translation.document_mode = mode;
+                        });
+                    }
+                },
+            )
+            .default_value(defaults.translation.document_mode.as_str().to_string()),
+        )
+        .description(
+            "Auto uses side-by-side panes in wide views and top/bottom panes in tall views.",
         );
 
         let active_provider = SettingItem::new(
@@ -437,7 +469,7 @@ impl SettingsWindow {
         SettingPage::new(crate::fl!("settings-tab-translation")).groups([
             SettingGroup::new()
                 .title(crate::fl!("settings-section-general"))
-                .items([target_language, active_provider]),
+                .items([target_language, document_mode, active_provider]),
             SettingGroup::new()
                 .title("Pinned translation")
                 .items([pinned_width, pinned_corner]),

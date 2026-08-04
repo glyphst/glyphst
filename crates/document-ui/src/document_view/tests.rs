@@ -1,11 +1,24 @@
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use super::{
     DocumentPage, DocumentView, Glyph, RegionDragState, RegionImageExport, RenderCache, RenderKey,
-    SearchMatch, SearchState, SurfaceRenderKeys, TextChunk, TextFormatBlock, TextIndexState,
-    TextLine, TranslationCardState, TranslationStatus, clear_copied_region_selection,
-    page_render::should_start_viewport_render, reset_translation_cards_for_document_replacement,
-    retain_valid_annotation_id,
+    SearchMatch, SearchState, SurfaceRenderKeys, TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY,
+    TRANSLATION_PANEL_DEFAULT_RIGHT, TRANSLATION_PANEL_DEFAULT_TOP, TRANSLATION_PANEL_DOCK_DELAY,
+    TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY, TRANSLATION_PANEL_MARGIN,
+    TRANSLATION_PANEL_OVERLAY_PRIORITY, TRANSLATION_PANEL_PREFERRED_WIDTH,
+    TRANSLATION_PANEL_RETRACT_DELAY, TRANSLATION_PANEL_SNAP_ZONE, TextChunk, TextFormatBlock,
+    TextIndexState, TextLine, TranslationCardState, TranslationHoverAnimation,
+    TranslationPanelSide, TranslationStatus, TranslationViewRole, clamp_translation_panel_edge_y,
+    clamp_translation_panel_position, clear_copied_region_selection,
+    default_translation_panel_position, page_render::should_start_viewport_render,
+    reset_translation_cards_for_document_replacement, retain_valid_annotation_id,
+    translation_pair_highlights_enabled, translation_panel_docked_x, translation_panel_snap_side,
+    translation_panel_width, translation_toolbar_enabled,
 };
 use glyphst_ai::ai_chat::{MentionKind, MentionReference};
 use glyphst_core::{
@@ -606,10 +619,192 @@ fn test_render_image() -> Arc<gpui::RenderImage> {
 }
 
 #[test]
+fn translation_panel_uses_pane_local_width_and_default_right_edge() {
+    let wide_width = translation_panel_width(1_000.0);
+    let wide = default_translation_panel_position(1_000.0, wide_width);
+    assert_eq!(wide_width, TRANSLATION_PANEL_PREFERRED_WIDTH);
+    assert_eq!(wide.x.as_f32(), 594.0);
+    assert_eq!(wide.y.as_f32(), TRANSLATION_PANEL_DEFAULT_TOP);
+
+    let narrow_width = translation_panel_width(240.0);
+    let narrow = default_translation_panel_position(240.0, narrow_width);
+    assert_eq!(narrow_width, 216.0);
+    assert_eq!(narrow.x.as_f32(), TRANSLATION_PANEL_MARGIN);
+    assert!(narrow.x.as_f32() + narrow_width <= 240.0 - TRANSLATION_PANEL_DEFAULT_RIGHT);
+}
+
+#[test]
+fn translation_affordances_are_scoped_to_the_active_live_pair() {
+    assert!(!translation_pair_highlights_enabled(
+        TranslationViewRole::None,
+        true
+    ));
+    assert!(!translation_pair_highlights_enabled(
+        TranslationViewRole::Translation,
+        false
+    ));
+    assert!(translation_pair_highlights_enabled(
+        TranslationViewRole::Translation,
+        true
+    ));
+    assert!(translation_pair_highlights_enabled(
+        TranslationViewRole::SourceMirror,
+        true
+    ));
+
+    assert!(translation_toolbar_enabled(
+        TranslationViewRole::Translation,
+        true
+    ));
+    assert!(!translation_toolbar_enabled(
+        TranslationViewRole::SourceMirror,
+        true
+    ));
+    assert!(!translation_toolbar_enabled(
+        TranslationViewRole::None,
+        true
+    ));
+}
+
+#[test]
+fn translation_panel_drag_is_reclamped_after_pane_resize() {
+    let resized_width = translation_panel_width(300.0);
+    let clamped = clamp_translation_panel_position(
+        point(px(700.0), px(900.0)),
+        300.0,
+        180.0,
+        size(px(resized_width), px(48.0)),
+    );
+    assert_eq!(clamped.x.as_f32(), 16.0);
+    assert_eq!(clamped.y.as_f32(), 124.0);
+
+    let tiny_width = translation_panel_width(72.0);
+    let tiny = clamp_translation_panel_position(
+        point(px(-20.0), px(-20.0)),
+        72.0,
+        40.0,
+        size(px(tiny_width), px(40.0)),
+    );
+    assert_eq!(tiny.x.as_f32(), TRANSLATION_PANEL_MARGIN);
+    assert_eq!(tiny.y.as_f32(), TRANSLATION_PANEL_MARGIN);
+}
+
+#[test]
+fn translation_panel_layout_stays_bounded_at_reported_pane_widths() {
+    assert_eq!(translation_panel_width(590.0), 390.0);
+    assert_eq!(translation_panel_width(320.0), 296.0);
+    assert_eq!(translation_panel_width(220.0), 196.0);
+    assert!(translation_panel_width(590.0) >= 300.0);
+    assert!(translation_panel_width(320.0) < 300.0);
+    assert!(translation_panel_width(220.0) < 300.0);
+}
+
+#[test]
+fn translation_panel_snaps_only_inside_the_edge_magnet_zones() {
+    let viewport_width = 600.0;
+    let panel_width = 200.0;
+    assert_eq!(
+        translation_panel_snap_side(
+            point(px(TRANSLATION_PANEL_SNAP_ZONE), px(40.0)),
+            panel_width,
+            viewport_width,
+        ),
+        Some(TranslationPanelSide::Left)
+    );
+    assert_eq!(
+        translation_panel_snap_side(point(px(200.0), px(40.0)), panel_width, viewport_width,),
+        None
+    );
+    assert_eq!(
+        translation_panel_snap_side(
+            point(
+                px(viewport_width - panel_width - TRANSLATION_PANEL_SNAP_ZONE),
+                px(40.0),
+            ),
+            panel_width,
+            viewport_width,
+        ),
+        Some(TranslationPanelSide::Right)
+    );
+    assert_eq!(
+        clamp_translation_panel_edge_y(px(900.0), 180.0).as_f32(),
+        132.0
+    );
+}
+
+#[test]
+fn translation_panel_drawer_geometry_is_symmetric_and_delayed() {
+    let viewport_width = 600.0;
+    let panel_width = 200.0;
+    assert_eq!(
+        translation_panel_docked_x(TranslationPanelSide::Left, 0.0, viewport_width, panel_width,)
+            .as_f32(),
+        -panel_width
+    );
+    assert_eq!(
+        translation_panel_docked_x(TranslationPanelSide::Left, 1.0, viewport_width, panel_width,)
+            .as_f32(),
+        TRANSLATION_PANEL_MARGIN
+    );
+    assert_eq!(
+        translation_panel_docked_x(
+            TranslationPanelSide::Right,
+            0.0,
+            viewport_width,
+            panel_width,
+        )
+        .as_f32(),
+        viewport_width
+    );
+    assert_eq!(
+        translation_panel_docked_x(
+            TranslationPanelSide::Right,
+            1.0,
+            viewport_width,
+            panel_width,
+        )
+        .as_f32(),
+        viewport_width - panel_width - TRANSLATION_PANEL_MARGIN
+    );
+    assert_eq!(TRANSLATION_PANEL_DOCK_DELAY, Duration::from_millis(1500));
+    assert_eq!(TRANSLATION_PANEL_RETRACT_DELAY, Duration::from_millis(400));
+}
+
+#[test]
+fn root_notifications_are_above_translation_overlays() {
+    assert!(glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY > TRANSLATION_PANEL_OVERLAY_PRIORITY);
+    assert!(
+        glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY > TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY
+    );
+    assert!(TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY > glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY);
+}
+
+#[test]
+fn translation_hover_animation_retargets_after_becoming_invisible() {
+    let large = Bounds::new(point(px(20.0), px(30.0)), size(px(240.0), px(120.0)));
+    let small = Bounds::new(point(px(24.0), px(156.0)), size(px(90.0), px(24.0)));
+    let mut animation = TranslationHoverAnimation::new("large".to_string(), large);
+    let now = Instant::now();
+
+    animation.fade_out(now, false);
+    assert_eq!(animation.opacity.target(), 0.0);
+    animation.retarget("small".to_string(), small, now, false);
+
+    assert_eq!(animation.region_id, "small");
+    assert_eq!(animation.opacity.target(), 1.0);
+    assert_eq!(animation.x.target(), small.origin.x.as_f32());
+    assert_eq!(animation.y.target(), small.origin.y.as_f32());
+    assert_eq!(animation.width.target(), small.size.width.as_f32());
+    assert_eq!(animation.height.target(), small.size.height.as_f32());
+    assert_eq!(animation.bounds(now), large);
+}
+
+#[test]
 fn render_cache_protects_only_the_exact_visible_render() {
     let unrotated = RenderKey {
         doc_id: 1,
         page_idx: 0,
+        source_revision: 0,
         rotation: DocumentRotation::Degrees0,
         physical_width: 8192,
         physical_height: 8192,
@@ -633,6 +828,7 @@ fn render_cache_resize_churn_keeps_current_viewport_and_thumbnail_sizes() {
     let key = |physical_width, physical_height| RenderKey {
         doc_id: 1,
         page_idx: 0,
+        source_revision: 0,
         rotation: DocumentRotation::Degrees0,
         physical_width,
         physical_height,
@@ -668,6 +864,7 @@ fn render_cache_reports_and_protects_the_texture_used_during_resize() {
     let fallback = RenderKey {
         doc_id: 1,
         page_idx: 0,
+        source_revision: 0,
         rotation: DocumentRotation::Degrees0,
         physical_width: 5_000,
         physical_height: 4_000,
@@ -698,6 +895,7 @@ fn surface_render_keys_keep_actual_fractional_scale_bounds_and_prune_hidden_page
     let predicted = RenderKey {
         doc_id: 1,
         page_idx: 0,
+        source_revision: 0,
         rotation: DocumentRotation::Degrees0,
         physical_width: 252,
         physical_height: 327,
@@ -740,6 +938,7 @@ fn render_cache_page_boundary_keeps_actual_visible_thumbnail() {
     let thumbnail = RenderKey {
         doc_id: 1,
         page_idx: 0,
+        source_revision: 0,
         rotation: DocumentRotation::Degrees0,
         physical_width: 252,
         physical_height: 326,
@@ -747,6 +946,7 @@ fn render_cache_page_boundary_keeps_actual_visible_thumbnail() {
     let fullscreen_page = |page_idx| RenderKey {
         doc_id: 1,
         page_idx,
+        source_revision: 0,
         rotation: DocumentRotation::Degrees0,
         physical_width: 2_770,
         physical_height: 3_585,
@@ -782,6 +982,7 @@ fn render_cache_protection_is_independent_per_document_and_cleared_on_eviction()
     let document_one = RenderKey {
         doc_id: 1,
         page_idx: 0,
+        source_revision: 0,
         rotation: DocumentRotation::Degrees0,
         physical_width: 5_000,
         physical_height: 4_000,
@@ -1153,7 +1354,6 @@ fn test_glyph(c: char, x0: f32, x1: f32) -> Glyph {
         line_idx: 0,
         block_idx: 0,
         font_size: 12.0,
-        color: 0,
         is_bold: false,
         inferred_space_after: false,
     }
@@ -1468,7 +1668,7 @@ fn build_text_blocks_handles_large_glyph_sets_without_rescanning() {
     let blocks = DocumentView::build_text_blocks(&glyphs);
 
     assert_eq!(blocks.len(), 100);
-    assert!(blocks.iter().all(|block| block.text.len() >= 1000));
+    assert!(blocks.iter().all(|block| block.glyph_range.len() == 1000));
 }
 
 #[test]

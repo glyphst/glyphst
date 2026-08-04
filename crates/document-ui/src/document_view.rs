@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     ops::Range,
     path::{Path, PathBuf},
@@ -54,32 +54,37 @@ use glyphst_pdf::{
     DocumentRenderSession, DocumentSnapshot, ReloadCoordinator, ReloadDisposition,
     RetainedDisplayList,
 };
-use glyphst_pdf_translation_app::{PdfTranslationRequest, PdfTranslationService};
+use glyphst_pdf_translation_app::{
+    BlockKind, BoundingBox, PdfTranslationService, PdfTranslationSessionRequest,
+    source_text_regions,
+};
 use glyphst_translation::{LanguageCode, TranslationRequest, TranslationService};
 use glyphst_translation_ui::{
-    DocumentTranslationJobManager, DocumentTranslationOpenMode, TargetLanguageOption,
+    DocumentTranslationJobId, DocumentTranslationJobManager, DocumentTranslationOpenMode,
+    DocumentTranslationSessionSnapshot, DocumentTranslationSessionStatus, TargetLanguageOption,
     target_language_options,
 };
 use glyphst_ui::{
     activity::ActivityCenter,
-    icons::toolbar_icon_button,
+    icons::{Icon, toolbar_icon_button},
     markdown::{Markdown, MarkdownElement, MarkdownStyle},
+    motion::{EASE_OUT, HOVER, LAYOUT, MotionSpec, ScalarTween},
     sticky_items::{StickyCandidate, sticky_items},
     tooltip::text_tooltip,
 };
 use gpui::{
     Anchor, AnyElement, AsyncApp, BorderStyle, Bounds, ClickEvent, ClipboardItem, Context, Corners,
-    DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Font, FontWeight, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render,
-    RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement, Task, TextAlign, TextRun, TextStyle, UniformListScrollHandle,
-    Window, WrappedLine, anchored, canvas, deferred, div, fill, hsla, linear_color_stop,
-    linear_gradient, outline, point, prelude::*, px, rgb, rgba, size, transparent_black,
-    uniform_list,
+    DismissEvent, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point as GpuiPoint, PromptButton, PromptLevel, Render, RenderImage, ScrollDelta,
+    ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement,
+    Task, TextStyle, UniformListScrollHandle, Window, anchored, canvas, deferred, div, fill, hsla,
+    linear_color_stop, linear_gradient, outline, point, prelude::*, px, rgb, rgba, size,
+    transparent_black, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IndexPath, Selectable as _, Sizable as _, StyledExt as _,
-    ThemeColor,
+    ActiveTheme as _, Disableable as _, ElementExt as _, IndexPath, Selectable as _, Sizable as _,
+    StyledExt as _, ThemeColor,
     alert::Alert,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
@@ -147,8 +152,102 @@ const DIFF_FLASH_PIXEL_THRESHOLD: u16 = 32;
 const DIFF_FLASH_MAX_RECTS: usize = 64;
 const FOOTBAR_HEIGHT: f32 = 26.0;
 const FOOTBAR_BUTTON_HEIGHT: f32 = 20.0;
-const MAX_CACHED_TRANSLATED_LAYOUTS: usize = 512;
-const TRANSLATED_LAYOUT_KEEP_FRAMES: u64 = 120;
+const TRANSLATION_PANEL_PREFERRED_WIDTH: f32 = 390.0;
+const TRANSLATION_PANEL_MARGIN: f32 = 8.0;
+const TRANSLATION_PANEL_DEFAULT_RIGHT: f32 = 16.0;
+const TRANSLATION_PANEL_DEFAULT_TOP: f32 = 12.0;
+const TRANSLATION_PANEL_COMPACT_BREAKPOINT: f32 = 300.0;
+const TRANSLATION_PANEL_DEFAULT_HEIGHT: f32 = 76.0;
+const TRANSLATION_PANEL_SNAP_ZONE: f32 = 32.0;
+const TRANSLATION_PANEL_EDGE_PILL_WIDTH: f32 = 24.0;
+const TRANSLATION_PANEL_EDGE_PILL_HEIGHT: f32 = 40.0;
+const TRANSLATION_PANEL_DOCK_DELAY: Duration = Duration::from_millis(1500);
+const TRANSLATION_PANEL_RETRACT_DELAY: Duration = Duration::from_millis(400);
+const TRANSLATION_HOVER_CLEAR_GRACE: Duration = Duration::from_millis(100);
+const TRANSLATION_HOVER_FADE: MotionSpec = MotionSpec::new(120, EASE_OUT);
+const TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY: usize = 4;
+const TRANSLATION_PANEL_OVERLAY_PRIORITY: usize = 5;
+const TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY: usize =
+    glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY + 1;
+
+fn translation_panel_width(viewport_width: f32) -> f32 {
+    if !viewport_width.is_finite() || viewport_width <= 0.0 {
+        return TRANSLATION_PANEL_PREFERRED_WIDTH;
+    }
+    (viewport_width - TRANSLATION_PANEL_MARGIN - TRANSLATION_PANEL_DEFAULT_RIGHT)
+        .max(1.0)
+        .min(TRANSLATION_PANEL_PREFERRED_WIDTH)
+}
+
+fn default_translation_panel_position(viewport_width: f32, panel_width: f32) -> GpuiPoint<Pixels> {
+    point(
+        px(
+            (viewport_width - panel_width - TRANSLATION_PANEL_DEFAULT_RIGHT)
+                .max(TRANSLATION_PANEL_MARGIN),
+        ),
+        px(TRANSLATION_PANEL_DEFAULT_TOP),
+    )
+}
+
+fn clamp_translation_panel_position(
+    position: GpuiPoint<Pixels>,
+    viewport_width: f32,
+    viewport_height: f32,
+    panel_size: Size<Pixels>,
+) -> GpuiPoint<Pixels> {
+    let max_x = (viewport_width - panel_size.width.as_f32() - TRANSLATION_PANEL_MARGIN)
+        .max(TRANSLATION_PANEL_MARGIN);
+    let max_y = (viewport_height - panel_size.height.as_f32() - TRANSLATION_PANEL_MARGIN)
+        .max(TRANSLATION_PANEL_MARGIN);
+    point(
+        px(position.x.as_f32().clamp(TRANSLATION_PANEL_MARGIN, max_x)),
+        px(position.y.as_f32().clamp(TRANSLATION_PANEL_MARGIN, max_y)),
+    )
+}
+
+fn translation_panel_snap_side(
+    position: GpuiPoint<Pixels>,
+    panel_width: f32,
+    viewport_width: f32,
+) -> Option<TranslationPanelSide> {
+    let left_distance = position.x.as_f32().max(0.0);
+    let right_distance = (viewport_width - (position.x.as_f32() + panel_width)).max(0.0);
+    match (
+        left_distance <= TRANSLATION_PANEL_SNAP_ZONE,
+        right_distance <= TRANSLATION_PANEL_SNAP_ZONE,
+    ) {
+        (true, true) if right_distance < left_distance => Some(TranslationPanelSide::Right),
+        (true, _) => Some(TranslationPanelSide::Left),
+        (_, true) => Some(TranslationPanelSide::Right),
+        _ => None,
+    }
+}
+
+fn translation_panel_docked_x(
+    side: TranslationPanelSide,
+    reveal: f32,
+    viewport_width: f32,
+    panel_width: f32,
+) -> Pixels {
+    let reveal = reveal.clamp(0.0, 1.0);
+    let shown = match side {
+        TranslationPanelSide::Left => TRANSLATION_PANEL_MARGIN,
+        TranslationPanelSide::Right => {
+            (viewport_width - panel_width - TRANSLATION_PANEL_MARGIN).max(TRANSLATION_PANEL_MARGIN)
+        }
+    };
+    let hidden = match side {
+        TranslationPanelSide::Left => -panel_width,
+        TranslationPanelSide::Right => viewport_width,
+    };
+    px(hidden + (shown - hidden) * reveal)
+}
+
+fn clamp_translation_panel_edge_y(y: Pixels, viewport_height: f32) -> Pixels {
+    let maximum = (viewport_height - TRANSLATION_PANEL_EDGE_PILL_HEIGHT - TRANSLATION_PANEL_MARGIN)
+        .max(TRANSLATION_PANEL_MARGIN);
+    px(y.as_f32().clamp(TRANSLATION_PANEL_MARGIN, maximum))
+}
 
 static NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -248,6 +347,15 @@ struct ReloadData {
     toc: Vec<TocEntry>,
 }
 
+#[derive(Clone)]
+struct RevisionedPageRenderSource {
+    revision: u64,
+    // The render session borrows the immutable bytes indirectly, but retaining
+    // the snapshot here makes that lifetime explicit at the view boundary.
+    _snapshot: Arc<DocumentSnapshot>,
+    render_session: DocumentRenderSession,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileSignature {
     modified: Option<SystemTime>,
@@ -258,6 +366,7 @@ struct FileSignature {
 struct RenderKey {
     doc_id: u64,
     page_idx: usize,
+    source_revision: u64,
     rotation: DocumentRotation,
     physical_width: u32,
     physical_height: u32,
@@ -313,6 +422,7 @@ struct CachedRender {
 struct CachedDisplayList {
     doc_id: u64,
     page_idx: usize,
+    source_revision: u64,
     display_list: RetainedDisplayList,
     last_access: u64,
 }
@@ -450,11 +560,17 @@ impl RenderCache {
         removed
     }
 
-    fn display_list(&mut self, doc_id: u64, page_idx: usize) -> Option<RetainedDisplayList> {
-        let index = self
-            .display_lists
-            .iter()
-            .position(|cached| cached.doc_id == doc_id && cached.page_idx == page_idx)?;
+    fn display_list(
+        &mut self,
+        doc_id: u64,
+        page_idx: usize,
+        source_revision: u64,
+    ) -> Option<RetainedDisplayList> {
+        let index = self.display_lists.iter().position(|cached| {
+            cached.doc_id == doc_id
+                && cached.page_idx == page_idx
+                && cached.source_revision == source_revision
+        })?;
         let last_access = self.next_access();
         self.display_lists[index].last_access = last_access;
         Some(self.display_lists[index].display_list.clone())
@@ -464,18 +580,20 @@ impl RenderCache {
         &mut self,
         doc_id: u64,
         page_idx: usize,
+        source_revision: u64,
         display_list: RetainedDisplayList,
     ) -> RetainedDisplayList {
         let last_access = self.next_access();
 
-        if let Some(index) = self
-            .display_lists
-            .iter()
-            .position(|cached| cached.doc_id == doc_id && cached.page_idx == page_idx)
-        {
+        if let Some(index) = self.display_lists.iter().position(|cached| {
+            cached.doc_id == doc_id
+                && cached.page_idx == page_idx
+                && cached.source_revision == source_revision
+        }) {
             self.display_lists[index] = CachedDisplayList {
                 doc_id,
                 page_idx,
+                source_revision,
                 display_list: display_list.clone(),
                 last_access,
             };
@@ -483,6 +601,7 @@ impl RenderCache {
             self.display_lists.push(CachedDisplayList {
                 doc_id,
                 page_idx,
+                source_revision,
                 display_list: display_list.clone(),
                 last_access,
             });
@@ -517,6 +636,24 @@ impl RenderCache {
         });
         self.display_lists.retain(|cached| cached.doc_id != doc_id);
         self.protected_renders.remove(&doc_id);
+        removed
+    }
+
+    fn evict_page(&mut self, doc_id: u64, page_idx: usize) -> Vec<Arc<RenderImage>> {
+        let mut removed = Vec::new();
+        self.renders.retain(|cached| {
+            if cached.key.doc_id == doc_id && cached.key.page_idx == page_idx {
+                removed.push(cached.image.clone());
+                false
+            } else {
+                true
+            }
+        });
+        self.display_lists
+            .retain(|cached| cached.doc_id != doc_id || cached.page_idx != page_idx);
+        if let Some(protected) = self.protected_renders.get_mut(&doc_id) {
+            protected.retain(|key| key.page_idx != page_idx);
+        }
         removed
     }
 
@@ -622,18 +759,127 @@ struct DiffFlashOverlay {
 
 struct PaintData {
     pages: Vec<PaintPage>,
-    translated_text_overlays: Vec<TranslatedTextOverlay>,
     diff_flash_overlays: Vec<DiffFlashOverlay>,
     highlight_overlays: Vec<HighlightOverlay>,
     selected_highlight_borders: Vec<Bounds<Pixels>>,
     note_underlines: Vec<(Bounds<Pixels>, HighlightColor)>,
     link_highlights: Vec<Bounds<Pixels>>,
-    linked_hover_highlights: Vec<Bounds<Pixels>>,
-    linked_selection_highlights: Vec<Bounds<Pixels>>,
+    linked_hover_highlights: Vec<TranslationHoverHighlight>,
+    failed_translation_highlights: Vec<Bounds<Pixels>>,
     selection_highlights: Vec<Bounds<Pixels>>,
     search_highlights: Vec<Bounds<Pixels>>,
     active_search_highlights: Vec<Bounds<Pixels>>,
     region_overlays: Vec<Bounds<Pixels>>,
+}
+
+struct TranslationHoverAnimation {
+    region_id: String,
+    x: ScalarTween,
+    y: ScalarTween,
+    width: ScalarTween,
+    height: ScalarTween,
+    opacity: ScalarTween,
+}
+
+impl TranslationHoverAnimation {
+    fn new(region_id: String, target: Bounds<Pixels>) -> Self {
+        Self {
+            region_id,
+            x: ScalarTween::new(target.origin.x.as_f32(), HOVER),
+            y: ScalarTween::new(target.origin.y.as_f32(), HOVER),
+            width: ScalarTween::new(target.size.width.as_f32(), HOVER),
+            height: ScalarTween::new(target.size.height.as_f32(), HOVER),
+            opacity: ScalarTween::new(1.0, TRANSLATION_HOVER_FADE),
+        }
+    }
+
+    fn retarget(
+        &mut self,
+        region_id: String,
+        target: Bounds<Pixels>,
+        now: Instant,
+        reduce_motion: bool,
+    ) {
+        self.region_id = region_id;
+        self.x
+            .retarget(target.origin.x.as_f32(), now, reduce_motion);
+        self.y
+            .retarget(target.origin.y.as_f32(), now, reduce_motion);
+        self.width
+            .retarget(target.size.width.as_f32(), now, reduce_motion);
+        self.height
+            .retarget(target.size.height.as_f32(), now, reduce_motion);
+        self.opacity.retarget(1.0, now, reduce_motion);
+    }
+
+    fn fade_out(&mut self, now: Instant, reduce_motion: bool) {
+        self.opacity.retarget(0.0, now, reduce_motion);
+    }
+
+    fn bounds(&self, now: Instant) -> Bounds<Pixels> {
+        Bounds::new(
+            point(px(self.x.value(now)), px(self.y.value(now))),
+            size(px(self.width.value(now)), px(self.height.value(now))),
+        )
+    }
+
+    fn is_animating(&self, now: Instant) -> bool {
+        [self.x, self.y, self.width, self.height, self.opacity]
+            .into_iter()
+            .any(|tween| tween.is_animating(now))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TranslationHoverHighlight {
+    bounds: Bounds<Pixels>,
+    opacity: f32,
+}
+
+#[derive(Clone)]
+struct TranslationHoverRegionEntry {
+    page_index: usize,
+    unit_id: Option<String>,
+    block_id: Option<String>,
+    target_bounds: BoundingBox,
+    source_regions: Vec<BoundingBox>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranslationPanelSide {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum TranslationPanelPlacement {
+    #[default]
+    Default,
+    Floating(GpuiPoint<Pixels>),
+    PendingDock {
+        position: GpuiPoint<Pixels>,
+        side: TranslationPanelSide,
+        y: Pixels,
+    },
+    Docked {
+        side: TranslationPanelSide,
+        y: Pixels,
+        reveal: ScalarTween,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TranslationPanelDrag {
+    Floating { pointer_offset: GpuiPoint<Pixels> },
+}
+
+#[derive(Clone)]
+struct TranslationPanelDragToken(u64);
+
+impl Render for TranslationPanelDragToken {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
 }
 
 #[derive(Clone)]
@@ -645,7 +891,6 @@ struct Glyph {
     line_idx: u32,
     block_idx: u32,
     font_size: f32,
-    color: u32,
     is_bold: bool,
     inferred_space_after: bool,
 }
@@ -661,23 +906,31 @@ struct TextBlock {
     id: u32,
     page_idx: usize,
     glyph_range: Range<usize>,
-    bounds: Rect,
-    text: String,
-    font_size: f32,
-    color: u32,
-    horizontal: bool,
-}
-
-#[derive(Clone)]
-struct TranslatedBlock {
-    source: TextBlock,
-    text: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DocumentViewLanguage {
     Original,
     Translated,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TranslationViewRole {
+    #[default]
+    None,
+    /// The live translated page. Pointer movement here is the sole initiator
+    /// of semantic paired highlighting.
+    Translation,
+    /// The source half of a live pair. It only mirrors semantic hover state.
+    SourceMirror,
+}
+
+fn translation_pair_highlights_enabled(role: TranslationViewRole, pair_active: bool) -> bool {
+    pair_active && role != TranslationViewRole::None
+}
+
+fn translation_toolbar_enabled(role: TranslationViewRole, pair_active: bool) -> bool {
+    pair_active && role == TranslationViewRole::Translation
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -691,49 +944,6 @@ pub struct SynchronizedScrollDelta {
     pub x_pixels: f32,
     pub y_pixels: f32,
     pub mode: SynchronizedScrollMode,
-}
-
-#[derive(Clone, Copy)]
-pub struct LinkedBlockAnchor {
-    pub block_id: u32,
-    pub page_idx: usize,
-    pub x0: f32,
-    pub y0: f32,
-    pub x1: f32,
-    pub y1: f32,
-}
-
-#[derive(Clone, Copy)]
-pub struct LinkedBlockSelection {
-    pub anchor: LinkedBlockAnchor,
-    pub generation: u64,
-}
-
-struct TranslatedTextOverlay {
-    mask: Bounds<Pixels>,
-    bounds: Bounds<Pixels>,
-    prepared: Arc<PreparedTranslatedText>,
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct TranslatedTextLayoutKey {
-    block_id: u32,
-    text: SharedString,
-    font: Font,
-    color: u32,
-    font_size_bits: u32,
-    width_bits: u32,
-    height_bits: u32,
-}
-
-struct PreparedTranslatedText {
-    lines: Vec<Arc<WrappedLine>>,
-    line_height: Pixels,
-}
-
-struct CachedTranslatedTextLayout {
-    prepared: Arc<PreparedTranslatedText>,
-    last_used_frame: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -888,8 +1098,12 @@ pub enum DocumentViewEvent {
     OpenSettings,
     AiPanelDismissed,
     SynchronizedScroll(SynchronizedScrollDelta),
-    BlockHovered(Option<LinkedBlockAnchor>),
-    BlockSelected(Option<LinkedBlockSelection>),
+    /// A canonical content-region id emitted only by the active translated
+    /// half of a live session pair.
+    TranslationRegionHovered {
+        session_id: DocumentTranslationJobId,
+        region_id: Option<String>,
+    },
 }
 
 struct SearchMatch {
@@ -1128,6 +1342,7 @@ pub struct DocumentView {
     epub_style_panel_position: Option<GpuiPoint<Pixels>>,
     document_snapshot: Arc<DocumentSnapshot>,
     render_session: DocumentRenderSession,
+    page_render_sources: HashMap<usize, RevisionedPageRenderSource>,
     pages: Vec<DocumentPage>,
     page_count: usize,
     max_page_width: f32,
@@ -1137,17 +1352,12 @@ pub struct DocumentView {
     text_lines: Vec<TextLine>,
     page_line_ranges: Vec<Range<usize>>,
     page_block_ranges: Vec<Range<usize>>,
-    translated_blocks: BTreeMap<u32, TranslatedBlock>,
-    translated_text_layouts: HashMap<TranslatedTextLayoutKey, CachedTranslatedTextLayout>,
-    translated_text_layout_frame: u64,
     view_language: DocumentViewLanguage,
-    linked_selection_generation: u64,
+    translation_view_role: TranslationViewRole,
+    translation_pair_active: bool,
     suppress_linked_events: bool,
-    external_hovered_block: Option<u32>,
-    external_selected_block: Option<u32>,
-    hovered_text_block: Option<u32>,
-    translation_document_generation: u64,
-    translation_document_task: Option<Task<()>>,
+    external_hovered_translation_region: Option<String>,
+    hovered_translation_region: Option<String>,
     links: Vec<DocumentLink>,
     highlights: Vec<Highlight>,
     notes: Vec<Note>,
@@ -1165,6 +1375,24 @@ pub struct DocumentView {
     pinned_translation_language_select: Option<TargetLanguageSelect>,
     translation_request_generation: u64,
     document_translation_jobs: Entity<DocumentTranslationJobManager>,
+    translation_session_id: Option<DocumentTranslationJobId>,
+    translation_pair_session_id: Option<DocumentTranslationJobId>,
+    translation_session_snapshot: Option<DocumentTranslationSessionSnapshot>,
+    translation_hover_regions: HashMap<String, TranslationHoverRegionEntry>,
+    translation_failed_hover_regions: HashSet<String>,
+    translation_hover_animation: Option<TranslationHoverAnimation>,
+    translation_hover_clear_generation: u64,
+    translation_hover_clear_task: Option<Task<()>>,
+    translation_hover_tools_hovered: bool,
+    translation_panel_placement: TranslationPanelPlacement,
+    translation_panel_drag: Option<TranslationPanelDrag>,
+    translation_panel_snap_candidate: Option<TranslationPanelSide>,
+    translation_panel_size: Size<Pixels>,
+    translation_panel_dock_generation: u64,
+    translation_panel_dock_task: Option<Task<()>>,
+    translation_panel_retract_generation: u64,
+    translation_panel_retract_task: Option<Task<()>>,
+    translation_panel_dock_surface_hovered: bool,
     pending_selection_anchor: Option<usize>,
     dragging: bool,
     hovered_link: Option<usize>,
@@ -1178,6 +1406,7 @@ pub struct DocumentView {
     rotation: DocumentRotation,
     zoom: f32,
     base_scale: f32,
+    viewport_origin: GpuiPoint<Pixels>,
     viewport_width: f32,
     viewport_height: f32,
     scroll_x_doc: f32,

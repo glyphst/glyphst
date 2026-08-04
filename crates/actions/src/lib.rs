@@ -118,7 +118,6 @@ pub mod document_viewer {
             TranslateDocument,
             CancelDocumentTranslation,
             TogglePinnedTranslation,
-            OpenTranslationSplit,
             ToggleRegionSelection,
             CancelRegionSelection,
         ]

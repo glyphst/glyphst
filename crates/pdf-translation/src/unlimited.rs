@@ -104,13 +104,41 @@ impl UnlimitedClient {
         cancellation: &CancellationToken,
         on_progress: impl FnMut(UnlimitedJobProgress),
     ) -> Result<UnlimitedOcrResult, UnlimitedError> {
-        self.run_document_inner(file_path, cancellation, on_progress)
+        cancellation
+            .check()
+            .map_err(|_| UnlimitedError::cancelled("submit"))?;
+        let file_name = file_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let bytes = fs::read(file_path).map_err(|error| {
+            UnlimitedError::new(
+                "submit",
+                UnlimitedErrorCategory::InvalidRequest,
+                format!("could not read Unlimited-OCR source: {error}"),
+                None,
+                None,
+                None,
+            )
+        })?;
+        self.run_document_bytes(file_name, &bytes, cancellation, on_progress)
+    }
+
+    pub fn run_document_bytes(
+        &self,
+        file_name: &str,
+        bytes: &[u8],
+        cancellation: &CancellationToken,
+        on_progress: impl FnMut(UnlimitedJobProgress),
+    ) -> Result<UnlimitedOcrResult, UnlimitedError> {
+        self.run_document_inner(file_name, bytes, cancellation, on_progress)
             .map_err(|error| self.redact_error(error))
     }
 
     fn run_document_inner(
         &self,
-        file_path: &Path,
+        file_name: &str,
+        bytes: &[u8],
         cancellation: &CancellationToken,
         mut on_progress: impl FnMut(UnlimitedJobProgress),
     ) -> Result<UnlimitedOcrResult, UnlimitedError> {
@@ -118,7 +146,7 @@ impl UnlimitedClient {
             .check()
             .map_err(|_| UnlimitedError::cancelled("authenticate"))?;
         let token = self.access_token(cancellation)?;
-        let submitted = self.submit_local_file(file_path, &token.value, cancellation)?;
+        let submitted = self.submit_file_bytes(file_name, bytes, &token.value, cancellation)?;
         let task_id = submitted.data;
         let mut latest_log_id = submitted.log_id;
         let started = Instant::now();
@@ -262,39 +290,36 @@ impl UnlimitedClient {
         })
     }
 
-    fn submit_local_file(
+    fn submit_file_bytes(
         &self,
-        file_path: &Path,
+        file_name: &str,
+        bytes: &[u8],
         access_token: &str,
         cancellation: &CancellationToken,
     ) -> Result<UnlimitedTrace<String>, UnlimitedError> {
         cancellation
             .check()
             .map_err(|_| UnlimitedError::cancelled("submit"))?;
-        let file_name = file_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .and_then(non_empty)
-            .ok_or_else(|| {
-                UnlimitedError::new(
-                    "submit",
-                    UnlimitedErrorCategory::InvalidRequest,
-                    "Unlimited-OCR source has no valid filename".to_string(),
-                    None,
-                    None,
-                    None,
-                )
-            })?;
-        let bytes = fs::read(file_path).map_err(|error| {
+        let file_name = non_empty(file_name).ok_or_else(|| {
             UnlimitedError::new(
                 "submit",
                 UnlimitedErrorCategory::InvalidRequest,
-                format!("could not read Unlimited-OCR source: {error}"),
+                "Unlimited-OCR source has no valid filename".to_string(),
                 None,
                 None,
                 None,
             )
         })?;
+        if bytes.is_empty() {
+            return Err(UnlimitedError::new(
+                "submit",
+                UnlimitedErrorCategory::InvalidRequest,
+                "Unlimited-OCR source PDF is empty".to_string(),
+                None,
+                None,
+                None,
+            ));
+        }
         let file_data = BASE64_STANDARD.encode(bytes);
         let url = format!(
             "{}/rest/2.0/brain/online/v2/unlimited-ocr-parser/task",

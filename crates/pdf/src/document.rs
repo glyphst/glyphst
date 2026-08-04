@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{Context as _, Result};
@@ -9,7 +10,7 @@ use glyphst_core::{DocumentCapabilities, DocumentFormat, DocumentLayout, EpubLay
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocumentSnapshot {
     path: PathBuf,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     format: DocumentFormat,
 }
 
@@ -21,9 +22,27 @@ impl DocumentSnapshot {
         let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         Ok(Self {
             path: path.to_path_buf(),
-            bytes,
+            bytes: Arc::from(bytes),
             format,
         })
+    }
+
+    /// Construct an immutable render snapshot from in-memory document bytes.
+    /// `path` is a diagnostic/name hint only; opening never reads it again.
+    pub fn from_bytes(
+        path: impl Into<PathBuf>,
+        format: DocumentFormat,
+        bytes: impl Into<Arc<[u8]>>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            bytes: bytes.into(),
+            format,
+        }
+    }
+
+    pub fn from_pdf_bytes(path: impl Into<PathBuf>, bytes: impl Into<Arc<[u8]>>) -> Self {
+        Self::from_bytes(path, DocumentFormat::Pdf, bytes)
     }
 
     pub fn path(&self) -> &Path {
@@ -179,6 +198,16 @@ mod tests {
         let error = DocumentSnapshot::read(&path).unwrap_err();
         assert!(error.to_string().contains("unsupported document type"));
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn snapshot_accepts_revisioned_in_memory_pdf_bytes() {
+        let bytes: Arc<[u8]> = Arc::from(&b"%PDF-1.7\n% preview revision"[..]);
+        let snapshot = DocumentSnapshot::from_pdf_bytes("page-1-revision-7.pdf", bytes.clone());
+
+        assert_eq!(snapshot.format(), DocumentFormat::Pdf);
+        assert_eq!(snapshot.path(), Path::new("page-1-revision-7.pdf"));
+        assert_eq!(snapshot.bytes(), bytes.as_ref());
     }
 
     #[test]

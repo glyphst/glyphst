@@ -1,15 +1,20 @@
 pub use glyphst_translation as service;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use futures::{StreamExt as _, channel::mpsc};
 use glyphst_pdf_translation_app::{
-    CancellationToken, PdfTranslationError, PdfTranslationProgress, PdfTranslationRequest,
-    PdfTranslationResult, PdfTranslationService, PdfTranslationStage, PdfTranslationWarning,
+    CancellationToken, DocumentMetadata, DocumentV1, Page, PdfTranslationError,
+    PdfTranslationExportRequest, PdfTranslationPageFailure, PdfTranslationPagePreview,
+    PdfTranslationProgress, PdfTranslationRequest, PdfTranslationResult, PdfTranslationService,
+    PdfTranslationSessionRequest, PdfTranslationSessionResult, PdfTranslationSessionUpdate,
+    PdfTranslationStage, PdfTranslationWarning, TranslatedUnit, TranslationFailureDiagnostic,
+    TranslationFailurePhase, TranslationRunProgress,
 };
-use glyphst_settings::{Settings, SettingsStore};
-use glyphst_translation::TARGET_LANGUAGES;
+use glyphst_settings::{DocumentTranslationMode, Settings, SettingsStore};
+use glyphst_translation::{LanguageCode, TARGET_LANGUAGES};
 use glyphst_ui::activity::{
     ActivityCenter, ActivityNoticeEntry, ActivityNoticeId, ActivityNoticeLevel,
     BackgroundTaskEntry, BackgroundTaskId, CenterAction, TaskProgress,
@@ -135,6 +140,99 @@ pub struct DocumentTranslationJobSnapshot {
     pub status: DocumentTranslationJobStatus,
 }
 
+/// A document translation that can be rendered before an output PDF exists.
+///
+/// Session snapshots are intentionally cheap to clone. Large pipeline values are
+/// shared so document views can read a coherent update without touching the job
+/// manager while it is processing a worker message.
+#[derive(Clone, Debug)]
+pub struct DocumentTranslationSessionSnapshot {
+    pub id: DocumentTranslationJobId,
+    pub request: PdfTranslationSessionRequest,
+    pub mode: DocumentTranslationMode,
+    pub status: DocumentTranslationSessionStatus,
+    pub prepared_document: Option<Arc<DocumentV1>>,
+    pub resolved_units: Arc<Vec<TranslatedUnit>>,
+    pub failures: Arc<Vec<TranslationFailureDiagnostic>>,
+    pub page_previews: Arc<BTreeMap<usize, Arc<PdfTranslationPagePreview>>>,
+    pub page_failures: Arc<Vec<PdfTranslationPageFailure>>,
+    pub ready_prefix: usize,
+    pub original_unit_ids: Arc<HashSet<String>>,
+    pub attached_views: usize,
+    pub last_export_path: Option<PathBuf>,
+    pub last_export_error: Option<SharedString>,
+}
+
+impl DocumentTranslationSessionSnapshot {
+    pub fn title(&self) -> String {
+        self.request
+            .source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Document")
+            .to_string()
+    }
+
+    pub fn is_translating(&self) -> bool {
+        matches!(
+            self.status,
+            DocumentTranslationSessionStatus::Queued
+                | DocumentTranslationSessionStatus::Running { .. }
+                | DocumentTranslationSessionStatus::Cancelling { .. }
+        )
+    }
+
+    pub fn can_save(&self) -> bool {
+        matches!(
+            self.status,
+            DocumentTranslationSessionStatus::Completed { .. }
+        )
+    }
+
+    pub fn has_failures(&self) -> bool {
+        self.failure_count() > 0
+    }
+
+    fn failure_count(&self) -> usize {
+        // OCR fallbacks are represented both as a stable diagnostic (for the
+        // artifact manifest) and as a page failure (for page-aware UI). Count
+        // that paired representation once while retaining independent layout
+        // and preview page failures.
+        self.failures.len()
+            + self
+                .page_failures
+                .iter()
+                .filter(|failure| failure.phase != TranslationFailurePhase::Ocr)
+                .count()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DocumentTranslationSessionStatus {
+    Queued,
+    Running {
+        progress: Option<PdfTranslationProgress>,
+        units: TranslationRunProgress,
+    },
+    Cancelling {
+        progress: Option<PdfTranslationProgress>,
+    },
+    Cancelled,
+    Completed {
+        failed_units: usize,
+    },
+    Exporting {
+        output_path: PathBuf,
+        progress: Option<PdfTranslationProgress>,
+    },
+    Failed {
+        stage: PdfTranslationStage,
+        message: SharedString,
+        detailed_message: SharedString,
+        retryable: bool,
+    },
+}
+
 impl DocumentTranslationJobSnapshot {
     pub fn title(&self) -> String {
         self.request
@@ -173,10 +271,29 @@ pub enum DocumentTranslationJobEvent {
     RemoveNotification {
         id: DocumentTranslationJobId,
     },
+    OpenSession {
+        id: DocumentTranslationJobId,
+        source_path: PathBuf,
+    },
+    SaveSession {
+        id: DocumentTranslationJobId,
+    },
+    OpenSessionExport {
+        path: PathBuf,
+    },
+    ShowSessionNotification {
+        snapshot: DocumentTranslationSessionSnapshot,
+    },
+    RemoveSessionNotification {
+        id: DocumentTranslationJobId,
+    },
 }
 
 /// Stable notification kind for terminal translation results.
 pub struct DocumentTranslationNotification;
+
+/// Stable notification kind for terminal in-memory translation sessions.
+pub struct DocumentTranslationSessionNotification;
 
 struct DocumentTranslationJobRecord {
     snapshot: DocumentTranslationJobSnapshot,
@@ -185,12 +302,42 @@ struct DocumentTranslationJobRecord {
     task: Option<Task<()>>,
 }
 
+struct DocumentTranslationSessionRecord {
+    snapshot: DocumentTranslationSessionSnapshot,
+    settings: Settings,
+    cancellation: CancellationToken,
+    task: Option<Task<()>>,
+    result: Option<Arc<PdfTranslationSessionResult>>,
+    pending_restart: Option<LanguageCode>,
+    pending_export: Option<PathBuf>,
+    notify_when_finished: bool,
+    prepared_metadata: Option<DocumentMetadata>,
+    prepared_pages: BTreeMap<usize, Page>,
+    prepared_page_count: usize,
+    preview_generation: u64,
+}
+
+impl DocumentTranslationSessionRecord {
+    fn should_publish_completion_notification(&self) -> bool {
+        self.notify_when_finished || self.snapshot.attached_views == 0
+    }
+}
+
+enum DocumentTranslationSessionWorkerUpdate {
+    Progress(PdfTranslationProgress),
+    Pipeline(PdfTranslationSessionUpdate),
+}
+
 pub struct DocumentTranslationJobManager {
     jobs: VecDeque<DocumentTranslationJobRecord>,
     next_id: DocumentTranslationJobId,
     active_job_id: Option<DocumentTranslationJobId>,
     background_tasks: HashMap<DocumentTranslationJobId, BackgroundTaskId>,
     activity_notices: HashMap<DocumentTranslationJobId, ActivityNoticeId>,
+    sessions: VecDeque<DocumentTranslationSessionRecord>,
+    active_session_id: Option<DocumentTranslationJobId>,
+    session_background_tasks: HashMap<DocumentTranslationJobId, BackgroundTaskId>,
+    session_activity_notices: HashMap<DocumentTranslationJobId, ActivityNoticeId>,
 }
 
 impl EventEmitter<DocumentTranslationJobEvent> for DocumentTranslationJobManager {}
@@ -201,8 +348,14 @@ impl DocumentTranslationJobManager {
             for job in &this.jobs {
                 job.cancellation.cancel();
             }
+            for session in &this.sessions {
+                session.cancellation.cancel();
+            }
             if let Some(center) = ActivityCenter::try_global(cx) {
                 for task_id in this.background_tasks.values().copied() {
+                    center.update(cx, |center, cx| center.remove_task(task_id, cx));
+                }
+                for task_id in this.session_background_tasks.values().copied() {
                     center.update(cx, |center, cx| center.remove_task(task_id, cx));
                 }
             }
@@ -214,6 +367,10 @@ impl DocumentTranslationJobManager {
             active_job_id: None,
             background_tasks: HashMap::new(),
             activity_notices: HashMap::new(),
+            sessions: VecDeque::new(),
+            active_session_id: None,
+            session_background_tasks: HashMap::new(),
+            session_activity_notices: HashMap::new(),
         }
     }
 
@@ -241,6 +398,489 @@ impl DocumentTranslationJobManager {
         self.start_next(cx);
         cx.notify();
         id
+    }
+
+    /// Start a translation whose primary result remains in memory until the
+    /// user explicitly saves it.
+    pub fn submit_session(
+        &mut self,
+        settings: Settings,
+        request: PdfTranslationSessionRequest,
+        mode: DocumentTranslationMode,
+        cx: &mut Context<Self>,
+    ) -> DocumentTranslationJobId {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let foreground = mode != DocumentTranslationMode::Background;
+        let source_path = request.source_path.clone();
+        self.sessions.push_back(DocumentTranslationSessionRecord {
+            snapshot: DocumentTranslationSessionSnapshot {
+                id,
+                request,
+                mode,
+                status: DocumentTranslationSessionStatus::Queued,
+                prepared_document: None,
+                resolved_units: Arc::new(Vec::new()),
+                failures: Arc::new(Vec::new()),
+                page_previews: Arc::new(BTreeMap::new()),
+                page_failures: Arc::new(Vec::new()),
+                ready_prefix: 0,
+                original_unit_ids: Arc::new(HashSet::new()),
+                attached_views: usize::from(foreground),
+                last_export_path: None,
+                last_export_error: None,
+            },
+            settings,
+            cancellation: CancellationToken::new(),
+            task: None,
+            result: None,
+            pending_restart: None,
+            pending_export: None,
+            notify_when_finished: !foreground,
+            prepared_metadata: None,
+            prepared_pages: BTreeMap::new(),
+            prepared_page_count: 0,
+            preview_generation: 0,
+        });
+        self.register_session_background_task(id, cx);
+        self.start_next_session(cx);
+        if foreground {
+            cx.emit(DocumentTranslationJobEvent::OpenSession { id, source_path });
+        }
+        cx.notify();
+        id
+    }
+
+    pub fn has_active_session_for_source(&self, source_path: &std::path::Path) -> bool {
+        self.sessions.iter().any(|session| {
+            session.snapshot.request.source_path == source_path && session.snapshot.is_translating()
+        })
+    }
+
+    pub fn session_snapshot(
+        &self,
+        id: DocumentTranslationJobId,
+    ) -> Option<DocumentTranslationSessionSnapshot> {
+        self.session(id).map(|session| session.snapshot.clone())
+    }
+
+    pub fn session_result(
+        &self,
+        id: DocumentTranslationJobId,
+    ) -> Option<Arc<PdfTranslationSessionResult>> {
+        self.session(id).and_then(|session| session.result.clone())
+    }
+
+    pub fn request_open_session(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+        let Some(source_path) = self
+            .session(id)
+            .map(|session| session.snapshot.request.source_path.clone())
+        else {
+            return;
+        };
+        if let Some(session) = self.session_mut(id) {
+            session.snapshot.attached_views = session.snapshot.attached_views.saturating_add(1);
+            session.notify_when_finished = false;
+        }
+        self.remove_session_activity_notice(id, cx);
+        cx.emit(DocumentTranslationJobEvent::RemoveSessionNotification { id });
+        cx.emit(DocumentTranslationJobEvent::OpenSession { id, source_path });
+        cx.notify();
+    }
+
+    pub fn request_save_session(&self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+        if self
+            .session(id)
+            .is_some_and(|session| session.result.is_some())
+        {
+            cx.emit(DocumentTranslationJobEvent::SaveSession { id });
+        }
+    }
+
+    pub fn request_open_session_export(
+        &self,
+        id: DocumentTranslationJobId,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(path) = self
+            .session(id)
+            .and_then(|session| session.snapshot.last_export_path.clone())
+        {
+            cx.emit(DocumentTranslationJobEvent::OpenSessionExport { path });
+        }
+    }
+
+    pub fn set_session_backgrounded(
+        &mut self,
+        id: DocumentTranslationJobId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session_mut(id) else {
+            return;
+        };
+        session.snapshot.attached_views = session.snapshot.attached_views.saturating_sub(1);
+        session.notify_when_finished = true;
+        self.sync_session_background_task(id, cx);
+        cx.notify();
+    }
+
+    pub fn cancel_session(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+        let mut remove_queued = false;
+        let mut settle_without_worker = false;
+        let is_active = self.active_session_id == Some(id);
+        {
+            let Some(session) = self.session_mut(id) else {
+                return;
+            };
+            match session.snapshot.status.clone() {
+                DocumentTranslationSessionStatus::Queued => {
+                    if session.snapshot.attached_views == 0 {
+                        remove_queued = true;
+                    } else {
+                        session.snapshot.status = DocumentTranslationSessionStatus::Cancelled;
+                        settle_without_worker = true;
+                    }
+                }
+                DocumentTranslationSessionStatus::Running { progress, .. } => {
+                    session.cancellation.cancel();
+                    session.snapshot.status =
+                        DocumentTranslationSessionStatus::Cancelling { progress };
+                }
+                DocumentTranslationSessionStatus::Exporting { .. } => {
+                    if is_active {
+                        session.cancellation.cancel();
+                    } else {
+                        session.pending_export = None;
+                        session.snapshot.status = DocumentTranslationSessionStatus::Completed {
+                            failed_units: session.snapshot.failure_count(),
+                        };
+                        settle_without_worker = true;
+                    }
+                }
+                DocumentTranslationSessionStatus::Cancelling { .. }
+                | DocumentTranslationSessionStatus::Cancelled
+                | DocumentTranslationSessionStatus::Completed { .. }
+                | DocumentTranslationSessionStatus::Failed { .. } => {}
+            }
+        }
+        if remove_queued {
+            self.sessions.retain(|session| session.snapshot.id != id);
+            self.remove_session_background_task(id, cx);
+            self.start_next_session(cx);
+        } else if settle_without_worker {
+            self.remove_session_background_task(id, cx);
+            self.start_next_session(cx);
+        } else {
+            self.sync_session_background_task(id, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn discard_session(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+        if let Some(session) = self.session(id) {
+            session.cancellation.cancel();
+        }
+        if self.active_session_id == Some(id) {
+            if let Some(session) = self.session_mut(id) {
+                session.snapshot.attached_views = 0;
+                session.notify_when_finished = false;
+                session.snapshot.status =
+                    DocumentTranslationSessionStatus::Cancelling { progress: None };
+            }
+        } else {
+            self.sessions.retain(|session| session.snapshot.id != id);
+            self.remove_session_background_task(id, cx);
+            self.remove_session_activity_notice(id, cx);
+        }
+        cx.emit(DocumentTranslationJobEvent::RemoveSessionNotification { id });
+        cx.notify();
+    }
+
+    pub fn toggle_session_unit_original(
+        &mut self,
+        id: DocumentTranslationJobId,
+        unit_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session_mut(id) else {
+            return;
+        };
+        let original_ids = Arc::make_mut(&mut session.snapshot.original_unit_ids);
+        if !original_ids.remove(unit_id) {
+            original_ids.insert(unit_id.to_string());
+        }
+        let unit_id = unit_id.to_string();
+        let _ = session;
+        self.rebuild_session_original_previews(id, Some(&unit_id), cx);
+        cx.notify();
+    }
+
+    fn rebuild_session_original_previews(
+        &mut self,
+        id: DocumentTranslationJobId,
+        changed_unit_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if !cx.has_global::<PdfTranslationService>() {
+            return;
+        }
+        let Some(session) = self.session_mut(id) else {
+            return;
+        };
+        session.preview_generation = session.preview_generation.wrapping_add(1);
+        let generation = session.preview_generation;
+        let Some(result) = session.result.clone() else {
+            return;
+        };
+        let original_unit_ids = session
+            .snapshot
+            .original_unit_ids
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let selected_units = changed_unit_id.map_or_else(
+            || {
+                original_unit_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>()
+            },
+            |unit_id| std::iter::once(unit_id).collect(),
+        );
+        let selected_blocks = result
+            .translated
+            .units
+            .iter()
+            .filter(|unit| selected_units.contains(unit.id.as_str()))
+            .flat_map(|unit| unit.member_block_ids.iter().map(String::as_str))
+            .collect::<HashSet<_>>();
+        let mut pages = result
+            .translated
+            .document
+            .pages
+            .iter()
+            .filter(|page| {
+                page.blocks
+                    .iter()
+                    .any(|block| selected_blocks.contains(block.id.as_str()))
+            })
+            .map(|page| page.page_index)
+            .collect::<Vec<_>>();
+        pages.sort_unstable();
+        pages.dedup();
+        if pages.is_empty() {
+            return;
+        }
+        let revisions = pages
+            .iter()
+            .map(|page_index| {
+                let revision = session
+                    .snapshot
+                    .page_previews
+                    .get(page_index)
+                    .map(|preview| preview.revision)
+                    .unwrap_or_default()
+                    .wrapping_add(1)
+                    .max(1);
+                (*page_index, revision)
+            })
+            .collect::<Vec<_>>();
+        let service = cx.global::<PdfTranslationService>().clone();
+        let cancellation = CancellationToken::new();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let rendered = cx
+                .background_spawn(async move {
+                    revisions
+                        .into_iter()
+                        .map(|(page_index, revision)| {
+                            let preview = service.render_session_page_preview(
+                                &result,
+                                page_index,
+                                revision,
+                                &original_unit_ids,
+                                &cancellation,
+                            );
+                            (page_index, preview)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                let Some(session) = this.session_mut(id) else {
+                    return;
+                };
+                if session.preview_generation != generation {
+                    return;
+                }
+                let mut previews = (*session.snapshot.page_previews).clone();
+                let mut page_failures = (*session.snapshot.page_failures).clone();
+                for (page_index, result) in rendered {
+                    match result {
+                        Ok(preview) => {
+                            let layout_failures = preview.layout_failures.clone();
+                            previews.insert(page_index, Arc::new(preview));
+                            page_failures.retain(|failure| {
+                                failure.page_index != page_index
+                                    || !matches!(
+                                        failure.phase,
+                                        TranslationFailurePhase::Layout
+                                            | TranslationFailurePhase::Preview
+                                    )
+                            });
+                            if !layout_failures.is_empty() {
+                                let mut failures = (*session.snapshot.failures).clone();
+                                failures.extend(layout_failures);
+                                failures.sort_by(|left, right| left.id.cmp(&right.id));
+                                failures.dedup_by(|left, right| {
+                                    left.id == right.id && left.phase == right.phase
+                                });
+                                session.snapshot.failures = Arc::new(failures);
+                            }
+                        }
+                        Err(error) => {
+                            page_failures.retain(|failure| {
+                                failure.page_index != page_index
+                                    || failure.phase != TranslationFailurePhase::Preview
+                            });
+                            page_failures.push(PdfTranslationPageFailure {
+                                page_index,
+                                phase: TranslationFailurePhase::Preview,
+                                message: error.message,
+                                retryable: error.retryable,
+                            });
+                        }
+                    }
+                }
+                session.snapshot.page_previews = Arc::new(previews);
+                session.snapshot.page_failures = Arc::new(page_failures);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Retry terminal failed units. The pipeline checkpoint supplies all
+    /// successful units, so only unresolved work is sent to the provider.
+    pub fn retry_session_failures(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+        let can_retry = self.session(id).is_some_and(|session| {
+            session.snapshot.has_failures()
+                && !session.snapshot.is_translating()
+                && self.active_session_id != Some(id)
+        });
+        if !can_retry {
+            return;
+        }
+        self.reset_session_for_retry(id, None);
+        self.remove_session_activity_notice(id, cx);
+        cx.emit(DocumentTranslationJobEvent::RemoveSessionNotification { id });
+        self.register_session_background_task(id, cx);
+        self.start_next_session(cx);
+        cx.notify();
+    }
+
+    pub fn restart_session_in_language(
+        &mut self,
+        id: DocumentTranslationJobId,
+        target_language: LanguageCode,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_session_id == Some(id) {
+            let Some(session) = self.session_mut(id) else {
+                return;
+            };
+            session.pending_restart = Some(target_language);
+            session.cancellation.cancel();
+            let progress = match &session.snapshot.status {
+                DocumentTranslationSessionStatus::Running { progress, .. } => progress.clone(),
+                _ => None,
+            };
+            session.snapshot.status = DocumentTranslationSessionStatus::Cancelling { progress };
+            self.sync_session_background_task(id, cx);
+        } else {
+            self.reset_session_for_retry(id, Some(target_language));
+            self.register_session_background_task(id, cx);
+            self.start_next_session(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn export_session(
+        &mut self,
+        id: DocumentTranslationJobId,
+        output_path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session_mut(id) else {
+            return;
+        };
+        if session.result.is_none() || session.snapshot.is_translating() {
+            return;
+        }
+        session.pending_export = Some(output_path.clone());
+        session.snapshot.last_export_error = None;
+        session.snapshot.status = DocumentTranslationSessionStatus::Exporting {
+            output_path,
+            progress: None,
+        };
+        self.register_session_background_task(id, cx);
+        self.start_next_session(cx);
+        cx.notify();
+    }
+
+    fn start_session_export(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+        let Some((settings, result, output_path, original_unit_ids)) =
+            self.session_mut(id).and_then(|session| {
+                Some((
+                    session.settings.clone(),
+                    session.result.as_ref()?.as_ref().clone(),
+                    session.pending_export.take()?,
+                    session
+                        .snapshot
+                        .original_unit_ids
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ))
+            })
+        else {
+            return;
+        };
+        if !cx.has_global::<PdfTranslationService>() {
+            return;
+        }
+        let cancellation = CancellationToken::new();
+        let service = cx.global::<PdfTranslationService>().clone();
+        let request = PdfTranslationExportRequest {
+            output_path,
+            original_unit_ids,
+        };
+        if let Some(session) = self.session_mut(id) {
+            session.cancellation = cancellation.clone();
+        }
+        self.active_session_id = Some(id);
+        let (progress_tx, mut progress_rx) = mpsc::unbounded::<PdfTranslationProgress>();
+        let task = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
+            let result_task = cx.background_spawn(async move {
+                service.export_session(settings, result, request, cancellation, move |progress| {
+                    _ = progress_tx.unbounded_send(progress);
+                })
+            });
+            while let Some(progress) = progress_rx.next().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.update_session_progress(id, progress, cx)
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let result = result_task.await;
+            _ = this.update(cx, |this, cx| this.finish_session_export(id, result, cx));
+        });
+        if let Some(session) = self.session_mut(id) {
+            session.task = Some(task);
+        }
     }
 
     pub fn report_preflight_error(
@@ -689,6 +1329,446 @@ impl DocumentTranslationJobManager {
         cx.notify();
     }
 
+    fn start_next_session(&mut self, cx: &mut Context<Self>) {
+        if self.active_session_id.is_some() {
+            return;
+        }
+        if let Some(id) = self
+            .sessions
+            .iter()
+            .find(|session| session.pending_export.is_some())
+            .map(|session| session.snapshot.id)
+        {
+            self.start_session_export(id, cx);
+            return;
+        }
+        let Some(index) = self.sessions.iter().position(|session| {
+            matches!(
+                session.snapshot.status,
+                DocumentTranslationSessionStatus::Queued
+            )
+        }) else {
+            return;
+        };
+        let id = self.sessions[index].snapshot.id;
+        if !cx.has_global::<PdfTranslationService>() {
+            self.sessions[index].snapshot.status = DocumentTranslationSessionStatus::Failed {
+                stage: PdfTranslationStage::Preparing,
+                message: "Document translation is unavailable.".into(),
+                detailed_message: "Document translation is unavailable.".into(),
+                retryable: false,
+            };
+            self.publish_session_terminal_notification(id, cx);
+            return;
+        }
+
+        let settings = self.sessions[index].settings.clone();
+        let request = self.sessions[index].snapshot.request.clone();
+        let cancellation = self.sessions[index].cancellation.clone();
+        let service = cx.global::<PdfTranslationService>().clone();
+        let (update_tx, mut update_rx) =
+            mpsc::unbounded::<DocumentTranslationSessionWorkerUpdate>();
+        let progress_tx = update_tx.clone();
+        self.sessions[index].snapshot.status = DocumentTranslationSessionStatus::Running {
+            progress: None,
+            units: TranslationRunProgress::default(),
+        };
+        self.active_session_id = Some(id);
+        self.sync_session_background_task(id, cx);
+
+        let task = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
+            let result_task = cx.background_spawn(async move {
+                service.run_session(
+                    settings,
+                    request,
+                    cancellation,
+                    move |progress| {
+                        _ = progress_tx.unbounded_send(
+                            DocumentTranslationSessionWorkerUpdate::Progress(progress),
+                        );
+                    },
+                    move |update| {
+                        _ = update_tx.unbounded_send(
+                            DocumentTranslationSessionWorkerUpdate::Pipeline(update),
+                        );
+                    },
+                )
+            });
+
+            while let Some(update) = update_rx.next().await {
+                if this
+                    .update(cx, |this, cx| this.update_session(id, update, cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let result = result_task.await;
+            _ = this.update(cx, |this, cx| this.finish_session(id, result, cx));
+        });
+        self.sessions[index].task = Some(task);
+        cx.notify();
+    }
+
+    fn update_session(
+        &mut self,
+        id: DocumentTranslationJobId,
+        update: DocumentTranslationSessionWorkerUpdate,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session_mut(id) else {
+            return;
+        };
+        match update {
+            DocumentTranslationSessionWorkerUpdate::Progress(progress) => {
+                match &mut session.snapshot.status {
+                    DocumentTranslationSessionStatus::Running {
+                        progress: current, ..
+                    }
+                    | DocumentTranslationSessionStatus::Cancelling { progress: current }
+                    | DocumentTranslationSessionStatus::Exporting {
+                        progress: current, ..
+                    } => *current = Some(progress),
+                    _ => return,
+                }
+            }
+            DocumentTranslationSessionWorkerUpdate::Pipeline(
+                PdfTranslationSessionUpdate::PagePrepared {
+                    metadata,
+                    page,
+                    page_count,
+                    ready_prefix,
+                },
+            ) => {
+                session.prepared_metadata = Some(metadata.clone());
+                session.prepared_page_count = page_count;
+                session.prepared_pages.insert(page.page_index, page);
+                session.snapshot.ready_prefix = ready_prefix;
+                let pages = (0..ready_prefix)
+                    .map(|page_index| session.prepared_pages.get(&page_index).cloned())
+                    .collect::<Option<Vec<_>>>();
+                if let Some(pages) = pages {
+                    session.snapshot.prepared_document =
+                        Some(Arc::new(DocumentV1::new(metadata, pages)));
+                }
+            }
+            DocumentTranslationSessionWorkerUpdate::Pipeline(
+                PdfTranslationSessionUpdate::UnitsChanged(snapshot),
+            ) => {
+                session.snapshot.resolved_units = Arc::new(snapshot.resolved_units);
+                let mut failures = snapshot.failures;
+                failures.extend(
+                    session
+                        .snapshot
+                        .failures
+                        .iter()
+                        .filter(|failure| failure.phase != TranslationFailurePhase::Translation)
+                        .cloned(),
+                );
+                failures.sort_by(|left, right| left.id.cmp(&right.id));
+                failures.dedup_by(|left, right| left.id == right.id && left.phase == right.phase);
+                session.snapshot.failures = Arc::new(failures);
+                if let DocumentTranslationSessionStatus::Running { units, .. } =
+                    &mut session.snapshot.status
+                {
+                    *units = snapshot.progress;
+                }
+            }
+            DocumentTranslationSessionWorkerUpdate::Pipeline(
+                PdfTranslationSessionUpdate::PagePreviewReady(preview),
+            ) => {
+                let mut previews = (*session.snapshot.page_previews).clone();
+                let page_index = preview.page_index;
+                let layout_failures = preview.layout_failures.clone();
+                let replace = previews
+                    .get(&page_index)
+                    .is_none_or(|current| preview.revision > current.revision);
+                if replace {
+                    previews.insert(page_index, Arc::new(preview));
+                    session.snapshot.page_previews = Arc::new(previews);
+                    let page_block_ids = session
+                        .snapshot
+                        .prepared_document
+                        .as_ref()
+                        .and_then(|document| document.pages.get(page_index))
+                        .map(|page| {
+                            page.blocks
+                                .iter()
+                                .map(|block| block.id.as_str())
+                                .collect::<HashSet<_>>()
+                        })
+                        .unwrap_or_default();
+                    let mut failures = (*session.snapshot.failures).clone();
+                    failures.retain(|failure| {
+                        failure.phase != TranslationFailurePhase::Layout
+                            || !failure
+                                .member_block_ids
+                                .iter()
+                                .any(|block_id| page_block_ids.contains(block_id.as_str()))
+                    });
+                    failures.extend(layout_failures);
+                    failures.sort_by(|left, right| left.id.cmp(&right.id));
+                    failures
+                        .dedup_by(|left, right| left.id == right.id && left.phase == right.phase);
+                    session.snapshot.failures = Arc::new(failures);
+
+                    let mut page_failures = (*session.snapshot.page_failures).clone();
+                    page_failures.retain(|failure| {
+                        failure.page_index != page_index
+                            || !matches!(
+                                failure.phase,
+                                TranslationFailurePhase::Layout | TranslationFailurePhase::Preview
+                            )
+                    });
+                    session.snapshot.page_failures = Arc::new(page_failures);
+                }
+            }
+            DocumentTranslationSessionWorkerUpdate::Pipeline(
+                PdfTranslationSessionUpdate::PageFailed(failure),
+            ) => {
+                let mut failures = (*session.snapshot.page_failures).clone();
+                failures.retain(|current| {
+                    current.page_index != failure.page_index || current.phase != failure.phase
+                });
+                failures.push(failure);
+                failures.sort_by_key(|failure| (failure.page_index, failure.phase as u8));
+                session.snapshot.page_failures = Arc::new(failures);
+            }
+            DocumentTranslationSessionWorkerUpdate::Pipeline(
+                PdfTranslationSessionUpdate::Reconciled {
+                    ready_prefix,
+                    invalidated_unit_ids,
+                    ..
+                },
+            ) => {
+                session.snapshot.ready_prefix = ready_prefix;
+                if !invalidated_unit_ids.is_empty() {
+                    let invalidated = invalidated_unit_ids.into_iter().collect::<HashSet<_>>();
+                    let mut units = (*session.snapshot.resolved_units).clone();
+                    units.retain(|unit| !invalidated.contains(&unit.id));
+                    session.snapshot.resolved_units = Arc::new(units);
+                }
+            }
+            DocumentTranslationSessionWorkerUpdate::Pipeline(
+                PdfTranslationSessionUpdate::Finished,
+            ) => {}
+        }
+        self.sync_session_background_task(id, cx);
+        cx.notify();
+    }
+
+    fn update_session_progress(
+        &mut self,
+        id: DocumentTranslationJobId,
+        progress: PdfTranslationProgress,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_session(
+            id,
+            DocumentTranslationSessionWorkerUpdate::Progress(progress),
+            cx,
+        );
+    }
+
+    fn finish_session(
+        &mut self,
+        id: DocumentTranslationJobId,
+        result: Result<PdfTranslationSessionResult, PdfTranslationError>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_session_id != Some(id) {
+            return;
+        }
+        self.active_session_id = None;
+        let pending_restart = self
+            .session_mut(id)
+            .and_then(|session| session.pending_restart.take());
+        if let Some(target_language) = pending_restart {
+            self.reset_session_for_retry(id, Some(target_language));
+            self.sync_session_background_task(id, cx);
+            self.start_next_session(cx);
+            cx.notify();
+            return;
+        }
+
+        let was_cancelled = self.session(id).is_some_and(|session| {
+            session.cancellation.is_cancelled()
+                || matches!(
+                    session.snapshot.status,
+                    DocumentTranslationSessionStatus::Cancelling { .. }
+                )
+        });
+        if was_cancelled {
+            let remove = self.session(id).is_some_and(|session| {
+                session.snapshot.attached_views == 0 && !session.notify_when_finished
+            });
+            if remove {
+                self.sessions.retain(|session| session.snapshot.id != id);
+            } else if let Some(session) = self.session_mut(id) {
+                session.task = None;
+                session.snapshot.status = DocumentTranslationSessionStatus::Cancelled;
+            }
+            self.remove_session_background_task(id, cx);
+            self.start_next_session(cx);
+            cx.notify();
+            return;
+        }
+
+        let mut publish_notification = false;
+        let mut rebuild_original_previews = false;
+        if let Some(session) = self.session_mut(id) {
+            session.task = None;
+            match result {
+                Ok(result) => {
+                    session.snapshot.prepared_document =
+                        Some(Arc::new(result.translated.document.clone()));
+                    session.snapshot.ready_prefix = result.translated.document.pages.len();
+                    session.snapshot.resolved_units = Arc::new(result.translated.units.clone());
+                    session.snapshot.failures = Arc::new(result.failures.clone());
+                    let failed_units = session.snapshot.failure_count();
+                    session.snapshot.status =
+                        DocumentTranslationSessionStatus::Completed { failed_units };
+                    session.result = Some(Arc::new(result));
+                    rebuild_original_previews = !session.snapshot.original_unit_ids.is_empty();
+                    publish_notification = session.should_publish_completion_notification();
+                }
+                Err(error) => {
+                    let detailed_message = error
+                        .detailed_message
+                        .unwrap_or_else(|| error.message.clone());
+                    session.snapshot.status = DocumentTranslationSessionStatus::Failed {
+                        stage: error.stage,
+                        message: error.message.into(),
+                        detailed_message: detailed_message.into(),
+                        retryable: error.retryable,
+                    };
+                    publish_notification = true;
+                }
+            }
+        }
+        if rebuild_original_previews {
+            self.rebuild_session_original_previews(id, None, cx);
+        }
+        if publish_notification {
+            self.publish_session_terminal_notification(id, cx);
+        } else {
+            self.remove_session_background_task(id, cx);
+        }
+        self.start_next_session(cx);
+        cx.notify();
+    }
+
+    fn finish_session_export(
+        &mut self,
+        id: DocumentTranslationJobId,
+        result: Result<PdfTranslationResult, PdfTranslationError>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_session_id == Some(id) {
+            self.active_session_id = None;
+        }
+        let pending_restart = self
+            .session_mut(id)
+            .and_then(|session| session.pending_restart.take());
+        if let Some(target_language) = pending_restart {
+            self.reset_session_for_retry(id, Some(target_language));
+            self.sync_session_background_task(id, cx);
+            self.start_next_session(cx);
+            cx.notify();
+            return;
+        }
+        let was_cancelled = self
+            .session(id)
+            .is_some_and(|session| session.cancellation.is_cancelled());
+        {
+            let Some(session) = self.session_mut(id) else {
+                return;
+            };
+            session.task = None;
+            if was_cancelled {
+                let failed_units = session.snapshot.failure_count();
+                session.snapshot.status =
+                    DocumentTranslationSessionStatus::Completed { failed_units };
+                self.remove_session_background_task(id, cx);
+                self.start_next_session(cx);
+                cx.notify();
+                return;
+            }
+            match result {
+                Ok(result) => {
+                    let failed_units = session.snapshot.failure_count();
+                    session.snapshot.last_export_path = Some(result.output_path);
+                    session.snapshot.last_export_error = None;
+                    session.snapshot.status =
+                        DocumentTranslationSessionStatus::Completed { failed_units };
+                }
+                Err(error) => {
+                    let detailed_message = error
+                        .detailed_message
+                        .unwrap_or_else(|| error.message.clone());
+                    session.snapshot.last_export_error = Some(detailed_message.into());
+                    session.snapshot.status = DocumentTranslationSessionStatus::Completed {
+                        failed_units: session.snapshot.failure_count(),
+                    };
+                }
+            }
+        }
+        // Export is an explicit user action (from the live toolbar or the
+        // activity center), not a newly completed background translation.
+        // Reflect the result in session state without raising the translation
+        // completion notification a second time.
+        self.remove_session_background_task(id, cx);
+        self.start_next_session(cx);
+        cx.notify();
+    }
+
+    fn reset_session_for_retry(
+        &mut self,
+        id: DocumentTranslationJobId,
+        target_language: Option<LanguageCode>,
+    ) {
+        let Some(session) = self.session_mut(id) else {
+            return;
+        };
+        if let Some(target_language) = target_language {
+            session.snapshot.request.target_language = target_language.clone();
+            session.settings.translation.target_language = target_language.as_str().to_string();
+        }
+        session.cancellation = CancellationToken::new();
+        session.task = None;
+        session.pending_export = None;
+        session.result = None;
+        session.snapshot.status = DocumentTranslationSessionStatus::Queued;
+        session.snapshot.prepared_document = None;
+        session.snapshot.resolved_units = Arc::new(Vec::new());
+        session.snapshot.failures = Arc::new(Vec::new());
+        session.snapshot.page_previews = Arc::new(BTreeMap::new());
+        session.snapshot.page_failures = Arc::new(Vec::new());
+        session.snapshot.ready_prefix = 0;
+        session.snapshot.original_unit_ids = Arc::new(HashSet::new());
+        session.snapshot.last_export_path = None;
+        session.snapshot.last_export_error = None;
+        session.prepared_metadata = None;
+        session.prepared_pages.clear();
+        session.prepared_page_count = 0;
+        session.preview_generation = session.preview_generation.wrapping_add(1);
+    }
+
+    fn session(&self, id: DocumentTranslationJobId) -> Option<&DocumentTranslationSessionRecord> {
+        self.sessions
+            .iter()
+            .find(|session| session.snapshot.id == id)
+    }
+
+    fn session_mut(
+        &mut self,
+        id: DocumentTranslationJobId,
+    ) -> Option<&mut DocumentTranslationSessionRecord> {
+        self.sessions
+            .iter_mut()
+            .find(|session| session.snapshot.id == id)
+    }
+
     fn job(&self, id: DocumentTranslationJobId) -> Option<&DocumentTranslationJobRecord> {
         self.jobs.iter().find(|job| job.snapshot.id == id)
     }
@@ -768,7 +1848,9 @@ impl DocumentTranslationJobManager {
             return;
         };
         if let Some(center) = ActivityCenter::try_global(cx) {
-            center.update(cx, |center, cx| center.dismiss_notice(notice_id, cx));
+            center.update(cx, |center, cx| {
+                center.dismiss_notice_by_owner(notice_id, cx)
+            });
         }
     }
 
@@ -810,6 +1892,146 @@ impl DocumentTranslationJobManager {
         if !job.snapshot.is_active() && !self.activity_notices.contains_key(&id) {
             self.remove_background_task(id, cx);
             self.jobs.retain(|job| job.snapshot.id != id);
+            cx.notify();
+        }
+    }
+
+    fn register_session_background_task(
+        &mut self,
+        id: DocumentTranslationJobId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session_background_tasks.contains_key(&id) {
+            self.sync_session_background_task(id, cx);
+            return;
+        }
+        let Some(snapshot) = self.session_snapshot(id) else {
+            return;
+        };
+        let Some(center) = ActivityCenter::try_global(cx) else {
+            return;
+        };
+        let weak_manager = cx.weak_entity();
+        let entry = session_background_task_entry(
+            &snapshot,
+            Some(CenterAction::new("Cancel", move |_, cx| {
+                _ = weak_manager.update(cx, |manager, cx| manager.cancel_session(id, cx));
+            })),
+        );
+        let task_id = center.update(cx, |center, cx| center.add_task(entry, cx));
+        self.session_background_tasks.insert(id, task_id);
+    }
+
+    fn sync_session_background_task(
+        &mut self,
+        id: DocumentTranslationJobId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task_id) = self.session_background_tasks.get(&id).copied() else {
+            self.register_session_background_task(id, cx);
+            return;
+        };
+        let Some(snapshot) = self.session_snapshot(id) else {
+            self.remove_session_background_task(id, cx);
+            return;
+        };
+        let Some(center) = ActivityCenter::try_global(cx) else {
+            return;
+        };
+        let weak_manager = cx.weak_entity();
+        let cancel_action = matches!(
+            snapshot.status,
+            DocumentTranslationSessionStatus::Queued
+                | DocumentTranslationSessionStatus::Running { .. }
+                | DocumentTranslationSessionStatus::Exporting { .. }
+        )
+        .then(|| {
+            CenterAction::new("Cancel", move |_, cx| {
+                _ = weak_manager.update(cx, |manager, cx| manager.cancel_session(id, cx));
+            })
+        });
+        let entry = session_background_task_entry(&snapshot, cancel_action);
+        center.update(cx, |center, cx| {
+            center.update_task(task_id, |task| *task = entry, cx)
+        });
+    }
+
+    fn remove_session_background_task(
+        &mut self,
+        id: DocumentTranslationJobId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task_id) = self.session_background_tasks.remove(&id) else {
+            return;
+        };
+        if let Some(center) = ActivityCenter::try_global(cx) {
+            center.update(cx, |center, cx| center.remove_task(task_id, cx));
+        }
+    }
+
+    fn remove_session_activity_notice(
+        &mut self,
+        id: DocumentTranslationJobId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(notice_id) = self.session_activity_notices.remove(&id) else {
+            return;
+        };
+        if let Some(center) = ActivityCenter::try_global(cx) {
+            center.update(cx, |center, cx| {
+                center.dismiss_notice_by_owner(notice_id, cx)
+            });
+        }
+    }
+
+    fn session_activity_notice_removed(
+        &mut self,
+        id: DocumentTranslationJobId,
+        cx: &mut Context<Self>,
+    ) {
+        self.session_activity_notices.remove(&id);
+        let remove = self.session(id).is_some_and(|session| {
+            session.snapshot.attached_views == 0 && !session.snapshot.is_translating()
+        });
+        if remove {
+            self.sessions.retain(|session| session.snapshot.id != id);
+        }
+        cx.notify();
+    }
+
+    fn publish_session_terminal_notification(
+        &mut self,
+        id: DocumentTranslationJobId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self.session_snapshot(id) else {
+            return;
+        };
+        self.remove_session_activity_notice(id, cx);
+        let task_id = self.session_background_tasks.remove(&id);
+        if let Some(center) = ActivityCenter::try_global(cx) {
+            let notice = document_translation_session_activity_notice(&snapshot, cx.weak_entity());
+            let notice_id = center.update(cx, |center, cx| match task_id {
+                Some(task_id) => center.finish_task(task_id, notice, cx),
+                None => center.add_notice(notice, cx),
+            });
+            self.session_activity_notices.insert(id, notice_id);
+        }
+        cx.emit(DocumentTranslationJobEvent::ShowSessionNotification { snapshot });
+    }
+
+    fn session_notification_closed(
+        &mut self,
+        id: DocumentTranslationJobId,
+        cx: &mut Context<Self>,
+    ) {
+        let remove = self.session(id).is_some_and(|session| {
+            session.snapshot.attached_views == 0
+                && !session.snapshot.is_translating()
+                && !self.session_activity_notices.contains_key(&id)
+        });
+        if remove {
+            self.sessions.retain(|session| session.snapshot.id != id);
             cx.notify();
         }
     }
@@ -872,6 +2094,205 @@ fn document_translation_activity_notice(
     notice.on_remove(move |cx| {
         _ = cleanup_manager.update(cx, |manager, cx| manager.activity_notice_removed(id, cx));
     })
+}
+
+fn document_translation_session_activity_notice(
+    snapshot: &DocumentTranslationSessionSnapshot,
+    manager: WeakEntity<DocumentTranslationJobManager>,
+) -> ActivityNoticeEntry {
+    let id = snapshot.id;
+    let level = match snapshot.status {
+        _ if snapshot.last_export_error.is_some() => ActivityNoticeLevel::Error,
+        DocumentTranslationSessionStatus::Completed { failed_units: 0 } => {
+            ActivityNoticeLevel::Success
+        }
+        DocumentTranslationSessionStatus::Completed { .. } => ActivityNoticeLevel::Warning,
+        DocumentTranslationSessionStatus::Failed { .. } => ActivityNoticeLevel::Error,
+        _ => ActivityNoticeLevel::Info,
+    };
+    let (status, detail, _, _) = session_status_content(snapshot);
+    let mut notice = ActivityNoticeEntry::new(
+        level,
+        format!("Translate {}", snapshot.title()),
+        format!("{status} · {detail}"),
+    );
+    if matches!(
+        snapshot.status,
+        DocumentTranslationSessionStatus::Completed { .. }
+    ) {
+        if snapshot.attached_views == 0 {
+            let open_manager = manager.clone();
+            notice
+                .actions
+                .push(CenterAction::new("Open translation", move |_, cx| {
+                    _ = open_manager.update(cx, |manager, cx| manager.request_open_session(id, cx));
+                }));
+        }
+        let save_manager = manager.clone();
+        notice.actions.push(CenterAction::new("Save", move |_, cx| {
+            _ = save_manager.update(cx, |manager, cx| manager.request_save_session(id, cx));
+        }));
+        if snapshot.last_export_path.is_some() {
+            let output_manager = manager.clone();
+            notice
+                .actions
+                .push(CenterAction::new("Open output", move |_, cx| {
+                    _ = output_manager.update(cx, |manager, cx| {
+                        manager.request_open_session_export(id, cx)
+                    });
+                }));
+        }
+        if snapshot.has_failures() {
+            let retry_manager = manager.clone();
+            notice
+                .actions
+                .push(CenterAction::new("Retry failed", move |_, cx| {
+                    _ = retry_manager
+                        .update(cx, |manager, cx| manager.retry_session_failures(id, cx));
+                }));
+        }
+    }
+    let cleanup_manager = manager;
+    notice.on_remove(move |cx| {
+        _ = cleanup_manager.update(cx, |manager, cx| {
+            manager.session_activity_notice_removed(id, cx)
+        });
+    })
+}
+
+/// Build the window notification for an in-memory translation session.
+pub fn document_translation_session_notification(
+    snapshot: DocumentTranslationSessionSnapshot,
+    manager: WeakEntity<DocumentTranslationJobManager>,
+) -> Notification {
+    let id = snapshot.id;
+    let type_ = match snapshot.status {
+        _ if snapshot.last_export_error.is_some() => NotificationType::Error,
+        DocumentTranslationSessionStatus::Completed { failed_units: 0 } => {
+            NotificationType::Success
+        }
+        DocumentTranslationSessionStatus::Completed { .. } => NotificationType::Warning,
+        DocumentTranslationSessionStatus::Failed { .. } => NotificationType::Error,
+        _ => NotificationType::Info,
+    };
+    let (status, detail, _, _) = session_status_content(&snapshot);
+    let content_snapshot = snapshot.clone();
+    let close_manager = manager.clone();
+    Notification::new()
+        .id1::<DocumentTranslationSessionNotification>(id.to_string())
+        .with_type(type_)
+        .title(snapshot.title())
+        .message(status)
+        .content(move |_, _, cx| {
+            let completed = matches!(
+                content_snapshot.status,
+                DocumentTranslationSessionStatus::Completed { .. }
+            );
+            let mut actions = Vec::new();
+            if completed {
+                if content_snapshot.attached_views == 0 {
+                    actions.push(session_notification_button(
+                        manager.clone(),
+                        id,
+                        "open",
+                        "Open translation",
+                        SessionNotificationAction::Open,
+                        true,
+                    ));
+                }
+                actions.push(session_notification_button(
+                    manager.clone(),
+                    id,
+                    "save",
+                    "Save",
+                    SessionNotificationAction::Save,
+                    content_snapshot.attached_views > 0,
+                ));
+                if content_snapshot.last_export_path.is_some() {
+                    actions.push(session_notification_button(
+                        manager.clone(),
+                        id,
+                        "open-output",
+                        "Open output",
+                        SessionNotificationAction::OpenOutput,
+                        false,
+                    ));
+                }
+                if content_snapshot.has_failures() {
+                    actions.push(session_notification_button(
+                        manager.clone(),
+                        id,
+                        "retry",
+                        "Retry failed",
+                        SessionNotificationAction::Retry,
+                        false,
+                    ));
+                }
+            }
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(detail.clone()),
+                )
+                .when(!actions.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_end()
+                            .gap_1()
+                            .children(actions),
+                    )
+                })
+                .into_any_element()
+        })
+        .on_close(move |_, cx| {
+            _ = close_manager.update(cx, |manager, cx| {
+                manager.session_notification_closed(id, cx)
+            });
+        })
+        .autohide(false)
+}
+
+#[derive(Clone, Copy)]
+enum SessionNotificationAction {
+    Open,
+    Save,
+    OpenOutput,
+    Retry,
+}
+
+fn session_notification_button(
+    manager: WeakEntity<DocumentTranslationJobManager>,
+    id: DocumentTranslationJobId,
+    action_id: &'static str,
+    label: &'static str,
+    action: SessionNotificationAction,
+    primary: bool,
+) -> Button {
+    let button = Button::new(format!("document-translation-session-{id}-{action_id}"))
+        .label(label)
+        .with_size(Size::XSmall)
+        .on_click(move |_, _, cx| {
+            _ = manager.update(cx, |manager, cx| match action {
+                SessionNotificationAction::Open => manager.request_open_session(id, cx),
+                SessionNotificationAction::Save => manager.request_save_session(id, cx),
+                SessionNotificationAction::OpenOutput => {
+                    manager.request_open_session_export(id, cx)
+                }
+                SessionNotificationAction::Retry => manager.retry_session_failures(id, cx),
+            });
+            cx.stop_propagation();
+        });
+    if primary {
+        button.primary()
+    } else {
+        button.ghost()
+    }
 }
 
 /// Build the window-scoped gpui-component notification for a terminal
@@ -1023,6 +2444,25 @@ fn background_task_entry(
     entry
 }
 
+fn session_background_task_entry(
+    snapshot: &DocumentTranslationSessionSnapshot,
+    cancel_action: Option<CenterAction>,
+) -> BackgroundTaskEntry {
+    let (status, detail, fraction, indeterminate) = session_status_content(snapshot);
+    let mut entry = BackgroundTaskEntry::new(
+        format!("Translate {}", snapshot.title()),
+        format!("{status} · {detail}"),
+    );
+    entry.progress = Some(TaskProgress {
+        fraction,
+        indeterminate,
+    });
+    if let Some(action) = cancel_action {
+        entry.actions.push(action);
+    }
+    entry
+}
+
 fn stage_label(stage: PdfTranslationStage) -> &'static str {
     match stage {
         PdfTranslationStage::Preparing => "Preparing",
@@ -1052,6 +2492,125 @@ fn progress_count(progress: &PdfTranslationProgress) -> Option<String> {
         _ => "steps",
     };
     Some(format!("{completed} / {total} {unit}"))
+}
+
+fn session_status_content(
+    snapshot: &DocumentTranslationSessionSnapshot,
+) -> (String, String, f32, bool) {
+    if let Some(error) = &snapshot.last_export_error {
+        return (
+            "Could not save translation".to_string(),
+            error.to_string(),
+            1.0,
+            false,
+        );
+    }
+    match &snapshot.status {
+        DocumentTranslationSessionStatus::Queued => (
+            "Queued".to_string(),
+            "Waiting for another document translation to finish.".to_string(),
+            0.0,
+            true,
+        ),
+        DocumentTranslationSessionStatus::Running { progress, units } => {
+            if let Some(progress) = progress {
+                let mut status = format!("Translating · {}", stage_label(progress.stage));
+                if let Some(count) = progress_count(progress) {
+                    status.push_str(" · ");
+                    status.push_str(&count);
+                }
+                (
+                    status,
+                    progress.detail.clone(),
+                    progress_fraction(progress),
+                    progress.indeterminate,
+                )
+            } else if units.total > 0 {
+                let resolved = units.translated + units.cached;
+                (
+                    format!("Translating · {resolved} / {} units", units.total),
+                    format!("{} retrying, {} failed", units.retrying, units.failed),
+                    resolved as f32 / units.total as f32,
+                    false,
+                )
+            } else {
+                (
+                    "Translating".to_string(),
+                    "Preparing the document translation.".to_string(),
+                    0.0,
+                    true,
+                )
+            }
+        }
+        DocumentTranslationSessionStatus::Cancelling { progress } => progress.as_ref().map_or_else(
+            || {
+                (
+                    "Cancelling".to_string(),
+                    "Stopping document translation.".to_string(),
+                    0.0,
+                    true,
+                )
+            },
+            |progress| {
+                (
+                    format!("Cancelling · {}", stage_label(progress.stage)),
+                    progress.detail.clone(),
+                    progress_fraction(progress),
+                    progress.indeterminate,
+                )
+            },
+        ),
+        DocumentTranslationSessionStatus::Cancelled => (
+            "Cancelled".to_string(),
+            "Document translation was cancelled.".to_string(),
+            0.0,
+            false,
+        ),
+        DocumentTranslationSessionStatus::Completed { failed_units: 0 } => (
+            "Translation complete".to_string(),
+            snapshot.last_export_path.as_ref().map_or_else(
+                || "Ready to save.".to_string(),
+                |path| format!("Saved to {}", path.display()),
+            ),
+            1.0,
+            false,
+        ),
+        DocumentTranslationSessionStatus::Completed { failed_units } => (
+            "Translation complete with warnings".to_string(),
+            format!(
+                "{failed_units} unit(s) remain untranslated. You can retry them or save the partial result."
+            ),
+            1.0,
+            false,
+        ),
+        DocumentTranslationSessionStatus::Exporting {
+            output_path,
+            progress,
+        } => progress.as_ref().map_or_else(
+            || {
+                (
+                    "Saving translation".to_string(),
+                    format!("Writing {}", output_path.display()),
+                    0.0,
+                    true,
+                )
+            },
+            |progress| {
+                (
+                    format!("Saving · {}", stage_label(progress.stage)),
+                    progress.detail.clone(),
+                    progress_fraction(progress),
+                    progress.indeterminate,
+                )
+            },
+        ),
+        DocumentTranslationSessionStatus::Failed { stage, message, .. } => (
+            format!("Failed · {}", stage_label(*stage)),
+            message.to_string(),
+            0.0,
+            false,
+        ),
+    }
 }
 
 fn job_status_content(snapshot: &DocumentTranslationJobSnapshot) -> (String, String, f32, bool) {
@@ -1235,6 +2794,61 @@ mod tests {
             .count()
     }
 
+    fn show_session_notification_count(events: &[DocumentTranslationJobEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    DocumentTranslationJobEvent::ShowSessionNotification { .. }
+                )
+            })
+            .count()
+    }
+
+    fn exporting_session_record(
+        id: DocumentTranslationJobId,
+        attached_views: usize,
+        notify_when_finished: bool,
+    ) -> DocumentTranslationSessionRecord {
+        DocumentTranslationSessionRecord {
+            snapshot: DocumentTranslationSessionSnapshot {
+                id,
+                request: PdfTranslationSessionRequest {
+                    source_path: "/tmp/source.pdf".into(),
+                    source_language: None,
+                    target_language: LanguageCode::new("zh-hans").unwrap(),
+                },
+                mode: DocumentTranslationMode::Auto,
+                status: DocumentTranslationSessionStatus::Exporting {
+                    output_path: "/tmp/translated.pdf".into(),
+                    progress: None,
+                },
+                prepared_document: None,
+                resolved_units: Arc::new(Vec::new()),
+                failures: Arc::new(Vec::new()),
+                page_previews: Arc::new(BTreeMap::new()),
+                page_failures: Arc::new(Vec::new()),
+                ready_prefix: 0,
+                original_unit_ids: Arc::new(HashSet::new()),
+                attached_views,
+                last_export_path: None,
+                last_export_error: None,
+            },
+            settings: Settings::default(),
+            cancellation: CancellationToken::new(),
+            task: None,
+            result: None,
+            pending_restart: None,
+            pending_export: None,
+            notify_when_finished,
+            prepared_metadata: None,
+            prepared_pages: BTreeMap::new(),
+            prepared_page_count: 0,
+            preview_generation: 0,
+        }
+    }
+
     fn remove_notification_count(events: &[DocumentTranslationJobEvent]) -> usize {
         events
             .iter()
@@ -1259,6 +2873,61 @@ mod tests {
             .expect("English should be present in the target-language catalog");
         assert!(english.matches("english"));
         assert!(english.matches("EN"));
+    }
+
+    #[test]
+    fn session_failure_count_deduplicates_ocr_page_diagnostics() {
+        let mut snapshot = DocumentTranslationSessionSnapshot {
+            id: 1,
+            request: PdfTranslationSessionRequest {
+                source_path: "/tmp/source.pdf".into(),
+                source_language: None,
+                target_language: LanguageCode::new("zh-hans").unwrap(),
+            },
+            mode: DocumentTranslationMode::Auto,
+            status: DocumentTranslationSessionStatus::Completed { failed_units: 0 },
+            prepared_document: None,
+            resolved_units: Arc::new(Vec::new()),
+            failures: Arc::new(vec![TranslationFailureDiagnostic {
+                id: "ocr-page-0001".to_string(),
+                phase: TranslationFailurePhase::Ocr,
+                reason: "OCR failed; source page preserved".to_string(),
+                attempts: 1,
+                retryable: true,
+                category: Some("ocr".to_string()),
+                status: None,
+                member_block_ids: Vec::new(),
+                role: None,
+                source_excerpt: None,
+                rejected_output_excerpt: None,
+            }]),
+            page_previews: Arc::new(BTreeMap::new()),
+            page_failures: Arc::new(vec![
+                PdfTranslationPageFailure {
+                    page_index: 0,
+                    phase: TranslationFailurePhase::Ocr,
+                    message: "OCR failed; source page preserved".to_string(),
+                    retryable: true,
+                },
+                PdfTranslationPageFailure {
+                    page_index: 1,
+                    phase: TranslationFailurePhase::Preview,
+                    message: "preview failed".to_string(),
+                    retryable: true,
+                },
+            ]),
+            ready_prefix: 2,
+            original_unit_ids: Arc::new(HashSet::new()),
+            attached_views: 1,
+            last_export_path: None,
+            last_export_error: None,
+        };
+
+        assert_eq!(snapshot.failure_count(), 2);
+        assert!(snapshot.has_failures());
+        snapshot.failures = Arc::new(Vec::new());
+        snapshot.page_failures = Arc::new(Vec::new());
+        assert!(!snapshot.has_failures());
     }
 
     #[test]
@@ -1324,6 +2993,45 @@ mod tests {
         assert!(cx.update(|cx| manager.read(cx).job(id).is_none()));
         cx.run_until_parked();
         assert_eq!(show_notification_count(&events.borrow()), 1);
+    }
+
+    #[gpui::test]
+    fn live_session_opens_only_for_split_modes(cx: &mut TestAppContext) {
+        cx.update(glyphst_ui::activity::init);
+        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let (_recorder, events) = record_job_events(&manager, cx);
+        let request = PdfTranslationSessionRequest {
+            source_path: "/tmp/source.pdf".into(),
+            source_language: None,
+            target_language: LanguageCode::new("zh-hans").unwrap(),
+        };
+
+        let (foreground, background) = manager.update(cx, |manager, cx| {
+            let foreground = manager.submit_session(
+                Settings::default(),
+                request.clone(),
+                DocumentTranslationMode::Auto,
+                cx,
+            );
+            let background = manager.submit_session(
+                Settings::default(),
+                request,
+                DocumentTranslationMode::Background,
+                cx,
+            );
+            (foreground, background)
+        });
+        cx.run_until_parked();
+
+        let events = events.borrow();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DocumentTranslationJobEvent::OpenSession { id, .. } if *id == foreground
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            DocumentTranslationJobEvent::OpenSession { id, .. } if *id == background
+        )));
     }
 
     #[gpui::test]
@@ -1394,6 +3102,49 @@ mod tests {
     }
 
     #[gpui::test]
+    fn explicit_session_export_never_replays_translation_completion_notification(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(glyphst_ui::activity::init);
+        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let (_recorder, events) = record_job_events(&manager, cx);
+
+        manager.update(cx, |manager, cx| {
+            for (id, attached_views, notify_when_finished) in [(31, 1, false), (32, 0, true)] {
+                manager.sessions.push_back(exporting_session_record(
+                    id,
+                    attached_views,
+                    notify_when_finished,
+                ));
+                manager.active_session_id = Some(id);
+                manager.finish_session_export(
+                    id,
+                    Ok(PdfTranslationResult {
+                        output_path: format!("/tmp/translated-{id}.pdf").into(),
+                        manifest_path: format!("/tmp/manifest-{id}.json").into(),
+                        job_directory: format!("/tmp/job-{id}").into(),
+                        fingerprint: format!("export-{id}"),
+                        warnings: Vec::new(),
+                    }),
+                    cx,
+                );
+                let session = manager.session(id).unwrap();
+                assert!(matches!(
+                    session.snapshot.status,
+                    DocumentTranslationSessionStatus::Completed { .. }
+                ));
+                assert_eq!(
+                    session.snapshot.last_export_path.as_deref(),
+                    Some(std::path::Path::new(&format!("/tmp/translated-{id}.pdf")))
+                );
+            }
+        });
+        cx.run_until_parked();
+
+        assert_eq!(show_session_notification_count(&events.borrow()), 0);
+    }
+
+    #[gpui::test]
     fn failed_output_open_returns_to_terminal_notification(cx: &mut TestAppContext) {
         cx.update(glyphst_ui::activity::init);
         let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
@@ -1409,7 +3160,10 @@ mod tests {
             };
             manager.jobs.push_back(record);
 
+            manager.publish_terminal_notification(id, cx);
+            assert_eq!(ActivityCenter::global(cx).read(cx).notice_count(), 1);
             manager.open(id, cx);
+            assert_eq!(ActivityCenter::global(cx).read(cx).notice_count(), 0);
             assert!(matches!(
                 manager.job(id).map(|job| &job.snapshot.status),
                 Some(DocumentTranslationJobStatus::Opening { .. })
@@ -1425,7 +3179,7 @@ mod tests {
             ));
         });
         cx.run_until_parked();
-        assert_eq!(show_notification_count(&events.borrow()), 1);
+        assert_eq!(show_notification_count(&events.borrow()), 2);
     }
 
     #[gpui::test]

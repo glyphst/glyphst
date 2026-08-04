@@ -268,13 +268,6 @@ impl DocumentView {
     }
 
     pub(crate) fn selected_text(&self) -> Option<String> {
-        if self.view_language == DocumentViewLanguage::Translated {
-            let (start, _) = self.selection_bounds()?;
-            let block_id = self.glyphs.get(start)?.block_idx;
-            if let Some(block) = self.translated_blocks.get(&block_id) {
-                return Some(block.text.clone());
-            }
-        }
         self.selected_source_text()
     }
 

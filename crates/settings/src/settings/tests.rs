@@ -934,6 +934,7 @@ fn parses_and_exports_translation_settings() {
 translation {
     provider "microsoft"
     target_language "zh-Hans"
+    document_mode "background"
     pinned {
         enabled #true
         width 420
@@ -960,6 +961,10 @@ translation {
         TranslationProvider::Microsoft
     );
     assert_eq!(settings.translation.target_language, "zh-hans");
+    assert_eq!(
+        settings.translation.document_mode,
+        DocumentTranslationMode::Background
+    );
     assert_eq!(settings.translation.pinned.width, 420.0);
     assert_eq!(
         settings.translation.pinned.corner,

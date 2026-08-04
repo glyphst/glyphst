@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -7,7 +7,8 @@ use std::{
 use anyhow::Result;
 use glyphst_translation_ui::{
     DocumentTranslationJobEvent, DocumentTranslationJobId, DocumentTranslationJobManager,
-    DocumentTranslationNotification, document_translation_notification,
+    DocumentTranslationNotification, DocumentTranslationSessionNotification,
+    document_translation_notification, document_translation_session_notification,
 };
 use glyphst_ui::{
     activity::ActivityCenter,
@@ -17,8 +18,9 @@ use glyphst_ui::{
 use gpui::{
     AnyElement, App, Bounds, Context, DismissEvent, DragMoveEvent, Entity, EntityId, FocusHandle,
     Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PathPromptOptions, Pixels, Point, Render, SharedString, Window, WindowAppearance,
-    bounds, canvas, div, fill, point, prelude::*, px, size,
+    MouseUpEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render,
+    SharedString, WeakEntity, Window, WindowAppearance, bounds, canvas, div, fill, point,
+    prelude::*, px, size,
 };
 use gpui_component::{ActiveTheme as _, ThemeColor, WindowExt as _, menu::PopupMenu};
 
@@ -70,6 +72,7 @@ pub struct Workspace {
     focus_handle: FocusHandle,
     document_translation_jobs: Entity<DocumentTranslationJobManager>,
     pending_translation_splits: Vec<PendingTranslationSplit>,
+    live_translation_pairs: HashMap<DocumentTranslationJobId, LiveTranslationPair>,
     command_palette: Option<Entity<CommandPalette>>,
     command_palette_previous_focus_handle: Option<FocusHandle>,
     document_browser: Option<Entity<DocumentBrowser>>,
@@ -163,6 +166,22 @@ pub type WorkspaceWindowHandle = glyphst_ui::root::RootWindowHandle<Workspace>;
 struct PendingTranslationSplit {
     job_id: DocumentTranslationJobId,
     stage: PendingTranslationSplitStage,
+}
+
+struct LiveTranslationPair {
+    source_id: EntityId,
+    translated_id: EntityId,
+    source: WeakEntity<DocumentView>,
+    translated: WeakEntity<DocumentView>,
+    active: bool,
+}
+
+fn live_translation_pair_is_active(
+    source_id: EntityId,
+    translated_id: EntityId,
+    active_tabs: &HashSet<EntityId>,
+) -> bool {
+    active_tabs.contains(&source_id) && active_tabs.contains(&translated_id)
 }
 
 enum PendingTranslationSplitStage {
@@ -325,6 +344,7 @@ impl Workspace {
             focus_handle,
             document_translation_jobs: document_translation_jobs.clone(),
             pending_translation_splits: Vec::new(),
+            live_translation_pairs: HashMap::new(),
             command_palette: None,
             command_palette_previous_focus_handle: None,
             document_browser: None,
@@ -357,53 +377,149 @@ impl Workspace {
         cx.subscribe_in(
             &document_translation_jobs,
             window,
-            |this, _, event: &DocumentTranslationJobEvent, window, cx| match event {
+            |_this, _, event: &DocumentTranslationJobEvent, window, cx| match event {
                 DocumentTranslationJobEvent::OpenDocument { id, path } => {
-                    let replace_active_new_tab = this.active_pane.read(cx).active_tab_is_new_tab();
-                    if let Err(error) = this.focus_or_open_document_for_job(
-                        path.clone(),
-                        None,
-                        replace_active_new_tab,
-                        *id,
-                        window,
-                        cx,
-                    ) {
-                        this.document_translation_jobs.update(cx, |jobs, cx| {
-                            jobs.finish_open(*id, Err(format!("{error:#}").into()), cx);
+                    let id = *id;
+                    let path = path.clone();
+                    cx.spawn_in(window, async move |this, cx| {
+                        _ = this.update_in(cx, |this, window, cx| {
+                            let replace_active_new_tab =
+                                this.active_pane.read(cx).active_tab_is_new_tab();
+                            if let Err(error) = this.focus_or_open_document_for_job(
+                                path,
+                                None,
+                                replace_active_new_tab,
+                                id,
+                                window,
+                                cx,
+                            ) {
+                                this.document_translation_jobs.update(cx, |jobs, cx| {
+                                    jobs.finish_open(id, Err(format!("{error:#}").into()), cx);
+                                });
+                            }
                         });
-                    }
+                    })
+                    .detach();
                 }
                 DocumentTranslationJobEvent::OpenSplit {
                     id,
                     source_path,
                     translated_path,
                 } => {
-                    if let Err(error) = this.begin_translation_split_open(
-                        *id,
-                        source_path.clone(),
-                        translated_path.clone(),
-                        window,
-                        cx,
-                    ) {
-                        this.document_translation_jobs.update(cx, |jobs, cx| {
-                            jobs.finish_open(*id, Err(format!("{error:#}").into()), cx);
+                    let id = *id;
+                    let source_path = source_path.clone();
+                    let translated_path = translated_path.clone();
+                    cx.spawn_in(window, async move |this, cx| {
+                        _ = this.update_in(cx, |this, window, cx| {
+                            if let Err(error) = this.begin_translation_split_open(
+                                id,
+                                source_path,
+                                translated_path,
+                                window,
+                                cx,
+                            ) {
+                                this.document_translation_jobs.update(cx, |jobs, cx| {
+                                    jobs.finish_open(id, Err(format!("{error:#}").into()), cx);
+                                });
+                            }
                         });
-                    }
+                    })
+                    .detach();
                 }
                 DocumentTranslationJobEvent::ShowNotification { snapshot } => {
-                    window.push_notification(
-                        document_translation_notification(
-                            snapshot.clone(),
-                            this.document_translation_jobs.downgrade(),
-                        ),
-                        cx,
-                    );
+                    let snapshot = snapshot.clone();
+                    cx.spawn_in(window, async move |this, cx| {
+                        _ = this.update_in(cx, |this, window, cx| {
+                            window.push_notification(
+                                document_translation_notification(
+                                    snapshot,
+                                    this.document_translation_jobs.downgrade(),
+                                ),
+                                cx,
+                            );
+                        });
+                    })
+                    .detach();
                 }
                 DocumentTranslationJobEvent::RemoveNotification { id } => {
-                    window.remove_notification1::<DocumentTranslationNotification>(
-                        id.to_string(),
-                        cx,
-                    );
+                    let id = id.to_string();
+                    cx.spawn_in(window, async move |this, cx| {
+                        _ = this.update_in(cx, |_, window, cx| {
+                            window.remove_notification1::<DocumentTranslationNotification>(id, cx);
+                        });
+                    })
+                    .detach();
+                }
+                DocumentTranslationJobEvent::OpenSession { id, source_path } => {
+                    let id = *id;
+                    let source_path = source_path.clone();
+                    cx.spawn_in(window, async move |this, cx| {
+                        _ = this.update_in(cx, |this, window, cx| {
+                            if let Err(error) =
+                                this.open_translation_session(id, &source_path, window, cx)
+                            {
+                                eprintln!("failed to open live translation split: {error:#}");
+                                this.document_translation_jobs.update(cx, |manager, cx| {
+                                    manager.set_session_backgrounded(id, cx);
+                                });
+                            }
+                        });
+                    })
+                    .detach();
+                }
+                DocumentTranslationJobEvent::SaveSession { id } => {
+                    let id = *id;
+                    cx.spawn_in(window, async move |this, cx| {
+                        _ = this.update_in(cx, |this, window, cx| {
+                            this.save_translation_session(id, window, cx);
+                        });
+                    })
+                    .detach();
+                }
+                DocumentTranslationJobEvent::OpenSessionExport { path } => {
+                    let path = path.clone();
+                    cx.spawn_in(window, async move |this, cx| {
+                        _ = this.update_in(cx, |this, window, cx| {
+                            let replace_active_new_tab =
+                                this.active_pane.read(cx).active_tab_is_new_tab();
+                            if let Err(error) = this.focus_or_open_document(
+                                path,
+                                None,
+                                replace_active_new_tab,
+                                window,
+                                cx,
+                            ) {
+                                eprintln!("failed to open saved translation: {error:#}");
+                            }
+                        });
+                    })
+                    .detach();
+                }
+                DocumentTranslationJobEvent::ShowSessionNotification { snapshot } => {
+                    let snapshot = snapshot.clone();
+                    cx.spawn_in(window, async move |this, cx| {
+                        _ = this.update_in(cx, |this, window, cx| {
+                            window.push_notification(
+                                document_translation_session_notification(
+                                    snapshot,
+                                    this.document_translation_jobs.downgrade(),
+                                ),
+                                cx,
+                            );
+                        });
+                    })
+                    .detach();
+                }
+                DocumentTranslationJobEvent::RemoveSessionNotification { id } => {
+                    let id = id.to_string();
+                    cx.spawn_in(window, async move |this, cx| {
+                        _ = this.update_in(cx, |_, window, cx| {
+                            window.remove_notification1::<DocumentTranslationSessionNotification>(
+                                id, cx,
+                            );
+                        });
+                    })
+                    .detach();
                 }
             },
         )
@@ -692,6 +808,7 @@ impl Workspace {
 
         let pane_for_observe = pane.clone();
         cx.observe(pane, move |this, _, cx| {
+            this.refresh_live_translation_pair_activity(cx);
             if this.active_pane == pane_for_observe {
                 cx.notify();
             }
@@ -1898,11 +2015,73 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let resolved_ix = tab_ix.unwrap_or_else(|| pane.read(cx).active_tab_ix());
+        let document_view = pane.read(cx).document_view_at(resolved_ix);
+        if let Some(document_view) = document_view
+            && let Some(session_id) = document_view.read(cx).translation_session_id()
+        {
+            let running = document_view.read(cx).translation_session_is_running();
+            let tab_id = document_view.entity_id();
+            if running {
+                let answer = window.prompt(
+                    PromptLevel::Warning,
+                    "Translation is still running",
+                    Some(
+                        "Cancel the translation, continue it in the background, or keep this tab open.",
+                    ),
+                    &[
+                        PromptButton::ok("Cancel translation"),
+                        PromptButton::new("Continue in background"),
+                        PromptButton::cancel("Keep tab open"),
+                    ],
+                    cx,
+                );
+                let pane = pane.clone();
+                cx.spawn_in(window, async move |this, cx| {
+                    let Ok(choice) = answer.await else {
+                        return;
+                    };
+                    if choice == 2 {
+                        return;
+                    }
+                    _ = this.update_in(cx, |this, window, cx| {
+                        if choice == 0 {
+                            this.document_translation_jobs
+                                .update(cx, |manager, cx| manager.discard_session(session_id, cx));
+                        } else {
+                            this.document_translation_jobs.update(cx, |manager, cx| {
+                                manager.set_session_backgrounded(session_id, cx)
+                            });
+                        }
+                        this.unregister_live_translation_pair(session_id, cx);
+                        if let Some(tab_ix) = pane.read(cx).tab_ix_for_entity_id(tab_id) {
+                            this.close_tab_in_pane_now(&pane, Some(tab_ix), window, cx);
+                        }
+                    });
+                })
+                .detach();
+                return;
+            }
+            self.document_translation_jobs
+                .update(cx, |manager, cx| manager.discard_session(session_id, cx));
+            self.unregister_live_translation_pair(session_id, cx);
+        }
+        self.close_tab_in_pane_now(pane, Some(resolved_ix), window, cx);
+    }
+
+    fn close_tab_in_pane_now(
+        &mut self,
+        pane: &Entity<Pane>,
+        tab_ix: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let closed_tab_id = match tab_ix {
             Some(tab_ix) => pane.read(cx).tab_id_at(tab_ix),
             None => pane.read(cx).active_tab_id(),
         };
         if let Some(tab_id) = closed_tab_id {
+            self.unregister_live_translation_pairs_for_tab(tab_id, cx);
             self.synchronized_tabs.remove_tab(tab_id);
             if self
                 .synchronized_connection
@@ -1949,7 +2128,9 @@ impl Workspace {
             .iter()
             .position(|candidate| candidate == pane)
             .unwrap_or(0);
-        for tab_id in pane.read(cx).tab_ids() {
+        let removed_tab_ids = pane.read(cx).tab_ids();
+        for tab_id in removed_tab_ids {
+            self.unregister_live_translation_pairs_for_tab(tab_id, cx);
             self.synchronized_tabs.remove_tab(tab_id);
         }
         if self
@@ -2038,6 +2219,156 @@ impl Workspace {
         }
         new_pane.update(cx, |pane, cx| pane.focus(window, cx));
         cx.notify();
+    }
+
+    fn open_translation_session(
+        &mut self,
+        session_id: DocumentTranslationJobId,
+        source_path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let source_path = normalize_path(source_path);
+        let Some((source_pane, tab_ix)) = self.document_location(&source_path, cx) else {
+            return Err(anyhow::anyhow!(
+                "open the source document before opening its live translation"
+            ));
+        };
+        source_pane.update(cx, |pane, cx| {
+            pane.activate_existing_document(tab_ix, None, false, window, cx);
+        });
+        let Some(original) = source_pane.read(cx).active_document_view() else {
+            return Err(anyhow::anyhow!("translation source is still opening"));
+        };
+        let snapshot = self
+            .document_translation_jobs
+            .read(cx)
+            .session_snapshot(session_id)
+            .ok_or_else(|| anyhow::anyhow!("translation session is no longer available"))?;
+        let viewport = window.viewport_size();
+        let direction = match snapshot.mode {
+            glyphst_settings::DocumentTranslationMode::Vertical => SplitDirection::Right,
+            glyphst_settings::DocumentTranslationMode::Horizontal => SplitDirection::Down,
+            glyphst_settings::DocumentTranslationMode::Auto
+            | glyphst_settings::DocumentTranslationMode::Background
+                if viewport.width >= viewport.height =>
+            {
+                SplitDirection::Right
+            }
+            glyphst_settings::DocumentTranslationMode::Auto
+            | glyphst_settings::DocumentTranslationMode::Background => SplitDirection::Down,
+        };
+        let translated_pane = self.create_empty_pane(window, cx);
+        self.pane_group
+            .split(&source_pane, &translated_pane, direction, cx);
+        let translated = translated_pane.update(cx, |pane, cx| {
+            pane.open_translation_duplicate(&original, session_id, window, cx)
+        });
+        let translated = match translated {
+            Ok(translated) => translated,
+            Err(error) => {
+                self.remove_pane(&translated_pane, window, cx);
+                return Err(error);
+            }
+        };
+        _ = self.synchronized_tabs.connect_tab_to_source_group(
+            original.entity_id(),
+            source_pane.entity_id(),
+            translated.entity_id(),
+            translated_pane.entity_id(),
+        );
+        original.update(cx, |view, cx| {
+            view.attach_translation_source_mirror(session_id, cx);
+        });
+        self.register_live_translation_pair(session_id, original, translated, window, cx);
+        self.active_pane = translated_pane.clone();
+        self.sync_tab_bar_visibility(cx);
+        translated_pane.update(cx, |pane, cx| pane.focus(window, cx));
+        self.refresh_synchronized_tab_presentation(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    fn save_translation_session(
+        &mut self,
+        session_id: DocumentTranslationJobId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self
+            .document_translation_jobs
+            .read(cx)
+            .session_snapshot(session_id)
+        else {
+            return;
+        };
+        if !snapshot.can_save() {
+            return;
+        }
+        if snapshot.failures.is_empty() {
+            self.choose_translation_export_path(session_id, cx);
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Save a partial translation?",
+            Some(
+                "Some translation units failed. They will remain in the original language in the saved PDF.",
+            ),
+            &[
+                PromptButton::ok("Save partial translation"),
+                PromptButton::cancel("Cancel"),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            _ = this.update_in(cx, |this, _, cx| {
+                this.choose_translation_export_path(session_id, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn choose_translation_export_path(
+        &mut self,
+        session_id: DocumentTranslationJobId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self
+            .document_translation_jobs
+            .read(cx)
+            .session_snapshot(session_id)
+        else {
+            return;
+        };
+        let source_path = &snapshot.request.source_path;
+        let stem = source_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or("document");
+        let suggested_name = format!("{stem}.{}.pdf", snapshot.request.target_language.as_str());
+        let directory = source_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+        let manager = self.document_translation_jobs.clone();
+        cx.spawn(async move |_, cx| match dialog.await {
+            Ok(Ok(Some(output_path))) => {
+                manager.update(cx, |manager, cx| {
+                    manager.export_session(session_id, output_path, cx);
+                });
+            }
+            Ok(Err(error)) => {
+                eprintln!("failed to choose translated PDF output path: {error:#}");
+            }
+            Ok(Ok(None)) | Err(_) => {}
+        })
+        .detach();
     }
 
     fn begin_translation_split_open(
@@ -2230,7 +2561,6 @@ impl Workspace {
                         translated_pane.entity_id(),
                     );
                 }
-                self.link_translation_views(original, translated, window, cx);
                 translated_pane.update(cx, |pane, cx| pane.focus(window, cx));
                 self.document_translation_jobs.update(cx, |jobs, cx| {
                     jobs.finish_open(job_id, Ok(()), cx);
@@ -2242,66 +2572,168 @@ impl Workspace {
         true
     }
 
-    fn link_translation_views(
-        &self,
+    fn register_live_translation_pair(
+        &mut self,
+        session_id: DocumentTranslationJobId,
         original: Entity<DocumentView>,
         translated: Entity<DocumentView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let translated_target = translated.downgrade();
-        cx.subscribe_in(
-            &original,
-            window,
-            move |_, _, event: &DocumentViewEvent, _, cx| match event {
-                DocumentViewEvent::BlockHovered(block_id) => {
-                    if let Some(translated_target) = translated_target.upgrade() {
-                        translated_target.update(cx, |view, cx| {
-                            view.apply_linked_hover(*block_id, cx);
-                        });
-                    }
-                }
-                DocumentViewEvent::BlockSelected(selection) => {
-                    if let Some(translated_target) = translated_target.upgrade() {
-                        translated_target.update(cx, |view, cx| {
-                            view.apply_linked_selection(*selection, cx);
-                        });
-                    }
-                }
-                DocumentViewEvent::OpenDocument { .. }
-                | DocumentViewEvent::OpenSettings
-                | DocumentViewEvent::AiPanelDismissed
-                | DocumentViewEvent::SynchronizedScroll(_) => {}
-            },
-        )
-        .detach();
+        let source_id = original.entity_id();
+        let translated_id = translated.entity_id();
+        let conflicts = self
+            .live_translation_pairs
+            .iter()
+            .filter_map(|(id, pair)| {
+                (*id != session_id
+                    && (pair.source_id == source_id
+                        || pair.source_id == translated_id
+                        || pair.translated_id == source_id
+                        || pair.translated_id == translated_id))
+                    .then_some(*id)
+            })
+            .collect::<Vec<_>>();
+        for conflict in conflicts {
+            self.unregister_live_translation_pair(conflict, cx);
+        }
+        if self.live_translation_pairs.contains_key(&session_id) {
+            self.unregister_live_translation_pair(session_id, cx);
+        }
 
         let original_target = original.downgrade();
         cx.subscribe_in(
             &translated,
             window,
-            move |_, _, event: &DocumentViewEvent, _, cx| match event {
-                DocumentViewEvent::BlockHovered(block_id) => {
-                    if let Some(original_target) = original_target.upgrade() {
-                        original_target.update(cx, |view, cx| {
-                            view.apply_linked_hover(*block_id, cx);
-                        });
-                    }
+            move |_, _, event: &DocumentViewEvent, _, cx| {
+                let DocumentViewEvent::TranslationRegionHovered {
+                    session_id: event_session_id,
+                    region_id,
+                } = event
+                else {
+                    return;
+                };
+                if *event_session_id != session_id {
+                    return;
                 }
-                DocumentViewEvent::BlockSelected(selection) => {
-                    if let Some(original_target) = original_target.upgrade() {
-                        original_target.update(cx, |view, cx| {
-                            view.apply_linked_selection(*selection, cx);
-                        });
-                    }
+                if let Some(original_target) = original_target.upgrade() {
+                    original_target.update(cx, |view, cx| {
+                        view.apply_live_translation_hover(session_id, region_id.clone(), cx);
+                    });
                 }
-                DocumentViewEvent::OpenDocument { .. }
-                | DocumentViewEvent::OpenSettings
-                | DocumentViewEvent::AiPanelDismissed
-                | DocumentViewEvent::SynchronizedScroll(_) => {}
             },
         )
         .detach();
+
+        self.live_translation_pairs.insert(
+            session_id,
+            LiveTranslationPair {
+                source_id,
+                translated_id,
+                source: original.downgrade(),
+                translated: translated.downgrade(),
+                active: false,
+            },
+        );
+        self.refresh_live_translation_pair_activity(cx);
+    }
+
+    fn unregister_live_translation_pair(
+        &mut self,
+        session_id: DocumentTranslationJobId,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pair) = self.live_translation_pairs.remove(&session_id) {
+            if let Some(source) = pair.source.upgrade() {
+                source.update(cx, |view, cx| {
+                    view.set_translation_pair_active(session_id, false, cx);
+                    view.detach_translation_source_mirror(session_id, cx);
+                });
+            }
+            if let Some(translated) = pair.translated.upgrade() {
+                translated.update(cx, |view, cx| {
+                    view.set_translation_pair_active(session_id, false, cx);
+                });
+            }
+            return;
+        }
+
+        // A session can be interrupted between attaching its source mirror
+        // and registering the pair. Clean that narrow partial-open state too.
+        for pane in self.pane_group.panes() {
+            for view in pane.read(cx).document_views() {
+                view.update(cx, |view, cx| {
+                    view.detach_translation_source_mirror(session_id, cx);
+                });
+            }
+        }
+    }
+
+    fn unregister_live_translation_pairs_for_tab(
+        &mut self,
+        tab_id: EntityId,
+        cx: &mut Context<Self>,
+    ) {
+        let session_ids = self
+            .live_translation_pairs
+            .iter()
+            .filter_map(|(session_id, pair)| {
+                (pair.source_id == tab_id || pair.translated_id == tab_id).then_some(*session_id)
+            })
+            .collect::<Vec<_>>();
+        for session_id in session_ids {
+            self.unregister_live_translation_pair(session_id, cx);
+        }
+    }
+
+    fn refresh_live_translation_pair_activity(&mut self, cx: &mut Context<Self>) {
+        if self.live_translation_pairs.is_empty() {
+            return;
+        }
+        let active_tabs = self
+            .pane_group
+            .panes()
+            .into_iter()
+            .filter_map(|pane| {
+                pane.read(cx)
+                    .active_document_view()
+                    .map(|view| view.entity_id())
+            })
+            .collect::<HashSet<_>>();
+        let stale = self
+            .live_translation_pairs
+            .iter()
+            .filter_map(|(session_id, pair)| {
+                (pair.source.upgrade().is_none() || pair.translated.upgrade().is_none())
+                    .then_some(*session_id)
+            })
+            .collect::<Vec<_>>();
+        for session_id in stale {
+            self.unregister_live_translation_pair(session_id, cx);
+        }
+
+        let mut updates = Vec::new();
+        for (session_id, pair) in &mut self.live_translation_pairs {
+            let active =
+                live_translation_pair_is_active(pair.source_id, pair.translated_id, &active_tabs);
+            if pair.active == active {
+                continue;
+            }
+            pair.active = active;
+            if let (Some(source), Some(translated)) =
+                (pair.source.upgrade(), pair.translated.upgrade())
+            {
+                updates.push((*session_id, active, source, translated));
+            }
+        }
+        for (session_id, active, source, translated) in updates {
+            source.update(cx, |view, cx| {
+                view.set_translation_pair_active(session_id, active, cx);
+            });
+            translated.update(cx, |view, cx| {
+                view.set_translation_pair_active(session_id, active, cx);
+            });
+        }
     }
 
     fn activate_pane(&mut self, pane: Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
@@ -2372,10 +2804,75 @@ impl Workspace {
     }
 
     fn close_other_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sessions = self
+            .pane_group
+            .panes()
+            .into_iter()
+            .filter(|pane| *pane != self.active_pane)
+            .flat_map(|pane| pane.read(cx).translation_sessions(cx))
+            .collect::<Vec<_>>();
+        let has_running = sessions.iter().any(|(_, running)| *running);
+        if has_running {
+            let answer = window.prompt(
+                PromptLevel::Warning,
+                "Translations are still running",
+                Some(
+                    "Closing the other panes would close live translation tabs. Cancel those translations, continue them in the background, or keep the panes open.",
+                ),
+                &[
+                    PromptButton::ok("Cancel translations"),
+                    PromptButton::new("Continue in background"),
+                    PromptButton::cancel("Keep panes open"),
+                ],
+                cx,
+            );
+            cx.spawn_in(window, async move |this, cx| {
+                let Ok(choice) = answer.await else {
+                    return;
+                };
+                if choice == 2 {
+                    return;
+                }
+                _ = this.update_in(cx, |this, window, cx| {
+                    this.dispose_translation_sessions_for_close(&sessions, choice == 1, cx);
+                    this.close_other_panes_now(window, cx);
+                });
+            })
+            .detach();
+            return;
+        }
+        self.dispose_translation_sessions_for_close(&sessions, false, cx);
+        self.close_other_panes_now(window, cx);
+    }
+
+    fn dispose_translation_sessions_for_close(
+        &mut self,
+        sessions: &[(DocumentTranslationJobId, bool)],
+        keep_running_in_background: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut seen = HashSet::new();
+        for (session_id, running) in sessions.iter().copied() {
+            if !seen.insert(session_id) {
+                continue;
+            }
+            self.document_translation_jobs.update(cx, |manager, cx| {
+                if running && keep_running_in_background {
+                    manager.set_session_backgrounded(session_id, cx);
+                } else {
+                    manager.discard_session(session_id, cx);
+                }
+            });
+            self.unregister_live_translation_pair(session_id, cx);
+        }
+    }
+
+    fn close_other_panes_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for pane in self.pane_group.panes() {
             if pane != self.active_pane {
                 self.cancel_pending_translation_splits_for_pane(&pane, cx);
                 for tab_id in pane.read(cx).tab_ids() {
+                    self.unregister_live_translation_pairs_for_tab(tab_id, cx);
                     self.synchronized_tabs.remove_tab(tab_id);
                 }
                 if self
@@ -3213,6 +3710,7 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         fs,
         path::Path,
         time::{Duration, Instant, SystemTime},
@@ -3220,8 +3718,8 @@ mod tests {
 
     use glyphst_translation_ui::DocumentTranslationOpenMode;
     use gpui::{
-        AppContext as _, Modifiers, MouseButton, MouseUpEvent, TestAppContext, bounds, point, px,
-        size,
+        AppContext as _, EntityId, Modifiers, MouseButton, MouseUpEvent, TestAppContext, bounds,
+        point, px, size,
     };
     use gpui_component::{Root, WindowExt as _};
 
@@ -3230,6 +3728,7 @@ mod tests {
         SynchronizedConnectionCurve, SynchronizedConnectionGroup,
         SynchronizedConnectionInvalidReason, SynchronizedConnectionTabState, Workspace,
         WorkspaceCallbacks, WorkspaceMenu, WorkspaceWindowHandle, WorkspaceWindowRequest,
+        live_translation_pair_is_active,
     };
     use crate::{
         document_view::{
@@ -3251,6 +3750,27 @@ mod tests {
     }
 
     fn ignore_settings_window(_: &mut gpui::App) {}
+
+    #[test]
+    fn live_translation_pair_requires_both_selected_tabs() {
+        let source = EntityId::from(1001);
+        let translated = EntityId::from(1002);
+        assert!(!live_translation_pair_is_active(
+            source,
+            translated,
+            &HashSet::new()
+        ));
+        assert!(!live_translation_pair_is_active(
+            source,
+            translated,
+            &HashSet::from([translated])
+        ));
+        assert!(live_translation_pair_is_active(
+            source,
+            translated,
+            &HashSet::from([source, translated])
+        ));
+    }
 
     fn temporary_pdf_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(

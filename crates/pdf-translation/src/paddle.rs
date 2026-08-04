@@ -146,12 +146,42 @@ impl PaddleClient {
         file_path: &Path,
         model: &str,
         cancellation: &CancellationToken,
+        on_progress: impl FnMut(PaddleJobProgress),
+    ) -> Result<PaddleOcrResult, PaddleError> {
+        cancellation
+            .check()
+            .map_err(|_| PaddleError::cancelled("submit"))?;
+        let file_name = file_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                PaddleError::invalid_response("submit", "invalid upload filename", None)
+            })?;
+        let file_bytes = std::fs::read(file_path).map_err(|error| {
+            PaddleError::new(
+                "submit",
+                PaddleErrorCategory::InvalidRequest,
+                format!("failed to read source PDF: {error}"),
+                None,
+                None,
+                None,
+            )
+        })?;
+        self.run_document_bytes(file_name, &file_bytes, model, cancellation, on_progress)
+    }
+
+    pub fn run_document_bytes(
+        &self,
+        file_name: &str,
+        file_bytes: &[u8],
+        model: &str,
+        cancellation: &CancellationToken,
         mut on_progress: impl FnMut(PaddleJobProgress),
     ) -> Result<PaddleOcrResult, PaddleError> {
         cancellation
             .check()
             .map_err(|_| PaddleError::cancelled("submit"))?;
-        let trace = self.submit_local_file(file_path, model, cancellation)?;
+        let trace = self.submit_file_bytes(file_name, file_bytes, model, cancellation)?;
         let job_id = trace.data;
         let started = Instant::now();
         let mut latest_trace_id = trace.trace_id;
@@ -226,29 +256,25 @@ impl PaddleClient {
         }
     }
 
-    fn submit_local_file(
+    fn submit_file_bytes(
         &self,
-        file_path: &Path,
+        file_name: &str,
+        file_bytes: &[u8],
         model: &str,
         cancellation: &CancellationToken,
     ) -> Result<PaddleTrace<String>, PaddleError> {
-        let file_name = file_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| {
-                PaddleError::invalid_response("submit", "invalid upload filename", None)
-            })?
-            .to_string();
-        let file_bytes = std::fs::read(file_path).map_err(|error| {
-            PaddleError::new(
+        cancellation
+            .check()
+            .map_err(|_| PaddleError::cancelled("submit"))?;
+        if file_name.trim().is_empty() || file_bytes.is_empty() {
+            return Err(PaddleError::invalid_response(
                 "submit",
-                PaddleErrorCategory::InvalidRequest,
-                format!("failed to read source PDF: {error}"),
+                "OCR upload requires a named, non-empty PDF",
                 None,
-                None,
-                None,
-            )
-        })?;
+            ));
+        }
+        let file_name = file_name.to_string();
+        let file_bytes = file_bytes.to_vec();
         let url = format!("{}/api/v2/ocr/jobs", self.config.base_url);
         let model = normalize_model_name(model);
         let optional_payload = json!({
@@ -730,6 +756,12 @@ pub fn normalize_paddle_payload(
     );
     document.validate()?;
     Ok(document)
+}
+
+/// Reconcile provider-declared continuation groups after independently
+/// normalized pages have been assembled into a global document.
+pub fn reconcile_provider_continuations(document: &mut DocumentV1) {
+    assign_provider_continuations(&mut document.pages);
 }
 
 fn paddle_structure_confidence(provider_version: &str) -> f32 {

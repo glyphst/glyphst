@@ -371,6 +371,13 @@ impl Settings {
             {
                 settings.translation.target_language = value.to_string();
             }
+            if let Some(value) = translation
+                .get_arg("document_mode")
+                .and_then(KdlValue::as_string)
+                .and_then(DocumentTranslationMode::parse)
+            {
+                settings.translation.document_mode = value;
+            }
             if let Some(pinned) = translation.get("pinned").and_then(KdlNode::children) {
                 if let Some(value) = pinned.get_arg("width").and_then(value_to_f32) {
                     settings.translation.pinned.width = value;
@@ -717,6 +724,11 @@ impl Settings {
                 translation_children,
                 "target_language",
                 self.translation.target_language.clone(),
+            );
+            push_value_node(
+                translation_children,
+                "document_mode",
+                self.translation.document_mode.as_str(),
             );
             let default_pinned = PinnedTranslationSettings::default();
             if self.translation.pinned.width != default_pinned.width

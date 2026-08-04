@@ -1,37 +1,45 @@
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::{BTreeSet, HashMap, HashSet, hash_map::DefaultHasher};
 use std::fmt::{self, Write as _};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    mpsc as sync_mpsc,
+};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, anyhow};
 use glyphst_settings::{OcrMode, OcrProvider, PdfContentReviewMode, Settings};
 use glyphst_translation::{LanguageCode, TranslationService};
+use mupdf::pdf::PdfDocument as MuPdfDocument;
 use mupdf::{Document, TextPageFlags};
 use serde::{Deserialize, Serialize};
 
 use glyphst_pdf_translation::{
-    BoundingBox, CancellationToken, DocumentV1, LayoutDocument, LayoutOptions, PaddleClient,
-    PaddleClientConfig, PdfComposer, PdfTranslationStage, ProgressTracker, TranslatedDocument,
-    TranslationProgressSink, TypstCompiler, TypstCompilerConfig, UnlimitedClient,
-    UnlimitedClientConfig, annotate_reference_sections, build_layout_with_options,
+    BlockKind, BoundingBox, CancellationToken, DocumentMetadata, DocumentV1, LayoutDocument,
+    LayoutOptions, LayoutPage, OcrFusionReport, PaddleClient, PaddleClientConfig, Page,
+    PdfComposer, PdfInspection, PdfTranslationStage, ProgressTracker, ProtectedRegionKind,
+    TranslatedDocument, TranslationProgressSink, TypstCompiler, TypstCompilerConfig,
+    UnlimitedClient, UnlimitedClientConfig, annotate_reference_sections, build_layout_with_options,
     extract_native_document, fuse_native_with_ocr_report, inspect_pdf, normalize_paddle_payload,
-    normalize_unlimited_payload, review_translation_policies, sanitize_source_pdf,
+    normalize_unlimited_payload, reconcile_provider_continuations, review_translation_policies,
+    sanitize_source_pdf, source_text_regions,
 };
 use glyphst_pdf_translation::{
-    TranslatedUnit, TranslationDocumentError, TranslationFailureDiagnostic, TranslationQueueStats,
-    TranslationRunProgress, TranslationRunSnapshot, translate_document_resuming,
+    TranslatedUnit, TranslationDocumentError, TranslationFailureDiagnostic,
+    TranslationFailurePhase, TranslationQueueStats, TranslationRunProgress, TranslationRunSnapshot,
+    translate_document_partial_resuming,
 };
 
 use crate::backend::GlyphstTranslationBackend;
 use crate::reviewer::GlyphstPolicyReviewer;
 
-const ARTIFACT_VERSION: u32 = 5;
-const PIPELINE_VERSION: &str = "native-rust-v23-inline-object-anchors-baselines";
-const CHECKPOINT_VERSION: u32 = 2;
+const ARTIFACT_VERSION: u32 = 7;
+const PIPELINE_VERSION: &str = "native-rust-v26-page-streaming-canonical-previews";
+const CHECKPOINT_VERSION: u32 = 4;
 
 #[derive(Clone)]
 pub struct PdfTranslationService {
@@ -152,8 +160,106 @@ impl PdfTranslationService {
         progress_sink: impl TranslationProgressSink + 'static,
     ) -> Result<PdfTranslationResult, PdfTranslationError> {
         let _run_guard = self.begin_run()?;
-        let (fingerprint, source_bytes) = request_fingerprint_with_source(&settings, &request)?;
+        let mut progress = ProgressTracker::new(progress_sink);
+        let session_request = PdfTranslationSessionRequest {
+            source_path: request.source_path.clone(),
+            source_language: request.source_language.clone(),
+            target_language: request.target_language.clone(),
+        };
+        let mut ignore_update = |_: PdfTranslationSessionUpdate| {};
+        let session = self.run_session_inner(
+            &settings,
+            session_request,
+            &cancellation,
+            &mut progress,
+            &mut ignore_update,
+        )?;
+        self.export_session_inner(
+            &settings,
+            &session,
+            PdfTranslationExportRequest {
+                output_path: request.output_path,
+                original_unit_ids: Vec::new(),
+            },
+            &cancellation,
+            &mut progress,
+        )
+    }
+
+    pub fn run_session(
+        &self,
+        settings: Settings,
+        request: PdfTranslationSessionRequest,
+        cancellation: CancellationToken,
+        progress_sink: impl TranslationProgressSink + 'static,
+        mut update_sink: impl FnMut(PdfTranslationSessionUpdate) + Send,
+    ) -> Result<PdfTranslationSessionResult, PdfTranslationError> {
+        let _run_guard = self.begin_run()?;
+        let mut progress = ProgressTracker::new(progress_sink);
+        self.run_session_inner(
+            &settings,
+            request,
+            &cancellation,
+            &mut progress,
+            &mut update_sink,
+        )
+    }
+
+    pub fn export_session(
+        &self,
+        settings: Settings,
+        session: PdfTranslationSessionResult,
+        request: PdfTranslationExportRequest,
+        cancellation: CancellationToken,
+        progress_sink: impl TranslationProgressSink + 'static,
+    ) -> Result<PdfTranslationResult, PdfTranslationError> {
+        let _run_guard = self.begin_run()?;
+        let mut progress = ProgressTracker::new(progress_sink);
+        self.export_session_inner(&settings, &session, request, &cancellation, &mut progress)
+    }
+
+    /// Rebuild one live page after a session-local original/translated toggle.
+    /// This deliberately uses the same finalizer as batch output and streaming
+    /// previews, so the interaction cannot diverge into a UI text overlay.
+    pub fn render_session_page_preview(
+        &self,
+        session: &PdfTranslationSessionResult,
+        page_index: usize,
+        revision: u64,
+        original_unit_ids: &[String],
+        cancellation: &CancellationToken,
+    ) -> Result<PdfTranslationPagePreview, PdfTranslationError> {
+        let _run_guard = self.begin_run()?;
+        self.compile_page_preview(
+            &session.translated,
+            &session.source_snapshot_path,
+            &session.inspection,
+            &session.job_directory,
+            page_index,
+            revision,
+            &original_unit_ids.iter().cloned().collect(),
+            cancellation,
+        )
+    }
+
+    fn run_session_inner(
+        &self,
+        settings: &Settings,
+        session_request: PdfTranslationSessionRequest,
+        cancellation: &CancellationToken,
+        progress: &mut ProgressTracker,
+        update_sink: &mut (impl FnMut(PdfTranslationSessionUpdate) + Send),
+    ) -> Result<PdfTranslationSessionResult, PdfTranslationError> {
+        let request = PdfTranslationRequest {
+            source_path: session_request.source_path.clone(),
+            output_path: PathBuf::new(),
+            source_language: session_request.source_language.clone(),
+            target_language: session_request.target_language.clone(),
+        };
+        let (fingerprint, source_fingerprint, source_bytes) =
+            request_fingerprint_with_source(settings, &request)?;
         let job_directory = create_job_directory(&fingerprint)?;
+        let prepared_directory = create_prepared_directory(&source_fingerprint)?;
         let source_path = job_directory.join("source-original.pdf");
         fs::write(&source_path, source_bytes).map_err(|error| {
             PdfTranslationError::stage(
@@ -164,7 +270,6 @@ impl PdfTranslationService {
         })?;
         let mut pipeline_request = request.clone();
         pipeline_request.source_path = source_path;
-        let mut progress = ProgressTracker::new(progress_sink);
         progress.report(
             PdfTranslationStage::Preparing,
             "Inspecting source PDF",
@@ -188,34 +293,69 @@ impl PdfTranslationService {
             .map(|page| crate::PageGeometry::new(page.width, page.height))
             .collect::<Vec<_>>();
         progress.finish_stage(PdfTranslationStage::Preparing, "Source PDF inspected");
+        let backend = GlyphstTranslationBackend::new(
+            self.translation.clone(),
+            settings.clone(),
+            request.source_language.clone(),
+            request.target_language.clone(),
+        );
+        let mut streamed_units = Vec::<TranslatedUnit>::new();
+        let mut streamed_preview_units = HashMap::<String, (u64, Vec<usize>)>::new();
+        let mut streamed_preview_revisions = HashMap::<usize, u64>::new();
 
-        let document_path = job_directory.join("document.v1.json");
-        let mut document = if let Some(document) =
-            load_normalized_document(&document_path, &fingerprint)
+        let document_path = prepared_directory.join("document.v1.json");
+        let (mut document, reused_prepared_document) = if let Some(mut document) =
+            load_normalized_document(&document_path, &source_fingerprint)
         {
+            document.metadata.source_path = pipeline_request.source_path.clone();
             progress.finish_stage(PdfTranslationStage::Ocr, "Reused extracted document");
             progress.finish_stage(
                 PdfTranslationStage::Normalizing,
                 "Reused normalized document",
             );
-            document
+            (document, true)
         } else {
-            match settings.ocr.mode {
+            let all_pages = (0..target_pages.len()).collect::<Vec<_>>();
+            let automatic_ocr_pages = inspection
+                .pages
+                .iter()
+                .filter(|page| page.needs_ocr)
+                .map(|page| page.page_index)
+                .collect::<Vec<_>>();
+            let document = match settings.ocr.mode {
                 OcrMode::Always => self.run_selected_ocr(
-                    &settings,
+                    settings,
                     &pipeline_request,
                     &target_pages,
+                    &prepared_directory,
                     &job_directory,
-                    &cancellation,
-                    &mut progress,
+                    &source_fingerprint,
+                    &inspection,
+                    &all_pages,
+                    cancellation,
+                    progress,
+                    update_sink,
+                    &backend,
+                    &mut streamed_units,
+                    &mut streamed_preview_units,
+                    &mut streamed_preview_revisions,
                 )?,
                 OcrMode::Auto if inspection.recommends_ocr => self.run_selected_ocr(
-                    &settings,
+                    settings,
                     &pipeline_request,
                     &target_pages,
+                    &prepared_directory,
                     &job_directory,
-                    &cancellation,
-                    &mut progress,
+                    &source_fingerprint,
+                    &inspection,
+                    &automatic_ocr_pages,
+                    cancellation,
+                    progress,
+                    update_sink,
+                    &backend,
+                    &mut streamed_units,
+                    &mut streamed_preview_units,
+                    &mut streamed_preview_revisions,
                 )?,
                 OcrMode::Auto | OcrMode::Off => {
                     progress.report(
@@ -226,8 +366,8 @@ impl PdfTranslationService {
                     );
                     let document = extract_native_document(
                         &pipeline_request.source_path,
-                        fingerprint.clone(),
-                        &cancellation,
+                        source_fingerprint.clone(),
+                        cancellation,
                     )
                     .map_err(|error| {
                         PdfTranslationError::stage(
@@ -243,11 +383,16 @@ impl PdfTranslationService {
                     );
                     document
                 }
-            }
+            };
+            (document, false)
         };
-        annotate_reference_sections(&mut document);
+        if !reused_prepared_document {
+            annotate_reference_sections(&mut document);
+        }
         let mut warnings = Vec::new();
-        if let Some(reviewer) = GlyphstPolicyReviewer::from_settings(&settings) {
+        if !reused_prepared_document
+            && let Some(reviewer) = GlyphstPolicyReviewer::from_settings(settings)
+        {
             let review_errors = review_translation_policies(&mut document, &reviewer);
             if !review_errors.is_empty() {
                 document.metadata.extra.insert(
@@ -282,8 +427,48 @@ impl PdfTranslationService {
                     affected_block_ids,
                 });
             }
+        } else if let Some(errors) = document
+            .metadata
+            .extra
+            .get("policy_review_errors")
+            .and_then(serde_json::Value::as_array)
+            && !errors.is_empty()
+        {
+            warnings.push(PdfTranslationWarning {
+                code: "content_review_failed".to_string(),
+                message: format!(
+                    "AI content review previously failed for {} page batch(es); ambiguous text was preserved.",
+                    errors.len()
+                ),
+                affected_block_ids: document
+                    .pages
+                    .iter()
+                    .flat_map(|page| &page.blocks)
+                    .filter(|block| {
+                        block.policy.reason.starts_with("policy_review_failed:")
+                            || block.policy.reason.starts_with("policy_review_incomplete:")
+                    })
+                    .map(|block| block.id.clone())
+                    .collect(),
+            });
         }
-        write_json(&document_path, &document)?;
+        if !reused_prepared_document {
+            write_json_atomically(&document_path, &document, PdfTranslationStage::Normalizing)?;
+        }
+        let ocr_page_failures = ocr_page_failures(&document);
+        let ocr_failures = ocr_failure_diagnostics(&document);
+        for failure in &ocr_page_failures {
+            update_sink(PdfTranslationSessionUpdate::PageFailed(failure.clone()));
+        }
+        let page_count = document.pages.len();
+        for page in &document.pages {
+            update_sink(PdfTranslationSessionUpdate::PagePrepared {
+                metadata: document.metadata.clone(),
+                page: page.clone(),
+                page_count,
+                ready_prefix: page.page_index + 1,
+            });
+        }
 
         progress.report(
             PdfTranslationStage::Translating,
@@ -291,70 +476,132 @@ impl PdfTranslationService {
             Some(0),
             Some(1),
         );
-        let backend = GlyphstTranslationBackend::new(
-            self.translation.clone(),
-            settings.clone(),
-            request.source_language.clone(),
-            request.target_language.clone(),
-        );
         let checkpoint_identity =
             TranslationCheckpointIdentity::new(&settings, &request, &fingerprint, &document);
         let checkpoint_path = job_directory.join("translated-document.partial.json");
         let diagnostics_path = job_directory.join("translation-diagnostics.json");
         let block_locations = translation_block_locations(&document);
-        let resumed_units = load_translation_checkpoint(&checkpoint_path, &checkpoint_identity);
+        let mut resumed_by_id = load_translation_checkpoint(&checkpoint_path, &checkpoint_identity)
+            .into_iter()
+            .map(|unit| (unit.id.clone(), unit))
+            .collect::<HashMap<_, _>>();
+        for unit in &streamed_units {
+            resumed_by_id.insert(unit.id.clone(), unit.clone());
+        }
+        let resumed_units = resumed_by_id.into_values().collect::<Vec<_>>();
         let mut last_checkpoint_resolved = resumed_units.len();
         let mut last_terminal_failures = 0usize;
         let mut final_translation_counts = TranslationRunProgress::default();
         let mut final_translation_snapshot = None;
-        let translation_result = translate_document_resuming(
-            document,
-            &backend,
-            &cancellation,
-            resumed_units,
-            |snapshot| {
-                let counts = &snapshot.progress;
-                final_translation_counts = counts.clone();
-                final_translation_snapshot = Some(snapshot.clone());
-                let resolved = snapshot.resolved_units.len();
-                let should_persist = translation_checkpoint_changed(
-                    resolved,
-                    last_checkpoint_resolved,
-                    counts.failed,
-                    last_terminal_failures,
+        let streamed_hashes = streamed_units
+            .iter()
+            .map(|unit| (unit.id.clone(), unit.semantic_hash))
+            .collect::<HashMap<_, _>>();
+        let mut final_reconciliation_emitted = false;
+        let update_sink = Mutex::new(update_sink);
+        let translation_result = std::thread::scope(|scope| {
+            let (preview_tx, preview_rx) = sync_mpsc::channel();
+            scope.spawn(|| {
+                stream_page_previews(
+                    self,
+                    &document,
+                    &pipeline_request.source_path,
+                    &inspection,
+                    &job_directory,
+                    &cancellation,
+                    streamed_preview_units.clone(),
+                    streamed_preview_revisions.clone(),
+                    preview_rx,
+                    &update_sink,
                 );
-                if should_persist {
-                    write_translation_checkpoint(&checkpoint_path, &checkpoint_identity, snapshot)
-                        .map_err(|error| error.message)?;
-                    write_translation_diagnostics(
-                        &diagnostics_path,
-                        &checkpoint_identity,
-                        snapshot,
-                    )
-                    .map_err(|error| error.message)?;
-                    last_checkpoint_resolved = resolved;
-                    last_terminal_failures = counts.failed;
-                }
-                progress.report_translation(
-                    format!(
-                        "Translated {}, cached {}, retrying {}, failed {} of {} semantic units",
-                        counts.translated,
-                        counts.cached,
-                        counts.retrying,
+            });
+            let result = translate_document_partial_resuming(
+                document.clone(),
+                &backend,
+                &cancellation,
+                resumed_units,
+                |snapshot| {
+                    let counts = &snapshot.progress;
+                    final_translation_counts = counts.clone();
+                    final_translation_snapshot = Some(snapshot.clone());
+                    {
+                        let mut sink = update_sink
+                            .lock()
+                            .map_err(|_| "translation session update sink stopped".to_string())?;
+                        if !final_reconciliation_emitted {
+                            let valid_hashes = snapshot
+                                .resolved_units
+                                .iter()
+                                .map(|unit| (unit.id.as_str(), unit.semantic_hash))
+                                .collect::<HashMap<_, _>>();
+                            let mut invalidated_unit_ids = streamed_hashes
+                                .iter()
+                                .filter(|(id, semantic_hash)| {
+                                    valid_hashes
+                                        .get(id.as_str())
+                                        .is_none_or(|valid| valid != *semantic_hash)
+                                })
+                                .map(|(id, _)| id.clone())
+                                .collect::<Vec<_>>();
+                            invalidated_unit_ids.sort();
+                            (**sink)(PdfTranslationSessionUpdate::Reconciled {
+                                ready_prefix: document.pages.len(),
+                                invalidated_unit_ids,
+                                final_pass: true,
+                            });
+                            final_reconciliation_emitted = true;
+                        }
+                        (**sink)(PdfTranslationSessionUpdate::UnitsChanged(snapshot.clone()));
+                    }
+                    preview_tx
+                        .send(snapshot.clone())
+                        .map_err(|_| "page preview worker stopped".to_string())?;
+                    let resolved = snapshot.resolved_units.len();
+                    let should_persist = translation_checkpoint_changed(
+                        resolved,
+                        last_checkpoint_resolved,
                         counts.failed,
-                        counts.total
-                    ),
-                    counts.translated as u32,
-                    counts.cached as u32,
-                    counts.retrying as u32,
-                    counts.failed as u32,
-                    counts.total as u32,
-                );
-                Ok(())
-            },
-        );
-        let translated = match translation_result {
-            Ok(translated) => translated,
+                        last_terminal_failures,
+                    );
+                    if should_persist {
+                        write_translation_checkpoint(
+                            &checkpoint_path,
+                            &checkpoint_identity,
+                            snapshot,
+                        )
+                        .map_err(|error| error.message)?;
+                        write_translation_diagnostics(
+                            &diagnostics_path,
+                            &checkpoint_identity,
+                            snapshot,
+                        )
+                        .map_err(|error| error.message)?;
+                        last_checkpoint_resolved = resolved;
+                        last_terminal_failures = counts.failed;
+                    }
+                    progress.report_translation(
+                        format!(
+                            "Translated {}, cached {}, retrying {}, failed {} of {} semantic units",
+                            counts.translated,
+                            counts.cached,
+                            counts.retrying,
+                            counts.failed,
+                            counts.total
+                        ),
+                        counts.translated as u32,
+                        counts.cached as u32,
+                        counts.retrying as u32,
+                        counts.failed as u32,
+                        counts.total as u32,
+                    );
+                    Ok(())
+                },
+            );
+            drop(preview_tx);
+            result
+        });
+        let mut outcome = match translation_result {
+            Ok(outcome) => outcome,
             Err(error) => {
                 let detailed_message = translation_failure_report(
                     &request,
@@ -374,23 +621,104 @@ impl PdfTranslationService {
                 });
             }
         };
+        outcome.failures.extend(ocr_failures);
+        let prepared = prepare_translation_layout(&outcome.document, &HashSet::new());
+        if !prepared.failures.is_empty() {
+            outcome.progress.failed = outcome
+                .progress
+                .failed
+                .saturating_add(prepared.failures.len());
+            outcome.failures.extend(prepared.failures);
+        }
+        outcome.document = prepared.translated;
         progress.report_translation(
-            "Document translation complete",
+            if outcome.failures.is_empty() {
+                "Document translation complete"
+            } else {
+                "Document translation complete with untranslated units"
+            },
             final_translation_counts.translated as u32,
             final_translation_counts.cached as u32,
             0,
-            0,
+            final_translation_counts.failed as u32,
             final_translation_counts.total as u32,
         );
-        write_json(job_directory.join("translated-document.json"), &translated)?;
+        write_json(
+            job_directory.join("translated-document.json"),
+            &outcome.document,
+        )?;
+        if let Ok(mut sink) = update_sink.lock() {
+            (**sink)(PdfTranslationSessionUpdate::Finished);
+        }
+        Ok(PdfTranslationSessionResult {
+            request: session_request,
+            translated: outcome.document,
+            failures: outcome.failures,
+            progress: outcome.progress,
+            queue: outcome.queue,
+            inspection,
+            source_snapshot_path: pipeline_request.source_path,
+            job_directory,
+            fingerprint,
+            warnings,
+        })
+    }
 
+    fn export_session_inner(
+        &self,
+        settings: &Settings,
+        session: &PdfTranslationSessionResult,
+        request: PdfTranslationExportRequest,
+        cancellation: &CancellationToken,
+        progress: &mut ProgressTracker,
+    ) -> Result<PdfTranslationResult, PdfTranslationError> {
+        let job_directory = &session.job_directory;
+        let source_snapshot_path = &session.source_snapshot_path;
+        let original_unit_ids = request
+            .original_unit_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let mut warnings = session.warnings.clone();
+        if !session.failures.is_empty() {
+            warnings.push(PdfTranslationWarning {
+                code: "translation_units_failed".to_string(),
+                message: format!(
+                    "{} translation unit(s) remain in the original language.",
+                    session.failures.len()
+                ),
+                affected_block_ids: session
+                    .failures
+                    .iter()
+                    .flat_map(|failure| failure.member_block_ids.iter().cloned())
+                    .collect(),
+            });
+        }
         progress.report(
             PdfTranslationStage::Layout,
             "Fitting translated text to source geometry",
             Some(0),
             Some(1),
         );
-        let layout = build_layout_with_options(&translated, LayoutOptions::application_default());
+        let prepared = prepare_translation_layout(&session.translated, &original_unit_ids);
+        let translated = prepared.translated;
+        let layout = prepared.layout;
+        let mut artifact_failures = session.failures.clone();
+        if !prepared.failures.is_empty() {
+            warnings.push(PdfTranslationWarning {
+                code: "translation_layout_fallback".to_string(),
+                message: format!(
+                    "{} translated unit(s) could not be laid out safely and remain in the original language.",
+                    prepared.failures.len()
+                ),
+                affected_block_ids: prepared
+                    .failures
+                    .iter()
+                    .flat_map(|failure| failure.member_block_ids.iter().cloned())
+                    .collect(),
+            });
+            artifact_failures.extend(prepared.failures);
+        }
         validate_layout_completeness(&translated, &layout)?;
         write_json(job_directory.join("layout.json"), &layout)?;
         progress.finish_stage(PdfTranslationStage::Layout, "Translated layout prepared");
@@ -401,12 +729,87 @@ impl PdfTranslationService {
             None,
             None,
         );
-        let sanitized_source_path = job_directory.join("source-sanitized.pdf");
-        sanitize_source_pdf(
-            &pipeline_request.source_path,
-            &sanitized_source_path,
+        let composed_path = self.finalize_layout_pdf(
+            source_snapshot_path,
+            source_snapshot_path,
             &layout,
-            &cancellation,
+            &session.inspection,
+            job_directory,
+            cancellation,
+        )?;
+        write_json(job_directory.join("layout.json"), &layout)?;
+        progress.finish_stage(PdfTranslationStage::Compiling, "Typst PDF compiled");
+
+        progress.report(
+            PdfTranslationStage::Composing,
+            "Restoring PDF links, outlines, and metadata",
+            Some(0),
+            Some(1),
+        );
+        progress.finish_stage(PdfTranslationStage::Composing, "PDF structure restored");
+
+        progress.report(
+            PdfTranslationStage::Validating,
+            "Validating translated PDF",
+            Some(0),
+            Some(1),
+        );
+        cancellation
+            .check()
+            .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Validating))?;
+        publish_atomically(&composed_path, &request.output_path)?;
+        let artifact_request = PdfTranslationRequest {
+            source_path: session.request.source_path.clone(),
+            output_path: request.output_path.clone(),
+            source_language: session.request.source_language.clone(),
+            target_language: session.request.target_language.clone(),
+        };
+        let manifest = build_manifest(
+            settings,
+            &artifact_request,
+            &session.fingerprint,
+            job_directory,
+            &layout,
+            &translated,
+            &warnings,
+            &artifact_failures,
+            &request.original_unit_ids,
+        );
+        let manifest_path = job_directory.join("artifact-manifest.json");
+        write_json(&manifest_path, &manifest)?;
+        progress.finish("Translated PDF is ready");
+
+        Ok(PdfTranslationResult {
+            output_path: request.output_path,
+            manifest_path,
+            job_directory: session.job_directory.clone(),
+            fingerprint: session.fingerprint.clone(),
+            warnings,
+        })
+    }
+
+    fn finalize_layout_pdf(
+        &self,
+        original_source_path: &Path,
+        render_source_path: &Path,
+        layout: &LayoutDocument,
+        inspection: &PdfInspection,
+        work_directory: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<PathBuf, PdfTranslationError> {
+        create_private_directory(work_directory).map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Compiling,
+                "Could not create the translated PDF render directory",
+                error,
+            )
+        })?;
+        let sanitized_source_path = work_directory.join("source-sanitized.pdf");
+        sanitize_source_pdf(
+            render_source_path,
+            &sanitized_source_path,
+            layout,
+            cancellation,
         )
         .map_err(|error| PdfTranslationError {
             stage: PdfTranslationStage::Compiling,
@@ -417,11 +820,11 @@ impl PdfTranslationService {
         let typst_output = self
             .typst
             .compile_translated_pdf(
-                &pipeline_request.source_path,
+                original_source_path,
                 &sanitized_source_path,
-                &layout,
-                &job_directory,
-                &cancellation,
+                layout,
+                work_directory,
+                cancellation,
             )
             .map_err(|error| PdfTranslationError {
                 stage: PdfTranslationStage::Compiling,
@@ -429,24 +832,15 @@ impl PdfTranslationService {
                 retryable: false,
                 detailed_message: None,
             })?;
-        write_json(job_directory.join("layout.json"), &layout)?;
-        progress.finish_stage(PdfTranslationStage::Compiling, "Typst PDF compiled");
-
-        progress.report(
-            PdfTranslationStage::Composing,
-            "Restoring PDF links, outlines, and metadata",
-            Some(0),
-            Some(1),
-        );
-        let composed_path = job_directory.join("translated-final.pdf");
+        let composed_path = work_directory.join("translated-final.pdf");
         self.composer
             .compose(
-                &pipeline_request.source_path,
+                original_source_path,
                 &typst_output.pdf_path,
                 &composed_path,
-                &layout,
-                &inspection,
-                &cancellation,
+                layout,
+                inspection,
+                cancellation,
             )
             .map_err(|error| PdfTranslationError {
                 stage: PdfTranslationStage::Composing,
@@ -454,43 +848,112 @@ impl PdfTranslationService {
                 retryable: false,
                 detailed_message: None,
             })?;
-        progress.finish_stage(PdfTranslationStage::Composing, "PDF structure restored");
-
-        progress.report(
-            PdfTranslationStage::Validating,
-            "Validating translated PDF",
-            Some(0),
-            Some(1),
-        );
-        validate_output(
-            &pipeline_request.source_path,
-            &composed_path,
-            &translated,
-            &layout,
-        )?;
+        validate_rendered_output(original_source_path, &composed_path, layout)?;
         cancellation
             .check()
             .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Validating))?;
-        publish_atomically(&composed_path, &request.output_path)?;
-        let manifest = build_manifest(
-            &settings,
-            &request,
-            &fingerprint,
-            &job_directory,
-            &layout,
-            &translated,
-            &warnings,
-        );
-        let manifest_path = job_directory.join("artifact-manifest.json");
-        write_json(&manifest_path, &manifest)?;
-        progress.finish("Translated PDF is ready");
+        Ok(composed_path)
+    }
 
-        Ok(PdfTranslationResult {
-            output_path: request.output_path,
-            manifest_path,
-            job_directory,
-            fingerprint,
-            warnings,
+    fn compile_page_preview(
+        &self,
+        translated: &TranslatedDocument,
+        source_path: &Path,
+        inspection: &PdfInspection,
+        job_directory: &Path,
+        page_index: usize,
+        revision: u64,
+        original_unit_ids: &HashSet<String>,
+        cancellation: &CancellationToken,
+    ) -> Result<PdfTranslationPagePreview, PdfTranslationError> {
+        let prepared = prepare_translation_layout(translated, original_unit_ids);
+        let page = prepared
+            .layout
+            .pages
+            .iter()
+            .find(|page| page.page_index == page_index)
+            .cloned()
+            .ok_or_else(|| {
+                PdfTranslationError::message(
+                    PdfTranslationStage::Compiling,
+                    format!("Translated preview page {} is unavailable", page_index + 1),
+                )
+            })?;
+        let hover_regions = build_page_hover_regions(translated, &page);
+        let source_bytes = extract_single_pdf_page(source_path, page_index)?;
+        let work_directory = job_directory
+            .join("page-previews")
+            .join(format!("page-{:04}-revision-{revision:08}", page_index + 1));
+        create_private_directory(&work_directory).map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Compiling,
+                "Could not create the page preview directory",
+                error,
+            )
+        })?;
+        let page_source_path = work_directory.join("source-page.pdf");
+        fs::write(&page_source_path, source_bytes).map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Compiling,
+                "Could not stage a source page for preview",
+                error,
+            )
+        })?;
+        let mut page_profile = inspection.pages.get(page_index).cloned().ok_or_else(|| {
+            PdfTranslationError::message(
+                PdfTranslationStage::Compiling,
+                format!("Source profile for page {} is unavailable", page_index + 1),
+            )
+        })?;
+        page_profile.page_index = 0;
+        let page_inspection = PdfInspection {
+            recommends_ocr: page_profile.needs_ocr,
+            pages: vec![page_profile],
+        };
+        let preview_layout = reindex_preview_layout(&page);
+        let output_path = self.finalize_layout_pdf(
+            &page_source_path,
+            &page_source_path,
+            &preview_layout,
+            &page_inspection,
+            &work_directory,
+            cancellation,
+        )?;
+        let pdf = fs::read(&output_path).map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Compiling,
+                "Could not load the compiled page preview",
+                error,
+            )
+        })?;
+        let page_block_ids = translated
+            .document
+            .pages
+            .get(page_index)
+            .map(|page| {
+                page.blocks
+                    .iter()
+                    .map(|block| block.id.as_str())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let layout_failures = prepared
+            .failures
+            .into_iter()
+            .filter(|failure| {
+                failure
+                    .member_block_ids
+                    .iter()
+                    .any(|block_id| page_block_ids.contains(block_id.as_str()))
+            })
+            .collect();
+        Ok(PdfTranslationPagePreview {
+            page_index,
+            revision,
+            layout: page,
+            hover_regions,
+            pdf: Arc::from(pdf),
+            layout_failures,
         })
     }
 
@@ -505,6 +968,9 @@ impl PdfTranslationService {
         let manifest_path = job_directory.join("artifact-manifest.json");
         let manifest: PdfTranslationArtifactManifest =
             serde_json::from_slice(&fs::read(&manifest_path).ok()?).ok()?;
+        if manifest.version != ARTIFACT_VERSION || manifest.pipeline_version != PIPELINE_VERSION {
+            return None;
+        }
         if manifest
             .warnings
             .iter()
@@ -544,219 +1010,817 @@ impl PdfTranslationService {
         })
     }
 
-    fn run_paddle_ocr(
-        &self,
-        settings: &Settings,
-        request: &PdfTranslationRequest,
-        target_pages: &[crate::PageGeometry],
-        job_directory: &Path,
-        cancellation: &CancellationToken,
-        progress: &mut ProgressTracker,
-    ) -> Result<DocumentV1, PdfTranslationError> {
-        progress.report(
-            PdfTranslationStage::Ocr,
-            "Submitting the document to PaddleOCR",
-            None,
-            None,
-        );
-        let client = PaddleClient::new(
-            PaddleClientConfig {
-                base_url: settings.ocr.paddle.endpoint.clone(),
-                ..PaddleClientConfig::default()
-            },
-            settings.ocr.paddle.token.clone(),
-        )
-        .map_err(|error| {
-            PdfTranslationError::message(PdfTranslationStage::Ocr, error.to_string())
-        })?;
-        let result = client
-            .run_document(
-                &request.source_path,
-                &settings.ocr.paddle.model,
-                cancellation,
-                |ocr_progress| {
-                    let completed = ocr_progress
-                        .extracted_pages
-                        .and_then(|value| u32::try_from(value).ok());
-                    let total = ocr_progress
-                        .total_pages
-                        .and_then(|value| u32::try_from(value).ok());
-                    progress.report(
-                        PdfTranslationStage::Ocr,
-                        match ocr_progress.state.as_str() {
-                            "pending" => "PaddleOCR is queued".to_string(),
-                            "running" => "PaddleOCR is parsing the document".to_string(),
-                            _ => format!("PaddleOCR state: {}", ocr_progress.state),
-                        },
-                        completed,
-                        total,
-                    );
-                },
-            )
-            .map_err(|error| PdfTranslationError {
-                stage: PdfTranslationStage::Ocr,
-                message: error.to_string(),
-                retryable: matches!(
-                    error.category,
-                    crate::PaddleErrorCategory::QueueFull
-                        | crate::PaddleErrorCategory::ServiceUnavailable
-                        | crate::PaddleErrorCategory::PollTimeout
-                ),
-                detailed_message: None,
-            })?;
-        write_json(job_directory.join("paddle-raw.json"), &result.payload)?;
-        progress.finish_stage(PdfTranslationStage::Ocr, "PaddleOCR result downloaded");
-
-        progress.report(
-            PdfTranslationStage::Normalizing,
-            "Normalizing OCR geometry and semantic roles",
-            Some(0),
-            Some(1),
-        );
-        let document = normalize_paddle_payload(
-            &result.payload,
-            request.source_path.clone(),
-            request_fingerprint(settings, request).unwrap_or_else(|_| "document".to_string()),
-            settings.ocr.paddle.model.clone(),
-            target_pages,
-        )
-        .map_err(|error| {
-            PdfTranslationError::stage(
-                PdfTranslationStage::Normalizing,
-                "Could not normalize the PaddleOCR result",
-                error,
-            )
-        })?;
-        let document = self.fuse_ocr_with_native(document, request, job_directory, cancellation)?;
-        progress.finish_stage(PdfTranslationStage::Normalizing, "OCR document normalized");
-        Ok(document)
-    }
-
     fn run_selected_ocr(
         &self,
         settings: &Settings,
         request: &PdfTranslationRequest,
         target_pages: &[crate::PageGeometry],
-        job_directory: &Path,
+        preparation_directory: &Path,
+        preview_job_directory: &Path,
+        document_id: &str,
+        inspection: &PdfInspection,
+        selected_pages: &[usize],
         cancellation: &CancellationToken,
         progress: &mut ProgressTracker,
+        update_sink: &mut impl FnMut(PdfTranslationSessionUpdate),
+        backend: &GlyphstTranslationBackend,
+        streamed_units: &mut Vec<TranslatedUnit>,
+        streamed_preview_units: &mut HashMap<String, (u64, Vec<usize>)>,
+        streamed_preview_revisions: &mut HashMap<usize, u64>,
     ) -> Result<DocumentV1, PdfTranslationError> {
-        match settings.ocr.provider {
-            OcrProvider::Unlimited => self.run_unlimited_ocr(
-                settings,
-                request,
-                target_pages,
-                job_directory,
-                cancellation,
-                progress,
-            ),
-            OcrProvider::Paddle => self.run_paddle_ocr(
-                settings,
-                request,
-                target_pages,
-                job_directory,
-                cancellation,
-                progress,
-            ),
+        cancellation
+            .check()
+            .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Ocr))?;
+        let native = extract_native_document(&request.source_path, document_id, cancellation)
+            .map_err(|error| {
+                PdfTranslationError::stage(
+                    PdfTranslationStage::Ocr,
+                    "Could not extract native PDF text for OCR fusion",
+                    error,
+                )
+            })?;
+        let selected_pages = selected_pages
+            .iter()
+            .copied()
+            .filter(|page_index| *page_index < native.pages.len())
+            .collect::<Vec<_>>();
+        if selected_pages.is_empty() {
+            progress.finish_stage(PdfTranslationStage::Ocr, "Native PDF text extracted");
+            progress.finish_stage(
+                PdfTranslationStage::Normalizing,
+                "Native document normalized",
+            );
+            return Ok(native);
         }
-    }
 
-    fn run_unlimited_ocr(
-        &self,
-        settings: &Settings,
-        request: &PdfTranslationRequest,
-        target_pages: &[crate::PageGeometry],
-        job_directory: &Path,
-        cancellation: &CancellationToken,
-        progress: &mut ProgressTracker,
-    ) -> Result<DocumentV1, PdfTranslationError> {
         progress.report(
             PdfTranslationStage::Ocr,
-            "Submitting the document to Unlimited-OCR",
-            None,
-            None,
+            format!("Preparing {} page(s) for bounded OCR", selected_pages.len()),
+            Some(0),
+            Some(selected_pages.len() as u32),
         );
-        let client = UnlimitedClient::new(
-            UnlimitedClientConfig {
-                base_url: settings.ocr.unlimited.endpoint.clone(),
-                ..UnlimitedClientConfig::default()
-            },
-            settings.ocr.unlimited.api_key.clone(),
-            settings.ocr.unlimited.secret_key.clone(),
-        )
-        .map_err(|error| {
-            PdfTranslationError::message(PdfTranslationStage::Ocr, error.to_string())
-        })?;
-        let result = client
-            .run_document(&request.source_path, cancellation, |ocr_progress| {
+        let client = PageOcrClient::from_settings(settings)?;
+        let tasks = selected_pages
+            .iter()
+            .map(|page_index| PageOcrTask {
+                page_index: *page_index,
+                pdf: extract_single_pdf_page(&request.source_path, *page_index),
+            })
+            .collect::<Vec<_>>();
+        let next_task = AtomicUsize::new(0);
+        let (sender, receiver) = sync_mpsc::channel::<PageOcrWorkerResult>();
+        let worker_count = bounded_ocr_worker_count(tasks.len());
+        let mut results = Vec::with_capacity(tasks.len());
+        let mut ready_pages = native.pages.iter().cloned().map(Some).collect::<Vec<_>>();
+        for page_index in &selected_pages {
+            ready_pages[*page_index] = None;
+        }
+        let stream_metadata = DocumentMetadata {
+            document_id: document_id.to_string(),
+            source_path: request.source_path.clone(),
+            provider: format!("native+{}-page-stream", client.provider_name()),
+            provider_version: PIPELINE_VERSION.to_string(),
+            extra: Default::default(),
+        };
+        let mut emitted_prefix = ready_pages.iter().take_while(|page| page.is_some()).count();
+        let initial_prefix_document = (emitted_prefix > 0).then(|| {
+            let mut document = DocumentV1::new(
+                stream_metadata.clone(),
+                ready_pages[..emitted_prefix]
+                    .iter()
+                    .map(|page| page.as_ref().expect("ready prefix contains a page").clone())
+                    .collect(),
+            );
+            reconcile_provider_continuations(&mut document);
+            document
+        });
+        if let Some(document) = &initial_prefix_document {
+            for page in &document.pages {
+                ready_pages[page.page_index] = Some(page.clone());
+            }
+        }
+        for page_index in 0..emitted_prefix {
+            update_sink(PdfTranslationSessionUpdate::PagePrepared {
+                metadata: stream_metadata.clone(),
+                page: ready_pages[page_index]
+                    .as_ref()
+                    .expect("ready prefix contains a page")
+                    .clone(),
+                page_count: ready_pages.len(),
+                ready_prefix: emitted_prefix,
+            });
+        }
+        std::thread::scope(|scope| {
+            for _ in 0..worker_count {
+                let sender = sender.clone();
+                let client = client.clone();
+                let native = &native;
+                let tasks = &tasks;
+                let next_task = &next_task;
+                scope.spawn(move || {
+                    loop {
+                        let task_index = next_task.fetch_add(1, AtomicOrdering::Relaxed);
+                        let Some(task) = tasks.get(task_index) else {
+                            break;
+                        };
+                        let result = run_ocr_page(
+                            &client,
+                            task,
+                            native,
+                            target_pages,
+                            &request.source_path,
+                            document_id,
+                            cancellation,
+                        );
+                        if sender.send(result).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            // Start translating a native-text prefix only after the OCR
+            // workers are running. This keeps preparation and translation
+            // overlapped even when Auto mode can immediately release the
+            // document's leading pages.
+            if let Some(document) = initial_prefix_document {
+                translate_ready_prefix(
+                    self,
+                    document,
+                    &request.source_path,
+                    inspection,
+                    preview_job_directory,
+                    backend,
+                    cancellation,
+                    streamed_units,
+                    streamed_preview_units,
+                    streamed_preview_revisions,
+                    update_sink,
+                );
+            }
+            drop(sender);
+            for (completed, result) in receiver.into_iter().enumerate() {
                 progress.report(
                     PdfTranslationStage::Ocr,
-                    match ocr_progress.state.as_str() {
-                        "pending" => "Unlimited-OCR is queued".to_string(),
-                        "running" => "Unlimited-OCR is parsing the document".to_string(),
-                        _ => format!("Unlimited-OCR state: {}", ocr_progress.state),
-                    },
-                    None,
-                    None,
+                    format!(
+                        "OCR page {} finished ({}/{})",
+                        result.page_index + 1,
+                        completed + 1,
+                        tasks.len()
+                    ),
+                    Some((completed + 1) as u32),
+                    Some(tasks.len() as u32),
                 );
-            })
-            .map_err(|error| PdfTranslationError {
-                stage: PdfTranslationStage::Ocr,
-                message: error.to_string(),
-                retryable: matches!(
-                    error.category,
-                    crate::UnlimitedErrorCategory::QueueFull
-                        | crate::UnlimitedErrorCategory::ServiceUnavailable
-                        | crate::UnlimitedErrorCategory::PollTimeout
-                ),
-                detailed_message: None,
-            })?;
-        write_json(job_directory.join("unlimited-raw.json"), &result.payload)?;
-        progress.finish_stage(PdfTranslationStage::Ocr, "Unlimited-OCR result downloaded");
+                let page_index = result.page_index;
+                let page = result
+                    .page
+                    .clone()
+                    .unwrap_or_else(|| native.pages[page_index].clone());
+                ready_pages[page_index] = Some(page);
+                if let Some(failure) = &result.failure {
+                    update_sink(PdfTranslationSessionUpdate::PageFailed(failure.clone()));
+                }
+                let ready_prefix = ready_pages.iter().take_while(|page| page.is_some()).count();
+                let reconciled_prefix = if ready_prefix > emitted_prefix {
+                    let mut prefix_document = DocumentV1::new(
+                        stream_metadata.clone(),
+                        ready_pages[..ready_prefix]
+                            .iter()
+                            .map(|page| {
+                                page.as_ref().expect("ready prefix contains a page").clone()
+                            })
+                            .collect(),
+                    );
+                    reconcile_provider_continuations(&mut prefix_document);
+                    for page in &prefix_document.pages {
+                        let page_index = page.page_index;
+                        ready_pages[page_index] = Some(page.clone());
+                    }
+                    Some(prefix_document)
+                } else {
+                    None
+                };
+                for page_index in emitted_prefix..ready_prefix {
+                    update_sink(PdfTranslationSessionUpdate::PagePrepared {
+                        metadata: stream_metadata.clone(),
+                        page: ready_pages[page_index]
+                            .as_ref()
+                            .expect("ready prefix contains a page")
+                            .clone(),
+                        page_count: ready_pages.len(),
+                        ready_prefix,
+                    });
+                }
+                if ready_prefix > emitted_prefix {
+                    update_sink(PdfTranslationSessionUpdate::Reconciled {
+                        ready_prefix,
+                        invalidated_unit_ids: Vec::new(),
+                        final_pass: false,
+                    });
+                }
+                if let Some(prefix_document) = reconciled_prefix {
+                    translate_ready_prefix(
+                        self,
+                        prefix_document,
+                        &request.source_path,
+                        inspection,
+                        preview_job_directory,
+                        backend,
+                        cancellation,
+                        streamed_units,
+                        streamed_preview_units,
+                        streamed_preview_revisions,
+                        update_sink,
+                    );
+                }
+                emitted_prefix = ready_prefix;
+                results.push(result);
+            }
+        });
+        cancellation
+            .check()
+            .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Ocr))?;
 
-        progress.report(
-            PdfTranslationStage::Normalizing,
-            "Normalizing OCR geometry and semantic roles",
-            Some(0),
-            Some(1),
-        );
-        let document = normalize_unlimited_payload(
-            &result.payload,
-            request.source_path.clone(),
-            request_fingerprint(settings, request).unwrap_or_else(|_| "document".to_string()),
-            target_pages,
-        )
-        .map_err(|error| {
+        let mut pages = native.pages.clone();
+        let raw_directory = preparation_directory.join("ocr-pages");
+        create_private_directory(&raw_directory).map_err(|error| {
             PdfTranslationError::stage(
-                PdfTranslationStage::Normalizing,
-                "Could not normalize the Unlimited-OCR result",
+                PdfTranslationStage::Ocr,
+                "Could not create the per-page OCR artifact directory",
                 error,
             )
         })?;
-        let document = self.fuse_ocr_with_native(document, request, job_directory, cancellation)?;
-        progress.finish_stage(PdfTranslationStage::Normalizing, "OCR document normalized");
+        for result in results {
+            let page_index = result.page_index;
+            if let Some(payload) = result.raw_payload {
+                write_json(
+                    raw_directory.join(format!("page-{:04}-raw.json", page_index + 1)),
+                    &payload,
+                )?;
+            }
+            if let Some(report) = result.fusion_report {
+                write_json(
+                    raw_directory.join(format!("page-{:04}-fusion.json", page_index + 1)),
+                    &report,
+                )?;
+            }
+            let mut page = result.page.unwrap_or_else(|| pages[page_index].clone());
+            if let Some(failure) = result.failure {
+                page.metadata.insert(
+                    "ocr_failure".to_string(),
+                    serde_json::json!({
+                        "message": failure.message,
+                        "retryable": failure.retryable,
+                    }),
+                );
+            } else {
+                page.metadata.remove("ocr_failure");
+            }
+            pages[page_index] = page;
+        }
+        let mut document = DocumentV1::new(stream_metadata, pages);
+        reconcile_provider_continuations(&mut document);
+        update_sink(PdfTranslationSessionUpdate::Reconciled {
+            ready_prefix: document.pages.len(),
+            invalidated_unit_ids: Vec::new(),
+            final_pass: false,
+        });
+        document.validate().map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Normalizing,
+                "Could not validate the page-streamed OCR document",
+                error,
+            )
+        })?;
+        progress.finish_stage(PdfTranslationStage::Ocr, "Per-page OCR completed");
+        progress.finish_stage(
+            PdfTranslationStage::Normalizing,
+            "OCR pages fused with native PDF geometry",
+        );
         Ok(document)
     }
+}
 
-    fn fuse_ocr_with_native(
-        &self,
-        document: DocumentV1,
-        request: &PdfTranslationRequest,
-        job_directory: &Path,
-        cancellation: &CancellationToken,
-    ) -> Result<DocumentV1, PdfTranslationError> {
-        if let Ok(native_document) =
-            extract_native_document(&request.source_path, "native-geometry", cancellation)
-        {
-            let fusion = fuse_native_with_ocr_report(native_document, &document);
-            write_json(
-                job_directory.join("fusion-diagnostics.json"),
-                &fusion.report,
-            )?;
-            Ok(fusion.document)
-        } else {
-            Ok(document)
+const MAX_ACTIVE_OCR_PAGES: usize = 3;
+
+fn bounded_ocr_worker_count(task_count: usize) -> usize {
+    task_count.min(MAX_ACTIVE_OCR_PAGES)
+}
+
+#[derive(Clone)]
+enum PageOcrClient {
+    Paddle { client: PaddleClient, model: String },
+    Unlimited(UnlimitedClient),
+}
+
+impl PageOcrClient {
+    fn from_settings(settings: &Settings) -> Result<Self, PdfTranslationError> {
+        match settings.ocr.provider {
+            OcrProvider::Paddle => PaddleClient::new(
+                PaddleClientConfig {
+                    base_url: settings.ocr.paddle.endpoint.clone(),
+                    ..PaddleClientConfig::default()
+                },
+                settings.ocr.paddle.token.clone(),
+            )
+            .map(|client| Self::Paddle {
+                client,
+                model: settings.ocr.paddle.model.clone(),
+            })
+            .map_err(|error| {
+                PdfTranslationError::message(PdfTranslationStage::Ocr, error.to_string())
+            }),
+            OcrProvider::Unlimited => UnlimitedClient::new(
+                UnlimitedClientConfig {
+                    base_url: settings.ocr.unlimited.endpoint.clone(),
+                    ..UnlimitedClientConfig::default()
+                },
+                settings.ocr.unlimited.api_key.clone(),
+                settings.ocr.unlimited.secret_key.clone(),
+            )
+            .map(Self::Unlimited)
+            .map_err(|error| {
+                PdfTranslationError::message(PdfTranslationStage::Ocr, error.to_string())
+            }),
         }
+    }
+
+    fn provider_name(&self) -> &'static str {
+        match self {
+            Self::Paddle { .. } => "paddle",
+            Self::Unlimited(_) => "unlimited",
+        }
+    }
+}
+
+struct PageOcrTask {
+    page_index: usize,
+    pdf: Result<Vec<u8>, PdfTranslationError>,
+}
+
+struct PageOcrWorkerResult {
+    page_index: usize,
+    page: Option<Page>,
+    raw_payload: Option<serde_json::Value>,
+    fusion_report: Option<OcrFusionReport>,
+    failure: Option<PdfTranslationPageFailure>,
+}
+
+fn run_ocr_page(
+    client: &PageOcrClient,
+    task: &PageOcrTask,
+    native: &DocumentV1,
+    target_pages: &[crate::PageGeometry],
+    source_path: &Path,
+    document_id: &str,
+    cancellation: &CancellationToken,
+) -> PageOcrWorkerResult {
+    let failed = |message: String, retryable: bool| PageOcrWorkerResult {
+        page_index: task.page_index,
+        page: None,
+        raw_payload: None,
+        fusion_report: None,
+        failure: Some(PdfTranslationPageFailure {
+            page_index: task.page_index,
+            phase: TranslationFailurePhase::Ocr,
+            message,
+            retryable,
+        }),
+    };
+    let bytes = match &task.pdf {
+        Ok(bytes) => bytes,
+        Err(error) => return failed(error.message.clone(), error.retryable),
+    };
+    if cancellation.is_cancelled() {
+        return failed("PDF translation was cancelled".to_string(), false);
+    }
+    let file_name = format!("page-{:04}.pdf", task.page_index + 1);
+    let payload = match client {
+        PageOcrClient::Paddle { client, model } => client
+            .run_document_bytes(&file_name, bytes, model, cancellation, |_| {})
+            .map(|result| result.payload)
+            .map_err(|error| {
+                (
+                    error.to_string(),
+                    matches!(
+                        error.category,
+                        crate::PaddleErrorCategory::QueueFull
+                            | crate::PaddleErrorCategory::ServiceUnavailable
+                            | crate::PaddleErrorCategory::PollTimeout
+                    ),
+                )
+            }),
+        PageOcrClient::Unlimited(client) => client
+            .run_document_bytes(&file_name, bytes, cancellation, |_| {})
+            .map(|result| result.payload)
+            .map_err(|error| {
+                (
+                    error.to_string(),
+                    matches!(
+                        error.category,
+                        crate::UnlimitedErrorCategory::QueueFull
+                            | crate::UnlimitedErrorCategory::ServiceUnavailable
+                            | crate::UnlimitedErrorCategory::PollTimeout
+                    ),
+                )
+            }),
+    };
+    let payload = match payload {
+        Ok(payload) => payload,
+        Err((message, retryable)) => return failed(message, retryable),
+    };
+    let Some(geometry) = target_pages.get(task.page_index).copied() else {
+        return failed(
+            format!("page {} has no source geometry", task.page_index + 1),
+            false,
+        );
+    };
+    let normalized = match client {
+        PageOcrClient::Paddle { model, .. } => {
+            normalize_paddle_payload(&payload, source_path, document_id, model, &[geometry])
+        }
+        PageOcrClient::Unlimited(_) => {
+            normalize_unlimited_payload(&payload, source_path, document_id, &[geometry])
+        }
+    };
+    let mut normalized = match normalized {
+        Ok(document) => document,
+        Err(error) => {
+            return PageOcrWorkerResult {
+                raw_payload: Some(payload),
+                ..failed(format!("Could not normalize OCR page: {error}"), false)
+            };
+        }
+    };
+    let Some(page) = normalized.pages.pop() else {
+        return PageOcrWorkerResult {
+            raw_payload: Some(payload),
+            ..failed("OCR result did not contain a page".to_string(), false)
+        };
+    };
+    let page = globalize_ocr_page(page, task.page_index);
+    let ocr_document = DocumentV1::new(normalized.metadata, vec![page]);
+    let Some(native_page) = native.pages.get(task.page_index).cloned() else {
+        return PageOcrWorkerResult {
+            raw_payload: Some(payload),
+            ..failed("Native fallback page is unavailable".to_string(), false)
+        };
+    };
+    let native_document = DocumentV1::new(native.metadata.clone(), vec![native_page]);
+    let fusion = fuse_native_with_ocr_report(native_document, &ocr_document);
+    PageOcrWorkerResult {
+        page_index: task.page_index,
+        page: fusion.document.pages.into_iter().next(),
+        raw_payload: Some(payload),
+        fusion_report: Some(fusion.report),
+        failure: None,
+    }
+}
+
+fn globalize_ocr_page(mut page: Page, page_index: usize) -> Page {
+    let page_prefix = format!("p{:03}-", page_index + 1);
+    let replace_local_page_id = |value: &str| {
+        value.replace("p001-", &page_prefix).replace(
+            "provider-paddle-page-001-",
+            &format!("provider-paddle-page-{:03}-", page_index + 1),
+        )
+    };
+    page.page_index = page_index;
+    for block in &mut page.blocks {
+        block.page_index = page_index;
+        block.id = replace_local_page_id(&block.id);
+        if let Some(continuation) = &mut block.continuation {
+            continuation.group_id = replace_local_page_id(&continuation.group_id);
+        }
+        if let Some(structure) = &mut block.structure
+            && let Some(group_id) = &mut structure.group_id
+        {
+            *group_id = replace_local_page_id(group_id);
+        }
+    }
+    for region in &mut page.protected_regions {
+        region.page_index = page_index;
+        region.id = replace_local_page_id(&region.id);
+    }
+    for object in &mut page.inline_objects {
+        object.page_index = page_index;
+        object.id = replace_local_page_id(&object.id);
+    }
+    page
+}
+
+fn translate_ready_prefix(
+    service: &PdfTranslationService,
+    mut document: DocumentV1,
+    source_path: &Path,
+    inspection: &PdfInspection,
+    job_directory: &Path,
+    backend: &GlyphstTranslationBackend,
+    cancellation: &CancellationToken,
+    streamed_units: &mut Vec<TranslatedUnit>,
+    known_preview_units: &mut HashMap<String, (u64, Vec<usize>)>,
+    preview_revisions: &mut HashMap<usize, u64>,
+    update_sink: &mut impl FnMut(PdfTranslationSessionUpdate),
+) {
+    if cancellation.is_cancelled() || document.pages.is_empty() {
+        return;
+    }
+    annotate_reference_sections(&mut document);
+    let resumed = streamed_units.clone();
+    match translate_document_partial_resuming(
+        document,
+        backend,
+        cancellation,
+        resumed,
+        |snapshot| {
+            update_sink(PdfTranslationSessionUpdate::UnitsChanged(snapshot.clone()));
+            Ok(())
+        },
+    ) {
+        Ok(outcome) => {
+            let block_pages = translation_block_locations(&outcome.document.document)
+                .into_iter()
+                .map(|(block_id, location)| (block_id, location.page_index))
+                .collect::<HashMap<_, _>>();
+            let (next_preview_units, dirty_pages) =
+                reconcile_preview_units(&block_pages, known_preview_units, &outcome.document.units);
+            *known_preview_units = next_preview_units;
+            for page_index in dirty_pages {
+                let revision = preview_revisions.entry(page_index).or_default();
+                *revision = revision.wrapping_add(1).max(1);
+                let update = match service.compile_page_preview(
+                    &outcome.document,
+                    source_path,
+                    inspection,
+                    job_directory,
+                    page_index,
+                    *revision,
+                    &HashSet::new(),
+                    cancellation,
+                ) {
+                    Ok(preview) => PdfTranslationSessionUpdate::PagePreviewReady(preview),
+                    Err(error) => {
+                        PdfTranslationSessionUpdate::PageFailed(PdfTranslationPageFailure {
+                            page_index,
+                            phase: if error.stage == PdfTranslationStage::Layout {
+                                TranslationFailurePhase::Layout
+                            } else {
+                                TranslationFailurePhase::Preview
+                            },
+                            message: error.message,
+                            retryable: error.retryable,
+                        })
+                    }
+                };
+                update_sink(update);
+            }
+            *streamed_units = outcome.document.units;
+        }
+        Err(_error) if cancellation.is_cancelled() => {}
+        Err(error) => {
+            // The final document-wide pass retries unresolved work after OCR
+            // reconciliation, so a provisional prefix error is non-terminal.
+            eprintln!(
+                "incremental PDF translation prefix failed: {}",
+                error.message
+            );
+        }
+    }
+}
+
+fn ocr_page_failures(document: &DocumentV1) -> Vec<PdfTranslationPageFailure> {
+    document
+        .pages
+        .iter()
+        .filter_map(|page| {
+            let failure = page.metadata.get("ocr_failure")?;
+            Some(PdfTranslationPageFailure {
+                page_index: page.page_index,
+                phase: TranslationFailurePhase::Ocr,
+                message: failure
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("OCR failed; the source page was preserved")
+                    .to_string(),
+                retryable: failure
+                    .get("retryable")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+fn ocr_failure_diagnostics(document: &DocumentV1) -> Vec<TranslationFailureDiagnostic> {
+    ocr_page_failures(document)
+        .into_iter()
+        .map(|failure| {
+            let page = &document.pages[failure.page_index];
+            TranslationFailureDiagnostic {
+                id: format!("ocr-page-{:04}", failure.page_index + 1),
+                phase: TranslationFailurePhase::Ocr,
+                reason: failure.message,
+                attempts: 1,
+                retryable: failure.retryable,
+                category: Some("ocr".to_string()),
+                status: None,
+                member_block_ids: page.blocks.iter().map(|block| block.id.clone()).collect(),
+                role: None,
+                source_excerpt: page.blocks.iter().find_map(|block| {
+                    (!block.content.text.trim().is_empty())
+                        .then(|| block.content.text.chars().take(480).collect::<String>())
+                }),
+                rejected_output_excerpt: None,
+            }
+        })
+        .collect()
+}
+
+const PAGE_PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
+const PAGE_PREVIEW_MAX_DELAY: Duration = Duration::from_millis(250);
+
+type PreviewUnitIdentity = (u64, Vec<usize>);
+
+fn reconcile_preview_units(
+    block_pages: &HashMap<String, usize>,
+    known_units: &HashMap<String, PreviewUnitIdentity>,
+    resolved_units: &[TranslatedUnit],
+) -> (HashMap<String, PreviewUnitIdentity>, BTreeSet<usize>) {
+    let mut next_units = HashMap::new();
+    let mut dirty_pages = BTreeSet::new();
+    for unit in resolved_units {
+        let mut pages = unit
+            .member_block_ids
+            .iter()
+            .filter_map(|block_id| block_pages.get(block_id).copied())
+            .collect::<Vec<_>>();
+        pages.sort_unstable();
+        pages.dedup();
+        let mut hasher = DefaultHasher::new();
+        unit.semantic_hash.hash(&mut hasher);
+        unit.translated_text.hash(&mut hasher);
+        unit.styled_runs
+            .iter()
+            .for_each(|run| run.text.hash(&mut hasher));
+        let identity = hasher.finish();
+        if known_units
+            .get(&unit.id)
+            .is_none_or(|known| known.0 != identity || known.1 != pages)
+        {
+            dirty_pages.extend(pages.iter().copied());
+            if let Some((_, old_pages)) = known_units.get(&unit.id) {
+                dirty_pages.extend(old_pages.iter().copied());
+            }
+        }
+        next_units.insert(unit.id.clone(), (identity, pages));
+    }
+    for (unit_id, (_, pages)) in known_units {
+        if !next_units.contains_key(unit_id) {
+            dirty_pages.extend(pages.iter().copied());
+        }
+    }
+    (next_units, dirty_pages)
+}
+
+fn stream_page_previews<U>(
+    service: &PdfTranslationService,
+    document: &DocumentV1,
+    source_path: &Path,
+    inspection: &PdfInspection,
+    job_directory: &Path,
+    cancellation: &CancellationToken,
+    mut known_units: HashMap<String, (u64, Vec<usize>)>,
+    mut revisions: HashMap<usize, u64>,
+    receiver: sync_mpsc::Receiver<TranslationRunSnapshot>,
+    update_sink: &Mutex<&mut U>,
+) where
+    U: FnMut(PdfTranslationSessionUpdate) + Send,
+{
+    let block_pages = translation_block_locations(document)
+        .into_iter()
+        .map(|(block_id, location)| (block_id, location.page_index))
+        .collect::<HashMap<_, _>>();
+    let mut latest = None::<TranslationRunSnapshot>;
+    let mut dirty_pages = BTreeSet::<usize>::new();
+    let mut first_dirty_at = None::<Instant>;
+    let mut last_change_at = None::<Instant>;
+
+    loop {
+        let wait = match (first_dirty_at, last_change_at) {
+            (Some(first), Some(last)) => {
+                let now = Instant::now();
+                let debounce_deadline = last.checked_add(PAGE_PREVIEW_DEBOUNCE).unwrap_or(last);
+                let maximum_deadline = first.checked_add(PAGE_PREVIEW_MAX_DELAY).unwrap_or(first);
+                debounce_deadline
+                    .min(maximum_deadline)
+                    .saturating_duration_since(now)
+            }
+            _ => Duration::from_secs(60),
+        };
+        let received = receiver.recv_timeout(wait);
+        match received {
+            Ok(snapshot) => {
+                let (next_units, changed_pages) =
+                    reconcile_preview_units(&block_pages, &known_units, &snapshot.resolved_units);
+                dirty_pages.extend(changed_pages);
+                known_units = next_units;
+                latest = Some(snapshot);
+                if !dirty_pages.is_empty() {
+                    let now = Instant::now();
+                    first_dirty_at.get_or_insert(now);
+                    last_change_at = Some(now);
+                }
+            }
+            Err(sync_mpsc::RecvTimeoutError::Timeout) => {
+                compile_dirty_page_previews(
+                    service,
+                    document,
+                    source_path,
+                    inspection,
+                    job_directory,
+                    cancellation,
+                    latest.as_ref(),
+                    &mut dirty_pages,
+                    &mut revisions,
+                    update_sink,
+                );
+                first_dirty_at = None;
+                last_change_at = None;
+            }
+            Err(sync_mpsc::RecvTimeoutError::Disconnected) => {
+                compile_dirty_page_previews(
+                    service,
+                    document,
+                    source_path,
+                    inspection,
+                    job_directory,
+                    cancellation,
+                    latest.as_ref(),
+                    &mut dirty_pages,
+                    &mut revisions,
+                    update_sink,
+                );
+                break;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_dirty_page_previews<U>(
+    service: &PdfTranslationService,
+    document: &DocumentV1,
+    source_path: &Path,
+    inspection: &PdfInspection,
+    job_directory: &Path,
+    cancellation: &CancellationToken,
+    snapshot: Option<&TranslationRunSnapshot>,
+    dirty_pages: &mut BTreeSet<usize>,
+    revisions: &mut HashMap<usize, u64>,
+    update_sink: &Mutex<&mut U>,
+) where
+    U: FnMut(PdfTranslationSessionUpdate) + Send,
+{
+    let Some(snapshot) = snapshot else {
+        dirty_pages.clear();
+        return;
+    };
+    let translated = TranslatedDocument {
+        document: document.clone(),
+        units: snapshot.resolved_units.clone(),
+    };
+    let pages = std::mem::take(dirty_pages);
+    for page_index in pages {
+        if cancellation.is_cancelled() {
+            break;
+        }
+        let revision = revisions.entry(page_index).or_default();
+        *revision = revision.wrapping_add(1).max(1);
+        let update = match service.compile_page_preview(
+            &translated,
+            source_path,
+            inspection,
+            job_directory,
+            page_index,
+            *revision,
+            &HashSet::new(),
+            cancellation,
+        ) {
+            Ok(preview) => PdfTranslationSessionUpdate::PagePreviewReady(preview),
+            Err(error) => PdfTranslationSessionUpdate::PageFailed(PdfTranslationPageFailure {
+                page_index,
+                phase: if error.stage == PdfTranslationStage::Layout {
+                    TranslationFailurePhase::Layout
+                } else {
+                    TranslationFailurePhase::Preview
+                },
+                message: error.message,
+                retryable: error.retryable,
+            }),
+        };
+        let Ok(mut sink) = update_sink.lock() else {
+            break;
+        };
+        (*sink)(update);
     }
 }
 
@@ -766,6 +1830,233 @@ pub struct PdfTranslationRequest {
     pub output_path: PathBuf,
     pub source_language: Option<LanguageCode>,
     pub target_language: LanguageCode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdfTranslationSessionRequest {
+    pub source_path: PathBuf,
+    pub source_language: Option<LanguageCode>,
+    pub target_language: LanguageCode,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PdfTranslationSessionUpdate {
+    PagePrepared {
+        metadata: DocumentMetadata,
+        page: Page,
+        page_count: usize,
+        ready_prefix: usize,
+    },
+    UnitsChanged(TranslationRunSnapshot),
+    PagePreviewReady(PdfTranslationPagePreview),
+    PageFailed(PdfTranslationPageFailure),
+    Reconciled {
+        ready_prefix: usize,
+        invalidated_unit_ids: Vec<String>,
+        final_pass: bool,
+    },
+    Finished,
+}
+
+fn build_page_hover_regions(
+    translated: &TranslatedDocument,
+    layout_page: &LayoutPage,
+) -> Vec<PdfTranslationHoverRegion> {
+    let Some(source_page) = translated
+        .document
+        .pages
+        .iter()
+        .find(|page| page.page_index == layout_page.page_index)
+    else {
+        return layout_page
+            .items
+            .iter()
+            .map(|item| PdfTranslationHoverRegion {
+                id: hover_region_id(layout_page.page_index, "block", &item.block_id),
+                kind: PdfTranslationHoverRegionKind::Text,
+                unit_id: Some(item.unit_id.clone()),
+                block_id: Some(item.block_id.clone()),
+                target_bounds: item.bbox,
+                source_regions: if item.source_regions.is_empty() {
+                    vec![item.source_bbox]
+                } else {
+                    item.source_regions.clone()
+                },
+            })
+            .collect();
+    };
+
+    let layout_items = layout_page
+        .items
+        .iter()
+        .map(|item| (item.block_id.as_str(), item))
+        .collect::<HashMap<_, _>>();
+    let unit_ids = translated
+        .units
+        .iter()
+        .flat_map(|unit| {
+            unit.member_block_ids
+                .iter()
+                .map(move |block_id| (block_id.as_str(), unit.id.as_str()))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut represented_blocks = HashSet::new();
+    let mut regions = Vec::new();
+
+    for block in &source_page.blocks {
+        if block.kind != BlockKind::Text
+            && source_page.protected_regions.iter().any(|region| {
+                region
+                    .bbox
+                    .intersection(block.bbox)
+                    .is_some_and(|intersection| {
+                        intersection.area() / region.bbox.area().min(block.bbox.area()).max(1.0)
+                            >= 0.8
+                    })
+            })
+        {
+            continue;
+        }
+        represented_blocks.insert(block.id.as_str());
+        let layout_item = layout_items.get(block.id.as_str()).copied();
+        let source_regions = layout_item
+            .filter(|item| !item.source_regions.is_empty())
+            .map(|item| item.source_regions.clone())
+            .unwrap_or_else(|| source_text_regions(block));
+        regions.push(PdfTranslationHoverRegion {
+            id: hover_region_id(layout_page.page_index, "block", &block.id),
+            kind: hover_region_kind_for_block(block.kind),
+            unit_id: layout_item
+                .map(|item| item.unit_id.clone())
+                .or_else(|| unit_ids.get(block.id.as_str()).map(|id| (*id).to_string())),
+            block_id: Some(block.id.clone()),
+            target_bounds: layout_item.map_or(block.bbox, |item| item.bbox),
+            source_regions,
+        });
+    }
+
+    // A malformed provider response should not make a successfully rendered
+    // layout item impossible to target. Keep these as a conservative fallback.
+    for item in &layout_page.items {
+        if represented_blocks.contains(item.block_id.as_str()) {
+            continue;
+        }
+        regions.push(PdfTranslationHoverRegion {
+            id: hover_region_id(layout_page.page_index, "block", &item.block_id),
+            kind: PdfTranslationHoverRegionKind::Text,
+            unit_id: Some(item.unit_id.clone()),
+            block_id: Some(item.block_id.clone()),
+            target_bounds: item.bbox,
+            source_regions: if item.source_regions.is_empty() {
+                vec![item.source_bbox]
+            } else {
+                item.source_regions.clone()
+            },
+        });
+    }
+
+    regions.extend(
+        source_page
+            .protected_regions
+            .iter()
+            .map(|region| PdfTranslationHoverRegion {
+                id: hover_region_id(layout_page.page_index, "protected", &region.id),
+                kind: hover_region_kind_for_protected(region.kind),
+                unit_id: None,
+                block_id: None,
+                target_bounds: region.bbox,
+                source_regions: vec![region.bbox],
+            }),
+    );
+    regions.sort_by(|left, right| left.id.cmp(&right.id));
+    regions
+}
+
+fn hover_region_id(page_index: usize, namespace: &str, source_id: &str) -> String {
+    format!("page:{page_index}:{namespace}:{source_id}")
+}
+
+fn hover_region_kind_for_block(kind: BlockKind) -> PdfTranslationHoverRegionKind {
+    match kind {
+        BlockKind::Text => PdfTranslationHoverRegionKind::Text,
+        BlockKind::Image => PdfTranslationHoverRegionKind::Image,
+        BlockKind::Table => PdfTranslationHoverRegionKind::Table,
+        BlockKind::Formula => PdfTranslationHoverRegionKind::Formula,
+        BlockKind::Code => PdfTranslationHoverRegionKind::Code,
+        BlockKind::Unknown => PdfTranslationHoverRegionKind::Unknown,
+    }
+}
+
+fn hover_region_kind_for_protected(kind: ProtectedRegionKind) -> PdfTranslationHoverRegionKind {
+    match kind {
+        ProtectedRegionKind::Chart => PdfTranslationHoverRegionKind::Chart,
+        ProtectedRegionKind::Table => PdfTranslationHoverRegionKind::Table,
+        ProtectedRegionKind::Image => PdfTranslationHoverRegionKind::Image,
+        ProtectedRegionKind::Formula => PdfTranslationHoverRegionKind::Formula,
+        ProtectedRegionKind::Code => PdfTranslationHoverRegionKind::Code,
+        ProtectedRegionKind::Drawing => PdfTranslationHoverRegionKind::Drawing,
+        ProtectedRegionKind::Unknown => PdfTranslationHoverRegionKind::Unknown,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfTranslationPagePreview {
+    pub page_index: usize,
+    pub revision: u64,
+    pub layout: LayoutPage,
+    pub hover_regions: Vec<PdfTranslationHoverRegion>,
+    pub pdf: Arc<[u8]>,
+    pub layout_failures: Vec<TranslationFailureDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfTranslationHoverRegionKind {
+    Text,
+    Image,
+    Chart,
+    Table,
+    Formula,
+    Code,
+    Drawing,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfTranslationHoverRegion {
+    pub id: String,
+    pub kind: PdfTranslationHoverRegionKind,
+    pub unit_id: Option<String>,
+    pub block_id: Option<String>,
+    pub target_bounds: BoundingBox,
+    pub source_regions: Vec<BoundingBox>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdfTranslationPageFailure {
+    pub page_index: usize,
+    pub phase: TranslationFailurePhase,
+    pub message: String,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfTranslationSessionResult {
+    pub request: PdfTranslationSessionRequest,
+    pub translated: TranslatedDocument,
+    pub failures: Vec<TranslationFailureDiagnostic>,
+    pub progress: TranslationRunProgress,
+    pub queue: TranslationQueueStats,
+    pub inspection: PdfInspection,
+    pub source_snapshot_path: PathBuf,
+    pub job_directory: PathBuf,
+    pub fingerprint: String,
+    pub warnings: Vec<PdfTranslationWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdfTranslationExportRequest {
+    pub output_path: PathBuf,
+    pub original_unit_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1097,6 +2388,10 @@ pub struct PdfTranslationArtifactManifest {
     pub preserved_on_overflow: Vec<String>,
     #[serde(default)]
     pub warnings: Vec<PdfTranslationWarning>,
+    #[serde(default)]
+    pub failed_units: Vec<TranslationFailureDiagnostic>,
+    #[serde(default)]
+    pub original_unit_ids: Vec<String>,
     pub job_directory: String,
     pub geometry: Vec<ArtifactGeometry>,
 }
@@ -1117,6 +2412,8 @@ fn build_manifest(
     layout: &LayoutDocument,
     translated: &TranslatedDocument,
     warnings: &[PdfTranslationWarning],
+    failed_units: &[TranslationFailureDiagnostic],
+    original_unit_ids: &[String],
 ) -> PdfTranslationArtifactManifest {
     PdfTranslationArtifactManifest {
         version: ARTIFACT_VERSION,
@@ -1137,6 +2434,8 @@ fn build_manifest(
         translated_unit_count: translated.units.len(),
         preserved_on_overflow: layout.preserved_on_overflow.clone(),
         warnings: warnings.to_vec(),
+        failed_units: failed_units.to_vec(),
+        original_unit_ids: original_unit_ids.to_vec(),
         job_directory: job_directory.to_string_lossy().to_string(),
         geometry: layout
             .pages
@@ -1153,13 +2452,11 @@ fn build_manifest(
     }
 }
 
-fn validate_output(
+fn validate_rendered_output(
     source_path: &Path,
     output_path: &Path,
-    translated: &TranslatedDocument,
     layout: &LayoutDocument,
 ) -> Result<(), PdfTranslationError> {
-    validate_layout_completeness(translated, layout)?;
     let source = Document::open(source_path).map_err(|error| {
         PdfTranslationError::stage(
             PdfTranslationStage::Validating,
@@ -1285,6 +2582,183 @@ fn validate_layout_completeness(
     Ok(())
 }
 
+fn layout_fallback_unit_ids(
+    translated: &TranslatedDocument,
+    layout: &LayoutDocument,
+) -> Vec<String> {
+    let mut fallback = layout
+        .warnings
+        .iter()
+        .filter(|warning| warning.fatal)
+        .map(|warning| warning.unit_id.clone())
+        .collect::<HashSet<_>>();
+    let items = layout
+        .pages
+        .iter()
+        .flat_map(|page| page.items.iter())
+        .map(|item| (item.block_id.as_str(), item))
+        .collect::<HashMap<_, _>>();
+    for unit in &translated.units {
+        let rendered = unit
+            .member_block_ids
+            .iter()
+            .filter_map(|block_id| items.get(block_id.as_str()))
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let expected = normalize_layout_text(&unit.translated_text);
+        if expected.is_empty() || expected != normalize_layout_text(&rendered) {
+            fallback.insert(unit.id.clone());
+        }
+    }
+    let mut fallback = fallback.into_iter().collect::<Vec<_>>();
+    fallback.sort();
+    fallback
+}
+
+struct PreparedTranslationLayout {
+    translated: TranslatedDocument,
+    layout: LayoutDocument,
+    failures: Vec<TranslationFailureDiagnostic>,
+}
+
+fn prepare_translation_layout(
+    translated: &TranslatedDocument,
+    original_unit_ids: &HashSet<String>,
+) -> PreparedTranslationLayout {
+    let mut translated = translated.clone();
+    translated
+        .units
+        .retain(|unit| !original_unit_ids.contains(&unit.id));
+    let mut failures = Vec::new();
+    let mut layout = build_layout_with_options(&translated, LayoutOptions::application_default());
+    loop {
+        let fallback_ids = layout_fallback_unit_ids(&translated, &layout);
+        if fallback_ids.is_empty() {
+            break;
+        }
+        let fallback_ids = fallback_ids.into_iter().collect::<HashSet<_>>();
+        let removed = translated
+            .units
+            .iter()
+            .filter(|unit| fallback_ids.contains(&unit.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if removed.is_empty() {
+            break;
+        }
+        for unit in &removed {
+            let reason = layout
+                .warnings
+                .iter()
+                .find(|warning| warning.unit_id == unit.id)
+                .map(|warning| warning.message.clone())
+                .unwrap_or_else(|| {
+                    "translated text could not be represented safely by the canonical layout"
+                        .to_string()
+                });
+            failures.push(TranslationFailureDiagnostic {
+                id: unit.id.clone(),
+                phase: TranslationFailurePhase::Layout,
+                reason,
+                attempts: 1,
+                retryable: false,
+                category: Some("layout".to_string()),
+                status: None,
+                member_block_ids: unit.member_block_ids.clone(),
+                role: Some(unit.role),
+                source_excerpt: Some(unit.source_text.chars().take(480).collect()),
+                rejected_output_excerpt: Some(unit.translated_text.chars().take(480).collect()),
+            });
+        }
+        translated
+            .units
+            .retain(|unit| !fallback_ids.contains(&unit.id));
+        layout = build_layout_with_options(&translated, LayoutOptions::application_default());
+    }
+    PreparedTranslationLayout {
+        translated,
+        layout,
+        failures,
+    }
+}
+
+fn extract_single_pdf_page(
+    source_path: &Path,
+    page_index: usize,
+) -> Result<Vec<u8>, PdfTranslationError> {
+    let source_path_text = source_path.to_string_lossy();
+    let source = MuPdfDocument::open(source_path_text.as_ref()).map_err(|error| {
+        PdfTranslationError::stage(
+            PdfTranslationStage::Preparing,
+            "Could not open the source PDF for page streaming",
+            error,
+        )
+    })?;
+    extract_single_pdf_page_from_document(&source, page_index)
+}
+
+fn extract_single_pdf_page_from_document(
+    source: &MuPdfDocument,
+    page_index: usize,
+) -> Result<Vec<u8>, PdfTranslationError> {
+    let page = source.find_page(page_index as i32).map_err(|error| {
+        PdfTranslationError::stage(
+            PdfTranslationStage::Preparing,
+            "Could not isolate a source PDF page",
+            error,
+        )
+    })?;
+    let mut output = MuPdfDocument::new();
+    let mut graft = output.new_graft_map().map_err(|error| {
+        PdfTranslationError::stage(
+            PdfTranslationStage::Preparing,
+            "Could not initialize a PDF page copy",
+            error,
+        )
+    })?;
+    let page = graft.graft_object(&page).map_err(|error| {
+        PdfTranslationError::stage(
+            PdfTranslationStage::Preparing,
+            "Could not copy a source PDF page",
+            error,
+        )
+    })?;
+    output.insert_page(0, &page).map_err(|error| {
+        PdfTranslationError::stage(
+            PdfTranslationStage::Preparing,
+            "Could not assemble a single-page PDF",
+            error,
+        )
+    })?;
+    let mut bytes = Vec::new();
+    output.write_to(&mut bytes).map_err(|error| {
+        PdfTranslationError::stage(
+            PdfTranslationStage::Preparing,
+            "Could not serialize a single-page PDF",
+            error,
+        )
+    })?;
+    Ok(bytes)
+}
+
+fn reindex_preview_layout(page: &LayoutPage) -> LayoutDocument {
+    let mut page = page.clone();
+    page.page_index = 0;
+    for item in &mut page.items {
+        item.page_index = 0;
+        for object in &mut item.inline_objects {
+            object.page_index = 0;
+        }
+    }
+    LayoutDocument {
+        pages: vec![page],
+        warnings: Vec::new(),
+        preserved_on_overflow: Vec::new(),
+        overflow_policy: LayoutOptions::application_default().overflow_policy,
+    }
+}
+
 fn normalize_layout_text(text: &str) -> String {
     text.chars()
         .filter(|character| !character.is_whitespace())
@@ -1302,13 +2776,13 @@ fn request_fingerprint(
     settings: &Settings,
     request: &PdfTranslationRequest,
 ) -> Result<String, PdfTranslationError> {
-    request_fingerprint_with_source(settings, request).map(|(fingerprint, _)| fingerprint)
+    request_fingerprint_with_source(settings, request).map(|(fingerprint, _, _)| fingerprint)
 }
 
 fn request_fingerprint_with_source(
     settings: &Settings,
     request: &PdfTranslationRequest,
-) -> Result<(String, Vec<u8>), PdfTranslationError> {
+) -> Result<(String, String, Vec<u8>), PdfTranslationError> {
     let source_bytes = fs::read(&request.source_path).map_err(|error| {
         PdfTranslationError::stage(
             PdfTranslationStage::Preparing,
@@ -1316,12 +2790,28 @@ fn request_fingerprint_with_source(
             error,
         )
     })?;
+    let source_fingerprint = source_preparation_fingerprint(settings, &source_bytes);
+    let mut translation_hasher = DefaultHasher::new();
+    PIPELINE_VERSION.hash(&mut translation_hasher);
+    source_fingerprint.hash(&mut translation_hasher);
+    request.source_language.hash(&mut translation_hasher);
+    request.target_language.hash(&mut translation_hasher);
+    settings
+        .translation
+        .active_provider
+        .hash(&mut translation_hasher);
+    translation_provider_identity(settings).hash(&mut translation_hasher);
+    Ok((
+        format!("{:016x}", translation_hasher.finish()),
+        source_fingerprint,
+        source_bytes,
+    ))
+}
+
+fn source_preparation_fingerprint(settings: &Settings, source_bytes: &[u8]) -> String {
     let mut hasher = DefaultHasher::new();
     PIPELINE_VERSION.hash(&mut hasher);
-    request.source_path.hash(&mut hasher);
     source_bytes.hash(&mut hasher);
-    request.source_language.hash(&mut hasher);
-    request.target_language.hash(&mut hasher);
     settings.ocr.mode.as_str().hash(&mut hasher);
     settings.ocr.provider.as_str().hash(&mut hasher);
     match settings.ocr.provider {
@@ -1333,8 +2823,6 @@ fn request_fingerprint_with_source(
             settings.ocr.paddle.model.hash(&mut hasher);
         }
     }
-    settings.translation.active_provider.hash(&mut hasher);
-    translation_provider_identity(settings).hash(&mut hasher);
     settings
         .translation
         .content_review
@@ -1351,7 +2839,7 @@ fn request_fingerprint_with_source(
             review.api_style.as_str().hash(&mut hasher);
         }
     }
-    Ok((format!("{:016x}", hasher.finish()), source_bytes))
+    format!("{:016x}", hasher.finish())
 }
 
 fn translation_provider_identity(settings: &Settings) -> String {
@@ -1459,6 +2947,18 @@ fn create_job_directory(fingerprint: &str) -> Result<PathBuf, PdfTranslationErro
         PdfTranslationError::stage(
             PdfTranslationStage::Preparing,
             "Could not create the PDF translation job directory",
+            error,
+        )
+    })?;
+    Ok(directory)
+}
+
+fn create_prepared_directory(fingerprint: &str) -> Result<PathBuf, PdfTranslationError> {
+    let directory = artifact_root().join("prepared").join(fingerprint);
+    create_private_directory(&directory).map_err(|error| {
+        PdfTranslationError::stage(
+            PdfTranslationStage::Preparing,
+            "Could not create the PDF preparation cache directory",
             error,
         )
     })?;
@@ -1599,6 +3099,177 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    fn hover_test_block(
+        id: &str,
+        kind: BlockKind,
+        bbox: BoundingBox,
+    ) -> glyphst_pdf_translation::Block {
+        glyphst_pdf_translation::Block {
+            id: id.to_string(),
+            page_index: 1,
+            order: 0,
+            reading_order: 0,
+            kind,
+            role: if kind == BlockKind::Text {
+                glyphst_pdf_translation::BlockRole::Body
+            } else {
+                glyphst_pdf_translation::BlockRole::Image
+            },
+            bbox,
+            content: glyphst_pdf_translation::BlockContent {
+                text: (kind == BlockKind::Text)
+                    .then_some("Source title")
+                    .unwrap_or_default()
+                    .to_string(),
+                ..glyphst_pdf_translation::BlockContent::default()
+            },
+            policy: if kind == BlockKind::Text {
+                glyphst_pdf_translation::TranslationPolicy::translate("test")
+            } else {
+                glyphst_pdf_translation::TranslationPolicy::preserve("test")
+            },
+            continuation: None,
+            structure: None,
+            toc_entry: None,
+            source: glyphst_pdf_translation::SourceProvenance {
+                provider: "test".to_string(),
+                raw_label: format!("{kind:?}"),
+                raw_bbox: bbox,
+                raw_path: None,
+            },
+            tags: Vec::new(),
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn single_page_pdf_extraction_uses_the_requested_page() {
+        let mut source = MuPdfDocument::new();
+        source.new_page(mupdf::Size::A4).unwrap();
+        source.new_page(mupdf::Size::A5).unwrap();
+
+        let bytes = extract_single_pdf_page_from_document(&source, 1).unwrap();
+        let extracted = MuPdfDocument::from_bytes(&bytes).unwrap();
+
+        assert_eq!(extracted.page_count().unwrap(), 1);
+        let bounds = extracted.load_pdf_page(0).unwrap().bounds().unwrap();
+        assert_eq!(bounds.width(), mupdf::Size::A5.width);
+        assert_eq!(bounds.height(), mupdf::Size::A5.height);
+    }
+
+    #[test]
+    fn page_ocr_worker_pool_never_exceeds_three_requests() {
+        assert_eq!(bounded_ocr_worker_count(0), 0);
+        assert_eq!(bounded_ocr_worker_count(1), 1);
+        assert_eq!(bounded_ocr_worker_count(3), 3);
+        assert_eq!(bounded_ocr_worker_count(4), 3);
+        assert_eq!(bounded_ocr_worker_count(100), 3);
+    }
+
+    #[test]
+    fn page_hover_regions_keep_original_text_and_non_text_content_targetable() {
+        let text_bounds = BoundingBox::new(20.0, 30.0, 220.0, 58.0);
+        let image_bounds = BoundingBox::new(20.0, 80.0, 220.0, 260.0);
+        let protected_bounds = BoundingBox::new(20.0, 280.0, 220.0, 440.0);
+        let document = DocumentV1::new(
+            DocumentMetadata {
+                document_id: "hover-regions".to_string(),
+                source_path: PathBuf::from("source.pdf"),
+                provider: "test".to_string(),
+                provider_version: "1".to_string(),
+                extra: Default::default(),
+            },
+            vec![Page {
+                page_index: 1,
+                geometry: glyphst_pdf_translation::PageGeometry::new(240.0, 480.0),
+                blocks: vec![
+                    hover_test_block("title", BlockKind::Text, text_bounds),
+                    hover_test_block("image", BlockKind::Image, image_bounds),
+                    hover_test_block("protected-image-block", BlockKind::Image, protected_bounds),
+                ],
+                inline_objects: Vec::new(),
+                protected_regions: vec![glyphst_pdf_translation::ProtectedRegion {
+                    id: "hero".to_string(),
+                    page_index: 1,
+                    kind: ProtectedRegionKind::Image,
+                    bbox: protected_bounds,
+                    source: "test".to_string(),
+                    confidence: 1.0,
+                    reason: "test image".to_string(),
+                }],
+                metadata: Default::default(),
+            }],
+        );
+        let translated = TranslatedDocument {
+            document,
+            units: vec![TranslatedUnit {
+                id: "title-unit".to_string(),
+                member_block_ids: vec!["title".to_string()],
+                role: glyphst_pdf_translation::BlockRole::Title,
+                source_text: "Source title".to_string(),
+                translated_text: "Translated title".to_string(),
+                styled_runs: Vec::new(),
+                style_fallback: false,
+                semantic_hash: 1,
+            }],
+        };
+        // No layout item models the explicit "show original" state. The
+        // semantic region must survive so the user can toggle it back.
+        let layout_page = LayoutPage {
+            page_index: 1,
+            geometry: glyphst_pdf_translation::PageGeometry::new(240.0, 480.0),
+            items: Vec::new(),
+        };
+
+        let regions = build_page_hover_regions(&translated, &layout_page);
+
+        let title = regions
+            .iter()
+            .find(|region| region.id == "page:1:block:title")
+            .unwrap();
+        assert_eq!(title.kind, PdfTranslationHoverRegionKind::Text);
+        assert_eq!(title.unit_id.as_deref(), Some("title-unit"));
+        assert_eq!(title.target_bounds, text_bounds);
+        assert!(regions.iter().any(|region| {
+            region.id == "page:1:block:image"
+                && region.kind == PdfTranslationHoverRegionKind::Image
+                && region.target_bounds == image_bounds
+        }));
+        assert!(regions.iter().any(|region| {
+            region.id == "page:1:protected:hero"
+                && region.kind == PdfTranslationHoverRegionKind::Image
+                && region.target_bounds == protected_bounds
+        }));
+        assert!(
+            !regions
+                .iter()
+                .any(|region| region.id == "page:1:block:protected-image-block")
+        );
+    }
+
+    #[test]
+    fn final_preview_reconciliation_rebuilds_pages_for_removed_units() {
+        let block_pages = HashMap::from([("p003-b0001".to_string(), 2usize)]);
+        let unit = TranslatedUnit {
+            id: "unit-p003-b0001".to_string(),
+            member_block_ids: vec!["p003-b0001".to_string()],
+            role: crate::BlockRole::Body,
+            source_text: "Source".to_string(),
+            translated_text: "Translated".to_string(),
+            styled_runs: Vec::new(),
+            style_fallback: false,
+            semantic_hash: 7,
+        };
+        let (known, initially_dirty) =
+            reconcile_preview_units(&block_pages, &HashMap::new(), std::slice::from_ref(&unit));
+        assert_eq!(initially_dirty, BTreeSet::from([2]));
+
+        let (next, removed_dirty) = reconcile_preview_units(&block_pages, &known, &[]);
+
+        assert!(next.is_empty());
+        assert_eq!(removed_dirty, BTreeSet::from([2]));
+    }
+
     #[test]
     fn fatal_layout_warnings_stop_pdf_generation() {
         let translated = TranslatedDocument {
@@ -1696,6 +3367,33 @@ mod tests {
     }
 
     #[test]
+    fn preparation_cache_identity_is_independent_of_target_language() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let source_path =
+            std::env::temp_dir().join(format!("glyphst-source-fingerprint-{nonce:x}.pdf"));
+        fs::write(&source_path, b"same immutable source bytes").unwrap();
+        let settings = Settings::default();
+        let request = |target: &str| PdfTranslationRequest {
+            source_path: source_path.clone(),
+            output_path: "/tmp/translated.pdf".into(),
+            source_language: Some(LanguageCode::new("en").unwrap()),
+            target_language: LanguageCode::new(target).unwrap(),
+        };
+
+        let (zh_translation, zh_source, _) =
+            request_fingerprint_with_source(&settings, &request("zh-hans")).unwrap();
+        let (ja_translation, ja_source, _) =
+            request_fingerprint_with_source(&settings, &request("ja")).unwrap();
+
+        assert_eq!(zh_source, ja_source);
+        assert_ne!(zh_translation, ja_translation);
+        fs::remove_file(source_path).unwrap();
+    }
+
+    #[test]
     fn normalized_document_cache_requires_matching_fingerprint() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1741,6 +3439,7 @@ mod tests {
             resolved_units: Vec::new(),
             failures: vec![TranslationFailureDiagnostic {
                 id: "unit-p015-b0002".to_string(),
+                phase: TranslationFailurePhase::Translation,
                 reason: "translation failed validation".to_string(),
                 attempts: 3,
                 retryable: true,

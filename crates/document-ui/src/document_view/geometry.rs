@@ -54,6 +54,11 @@ impl DocumentView {
         RenderKey {
             doc_id: self.doc_id,
             page_idx,
+            source_revision: self
+                .page_render_sources
+                .get(&page_idx)
+                .map(|source| source.revision)
+                .unwrap_or_default(),
             rotation: self.rotation,
             physical_width: (requested_width * texture_scale)
                 .round()

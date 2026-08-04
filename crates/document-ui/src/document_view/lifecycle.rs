@@ -134,6 +134,7 @@ impl DocumentView {
             epub_style_panel_position: None,
             document_snapshot,
             render_session,
+            page_render_sources: HashMap::new(),
             pages,
             page_count,
             max_page_width,
@@ -143,17 +144,12 @@ impl DocumentView {
             text_lines: Vec::new(),
             page_line_ranges: vec![0..0; page_count],
             page_block_ranges: vec![0..0; page_count],
-            translated_blocks: BTreeMap::new(),
-            translated_text_layouts: HashMap::new(),
-            translated_text_layout_frame: 0,
             view_language: DocumentViewLanguage::Original,
-            linked_selection_generation: 0,
+            translation_view_role: TranslationViewRole::None,
+            translation_pair_active: false,
             suppress_linked_events: false,
-            external_hovered_block: None,
-            external_selected_block: None,
-            hovered_text_block: None,
-            translation_document_generation: 0,
-            translation_document_task: None,
+            external_hovered_translation_region: None,
+            hovered_translation_region: None,
             links: Vec::new(),
             highlights: options.annotations.highlights,
             notes: options.annotations.notes,
@@ -171,6 +167,27 @@ impl DocumentView {
             pinned_translation_language_select: None,
             translation_request_generation: 0,
             document_translation_jobs: options.document_translation_jobs,
+            translation_session_id: None,
+            translation_pair_session_id: None,
+            translation_session_snapshot: None,
+            translation_hover_regions: HashMap::new(),
+            translation_failed_hover_regions: HashSet::new(),
+            translation_hover_animation: None,
+            translation_hover_clear_generation: 0,
+            translation_hover_clear_task: None,
+            translation_hover_tools_hovered: false,
+            translation_panel_placement: TranslationPanelPlacement::Default,
+            translation_panel_drag: None,
+            translation_panel_snap_candidate: None,
+            translation_panel_size: size(
+                px(TRANSLATION_PANEL_PREFERRED_WIDTH),
+                px(TRANSLATION_PANEL_DEFAULT_HEIGHT),
+            ),
+            translation_panel_dock_generation: 0,
+            translation_panel_dock_task: None,
+            translation_panel_retract_generation: 0,
+            translation_panel_retract_task: None,
+            translation_panel_dock_surface_hovered: false,
             pending_selection_anchor: None,
             dragging: false,
             hovered_link: None,
@@ -184,6 +201,7 @@ impl DocumentView {
             rotation,
             zoom: behavior.default_zoom,
             base_scale: 1.0,
+            viewport_origin: point(px(0.0), px(0.0)),
             viewport_width: 0.0,
             viewport_height: 0.0,
             scroll_x_doc: 0.0,
@@ -361,6 +379,11 @@ impl DocumentView {
 
     pub fn initialize_runtime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.initialize_translation_selects(window, cx);
+        let translation_jobs = self.document_translation_jobs.clone();
+        cx.observe(&translation_jobs, |this, _, cx| {
+            this.refresh_translation_session(cx);
+        })
+        .detach();
         self.start_file_watch(cx);
     }
 

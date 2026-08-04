@@ -402,6 +402,13 @@ impl Pane {
         let mut tabs = Vec::with_capacity(self.tabs.len());
         let mut active_tab = None;
         for (tab_ix, tab) in self.tabs.iter().enumerate() {
+            if matches!(
+                tab,
+                Tab::Document(document_view)
+                    if document_view.read(cx).translation_session_id().is_some()
+            ) {
+                continue;
+            }
             *next_tab_id = next_tab_id.saturating_add(1);
             let id = *next_tab_id;
             runtime_tab_ids.insert(Self::tab_entity_id(tab), id);
@@ -718,6 +725,74 @@ impl Pane {
         Ok(Some(tab_id))
     }
 
+    pub(crate) fn open_translation_duplicate(
+        &mut self,
+        source: &Entity<DocumentView>,
+        session_id: DocumentTranslationJobId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Entity<DocumentView>> {
+        let (path, position, prepared) = {
+            let source = source.read(cx);
+            (
+                source.path().to_path_buf(),
+                source.current_document_position(),
+                source.prepared_duplicate(),
+            )
+        };
+        let behavior = cx.global::<SettingsStore>().settings.behavior;
+        let annotations = DocumentAnnotations {
+            highlights: cx.global::<LibraryStore>().highlights_for(&path),
+            notes: cx.global::<LibraryStore>().notes_for(&path),
+        };
+        let target_language = self
+            .document_translation_jobs
+            .read(cx)
+            .session_snapshot(session_id)
+            .map(|snapshot| snapshot.request.target_language.as_str().to_string())
+            .unwrap_or_else(|| {
+                cx.global::<SettingsStore>()
+                    .settings
+                    .translation
+                    .target_language
+                    .clone()
+            });
+        let epub_preferences = cx
+            .global::<LibraryStore>()
+            .epub_reader_preferences(&path)
+            .unwrap_or_else(|| cx.global::<SettingsStore>().settings.reading);
+        let options = DocumentOpenOptions {
+            initial_position: Some(position),
+            annotations,
+            target_language,
+            epub_preferences,
+            rotation: cx.global::<LibraryStore>().document_rotation(&path),
+            document_translation_jobs: self.document_translation_jobs.clone(),
+        };
+        let duplicate =
+            DocumentView::from_prepared(prepared, self.focus_handle.clone(), behavior, options)?;
+        let duplicate = cx.new(|cx| {
+            let mut duplicate = duplicate;
+            duplicate.register_cache_eviction(cx);
+            duplicate.initialize_runtime(window, cx);
+            duplicate
+        });
+        duplicate.update(cx, |duplicate, cx| {
+            duplicate.attach_translation_session(session_id, cx);
+        });
+        self.subscribe_to_document_view(&duplicate, window, cx);
+
+        self.flush_active_tab(cx);
+        let tab = Tab::Document(duplicate.clone());
+        self.register_tab_focus_handle(&tab, self.focus_handle.clone());
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len().saturating_sub(1);
+        self.sync_active_focus_handle();
+        self.focus(window, cx);
+        cx.notify();
+        Ok(duplicate)
+    }
+
     pub(crate) fn active_document_view(&self) -> Option<Entity<DocumentView>> {
         match self.tabs.get(self.active_tab) {
             Some(Tab::Document(document_view)) => Some(document_view.clone()),
@@ -725,6 +800,28 @@ impl Pane {
                 None
             }
         }
+    }
+
+    pub(crate) fn document_view_at(&self, tab_ix: usize) -> Option<Entity<DocumentView>> {
+        match self.tabs.get(tab_ix) {
+            Some(Tab::Document(document_view)) => Some(document_view.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn translation_sessions(&self, cx: &App) -> Vec<(DocumentTranslationJobId, bool)> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| match tab {
+                Tab::Document(document_view) => {
+                    let document_view = document_view.read(cx);
+                    document_view
+                        .translation_session_id()
+                        .map(|id| (id, document_view.translation_session_is_running()))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     pub(crate) fn active_tab_is_loading(&self) -> bool {
@@ -1476,7 +1573,7 @@ impl Pane {
                             delta: *delta,
                         });
                     }
-                    DocumentViewEvent::BlockHovered(_) | DocumentViewEvent::BlockSelected(_) => {}
+                    DocumentViewEvent::TranslationRegionHovered { .. } => {}
                 }
             },
         )
@@ -1571,10 +1668,14 @@ impl Pane {
 
     fn tab_is_draggable(&self, tab_ix: usize, cx: &App) -> bool {
         match self.tabs.get(tab_ix) {
-            Some(Tab::Document(document_view)) => !self
-                .document_translation_jobs
-                .read(cx)
-                .has_job_for_source(document_view.read(cx).path()),
+            Some(Tab::Document(document_view)) => {
+                let document_view = document_view.read(cx);
+                document_view.translation_session_id().is_none()
+                    && !self
+                        .document_translation_jobs
+                        .read(cx)
+                        .has_job_for_source(document_view.path())
+            }
             Some(Tab::NewTab(_)) => true,
             Some(Tab::LoadingDocument(_)) | Some(Tab::Keymap(_)) | None => false,
         }

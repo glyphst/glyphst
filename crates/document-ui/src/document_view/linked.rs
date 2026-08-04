@@ -1,21 +1,6 @@
 use super::*;
 
 impl DocumentView {
-    pub fn set_translated_view(&mut self, translated: bool, cx: &mut Context<Self>) {
-        if translated && !self.capabilities.translated_document {
-            return;
-        }
-        self.view_language = if translated {
-            DocumentViewLanguage::Translated
-        } else {
-            DocumentViewLanguage::Original
-        };
-        if translated {
-            self.request_document_translation(cx);
-        }
-        cx.notify();
-    }
-
     fn viewport_center_pdf_anchor(&self) -> Option<(usize, mupdf::Point)> {
         if self.pages.is_empty() {
             return None;
@@ -44,7 +29,6 @@ impl DocumentView {
         self.page_image_bounds.fill(None);
         self.diff_flashes.clear();
         self.diff_pending_pages.clear();
-        self.translated_text_layouts.clear();
         self.region_drag = None;
         self.context_menu_position = None;
         self.context_menu_popup = None;
@@ -108,86 +92,117 @@ impl DocumentView {
         self.rotate_to(self.rotation.counterclockwise(), cx);
     }
 
-    fn linked_block_anchor(&self, block_id: u32) -> Option<LinkedBlockAnchor> {
-        let block = self.text_blocks.iter().find(|block| block.id == block_id)?;
-        Some(LinkedBlockAnchor {
-            block_id,
-            page_idx: block.page_idx,
-            x0: block.bounds.x0,
-            y0: block.bounds.y0,
-            x1: block.bounds.x1,
-            y1: block.bounds.y1,
-        })
-    }
-
-    fn map_linked_block(&self, anchor: LinkedBlockAnchor) -> Option<u32> {
-        let anchor_center = ((anchor.x0 + anchor.x1) * 0.5, (anchor.y0 + anchor.y1) * 0.5);
-        self.text_blocks
-            .iter()
-            .filter(|block| block.page_idx == anchor.page_idx)
-            .min_by(|left, right| {
-                let distance = |block: &TextBlock| {
-                    let center = (
-                        (block.bounds.x0 + block.bounds.x1) * 0.5,
-                        (block.bounds.y0 + block.bounds.y1) * 0.5,
-                    );
-                    (center.0 - anchor_center.0).powi(2) + (center.1 - anchor_center.1).powi(2)
-                };
-                distance(left).total_cmp(&distance(right))
-            })
-            .map(|block| block.id)
-    }
-
-    pub fn apply_linked_hover(
+    pub fn apply_live_translation_hover(
         &mut self,
-        anchor: Option<LinkedBlockAnchor>,
+        session_id: DocumentTranslationJobId,
+        region_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let block_id = anchor.and_then(|anchor| self.map_linked_block(anchor));
-        if self.external_hovered_block != block_id {
-            self.external_hovered_block = block_id;
-            cx.notify();
-        }
-    }
-
-    pub fn apply_linked_selection(
-        &mut self,
-        selection: Option<LinkedBlockSelection>,
-        cx: &mut Context<Self>,
-    ) {
-        let block_id = selection.and_then(|selection| self.map_linked_block(selection.anchor));
-        if self.external_selected_block != block_id {
-            self.external_selected_block = block_id;
-            cx.notify();
-        }
-    }
-
-    pub(super) fn set_hovered_text_block(&mut self, block_id: Option<u32>, cx: &mut Context<Self>) {
-        if self.hovered_text_block != block_id {
-            self.hovered_text_block = block_id;
-            if !self.suppress_linked_events {
-                cx.emit(DocumentViewEvent::BlockHovered(
-                    block_id.and_then(|block_id| self.linked_block_anchor(block_id)),
-                ));
-            }
-            cx.notify();
-        }
-    }
-
-    pub(super) fn emit_linked_selection(&mut self, cx: &mut Context<Self>) {
-        if self.suppress_linked_events {
+        if self.translation_view_role != TranslationViewRole::SourceMirror
+            || self.translation_pair_session_id != Some(session_id)
+            || !self.translation_pair_active
+        {
             return;
         }
-        self.linked_selection_generation = self.linked_selection_generation.wrapping_add(1);
-        let selection = self.selection_bounds().and_then(|(start, _)| {
-            self.glyphs.get(start).and_then(|glyph| {
-                self.linked_block_anchor(glyph.block_idx)
-                    .map(|anchor| LinkedBlockSelection {
-                        anchor,
-                        generation: self.linked_selection_generation,
-                    })
-            })
-        });
-        cx.emit(DocumentViewEvent::BlockSelected(selection));
+        if self.external_hovered_translation_region != region_id {
+            self.external_hovered_translation_region = region_id;
+            cx.notify();
+        }
+    }
+
+    fn publish_hovered_translation_region(
+        &mut self,
+        region_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.translation_view_role != TranslationViewRole::Translation
+            || !self.translation_pair_active
+            || self.hovered_translation_region == region_id
+        {
+            return;
+        }
+        self.hovered_translation_region = region_id.clone();
+        if !self.suppress_linked_events
+            && let Some(session_id) = self.translation_pair_session_id
+        {
+            cx.emit(DocumentViewEvent::TranslationRegionHovered {
+                session_id,
+                region_id,
+            });
+        }
+        cx.notify();
+    }
+
+    fn cancel_translation_hover_clear(&mut self) {
+        self.translation_hover_clear_generation =
+            self.translation_hover_clear_generation.wrapping_add(1);
+        self.translation_hover_clear_task = None;
+    }
+
+    pub(super) fn set_hovered_translation_region(
+        &mut self,
+        region_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_translation_hover_clear();
+        self.publish_hovered_translation_region(Some(region_id), cx);
+    }
+
+    pub(super) fn schedule_translation_hover_clear(&mut self, cx: &mut Context<Self>) {
+        if self.translation_view_role != TranslationViewRole::Translation
+            || !self.translation_pair_active
+            || self.translation_hover_tools_hovered
+            || self.hovered_translation_region.is_none()
+            || self.translation_hover_clear_task.is_some()
+        {
+            return;
+        }
+        self.translation_hover_clear_generation =
+            self.translation_hover_clear_generation.wrapping_add(1);
+        let generation = self.translation_hover_clear_generation;
+        self.translation_hover_clear_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(TRANSLATION_HOVER_CLEAR_GRACE)
+                .await;
+            _ = this.update(cx, |this, cx| {
+                if this.translation_hover_clear_generation != generation
+                    || this.translation_hover_tools_hovered
+                {
+                    return;
+                }
+                this.translation_hover_clear_task = None;
+                this.publish_hovered_translation_region(None, cx);
+            });
+        }));
+    }
+
+    pub(super) fn set_translation_hover_tools_hovered(
+        &mut self,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.translation_hover_tools_hovered == hovered {
+            return;
+        }
+        self.translation_hover_tools_hovered = hovered;
+        if hovered {
+            self.cancel_translation_hover_clear();
+        } else {
+            self.schedule_translation_hover_clear(cx);
+        }
+    }
+
+    pub(super) fn clear_translation_hover_state(
+        &mut self,
+        reset_animation: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_translation_hover_clear();
+        self.translation_hover_tools_hovered = false;
+        self.publish_hovered_translation_region(None, cx);
+        self.external_hovered_translation_region = None;
+        if reset_animation {
+            self.translation_hover_animation = None;
+        }
     }
 }

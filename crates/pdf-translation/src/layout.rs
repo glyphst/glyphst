@@ -307,7 +307,7 @@ pub fn build_layout_with_options(
     }
 }
 
-fn source_text_regions(block: &Block) -> Vec<BoundingBox> {
+pub fn source_text_regions(block: &Block) -> Vec<BoundingBox> {
     let mut regions = block
         .content
         .lines

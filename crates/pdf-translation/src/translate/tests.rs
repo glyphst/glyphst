@@ -122,6 +122,7 @@ fn style_boundaries_do_not_force_adjacent_structural_markers() {
     );
     let unit = TranslationUnit {
         id: "unit".to_string(),
+        page_index: 0,
         member_block_ids: vec!["block".to_string()],
         role: BlockRole::Prompt,
         source_text: "•Who is running for the election?".to_string(),
@@ -758,6 +759,43 @@ fn blocks_export_when_repairs_fail() {
 }
 
 #[test]
+fn partial_translation_returns_failed_units_without_dropping_the_document() {
+    struct InvalidBackend;
+
+    impl TranslationBackend for InvalidBackend {
+        fn translate_batch(
+            &self,
+            units: &[TranslationUnit],
+        ) -> Result<Vec<TranslationUnitOutput>, TranslationBackendError> {
+            Ok(units
+                .iter()
+                .map(|unit| TranslationUnitOutput {
+                    id: unit.id.clone(),
+                    text: String::new(),
+                    cached: false,
+                    validation_error: None,
+                })
+                .collect())
+        }
+    }
+
+    let outcome = translate_document_partial_resuming(
+        test_document("This paragraph must be translated."),
+        &InvalidBackend,
+        &CancellationToken::new(),
+        Vec::new(),
+        |_| Ok(()),
+    )
+    .unwrap();
+
+    assert!(outcome.document.units.is_empty());
+    assert_eq!(outcome.failures.len(), 1);
+    assert_eq!(outcome.failures[0].id, "unit-p001-b0000");
+    assert_eq!(outcome.progress.failed, 1);
+    assert_eq!(outcome.progress.total, 1);
+}
+
+#[test]
 fn provider_recovery_diagnostic_stops_identical_scheduler_retries() {
     struct ProviderRecoveryBackend {
         calls: AtomicUsize,
@@ -1030,6 +1068,103 @@ fn bounded_parallel_translation_preserves_document_order() {
 }
 
 #[test]
+fn page_priority_scheduler_reserves_four_early_and_two_later_slots() {
+    struct PagePriorityBackend {
+        active: AtomicUsize,
+        page_zero_active: AtomicUsize,
+        page_one_active: AtomicUsize,
+        first_full_wave: Mutex<Option<(usize, usize)>>,
+    }
+
+    impl TranslationBackend for PagePriorityBackend {
+        fn translate_batch(
+            &self,
+            units: &[TranslationUnit],
+        ) -> Result<Vec<TranslationUnitOutput>, TranslationBackendError> {
+            let page_index = units[0].page_index;
+            assert!(units.iter().all(|unit| unit.page_index == page_index));
+            match page_index {
+                0 => {
+                    self.page_zero_active.fetch_add(1, Ordering::SeqCst);
+                }
+                1 => {
+                    self.page_one_active.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => panic!("unexpected test page"),
+            }
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            if active == MAX_ACTIVE_REQUESTS {
+                *self.first_full_wave.lock().unwrap() = Some((
+                    self.page_zero_active.load(Ordering::SeqCst),
+                    self.page_one_active.load(Ordering::SeqCst),
+                ));
+            }
+            thread::sleep(Duration::from_millis(60));
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            match page_index {
+                0 => {
+                    self.page_zero_active.fetch_sub(1, Ordering::SeqCst);
+                }
+                1 => {
+                    self.page_one_active.fetch_sub(1, Ordering::SeqCst);
+                }
+                _ => unreachable!(),
+            }
+            Ok(valid_outputs(units))
+        }
+    }
+
+    let page_blocks = |count: usize, label: &str| {
+        (0..count)
+            .map(|index| (BlockRole::Body, format!("{label} paragraph {index}.")))
+            .collect::<Vec<_>>()
+    };
+    let mut page_zero = test_document_with_blocks(page_blocks(30, "Early"))
+        .pages
+        .remove(0);
+    let mut page_one = test_document_with_blocks(page_blocks(18, "Later"))
+        .pages
+        .remove(0);
+    page_one.page_index = 1;
+    for (index, block) in page_one.blocks.iter_mut().enumerate() {
+        block.page_index = 1;
+        block.id = format!("p002-b{index:04}");
+    }
+    // Keep both pages explicit to ensure request planning cannot batch across
+    // the page boundary.
+    page_zero.page_index = 0;
+    let document = DocumentV1::new(
+        DocumentMetadata {
+            document_id: "page-priority".to_string(),
+            source_path: "test.pdf".into(),
+            provider: "test".to_string(),
+            provider_version: "1".to_string(),
+            extra: BTreeMap::new(),
+        },
+        vec![page_zero, page_one],
+    );
+    let backend = PagePriorityBackend {
+        active: AtomicUsize::new(0),
+        page_zero_active: AtomicUsize::new(0),
+        page_one_active: AtomicUsize::new(0),
+        first_full_wave: Mutex::new(None),
+    };
+
+    let outcome = translate_document_partial_resuming(
+        document,
+        &backend,
+        &CancellationToken::new(),
+        Vec::new(),
+        |_| Ok(()),
+    )
+    .unwrap();
+
+    assert_eq!(*backend.first_full_wave.lock().unwrap(), Some((4, 2)));
+    assert_eq!(outcome.queue.peak_active_requests, MAX_ACTIVE_REQUESTS);
+    assert_eq!(outcome.progress.failed, 0);
+}
+
+#[test]
 fn retains_valid_partial_results_and_retries_only_omitted_units() {
     struct PartialBackend {
         attempts: Mutex<HashMap<String, usize>>,
@@ -1193,6 +1328,7 @@ fn resumed_units_skip_backend_requests() {
 fn resumed_styled_units_do_not_require_internal_style_markers() {
     let unit = TranslationUnit {
         id: "styled".to_string(),
+        page_index: 0,
         member_block_ids: vec!["block".to_string()],
         role: BlockRole::Body,
         source_text: "Styled source text".to_string(),
@@ -1236,6 +1372,7 @@ fn resumed_inline_objects_must_still_exist_in_styled_runs() {
     let marker = crate::inline_object_marker("p001-o0000");
     let unit = TranslationUnit {
         id: "inline".to_string(),
+        page_index: 0,
         member_block_ids: vec!["block".to_string()],
         role: BlockRole::Body,
         source_text: format!("Before {marker} after"),
@@ -1283,6 +1420,37 @@ fn semantic_hash_includes_neighboring_context() {
     unit.context_after = Some("A changed neighboring paragraph.".to_string());
 
     assert_ne!(semantic_unit_hash(&unit), original);
+}
+
+#[test]
+fn empty_final_unit_set_still_emits_a_reconciliation_snapshot() {
+    let mut document = test_document("This text is preserved after final review.");
+    document.pages[0].blocks[0].policy = TranslationPolicy::preserve("review");
+    let backend = EchoBackend {
+        calls: Mutex::new(0),
+        corrupt_first_placeholder: false,
+    };
+    let snapshots = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&snapshots);
+
+    let outcome = translate_document_partial_resuming(
+        document,
+        &backend,
+        &CancellationToken::new(),
+        Vec::new(),
+        move |snapshot| {
+            captured.lock().unwrap().push(snapshot.clone());
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert!(outcome.document.units.is_empty());
+    assert_eq!(*backend.calls.lock().unwrap(), 0);
+    let snapshots = snapshots.lock().unwrap();
+    assert_eq!(snapshots.len(), 1);
+    assert!(snapshots[0].resolved_units.is_empty());
+    assert_eq!(snapshots[0].progress.total, 0);
 }
 
 #[test]

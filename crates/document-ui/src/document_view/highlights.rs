@@ -52,16 +52,6 @@ impl DocumentView {
         self.highlight_bounds_for_range(start..end + 1)
     }
 
-    pub(super) fn external_block_highlights(&self, block_id: Option<u32>) -> Vec<Bounds<Pixels>> {
-        let Some(block_id) = block_id else {
-            return Vec::new();
-        };
-        let Some(block) = self.text_blocks.iter().find(|block| block.id == block_id) else {
-            return Vec::new();
-        };
-        self.highlight_bounds_for_range(block.glyph_range.clone())
-    }
-
     pub(super) fn link_highlights(&self) -> Vec<Bounds<Pixels>> {
         let Some(link_ix) = self.hovered_link else {
             return Vec::new();

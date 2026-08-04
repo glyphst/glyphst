@@ -27,6 +27,7 @@ pub(super) fn build_translation_units(document: &DocumentV1) -> Vec<TranslationU
                 && let Some(unit_index) = continuation_units.get(group_id).copied()
             {
                 let unit = &mut units[unit_index];
+                unit.page_index = unit.page_index.min(page.page_index);
                 append_continuation_text(
                     &mut unit.source_text,
                     &normalize_pdf_hard_wraps(&block.content.text, block.role),
@@ -43,6 +44,7 @@ pub(super) fn build_translation_units(document: &DocumentV1) -> Vec<TranslationU
             let unit_index = units.len();
             units.push(TranslationUnit {
                 id,
+                page_index: page.page_index,
                 member_block_ids: vec![block.id.clone()],
                 role: block.role,
                 protected,
@@ -97,6 +99,17 @@ pub(super) fn plan_translation_requests(units: &[TranslationUnit]) -> Vec<Planne
             BlockRole::Body | BlockRole::Abstract | BlockRole::Prompt | BlockRole::Dialogue
         ) && characters <= MAX_BATCHABLE_UNIT_CHARACTERS
             && placeholders <= MAX_BATCHABLE_UNIT_PLACEHOLDERS;
+        if batch
+            .first()
+            .is_some_and(|first: &TranslationUnit| first.page_index != unit.page_index)
+        {
+            flush_batch(
+                &mut requests,
+                &mut batch,
+                &mut batch_characters,
+                &mut batch_placeholders,
+            );
+        }
         if !batchable {
             flush_batch(
                 &mut requests,
@@ -138,6 +151,7 @@ pub(super) fn plan_translation_requests(units: &[TranslationUnit]) -> Vec<Planne
 pub(super) fn semantic_unit_hash(unit: &TranslationUnit) -> u64 {
     let mut hasher = DefaultHasher::new();
     unit.id.hash(&mut hasher);
+    unit.page_index.hash(&mut hasher);
     unit.member_block_ids.hash(&mut hasher);
     role_name(unit.role).hash(&mut hasher);
     unit.source_text.hash(&mut hasher);

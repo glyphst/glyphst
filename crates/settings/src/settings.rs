@@ -78,8 +78,9 @@ pub use ocr::{OcrMode, OcrProvider, OcrSettings, PaddleOcrSettings, UnlimitedOcr
 pub use persistence::{parse_settings, user_themes_dir};
 pub use store::{SettingsStore, setup_ui_font, sync_component_theme};
 pub use translation::{
-    PdfContentReviewMode, PdfContentReviewSettings, PinnedTranslationSettings,
-    TranslationBoxCorner, TranslationProvider, TranslationProviderConfig, TranslationSettings,
+    DocumentTranslationMode, PdfContentReviewMode, PdfContentReviewSettings,
+    PinnedTranslationSettings, TranslationBoxCorner, TranslationProvider,
+    TranslationProviderConfig, TranslationSettings,
 };
 
 #[cfg(test)]

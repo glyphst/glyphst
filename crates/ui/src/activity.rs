@@ -240,6 +240,22 @@ impl ActivityCenter {
         cx.notify();
     }
 
+    /// Remove a notice at the request of its owner without invoking the
+    /// `on_remove` callback. Owner callbacks commonly update the same entity
+    /// that initiated dismissal, so invoking them here would create a nested
+    /// GPUI entity update.
+    pub fn dismiss_notice_by_owner(&mut self, id: ActivityNoticeId, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .notices
+            .iter()
+            .position(|(candidate, _)| *candidate == id)
+        else {
+            return;
+        };
+        self.notices.remove(index);
+        cx.notify();
+    }
+
     pub fn clear_notices(&mut self, cx: &mut Context<Self>) {
         let notices = std::mem::take(&mut self.notices);
         for (_, mut notice) in notices {
@@ -584,6 +600,7 @@ fn render_task_card(id: BackgroundTaskId, task: BackgroundTaskEntry, cx: &App) -
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+    use std::{cell::Cell, rc::Rc};
 
     #[gpui::test]
     fn tasks_can_be_added_updated_and_removed(cx: &mut TestAppContext) {
@@ -639,5 +656,24 @@ mod tests {
             assert_eq!(center.active_task_count(), 0);
             assert_eq!(center.notice_count(), 1);
         });
+    }
+
+    #[gpui::test]
+    fn owner_dismissal_does_not_reenter_cleanup(cx: &mut TestAppContext) {
+        cx.update(init);
+        let center = cx.update(|cx| ActivityCenter::global(cx));
+        let cleaned = Rc::new(Cell::new(false));
+        let cleanup_flag = cleaned.clone();
+        center.update(cx, |center, cx| {
+            let notice = center.add_notice(
+                ActivityNoticeEntry::new(ActivityNoticeLevel::Info, "Done", "Detail")
+                    .on_remove(move |_| cleanup_flag.set(true)),
+                cx,
+            );
+            center.dismiss_notice_by_owner(notice, cx);
+        });
+
+        assert!(!cleaned.get());
+        assert_eq!(cx.update(|cx| center.read(cx).notice_count()), 0);
     }
 }

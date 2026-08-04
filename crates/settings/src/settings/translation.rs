@@ -138,6 +138,52 @@ impl TranslationBoxCorner {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DocumentTranslationMode {
+    #[default]
+    Auto,
+    Vertical,
+    Horizontal,
+    Background,
+}
+
+impl DocumentTranslationMode {
+    pub const ALL: [Self; 4] = [
+        Self::Auto,
+        Self::Vertical,
+        Self::Horizontal,
+        Self::Background,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Vertical => "vertical",
+            Self::Horizontal => "horizontal",
+            Self::Background => "background",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "vertical" => Some(Self::Vertical),
+            "horizontal" => Some(Self::Horizontal),
+            "background" => Some(Self::Background),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto split",
+            Self::Vertical => "Vertical split (side by side)",
+            Self::Horizontal => "Horizontal split (top and bottom)",
+            Self::Background => "Run in background",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PdfContentReviewMode {
     #[default]
     Off,
@@ -228,6 +274,7 @@ pub struct TranslationSettings {
     pub active_provider: TranslationProvider,
     pub source_language: Option<String>,
     pub target_language: String,
+    pub document_mode: DocumentTranslationMode,
     pub pinned: PinnedTranslationSettings,
     pub content_review: PdfContentReviewSettings,
 }
@@ -239,6 +286,7 @@ impl Default for TranslationSettings {
             active_provider: TranslationProvider::Ai,
             source_language: None,
             target_language: DEFAULT_TRANSLATION_TARGET_LANGUAGE.to_string(),
+            document_mode: DocumentTranslationMode::Auto,
             pinned: PinnedTranslationSettings::default(),
             content_review: PdfContentReviewSettings::default(),
         }

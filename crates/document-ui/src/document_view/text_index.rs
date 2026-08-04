@@ -284,19 +284,21 @@ impl DocumentView {
         }
 
         if self.view_language == DocumentViewLanguage::Translated {
-            self.request_document_translation(cx);
+            if self.translation_session_id.is_some() {
+                self.refresh_translation_session(cx);
+            }
         }
         cx.notify();
     }
 
     fn invalidate_translation_document(&mut self) {
-        self.translation_document_generation = self.translation_document_generation.wrapping_add(1);
-        self.translation_document_task = None;
-        self.translated_blocks.clear();
-        self.translated_text_layouts.clear();
-        self.hovered_text_block = None;
-        self.external_hovered_block = None;
-        self.external_selected_block = None;
+        self.hovered_translation_region = None;
+        self.external_hovered_translation_region = None;
+        self.translation_hover_animation = None;
+        self.translation_hover_clear_generation =
+            self.translation_hover_clear_generation.wrapping_add(1);
+        self.translation_hover_clear_task = None;
+        self.translation_hover_tools_hovered = false;
     }
 
     pub(super) fn replace_translation_document(&mut self) {
@@ -322,39 +324,10 @@ impl DocumentView {
             while end < glyphs.len() && glyphs[end].block_idx == block_id {
                 end += 1;
             }
-            let block_glyphs = &glyphs[start..end];
-            let mut bounds = Self::glyph_line_rect(&block_glyphs[0]);
-            let mut font_size = 0.0;
-            let mut colors = BTreeMap::<u32, usize>::new();
-            let mut text = String::new();
-            for (offset, glyph) in block_glyphs.iter().enumerate() {
-                if offset > 0 {
-                    let previous = &block_glyphs[offset - 1];
-                    if glyph.line_idx != previous.line_idx {
-                        text.push('\n');
-                    } else if previous.inferred_space_after {
-                        text.push(' ');
-                    }
-                }
-                bounds = Self::union_rect(bounds, Self::glyph_line_rect(glyph));
-                font_size += glyph.font_size;
-                *colors.entry(glyph.color).or_default() += 1;
-                text.push(glyph.c);
-            }
-            let color = colors
-                .into_iter()
-                .max_by_key(|(_, count)| *count)
-                .map(|(color, _)| color)
-                .unwrap_or(0);
             blocks.push(TextBlock {
                 id: block_id,
                 page_idx: first.page_idx,
                 glyph_range: start..end,
-                bounds,
-                text,
-                font_size: (font_size / block_glyphs.len() as f32).max(6.0),
-                color,
-                horizontal: true,
             });
             start = end;
         }
