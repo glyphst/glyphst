@@ -761,14 +761,14 @@ impl KeymapEditor {
         let copy_action = action;
         let context_label = category.label().to_string();
 
-        div()
+        let row = div()
             .id(("keymap-row", index))
             .group("keymap-row")
-            .h(px(ROW_HEIGHT))
-            .w_full()
+            .size_full()
             .flex()
             .flex_row()
             .items_center()
+            .rounded(cx.theme().radius)
             .border_2()
             .when(is_selected, |this| this.border_color(theme.ring))
             .when(!is_selected, |this| this.border_color(transparent_black()))
@@ -948,7 +948,13 @@ impl KeymapEditor {
                             }
                         }),
                 )
-            })
+            });
+
+        div()
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .px_1()
+            .child(row)
             .into_any_element()
     }
 
@@ -1319,6 +1325,8 @@ impl Render for KeymapEditor {
                 div()
                     .flex_none()
                     .h(px(32.0))
+                    // Match the 4px row inset plus the row's 2px focus border.
+                    .px(px(6.0))
                     .flex()
                     .flex_row()
                     .items_center()

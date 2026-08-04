@@ -891,6 +891,7 @@ impl NewTab {
             .w(px(CARD_WIDTH))
             .h(px(CARD_HEIGHT))
             .p_3()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(border_color)
             .bg(card_bg)
@@ -977,13 +978,14 @@ impl NewTab {
             } else {
                 ("new-tab-list-row", state.item_ix)
             })
-            .h(px(LIST_ROW_HEIGHT))
-            .w_full()
+            .debug_selector(|| "new-tab-history-row".to_string())
+            .size_full()
             .min_w_0()
             .flex()
             .items_center()
             .gap_2()
             .px_3()
+            .rounded(cx.theme().radius)
             .border_1()
             .border_color(if state.focused {
                 theme.ring
@@ -1022,7 +1024,14 @@ impl NewTab {
                     .size(ui_rems(16.0))
                     .text_color(theme.muted_foreground),
             )
-            .child(div().flex_1().min_w_0().truncate().child(file_name));
+            .child(
+                div()
+                    .debug_selector(|| "new-tab-history-name".to_string())
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(file_name),
+            );
 
         if details {
             if columns.location {
@@ -1074,7 +1083,15 @@ impl NewTab {
             );
         }
 
-        row.into_any_element()
+        div()
+            .debug_selector(|| "new-tab-history-row-slot".to_string())
+            .h(px(LIST_ROW_HEIGHT))
+            .w_full()
+            .min_w_0()
+            .px_1()
+            .py_0p5()
+            .child(row)
+            .into_any_element()
     }
 
     fn render_empty_hint(height: f32, filtering: bool, theme: ThemeColor) -> AnyElement {
@@ -1327,7 +1344,8 @@ impl NewTab {
             .flex()
             .items_center()
             .gap_2()
-            .px_3()
+            // Match the 16px row inset plus the row's 1px focus border.
+            .px(px(17.0))
             .border_b(px(1.0))
             .border_color(theme.border)
             .bg(theme.background)
@@ -1338,6 +1356,7 @@ impl NewTab {
         }
         header = header.child(div().flex_none().w(ui_rems(16.0))).child(
             div()
+                .debug_selector(|| "new-tab-details-name-header".to_string())
                 .flex_1()
                 .min_w_0()
                 .truncate()
@@ -1975,13 +1994,13 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::{AppContext as _, TestAppContext, px};
     use gpui_component::Root;
     use image::Rgba;
 
     use super::{
-        CursorMove, DetailsColumns, NewTab, NewTabEntry, NewTabItemKey, ThumbnailCacheKey,
-        format_file_size, persist_cover_thumbnail,
+        CursorMove, DetailsColumns, LIST_ROW_HEIGHT, NewTab, NewTabEntry, NewTabItemKey,
+        ThumbnailCacheKey, format_file_size, persist_cover_thumbnail,
     };
     use crate::{
         library::{DocumentPosition, HistoryEntry, LibraryStore},
@@ -2143,6 +2162,65 @@ mod tests {
             );
         });
         assert!(cx.debug_bounds("new-tab-open-file").is_some());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[gpui::test]
+    fn history_rows_keep_their_slot_and_align_with_details_header(cx: &mut TestAppContext) {
+        let directory = temporary_directory("new-tab-rounded-rows");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("document.pdf");
+        fs::write(&path, b"document").unwrap();
+
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let mut settings_store = SettingsStore::memory();
+            settings_store.state_path = directory.join("settings.kdl");
+            let mut settings = settings_store.settings.clone();
+            settings.new_tab.view_mode = NewTabViewMode::List;
+            settings_store.set_settings_in_memory(settings);
+            cx.set_global(settings_store);
+
+            let mut library = LibraryStore::memory();
+            library.library.history = vec![history_entry(path.clone(), 1)];
+            cx.set_global(library);
+        });
+
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| NewTab::new(cx.focus_handle(), window, cx));
+            Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<NewTab>().unwrap()
+        });
+
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let slot = cx
+            .debug_bounds("new-tab-history-row-slot")
+            .expect("history row slot");
+        let row = cx.debug_bounds("new-tab-history-row").expect("history row");
+        assert_eq!(slot.size.height, px(LIST_ROW_HEIGHT));
+        assert_eq!(row.left(), slot.left() + px(4.0));
+        assert_eq!(row.top(), slot.top() + px(2.0));
+        assert_eq!(row.size.width, slot.size.width - px(8.0));
+        assert_eq!(row.size.height, slot.size.height - px(4.0));
+
+        view.update_in(cx, |this, _, cx| {
+            this.set_view_mode(NewTabViewMode::Details, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let name = cx
+            .debug_bounds("new-tab-history-name")
+            .expect("history name");
+        let header = cx
+            .debug_bounds("new-tab-details-name-header")
+            .expect("details name header");
+        assert_eq!(name.left(), header.left());
 
         fs::remove_dir_all(directory).unwrap();
     }

@@ -246,6 +246,7 @@ impl AiPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let radius = cx.theme().radius;
         let mut list = div().flex().flex_col().gap_1().p_2();
         list = list.child(
             div()
@@ -255,6 +256,7 @@ impl AiPanel {
                 .justify_between()
                 .border_1()
                 .border_color(theme.primary)
+                .rounded(radius)
                 .bg(theme.primary.opacity(0x18 as f32 / 255.0))
                 .px_2()
                 .py_2()
@@ -303,6 +305,7 @@ impl AiPanel {
                     .gap_1()
                     .px_2()
                     .py_2()
+                    .rounded(radius)
                     .bg(if active {
                         theme.list_active
                     } else {

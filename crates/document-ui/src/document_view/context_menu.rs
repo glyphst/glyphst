@@ -275,6 +275,7 @@ impl DocumentView {
         current: Option<HighlightColor>,
         document_theme: Theme,
         theme: ThemeColor,
+        radius: Pixels,
         view: Entity<Self>,
     ) -> impl IntoElement {
         let mut row = div().flex().flex_row().gap_2().px_3().pb_2();
@@ -286,6 +287,7 @@ impl DocumentView {
                 action,
                 document_theme,
                 theme,
+                radius,
                 view.clone(),
             ));
         }
@@ -299,12 +301,14 @@ impl DocumentView {
         action: HighlightColorAction,
         document_theme: Theme,
         theme: ThemeColor,
+        radius: Pixels,
         view: Entity<Self>,
     ) -> impl IntoElement {
         div()
             .id(format!("highlight-swatch-{action:?}-{color:?}"))
             .w(px(22.0))
             .h(px(22.0))
+            .rounded(radius)
             .border_1()
             .border_color(if current == Some(color) {
                 theme.primary
@@ -339,6 +343,7 @@ impl DocumentView {
         cx: &mut Context<PopupMenu>,
     ) -> PopupMenu {
         let theme = cx.theme().colors;
+        let radius = cx.theme().radius;
         let fullscreen_label = if is_fullscreen {
             crate::fl!("pdf-context-exit-full-screen")
         } else {
@@ -380,6 +385,7 @@ impl DocumentView {
                         Some(color),
                         document_theme,
                         theme,
+                        radius,
                         color_view.clone(),
                     )
                 }))
@@ -399,6 +405,7 @@ impl DocumentView {
                         None,
                         document_theme,
                         theme,
+                        radius,
                         color_view.clone(),
                     )
                 }))

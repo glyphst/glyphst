@@ -354,88 +354,96 @@ impl DocumentView {
             theme.list_hover
         };
 
+        let row = div()
+            .id((row_id, entry_ix))
+            .debug_selector(move || format!("{row_id}-{entry_ix}"))
+            .relative()
+            .flex()
+            .flex_row()
+            .size_full()
+            .items_center()
+            .px_2()
+            .rounded(cx.theme().radius)
+            .bg(background)
+            .when(navigable, |this| {
+                this.cursor_pointer()
+                    .hover(move |style| style.bg(hover_background))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.navigate_to_toc_sidebar_entry(entry_ix, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+            })
+            .child(div().flex_none().w(px(depth as f32 * 14.0)))
+            .child(
+                div()
+                    .id((disclosure_id, entry_ix))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(px(18.0))
+                    .h(px(24.0))
+                    .rounded(cx.theme().radius / 2.0)
+                    .text_color(theme.muted_foreground)
+                    .when(has_children && !sticky, |this| {
+                        this.cursor_pointer()
+                            .hover(move |style| style.bg(theme.list_hover))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    if !this.toc_collapsed.remove(&entry_ix) {
+                                        this.toc_collapsed.insert(entry_ix);
+                                    }
+                                    this.toc_sidebar_entries_dirty = true;
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }),
+                            )
+                    })
+                    .child(if has_children {
+                        if collapsed { "▸" } else { "▾" }
+                    } else {
+                        ""
+                    }),
+            )
+            .child(
+                div()
+                    .id((title_id, entry_ix))
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .h(px(28.0))
+                    .px_1()
+                    .truncate()
+                    .tooltip(text_tooltip(title.clone()))
+                    .text_color(title_color)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .ml_2()
+                    .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
+                    .text_align(gpui::TextAlign::Right)
+                    .text_color(theme.muted_foreground)
+                    .child(if navigable {
+                        format!("{}", page_number)
+                    } else {
+                        String::new()
+                    }),
+            );
+
         Some(
             div()
-                .id((row_id, entry_ix))
-                .debug_selector(move || format!("{row_id}-{entry_ix}"))
                 .relative()
-                .flex()
-                .flex_row()
                 .w_full()
-                .items_center()
                 .h(px(TOC_SIDEBAR_ROW_HEIGHT))
-                .px_2()
-                .bg(background)
-                .when(navigable, |this| {
-                    this.cursor_pointer()
-                        .hover(move |style| style.bg(hover_background))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                this.navigate_to_toc_sidebar_entry(entry_ix, cx);
-                                cx.stop_propagation();
-                            }),
-                        )
-                })
-                .child(div().flex_none().w(px(depth as f32 * 14.0)))
-                .child(
-                    div()
-                        .id((disclosure_id, entry_ix))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .justify_center()
-                        .w(px(18.0))
-                        .h(px(24.0))
-                        .text_color(theme.muted_foreground)
-                        .when(has_children && !sticky, |this| {
-                            this.cursor_pointer()
-                                .hover(move |style| style.bg(theme.list_hover))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, _, cx| {
-                                        if !this.toc_collapsed.remove(&entry_ix) {
-                                            this.toc_collapsed.insert(entry_ix);
-                                        }
-                                        this.toc_sidebar_entries_dirty = true;
-                                        cx.stop_propagation();
-                                        cx.notify();
-                                    }),
-                                )
-                        })
-                        .child(if has_children {
-                            if collapsed { "▸" } else { "▾" }
-                        } else {
-                            ""
-                        }),
-                )
-                .child(
-                    div()
-                        .id((title_id, entry_ix))
-                        .flex()
-                        .flex_1()
-                        .min_w_0()
-                        .items_center()
-                        .h(px(28.0))
-                        .px_1()
-                        .truncate()
-                        .tooltip(text_tooltip(title.clone()))
-                        .text_color(title_color)
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .ml_2()
-                        .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
-                        .text_align(gpui::TextAlign::Right)
-                        .text_color(theme.muted_foreground)
-                        .child(if navigable {
-                            format!("{}", page_number)
-                        } else {
-                            String::new()
-                        }),
-                )
+                .px_1()
+                .child(row)
                 .when(sticky_shadow, |this| {
                     this.child(
                         div()
@@ -651,69 +659,81 @@ impl DocumentView {
                                     let color = entry.color;
                                     let current = selected == Some(note_id);
 
-                                    Some(
-                                        div()
-                                            .id(format!("notes-sidebar-note-{note_id}"))
-                                            .flex()
-                                            .flex_row()
-                                            .w_full()
-                                            .items_center()
-                                            .h(px(NOTES_SIDEBAR_ROW_HEIGHT))
-                                            .px_2()
-                                            .gap_2()
-                                            .bg(if current {
-                                                theme.list_active
-                                            } else {
-                                                transparent_black()
-                                            })
-                                            .cursor_pointer()
-                                            .hover(move |style| style.bg(theme.list_hover))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |this, _, _, cx| {
-                                                    this.navigate_to_note(note_ix, cx);
-                                                    cx.stop_propagation();
-                                                }),
-                                            )
-                                            .child(div().flex_none().w(px(8.0)).h(px(8.0)).bg(
-                                                match color {
+                                    let row = div()
+                                        .id(format!("notes-sidebar-note-{note_id}"))
+                                        .flex()
+                                        .flex_row()
+                                        .size_full()
+                                        .items_center()
+                                        .px_2()
+                                        .gap_2()
+                                        .rounded(cx.theme().radius)
+                                        .bg(if current {
+                                            theme.list_active
+                                        } else {
+                                            transparent_black()
+                                        })
+                                        .cursor_pointer()
+                                        .hover(move |style| style.bg(theme.list_hover))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.navigate_to_note(note_ix, cx);
+                                                cx.stop_propagation();
+                                            }),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .w(px(8.0))
+                                                .h(px(8.0))
+                                                .rounded_full()
+                                                .bg(match color {
                                                     HighlightColor::Yellow => theme.yellow,
                                                     HighlightColor::Green => theme.green,
                                                     HighlightColor::Blue => theme.blue,
                                                     HighlightColor::Pink => theme.magenta,
                                                     HighlightColor::Orange => theme.warning,
-                                                },
-                                            ))
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .flex_col()
-                                                    .child(
-                                                        div()
-                                                            .truncate()
-                                                            .text_size(ui_rems(13.0))
-                                                            .text_color(theme.foreground)
-                                                            .child(body),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .truncate()
-                                                            .text_size(ui_rems(11.0))
-                                                            .text_color(theme.muted_foreground)
-                                                            .child(text),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_none()
-                                                    .ml_2()
-                                                    .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
-                                                    .text_align(gpui::TextAlign::Right)
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(format!("{}", page)),
-                                            ),
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .flex_col()
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_size(ui_rems(13.0))
+                                                        .text_color(theme.foreground)
+                                                        .child(body),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_size(ui_rems(11.0))
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(text),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .ml_2()
+                                                .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
+                                                .text_align(gpui::TextAlign::Right)
+                                                .text_color(theme.muted_foreground)
+                                                .child(format!("{}", page)),
+                                        );
+
+                                    Some(
+                                        div()
+                                            .h(px(NOTES_SIDEBAR_ROW_HEIGHT))
+                                            .w_full()
+                                            .px_1()
+                                            .py_0p5()
+                                            .child(row),
                                     )
                                 })
                                 .collect::<Vec<_>>()

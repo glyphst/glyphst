@@ -211,6 +211,7 @@ impl PickerDelegate for NotesPaletteDelegate {
                     .flex_none()
                     .w(px(8.0))
                     .h(px(8.0))
+                    .rounded_full()
                     .bg(match entry.color {
                         HighlightColor::Yellow => theme.yellow,
                         HighlightColor::Green => theme.green,

@@ -315,6 +315,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
             .w(px(self.delegate.width()))
             .max_h(px(INPUT_ROW_HEIGHT + list_height))
             .popover_style(cx)
+            .rounded(cx.theme().radius_lg)
             .overflow_hidden()
             .text_size(TextSize::Default.rems())
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -382,6 +383,8 @@ impl<D: PickerDelegate> ListDelegate for PickerListDelegate<D> {
         Some(
             ListItem::new(picker.delegate.match_id(ix.row))
                 .h(px(picker.delegate.row_height()))
+                .mx_1()
+                .rounded(cx.theme().radius)
                 .child(content),
         )
     }
@@ -578,9 +581,11 @@ mod tests {
     use gpui::TestAppContext;
     use gpui_component::Root;
 
-    struct EmptyPickerDelegate;
+    struct TestPickerDelegate {
+        matches: usize,
+    }
 
-    impl PickerDelegate for EmptyPickerDelegate {
+    impl PickerDelegate for TestPickerDelegate {
         fn key_context(&self) -> &'static str {
             "PickerFocusTest"
         }
@@ -606,13 +611,17 @@ mod tests {
         }
 
         fn match_count(&self) -> usize {
-            0
+            self.matches
         }
 
         fn update_matches(&mut self, _: &str) {}
 
         fn render_match(&self, _: usize, _: ThemeColor, _: &FocusHandle, _: &Window) -> AnyElement {
-            div().into_any_element()
+            div()
+                .debug_selector(|| "picker-test-row-content".to_string())
+                .w_full()
+                .child("Item")
+                .into_any_element()
         }
 
         fn confirm(
@@ -626,18 +635,22 @@ mod tests {
     }
 
     struct PickerFocusHost {
-        picker: Entity<Picker<EmptyPickerDelegate>>,
+        picker: Entity<Picker<TestPickerDelegate>>,
         previous_focus_handle: FocusHandle,
     }
 
     impl PickerFocusHost {
         fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+            Self::with_matches(0, window, cx)
+        }
+
+        fn with_matches(matches: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
             let previous_focus_handle = cx.focus_handle();
             previous_focus_handle.focus(window, cx);
             let picker = cx.new(|cx| {
                 Picker::new(
                     previous_focus_handle.clone(),
-                    EmptyPickerDelegate,
+                    TestPickerDelegate { matches },
                     window,
                     cx,
                 )
@@ -702,6 +715,27 @@ mod tests {
         let list = cx.debug_bounds("picker-list").expect("picker list bounds");
         assert_eq!(input_row.size.height, px(INPUT_ROW_HEIGHT));
         assert_eq!(input_row.bottom(), list.top());
+    }
+
+    #[gpui::test]
+    fn picker_rows_are_horizontally_inset_without_changing_height(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let host = cx.new(|cx| PickerFocusHost::with_matches(1, window, cx));
+            Root::new(host, window, cx)
+        });
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let list = cx.debug_bounds("picker-list").expect("picker list bounds");
+        let content = cx
+            .debug_bounds("picker-test-row-content")
+            .expect("picker row content bounds");
+        assert_eq!(content.left(), list.left() + px(16.0));
+        assert_eq!(list.size.height, px(32.0));
     }
 
     #[test]

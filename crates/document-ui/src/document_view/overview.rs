@@ -510,16 +510,18 @@ impl DocumentView {
                                                         this.thumbnail_overlays_for_page(page_idx),
                                                     );
 
-                                                Some(
-                                                    div()
+                                                let item = div()
                                                         .id(("thumbnail-sidebar-page", page_idx))
                                                         .flex()
                                                         .flex_col()
                                                         .items_center()
                                                         .justify_center()
-                                                        .w_full()
-                                                        .h(px(row_height))
-                                                        .px(px(THUMBNAIL_SIDEBAR_HORIZONTAL_PADDING))
+                                                        .size_full()
+                                                        .px(px(
+                                                            THUMBNAIL_SIDEBAR_HORIZONTAL_PADDING
+                                                                - 4.0,
+                                                        ))
+                                                        .rounded(cx.theme().radius)
                                                         .cursor_pointer()
                                                         .hover(move |style| {
                                                             style.bg(theme.list_hover)
@@ -569,6 +571,7 @@ impl DocumentView {
                                                                 .justify_center()
                                                                 .w(px(thumbnail_box_width))
                                                                 .h(px(thumbnail_box_height))
+                                                                .rounded(cx.theme().radius)
                                                                 .border_1()
                                                                 .border_color(border_color)
                                                                 .bg(if selected {
@@ -617,7 +620,15 @@ impl DocumentView {
                                                                 .text_size(ui_rems(11.0))
                                                                 .text_color(label_color)
                                                                 .child(format!("{}", page_idx + 1)),
-                                                        ),
+                                                        );
+
+                                                Some(
+                                                    div()
+                                                        .h(px(row_height))
+                                                        .w_full()
+                                                        .px_1()
+                                                        .py_0p5()
+                                                        .child(item),
                                                 )
                                             })
                                             .collect::<Vec<_>>()
@@ -880,6 +891,7 @@ impl DocumentView {
                                                         .items_center()
                                                         .relative()
                                                         .w(px(thumbnail_box_width))
+                                                        .rounded(cx.theme().radius)
                                                         .cursor_pointer()
                                                         .hover(move |style| {
                                                             style.bg(theme.list_hover)
@@ -934,6 +946,7 @@ impl DocumentView {
                                                                 .justify_center()
                                                                 .w(px(thumbnail_box_width))
                                                                 .h(px(thumbnail_box_height))
+                                                                .rounded(cx.theme().radius)
                                                                 .border_1()
                                                                 .border_color(border_color)
                                                                 .bg(if selected {

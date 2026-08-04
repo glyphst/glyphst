@@ -227,6 +227,7 @@ impl PickerDelegate for BookmarkPaletteDelegate {
                     div()
                         .flex_none()
                         .px_1()
+                        .rounded_full()
                         .bg(theme.list_active)
                         .text_color(theme.primary)
                         .child(crate::fl!("current")),
