@@ -4572,10 +4572,63 @@ mod tests {
             workspace.split_active_pane(SplitDirection::Right, window, cx);
         });
         let top_right = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let (initial_left_bounds, initial_right_bounds) =
+            workspace.read_with(cx, |workspace, _| {
+                (
+                    workspace
+                        .pane_group
+                        .bounding_box_for_pane(&top_left)
+                        .expect("left pane bounds"),
+                    workspace
+                        .pane_group
+                        .bounding_box_for_pane(&top_right)
+                        .expect("right pane bounds"),
+                )
+            });
+        let horizontal_indicator = cx
+            .debug_bounds("resizable-horizontal-handle-indicator")
+            .expect("horizontal resize indicator");
+        let active_surface = cx
+            .debug_bounds("active-pane-surface")
+            .expect("right active pane surface");
+        assert_eq!(active_surface, initial_right_bounds);
+        assert!(horizontal_indicator.left() > initial_left_bounds.right());
+        assert!(horizontal_indicator.right() < active_surface.left());
+
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.split_active_pane(SplitDirection::Down, window, cx);
         });
         let bottom_right = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let (right_top_bounds, right_bottom_bounds) = workspace.read_with(cx, |workspace, _| {
+            (
+                workspace
+                    .pane_group
+                    .bounding_box_for_pane(&top_right)
+                    .expect("top-right pane bounds"),
+                workspace
+                    .pane_group
+                    .bounding_box_for_pane(&bottom_right)
+                    .expect("bottom-right pane bounds"),
+            )
+        });
+        let vertical_indicator = cx
+            .debug_bounds("resizable-vertical-handle-indicator")
+            .expect("vertical resize indicator");
+        let active_surface = cx
+            .debug_bounds("active-pane-surface")
+            .expect("bottom active pane surface");
+        assert_eq!(active_surface, right_bottom_bounds);
+        assert!(vertical_indicator.top() > right_top_bounds.bottom());
+        assert!(vertical_indicator.bottom() < active_surface.top());
+
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.active_pane = top_left.clone();
             workspace.split_active_pane(SplitDirection::Down, window, cx);
