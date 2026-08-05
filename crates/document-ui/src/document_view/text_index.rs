@@ -259,6 +259,9 @@ impl DocumentView {
         self.hovered_link = None;
         self.pending_link = None;
         self.pending_selection_anchor = None;
+        for source in self.page_render_sources.values_mut() {
+            source.text_revision = None;
+        }
 
         for (page, glyph_range) in self.pages.iter_mut().zip(loaded.page_glyph_ranges) {
             page.glyph_range = glyph_range;

@@ -15,7 +15,10 @@ use anyhow::{Context as _, anyhow};
 use glyphst_settings::{OcrMode, OcrProvider, PdfContentReviewMode, Settings};
 use glyphst_translation::{LanguageCode, TranslationService};
 use mupdf::pdf::PdfDocument as MuPdfDocument;
-use mupdf::{Document, TextPageFlags};
+use mupdf::{
+    Document, TextPageFlags,
+    text_page::{TextBlockType, TextCharFlags},
+};
 use serde::{Deserialize, Serialize};
 
 use glyphst_pdf_translation::{
@@ -1269,7 +1272,7 @@ impl PdfTranslationService {
                     format!("Translated preview page {} is unavailable", page_index + 1),
                 )
             })?;
-        let hover_regions = build_page_hover_regions(translated, &page);
+        let mut hover_regions = build_page_hover_regions(translated, &page);
         let source_bytes = extract_single_pdf_page(source_path, page_index)?;
         let work_directory = job_directory
             .join("page-previews")
@@ -1309,6 +1312,8 @@ impl PdfTranslationService {
             &work_directory,
             cancellation,
         )?;
+        let text_layer = extract_preview_text_layer(&output_path)?;
+        refine_page_hover_regions(&mut hover_regions, &page, &text_layer);
         let pdf = fs::read(&output_path).map_err(|error| {
             PdfTranslationError::stage(
                 PdfTranslationStage::Compiling,
@@ -1342,6 +1347,7 @@ impl PdfTranslationService {
             revision,
             layout: page,
             hover_regions,
+            text_layer,
             pdf: Arc::from(pdf),
             layout_failures,
         })
@@ -2363,6 +2369,124 @@ fn build_page_hover_regions(
     regions
 }
 
+const TRANSLATION_HOVER_TEXT_PADDING_PT: f32 = 1.5;
+const TRANSLATION_HOVER_TEXT_TOLERANCE_PT: f32 = 0.75;
+
+fn extract_preview_text_layer(
+    output_path: &Path,
+) -> Result<PdfTranslationPageTextLayer, PdfTranslationError> {
+    let document = Document::open(output_path).map_err(|error| {
+        PdfTranslationError::stage(
+            PdfTranslationStage::Compiling,
+            "Could not reopen the translated page preview",
+            error,
+        )
+    })?;
+    let page_count = document.page_count().map_err(|error| {
+        PdfTranslationError::stage(
+            PdfTranslationStage::Compiling,
+            "Could not count translated page preview pages",
+            error,
+        )
+    })?;
+    if page_count != 1 {
+        return Err(PdfTranslationError::message(
+            PdfTranslationStage::Compiling,
+            "Translated page preview did not contain exactly one page",
+        ));
+    }
+    let page = document.load_page(0).map_err(|error| {
+        PdfTranslationError::stage(
+            PdfTranslationStage::Compiling,
+            "Could not load the translated page preview",
+            error,
+        )
+    })?;
+    let text_page = page
+        .to_text_page(TextPageFlags::PRESERVE_WHITESPACE)
+        .map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Compiling,
+                "Could not extract translated page preview text geometry",
+                error,
+            )
+        })?;
+    let mut blocks = Vec::new();
+    for block in text_page.blocks() {
+        if block.r#type() != TextBlockType::Text {
+            continue;
+        }
+        let mut lines = Vec::new();
+        for line in block.lines() {
+            let mut glyphs = Vec::new();
+            for character in line.chars() {
+                let Some(value) = character.char() else {
+                    continue;
+                };
+                let quad = character.quad();
+                glyphs.push(PdfTranslationPageGlyph {
+                    character: value,
+                    quad: PdfTranslationPageQuad {
+                        upper_left: PdfTranslationPagePoint::new(quad.ul.x, quad.ul.y),
+                        upper_right: PdfTranslationPagePoint::new(quad.ur.x, quad.ur.y),
+                        lower_left: PdfTranslationPagePoint::new(quad.ll.x, quad.ll.y),
+                        lower_right: PdfTranslationPagePoint::new(quad.lr.x, quad.lr.y),
+                    },
+                    font_size: character.size(),
+                    bold: character.flags().contains(TextCharFlags::BOLD)
+                        || character.font().is_some_and(|font| font.is_bold()),
+                });
+            }
+            if glyphs.is_empty() {
+                continue;
+            }
+            let bounds = line.bounds();
+            lines.push(PdfTranslationPageTextLine {
+                bounds: BoundingBox::new(bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+                glyphs,
+            });
+        }
+        if !lines.is_empty() {
+            blocks.push(PdfTranslationPageTextBlock { lines });
+        }
+    }
+    Ok(PdfTranslationPageTextLayer { blocks })
+}
+
+fn refine_page_hover_regions(
+    regions: &mut [PdfTranslationHoverRegion],
+    layout_page: &LayoutPage,
+    text_layer: &PdfTranslationPageTextLayer,
+) {
+    let items = layout_page
+        .items
+        .iter()
+        .map(|item| (item.block_id.as_str(), item.bbox))
+        .collect::<HashMap<_, _>>();
+    for region in regions {
+        if region.kind != PdfTranslationHoverRegionKind::Text {
+            continue;
+        }
+        let Some(item_bounds) = region
+            .block_id
+            .as_deref()
+            .and_then(|block_id| items.get(block_id))
+            .copied()
+        else {
+            continue;
+        };
+        if let Some(glyph_bounds) = text_layer.glyph_envelope_inside(item_bounds) {
+            region.target_bounds = BoundingBox::new(
+                glyph_bounds.x0 - TRANSLATION_HOVER_TEXT_PADDING_PT,
+                glyph_bounds.y0 - TRANSLATION_HOVER_TEXT_PADDING_PT,
+                glyph_bounds.x1 + TRANSLATION_HOVER_TEXT_PADDING_PT,
+                glyph_bounds.y1 + TRANSLATION_HOVER_TEXT_PADDING_PT,
+            )
+            .clamp_to(item_bounds);
+        }
+    }
+}
+
 fn hover_region_id(page_index: usize, namespace: &str, source_id: &str) -> String {
     format!("page:{page_index}:{namespace}:{source_id}")
 }
@@ -2396,8 +2520,108 @@ pub struct PdfTranslationPagePreview {
     pub revision: u64,
     pub layout: LayoutPage,
     pub hover_regions: Vec<PdfTranslationHoverRegion>,
+    pub text_layer: PdfTranslationPageTextLayer,
     pub pdf: Arc<[u8]>,
     pub layout_failures: Vec<TranslationFailureDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PdfTranslationPagePoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl PdfTranslationPagePoint {
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfTranslationPageQuad {
+    pub upper_left: PdfTranslationPagePoint,
+    pub upper_right: PdfTranslationPagePoint,
+    pub lower_left: PdfTranslationPagePoint,
+    pub lower_right: PdfTranslationPagePoint,
+}
+
+impl PdfTranslationPageQuad {
+    fn bounds(&self) -> BoundingBox {
+        let points = [
+            self.upper_left,
+            self.upper_right,
+            self.lower_left,
+            self.lower_right,
+        ];
+        BoundingBox::new(
+            points
+                .iter()
+                .map(|point| point.x)
+                .fold(f32::INFINITY, f32::min),
+            points
+                .iter()
+                .map(|point| point.y)
+                .fold(f32::INFINITY, f32::min),
+            points
+                .iter()
+                .map(|point| point.x)
+                .fold(f32::NEG_INFINITY, f32::max),
+            points
+                .iter()
+                .map(|point| point.y)
+                .fold(f32::NEG_INFINITY, f32::max),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfTranslationPageGlyph {
+    pub character: char,
+    pub quad: PdfTranslationPageQuad,
+    pub font_size: f32,
+    pub bold: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfTranslationPageTextLine {
+    pub bounds: BoundingBox,
+    pub glyphs: Vec<PdfTranslationPageGlyph>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfTranslationPageTextBlock {
+    pub lines: Vec<PdfTranslationPageTextLine>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PdfTranslationPageTextLayer {
+    pub blocks: Vec<PdfTranslationPageTextBlock>,
+}
+
+impl PdfTranslationPageTextLayer {
+    fn glyph_envelope_inside(&self, bounds: BoundingBox) -> Option<BoundingBox> {
+        self.blocks
+            .iter()
+            .flat_map(|block| &block.lines)
+            .flat_map(|line| &line.glyphs)
+            .map(|glyph| glyph.quad.bounds())
+            .filter(|glyph| {
+                let center_x = (glyph.x0 + glyph.x1) * 0.5;
+                let center_y = (glyph.y0 + glyph.y1) * 0.5;
+                center_x >= bounds.x0 - TRANSLATION_HOVER_TEXT_TOLERANCE_PT
+                    && center_x <= bounds.x1 + TRANSLATION_HOVER_TEXT_TOLERANCE_PT
+                    && center_y >= bounds.y0 - TRANSLATION_HOVER_TEXT_TOLERANCE_PT
+                    && center_y <= bounds.y1 + TRANSLATION_HOVER_TEXT_TOLERANCE_PT
+            })
+            .reduce(|left, right| {
+                BoundingBox::new(
+                    left.x0.min(right.x0),
+                    left.y0.min(right.y0),
+                    left.x1.max(right.x1),
+                    left.y1.max(right.y1),
+                )
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3554,6 +3778,125 @@ mod tests {
             tags: Vec::new(),
             metadata: Default::default(),
         }
+    }
+
+    fn hover_test_layout_item(
+        block_id: &str,
+        bbox: BoundingBox,
+    ) -> glyphst_pdf_translation::LayoutItem {
+        glyphst_pdf_translation::LayoutItem {
+            unit_id: format!("{block_id}-unit"),
+            block_id: block_id.to_string(),
+            page_index: 0,
+            source_bbox: bbox,
+            source_regions: vec![bbox],
+            structure_group_id: None,
+            toc: None,
+            bbox,
+            text: "Translated".to_string(),
+            role: glyphst_pdf_translation::BlockRole::Body,
+            source_font_size_pt: 12.0,
+            font_size_pt: 12.0,
+            minimum_font_size_pt: 8.0,
+            emergency_minimum_font_size_pt: 6.0,
+            leading_em: 1.2,
+            minimum_leading_em: 0.9,
+            font_weight: glyphst_pdf_translation::FontWeight::Regular,
+            font_class: glyphst_pdf_translation::FontFamilyClass::Serif,
+            italic: false,
+            underline: false,
+            strikeout: false,
+            color_argb: 0xff00_0000,
+            styled_runs: Vec::new(),
+            inline_objects: Vec::new(),
+            first_line_indent_pt: 0.0,
+            justify: false,
+            preserve_line_breaks: false,
+        }
+    }
+
+    fn preview_test_glyph(character: char, bounds: BoundingBox) -> PdfTranslationPageGlyph {
+        PdfTranslationPageGlyph {
+            character,
+            quad: PdfTranslationPageQuad {
+                upper_left: PdfTranslationPagePoint::new(bounds.x0, bounds.y0),
+                upper_right: PdfTranslationPagePoint::new(bounds.x1, bounds.y0),
+                lower_left: PdfTranslationPagePoint::new(bounds.x0, bounds.y1),
+                lower_right: PdfTranslationPagePoint::new(bounds.x1, bounds.y1),
+            },
+            font_size: 12.0,
+            bold: false,
+        }
+    }
+
+    #[test]
+    fn translated_text_hover_uses_the_rendered_glyph_envelope() {
+        let allocation = BoundingBox::new(10.0, 10.0, 100.0, 100.0);
+        let layer = PdfTranslationPageTextLayer {
+            blocks: vec![PdfTranslationPageTextBlock {
+                lines: vec![PdfTranslationPageTextLine {
+                    bounds: BoundingBox::new(20.0, 30.0, 60.0, 42.0),
+                    glyphs: vec![
+                        preview_test_glyph('A', BoundingBox::new(20.0, 30.0, 36.0, 42.0)),
+                        preview_test_glyph('B', BoundingBox::new(40.0, 30.0, 60.0, 42.0)),
+                    ],
+                }],
+            }],
+        };
+        let page = LayoutPage {
+            page_index: 0,
+            geometry: glyphst_pdf_translation::PageGeometry::new(200.0, 200.0),
+            items: vec![hover_test_layout_item("title", allocation)],
+        };
+        let mut regions = vec![PdfTranslationHoverRegion {
+            id: "title".to_string(),
+            kind: PdfTranslationHoverRegionKind::Text,
+            unit_id: Some("title-unit".to_string()),
+            block_id: Some("title".to_string()),
+            target_bounds: allocation,
+            source_regions: vec![allocation],
+        }];
+
+        refine_page_hover_regions(&mut regions, &page, &layer);
+
+        assert_eq!(
+            regions[0].target_bounds,
+            BoundingBox::new(18.5, 28.5, 61.5, 43.5)
+        );
+    }
+
+    #[test]
+    fn translated_text_hover_keeps_layout_and_non_text_fallbacks() {
+        let allocation = BoundingBox::new(10.0, 10.0, 100.0, 100.0);
+        let page = LayoutPage {
+            page_index: 0,
+            geometry: glyphst_pdf_translation::PageGeometry::new(200.0, 200.0),
+            items: vec![hover_test_layout_item("title", allocation)],
+        };
+        let image_bounds = BoundingBox::new(120.0, 20.0, 180.0, 90.0);
+        let mut regions = vec![
+            PdfTranslationHoverRegion {
+                id: "title".to_string(),
+                kind: PdfTranslationHoverRegionKind::Text,
+                unit_id: Some("title-unit".to_string()),
+                block_id: Some("title".to_string()),
+                target_bounds: allocation,
+                source_regions: vec![allocation],
+            },
+            PdfTranslationHoverRegion {
+                id: "image".to_string(),
+                kind: PdfTranslationHoverRegionKind::Image,
+                unit_id: None,
+                block_id: None,
+                target_bounds: image_bounds,
+                source_regions: vec![image_bounds],
+            },
+        ];
+
+        refine_page_hover_regions(&mut regions, &page, &PdfTranslationPageTextLayer::default());
+
+        assert_eq!(regions[0].target_bounds, allocation);
+        assert_eq!(regions[1].target_bounds, image_bounds);
     }
 
     #[test]

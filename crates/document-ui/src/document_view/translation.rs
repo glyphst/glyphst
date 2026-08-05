@@ -4,6 +4,199 @@ fn translation_hover_region_id(page_index: usize, namespace: &str, source_id: &s
     format!("page:{page_index}:{namespace}:{source_id}")
 }
 
+pub(super) fn replace_page_text_data(
+    pages: &mut [DocumentPage],
+    glyphs: &mut Vec<Glyph>,
+    text_lines: &mut Vec<TextLine>,
+    text_blocks: &mut Vec<TextBlock>,
+    page_line_ranges: &mut [Range<usize>],
+    page_block_ranges: &mut [Range<usize>],
+    page_index: usize,
+    mut replacement: PreparedPageText,
+) -> std::result::Result<(), String> {
+    if page_line_ranges.len() != pages.len() || page_block_ranges.len() != pages.len() {
+        return Err("PDF page text range counts were inconsistent".to_string());
+    }
+    if text_lines.iter().any(|line| {
+        line.glyph_range.start > line.glyph_range.end || line.glyph_range.end > glyphs.len()
+    }) || text_blocks.iter().any(|block| {
+        block.glyph_range.start > block.glyph_range.end || block.glyph_range.end > glyphs.len()
+    }) || pages.iter().any(|page| {
+        page.glyph_range.start > page.glyph_range.end || page.glyph_range.end > glyphs.len()
+    }) || page_line_ranges
+        .iter()
+        .any(|range| range.start > range.end || range.end > text_lines.len())
+        || page_block_ranges
+            .iter()
+            .any(|range| range.start > range.end || range.end > text_blocks.len())
+    {
+        return Err("Existing PDF text ranges were inconsistent".to_string());
+    }
+    let page = pages
+        .get(page_index)
+        .ok_or_else(|| "Translated preview page exceeded the document page count".to_string())?;
+    let old_glyph_range = page.glyph_range.clone();
+    let old_line_range = page_line_ranges
+        .get(page_index)
+        .cloned()
+        .ok_or_else(|| "Translated preview page had no text-line range".to_string())?;
+    let old_block_range = page_block_ranges
+        .get(page_index)
+        .cloned()
+        .ok_or_else(|| "Translated preview page had no text-block range".to_string())?;
+    if old_glyph_range.end > glyphs.len()
+        || old_line_range.end > text_lines.len()
+        || old_block_range.end > text_blocks.len()
+        || old_glyph_range.start > old_glyph_range.end
+        || old_line_range.start > old_line_range.end
+        || old_block_range.start > old_block_range.end
+    {
+        return Err("Existing PDF text ranges were inconsistent".to_string());
+    }
+    let total_line_count = (text_lines.len() - old_line_range.len())
+        .checked_add(replacement.text_lines.len())
+        .ok_or_else(|| "PDF contains too many text lines".to_string())?;
+    let total_block_count = (text_blocks.len() - old_block_range.len())
+        .checked_add(replacement.text_blocks.len())
+        .ok_or_else(|| "PDF contains too many text blocks".to_string())?;
+    if total_line_count > u32::MAX as usize {
+        return Err("PDF contains too many text lines".to_string());
+    }
+    if total_block_count > u32::MAX as usize {
+        return Err("PDF contains too many text blocks".to_string());
+    }
+    if replacement.text_lines.iter().any(|line| {
+        line.glyph_range.start > line.glyph_range.end
+            || line.glyph_range.end > replacement.glyphs.len()
+    }) || replacement.text_blocks.iter().any(|block| {
+        block.glyph_range.start > block.glyph_range.end
+            || block.glyph_range.end > replacement.glyphs.len()
+    }) {
+        return Err("Translated PDF text ranges were inconsistent".to_string());
+    }
+
+    let new_glyph_end = old_glyph_range
+        .start
+        .checked_add(replacement.glyphs.len())
+        .ok_or_else(|| "PDF contains too many glyphs".to_string())?;
+    let new_line_end = old_line_range
+        .start
+        .checked_add(replacement.text_lines.len())
+        .ok_or_else(|| "PDF contains too many text lines".to_string())?;
+    let new_block_end = old_block_range
+        .start
+        .checked_add(replacement.text_blocks.len())
+        .ok_or_else(|| "PDF contains too many text blocks".to_string())?;
+    let remap_after = |index: usize, old_end: usize, new_end: usize| {
+        index
+            .checked_sub(old_end)
+            .and_then(|offset| new_end.checked_add(offset))
+            .ok_or_else(|| "PDF page text ranges were out of order".to_string())
+    };
+
+    let shifted_later_lines = text_lines[old_line_range.end..]
+        .iter()
+        .map(|line| {
+            Ok(
+                remap_after(line.glyph_range.start, old_glyph_range.end, new_glyph_end)?
+                    ..remap_after(line.glyph_range.end, old_glyph_range.end, new_glyph_end)?,
+            )
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+    let shifted_later_blocks = text_blocks[old_block_range.end..]
+        .iter()
+        .map(|block| {
+            Ok(
+                remap_after(block.glyph_range.start, old_glyph_range.end, new_glyph_end)?
+                    ..remap_after(block.glyph_range.end, old_glyph_range.end, new_glyph_end)?,
+            )
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+    let shifted_later_pages = pages[page_index + 1..]
+        .iter()
+        .map(|page| {
+            Ok(
+                remap_after(page.glyph_range.start, old_glyph_range.end, new_glyph_end)?
+                    ..remap_after(page.glyph_range.end, old_glyph_range.end, new_glyph_end)?,
+            )
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+    let shifted_later_page_lines = page_line_ranges[page_index + 1..]
+        .iter()
+        .map(|range| {
+            Ok(remap_after(range.start, old_line_range.end, new_line_end)?
+                ..remap_after(range.end, old_line_range.end, new_line_end)?)
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+    let shifted_later_page_blocks = page_block_ranges[page_index + 1..]
+        .iter()
+        .map(|range| {
+            Ok(
+                remap_after(range.start, old_block_range.end, new_block_end)?
+                    ..remap_after(range.end, old_block_range.end, new_block_end)?,
+            )
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+
+    for line in &mut replacement.text_lines {
+        line.glyph_range = (line.glyph_range.start + old_glyph_range.start)
+            ..(line.glyph_range.end + old_glyph_range.start);
+    }
+    for block in &mut replacement.text_blocks {
+        block.glyph_range = (block.glyph_range.start + old_glyph_range.start)
+            ..(block.glyph_range.end + old_glyph_range.start);
+    }
+    for (line, range) in text_lines[old_line_range.end..]
+        .iter_mut()
+        .zip(shifted_later_lines)
+    {
+        line.glyph_range = range;
+    }
+    for (block, range) in text_blocks[old_block_range.end..]
+        .iter_mut()
+        .zip(shifted_later_blocks)
+    {
+        block.glyph_range = range;
+    }
+    for (later_page, range) in pages[page_index + 1..].iter_mut().zip(shifted_later_pages) {
+        later_page.glyph_range = range;
+    }
+    for (range, shifted) in page_line_ranges[page_index + 1..]
+        .iter_mut()
+        .zip(shifted_later_page_lines)
+    {
+        *range = shifted;
+    }
+    for (range, shifted) in page_block_ranges[page_index + 1..]
+        .iter_mut()
+        .zip(shifted_later_page_blocks)
+    {
+        *range = shifted;
+    }
+
+    glyphs.splice(old_glyph_range.clone(), replacement.glyphs);
+    text_lines.splice(old_line_range.clone(), replacement.text_lines);
+    text_blocks.splice(old_block_range.clone(), replacement.text_blocks);
+    pages[page_index].glyph_range = old_glyph_range.start..new_glyph_end;
+    page_line_ranges[page_index] = old_line_range.start..new_line_end;
+    page_block_ranges[page_index] = old_block_range.start..new_block_end;
+
+    for (line_index, line) in text_lines.iter().enumerate() {
+        let line_index = line_index as u32;
+        for glyph in &mut glyphs[line.glyph_range.clone()] {
+            glyph.line_idx = line_index;
+        }
+    }
+    for (block_index, block) in text_blocks.iter_mut().enumerate() {
+        let block_index = block_index as u32;
+        block.id = block_index;
+        for glyph in &mut glyphs[block.glyph_range.clone()] {
+            glyph.block_idx = block_index;
+        }
+    }
+    Ok(())
+}
+
 impl DocumentView {
     pub(super) fn can_translate_document(&self) -> bool {
         self.format == DocumentFormat::Pdf && self.path.is_absolute()
@@ -112,11 +305,14 @@ impl DocumentView {
         self.view_language = DocumentViewLanguage::Translated;
         self.cancel_translation_panel_pending_dock();
         self.cancel_translation_panel_retract();
+        self.cancel_translation_panel_initial_dock();
         self.translation_panel_placement = TranslationPanelPlacement::Default;
         self.translation_panel_drag = None;
+        self.translation_panel_initial_dock_armed = true;
         self.translation_panel_dock_panel_hovered = false;
         self.translation_panel_dock_edge_hovered = false;
         self.refresh_translation_session(cx);
+        self.sync_translation_panel_initial_dock(cx);
         cx.notify();
     }
 
@@ -156,9 +352,12 @@ impl DocumentView {
             self.clear_translation_hover_state(true, cx);
             self.cancel_translation_panel_pending_dock();
             self.cancel_translation_panel_retract();
+            self.cancel_translation_panel_initial_dock();
             self.translation_panel_drag = None;
             self.translation_panel_dock_panel_hovered = false;
             self.translation_panel_dock_edge_hovered = false;
+        } else {
+            self.sync_translation_panel_initial_dock(cx);
         }
         cx.notify();
     }
@@ -184,6 +383,8 @@ impl DocumentView {
         self.clear_translation_hover_state(true, cx);
         self.cancel_translation_panel_pending_dock();
         self.cancel_translation_panel_retract();
+        self.cancel_translation_panel_initial_dock();
+        self.translation_panel_initial_dock_armed = false;
         self.translation_panel_drag = None;
         self.translation_panel_dock_panel_hovered = false;
         self.translation_panel_dock_edge_hovered = false;
@@ -215,6 +416,8 @@ impl DocumentView {
             self.clear_translation_hover_state(true, cx);
             self.cancel_translation_panel_pending_dock();
             self.cancel_translation_panel_retract();
+            self.cancel_translation_panel_initial_dock();
+            self.translation_panel_initial_dock_armed = false;
             self.translation_panel_drag = None;
             self.translation_panel_dock_panel_hovered = false;
             self.translation_panel_dock_edge_hovered = false;
@@ -230,6 +433,7 @@ impl DocumentView {
             self.refresh_translation_page_sources(cx);
         }
         self.rebuild_session_hover_regions();
+        self.sync_translation_panel_initial_dock(cx);
         cx.notify();
     }
 
@@ -252,6 +456,7 @@ impl DocumentView {
                 *bounds = None;
             }
         }
+        self.restore_original_page_text(cx);
     }
 
     fn refresh_translation_page_sources(&mut self, cx: &mut Context<Self>) {
@@ -262,24 +467,41 @@ impl DocumentView {
         if previews.is_empty() && !self.page_render_sources.is_empty() {
             self.clear_translation_page_sources(cx);
         }
+        let mut text_changed = false;
         for (page_index, preview) in previews.iter() {
-            if self
-                .page_render_sources
-                .get(page_index)
-                .is_some_and(|source| source.revision >= preview.revision)
-            {
+            let current = self.page_render_sources.get(page_index);
+            if current.is_some_and(|source| source.revision > preview.revision) {
                 continue;
             }
-            let path = PathBuf::from(format!(
-                "translation-page-{}-revision-{}.pdf",
-                page_index + 1,
-                preview.revision
-            ));
-            let document_snapshot =
-                Arc::new(DocumentSnapshot::from_pdf_bytes(path, preview.pdf.clone()));
-            let render_session =
-                match DocumentRenderSession::open(document_snapshot.clone(), DocumentLayout::Fixed)
-                {
+            let replace_render = current.is_none_or(|source| source.revision < preview.revision);
+            let replace_text = replace_render
+                || current.is_none_or(|source| source.text_revision != Some(preview.revision));
+            if !replace_render && !replace_text {
+                continue;
+            }
+            let prepared_text =
+                match Self::prepare_translation_page_text(*page_index, &preview.text_layer) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        eprintln!(
+                            "failed to prepare translated text geometry for page {}: {error}",
+                            page_index + 1
+                        );
+                        continue;
+                    }
+                };
+            let replacement_source = if replace_render {
+                let path = PathBuf::from(format!(
+                    "translation-page-{}-revision-{}.pdf",
+                    page_index + 1,
+                    preview.revision
+                ));
+                let document_snapshot =
+                    Arc::new(DocumentSnapshot::from_pdf_bytes(path, preview.pdf.clone()));
+                let render_session = match DocumentRenderSession::open(
+                    document_snapshot.clone(),
+                    DocumentLayout::Fixed,
+                ) {
                     Ok(render_session) => render_session,
                     Err(error) => {
                         eprintln!(
@@ -289,20 +511,156 @@ impl DocumentView {
                         continue;
                     }
                 };
-            self.page_render_sources.insert(
-                *page_index,
-                RevisionedPageRenderSource {
+                Some(RevisionedPageRenderSource {
                     revision: preview.revision,
+                    text_revision: Some(preview.revision),
                     _snapshot: document_snapshot,
                     render_session,
-                },
-            );
-            self.pending_renders
-                .retain(|pending| pending.key.page_idx != *page_index);
-            if let Some(bounds) = self.page_image_bounds.get_mut(*page_index) {
-                *bounds = None;
+                })
+            } else {
+                None
+            };
+            if let Err(error) = self.replace_translation_page_text(*page_index, prepared_text) {
+                eprintln!(
+                    "failed to install translated text geometry for page {}: {error}",
+                    page_index + 1
+                );
+                continue;
+            }
+            text_changed = true;
+            if let Some(replacement_source) = replacement_source {
+                self.page_render_sources
+                    .insert(*page_index, replacement_source);
+                self.pending_renders
+                    .retain(|pending| pending.key.page_idx != *page_index);
+                let removed = cx
+                    .global_mut::<RenderCache>()
+                    .evict_page(self.doc_id, *page_index);
+                for image in removed {
+                    cx.drop_image(image, None);
+                }
+                if let Some(bounds) = self.page_image_bounds.get_mut(*page_index) {
+                    *bounds = None;
+                }
+            } else if let Some(source) = self.page_render_sources.get_mut(page_index) {
+                source.text_revision = Some(preview.revision);
             }
         }
+        if text_changed {
+            self.finish_translation_page_text_update(cx);
+        }
+    }
+
+    fn prepare_translation_page_text(
+        page_index: usize,
+        layer: &PdfTranslationPageTextLayer,
+    ) -> std::result::Result<PreparedPageText, String> {
+        let mut glyphs = Vec::new();
+        let mut text_lines = Vec::new();
+        let mut text_blocks = Vec::new();
+        for block in &layer.blocks {
+            let block_index = u32::try_from(text_blocks.len())
+                .map_err(|_| "PDF page contains too many text blocks".to_string())?;
+            let block_start = glyphs.len();
+            for line in &block.lines {
+                let line_index = u32::try_from(text_lines.len())
+                    .map_err(|_| "PDF page contains too many text lines".to_string())?;
+                let line_start = glyphs.len();
+                let line_rect = Rect::new(
+                    line.bounds.x0,
+                    line.bounds.y0,
+                    line.bounds.x1,
+                    line.bounds.y1,
+                );
+                glyphs.extend(line.glyphs.iter().map(|glyph| Glyph {
+                    c: glyph.character,
+                    quad: Quad::new(
+                        mupdf::Point::new(glyph.quad.upper_left.x, glyph.quad.upper_left.y),
+                        mupdf::Point::new(glyph.quad.upper_right.x, glyph.quad.upper_right.y),
+                        mupdf::Point::new(glyph.quad.lower_left.x, glyph.quad.lower_left.y),
+                        mupdf::Point::new(glyph.quad.lower_right.x, glyph.quad.lower_right.y),
+                    ),
+                    line_rect,
+                    page_idx: page_index,
+                    line_idx: line_index,
+                    block_idx: block_index,
+                    font_size: glyph.font_size,
+                    is_bold: glyph.bold,
+                    inferred_space_after: false,
+                }));
+                if line_start < glyphs.len() {
+                    Self::mark_inferred_spaces(&mut glyphs[line_start..]);
+                    text_lines.push(TextLine {
+                        glyph_range: line_start..glyphs.len(),
+                        bounds: line_rect,
+                    });
+                }
+            }
+            if block_start < glyphs.len() {
+                text_blocks.push(TextBlock {
+                    id: block_index,
+                    page_idx: page_index,
+                    glyph_range: block_start..glyphs.len(),
+                });
+            }
+        }
+        Ok(PreparedPageText {
+            glyphs,
+            text_blocks,
+            text_lines,
+        })
+    }
+
+    fn replace_translation_page_text(
+        &mut self,
+        page_index: usize,
+        prepared: PreparedPageText,
+    ) -> std::result::Result<(), String> {
+        replace_page_text_data(
+            &mut self.pages,
+            &mut self.glyphs,
+            &mut self.text_lines,
+            &mut self.text_blocks,
+            &mut self.page_line_ranges,
+            &mut self.page_block_ranges,
+            page_index,
+            prepared,
+        )
+    }
+
+    fn finish_translation_page_text_update(&mut self, cx: &mut Context<Self>) {
+        self.selection = None;
+        self.pending_selection_anchor = None;
+        self.dragging = false;
+        self.hovered_link = None;
+        self.pending_link = None;
+        self.refresh_annotation_geometry();
+        self.refresh_notes_sidebar_entries();
+        self.recompute_search();
+        self.search.active = self.nearest_search_match_index();
+        self.sync_search_bar(cx);
+        cx.notify();
+    }
+
+    fn restore_original_page_text(&mut self, cx: &mut Context<Self>) {
+        self.text_indexing_task = None;
+        self.glyphs.clear();
+        self.text_lines.clear();
+        self.text_blocks.clear();
+        self.links.clear();
+        self.page_line_ranges = vec![0..0; self.pages.len()];
+        self.page_block_ranges = vec![0..0; self.pages.len()];
+        for page in &mut self.pages {
+            page.glyph_range = 0..0;
+        }
+        self.selection = None;
+        self.pending_selection_anchor = None;
+        self.hovered_link = None;
+        self.pending_link = None;
+        self.text_index_state = TextIndexState::Pending;
+        self.recompute_search();
+        self.sync_search_bar(cx);
+        self.start_text_indexing(cx);
     }
 
     fn rebuild_session_hover_regions(&mut self) {
@@ -808,6 +1166,75 @@ impl DocumentView {
         }
     }
 
+    fn cancel_translation_panel_initial_dock(&mut self) {
+        if self.translation_panel_initial_dock_task.is_none() {
+            return;
+        }
+        self.translation_panel_initial_dock_generation = self
+            .translation_panel_initial_dock_generation
+            .wrapping_add(1);
+        self.translation_panel_initial_dock_task = None;
+    }
+
+    fn translation_panel_initial_dock_eligible(&self, cx: &gpui::App) -> bool {
+        translation_panel_initial_dock_should_run(
+            self.translation_panel_initial_dock_armed,
+            self.translation_view_role,
+            self.translation_pair_active,
+            self.translation_session_snapshot.is_some(),
+            matches!(
+                self.translation_panel_placement,
+                TranslationPanelPlacement::Default
+            ),
+            self.translation_panel_drag.is_some(),
+            self.translation_panel_dock_panel_hovered,
+            self.pinned_translation_language_select
+                .as_ref()
+                .is_some_and(|select| select.is_open(cx)),
+        )
+    }
+
+    pub(super) fn sync_translation_panel_initial_dock(&mut self, cx: &mut Context<Self>) {
+        if !self.translation_panel_initial_dock_eligible(cx) {
+            self.cancel_translation_panel_initial_dock();
+            return;
+        }
+        if self.translation_panel_initial_dock_task.is_some() {
+            return;
+        }
+        self.translation_panel_initial_dock_generation = self
+            .translation_panel_initial_dock_generation
+            .wrapping_add(1);
+        let generation = self.translation_panel_initial_dock_generation;
+        self.translation_panel_initial_dock_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(TRANSLATION_PANEL_INITIAL_DOCK_DELAY)
+                .await;
+            _ = this.update(cx, |this, cx| {
+                if this.translation_panel_initial_dock_generation != generation {
+                    return;
+                }
+                this.translation_panel_initial_dock_task = None;
+                if !this.translation_panel_initial_dock_eligible(cx) {
+                    return;
+                }
+                let now = Instant::now();
+                let reduce_motion = cx.global::<SettingsStore>().settings.behavior.reduce_motion;
+                let mut reveal = ScalarTween::new(1.0, LAYOUT);
+                reveal.retarget(0.0, now, reduce_motion);
+                this.translation_panel_placement = TranslationPanelPlacement::Docked {
+                    side: TranslationPanelSide::Right,
+                    y: px(TRANSLATION_PANEL_DEFAULT_TOP),
+                    reveal,
+                };
+                this.translation_panel_initial_dock_armed = false;
+                this.translation_panel_dock_panel_hovered = false;
+                this.translation_panel_dock_edge_hovered = false;
+                cx.notify();
+            });
+        }));
+    }
+
     fn cancel_translation_panel_retract(&mut self) {
         self.translation_panel_retract_generation =
             self.translation_panel_retract_generation.wrapping_add(1);
@@ -856,14 +1283,6 @@ impl DocumentView {
         hovered: bool,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(
-            self.translation_panel_placement,
-            TranslationPanelPlacement::Docked { .. }
-        ) {
-            self.translation_panel_dock_panel_hovered = false;
-            self.translation_panel_dock_edge_hovered = false;
-            return;
-        }
         let current = match surface {
             TranslationPanelDockSurface::Panel => &mut self.translation_panel_dock_panel_hovered,
             TranslationPanelDockSurface::Edge => &mut self.translation_panel_dock_edge_hovered,
@@ -872,6 +1291,16 @@ impl DocumentView {
             return;
         }
         *current = hovered;
+        if !matches!(
+            self.translation_panel_placement,
+            TranslationPanelPlacement::Docked { .. }
+        ) {
+            if surface == TranslationPanelDockSurface::Edge {
+                self.translation_panel_dock_edge_hovered = false;
+            }
+            self.sync_translation_panel_initial_dock(cx);
+            return;
+        }
         if hovered {
             self.cancel_translation_panel_retract();
             if let TranslationPanelPlacement::Docked { reveal, .. } =
@@ -947,6 +1376,8 @@ impl DocumentView {
         cx: &mut Context<Self>,
     ) {
         let pointer = self.translation_panel_local_pointer(pointer);
+        self.translation_panel_initial_dock_armed = false;
+        self.cancel_translation_panel_initial_dock();
         let panel_size = self.translation_panel_effective_size();
         let now = Instant::now();
         let origin = match self.translation_panel_placement {
@@ -1169,11 +1600,6 @@ impl DocumentView {
         let can_save = snapshot.can_save();
         let can_resume = snapshot.can_resume();
         let can_retry = snapshot.has_failures() && !snapshot.is_translating() && !can_resume;
-        let can_cancel = snapshot.is_translating()
-            || matches!(
-                snapshot.status,
-                DocumentTranslationSessionStatus::Exporting { .. }
-            );
 
         let drag_token = TranslationPanelDragToken(self.doc_id);
         let grip = div()
@@ -1214,22 +1640,110 @@ impl DocumentView {
                         .max_w_full()
                         .menu_width(px(190.0))
                         .menu_max_h(px(260.0))
+                        .menu_priority(TRANSLATION_PANEL_POPOVER_PRIORITY)
                         .search_placeholder("Search languages"),
                 )
             });
+        let (progress_value, progress_indeterminate) = match &snapshot.status {
+            DocumentTranslationSessionStatus::Running { progress, units } => {
+                if let Some(progress) = progress {
+                    (
+                        (progress.overall_fraction.is_finite() && !progress.indeterminate)
+                            .then_some(progress.overall_fraction.clamp(0.0, 1.0)),
+                        progress.indeterminate || !progress.overall_fraction.is_finite(),
+                    )
+                } else if units.total > 0 {
+                    (
+                        Some(
+                            ((units.translated + units.cached) as f32 / units.total as f32)
+                                .clamp(0.0, 1.0),
+                        ),
+                        false,
+                    )
+                } else {
+                    (None, true)
+                }
+            }
+            DocumentTranslationSessionStatus::Cancelling { progress }
+            | DocumentTranslationSessionStatus::Exporting { progress, .. } => progress
+                .as_ref()
+                .map(|progress| {
+                    (
+                        (progress.overall_fraction.is_finite() && !progress.indeterminate)
+                            .then_some(progress.overall_fraction.clamp(0.0, 1.0)),
+                        progress.indeterminate || !progress.overall_fraction.is_finite(),
+                    )
+                })
+                .unwrap_or((None, true)),
+            DocumentTranslationSessionStatus::Queued => (None, true),
+            _ => (None, false),
+        };
+        let active_progress = snapshot.is_translating()
+            || matches!(
+                &snapshot.status,
+                DocumentTranslationSessionStatus::Exporting { .. }
+            );
+        let cancelling = matches!(
+            &snapshot.status,
+            DocumentTranslationSessionStatus::Cancelling { .. }
+        );
+        let status_tooltip = format!("{status}: {detail}");
+        let terminal_status_icon = match &snapshot.status {
+            DocumentTranslationSessionStatus::Cancelled => Some((
+                IconName::Stop,
+                status_tooltip.clone(),
+                cx.theme().muted_foreground,
+            )),
+            DocumentTranslationSessionStatus::Failed { .. } => Some((
+                IconName::TriangleAlert,
+                status_tooltip.clone(),
+                cx.theme().warning,
+            )),
+            DocumentTranslationSessionStatus::Completed { .. }
+                if snapshot.last_export_error.is_some() =>
+            {
+                Some((
+                    IconName::TriangleAlert,
+                    status_tooltip.clone(),
+                    cx.theme().warning,
+                ))
+            }
+            _ => None,
+        };
         let actions = div()
             .flex_none()
             .flex()
             .flex_nowrap()
             .items_center()
             .gap_1()
+            .when(active_progress, |this| {
+                let indicator = ProgressCircle::new(format!(
+                    "translation-session-{session_id}-progress-circle"
+                ))
+                .loading(progress_indeterminate)
+                .value(progress_value.unwrap_or_default() * 100.0)
+                .child(Icon::new(IconName::X).xsmall());
+                this.child(
+                    toolbar_icon_button(
+                        format!("translation-session-{session_id}-progress"),
+                        IconName::X,
+                    )
+                    .icon(indicator)
+                    .disabled(cancelling)
+                    .tooltip(status_tooltip.clone())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.cancel_document_translation(cx);
+                        cx.stop_propagation();
+                    })),
+                )
+            })
             .when(can_resume, |this| {
                 this.child(
                     toolbar_icon_button(
                         format!("translation-session-{session_id}-resume"),
                         IconName::Play,
                     )
-                    .tooltip("Resume translation")
+                    .tooltip(status_tooltip.clone())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.resume_translation_session(cx);
                         cx.stop_propagation();
@@ -1262,44 +1776,18 @@ impl DocumentView {
                     })),
                 )
             })
-            .when(can_cancel, |this| {
+            .when_some(terminal_status_icon, |this, (icon, tooltip, color)| {
                 this.child(
-                    toolbar_icon_button(
-                        format!("translation-session-{session_id}-cancel"),
-                        IconName::X,
-                    )
-                    .tooltip("Cancel translation")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.cancel_document_translation(cx);
-                        cx.stop_propagation();
-                    })),
+                    div()
+                        .id(format!("translation-session-{session_id}-terminal-status"))
+                        .size(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .tooltip(text_tooltip(tooltip))
+                        .child(Icon::new(icon).small().text_color(color)),
                 )
             });
-        let status_line = div()
-            .min_w_0()
-            .flex_1()
-            .flex()
-            .flex_nowrap()
-            .items_center()
-            .gap_2()
-            .overflow_hidden()
-            .text_xs()
-            .child(
-                div()
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .font_medium()
-                    .child(status),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .truncate()
-                    .whitespace_nowrap()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(detail),
-            );
         let rows = if compact {
             div()
                 .w_full()
@@ -1325,8 +1813,8 @@ impl DocumentView {
                         .flex()
                         .flex_nowrap()
                         .items_center()
+                        .justify_end()
                         .gap_1()
-                        .child(status_line)
                         .child(actions),
                 )
                 .into_any_element()
@@ -1335,21 +1823,12 @@ impl DocumentView {
                 .w_full()
                 .min_w_0()
                 .flex()
-                .flex_col()
+                .flex_nowrap()
+                .items_center()
                 .gap_1()
-                .child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .flex()
-                        .flex_nowrap()
-                        .items_center()
-                        .gap_1()
-                        .child(grip)
-                        .child(language)
-                        .child(actions),
-                )
-                .child(status_line)
+                .child(grip)
+                .child(language)
+                .child(actions)
                 .into_any_element()
         };
         let panel_owner = cx.entity().downgrade();
@@ -1505,9 +1984,6 @@ impl DocumentView {
         let using_original = unit_id
             .as_ref()
             .is_some_and(|unit_id| snapshot.original_unit_ids.contains(unit_id));
-        let toggle_icon = using_original
-            .then_some(IconName::TextWrap)
-            .unwrap_or(IconName::TextUnwrap);
         let toggle_unit_id = unit_id.clone();
         let toggle_region_id = region_id.clone();
         let retry_region_id = region_id.clone();
@@ -1550,7 +2026,7 @@ impl DocumentView {
                                         format!(
                                             "translation-region-{toggle_region_id}-{unit_id}-toggle"
                                         ),
-                                        toggle_icon,
+                                        IconName::Repeat,
                                     )
                                     .w(px(20.0))
                                     .h(px(20.0))

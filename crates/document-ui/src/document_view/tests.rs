@@ -5,20 +5,24 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::translation::replace_page_text_data;
 use super::{
-    DocumentPage, DocumentView, Glyph, RegionDragState, RegionImageExport, RenderCache, RenderKey,
-    SearchMatch, SearchState, SurfaceRenderKeys, TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY,
-    TRANSLATION_PANEL_DEFAULT_RIGHT, TRANSLATION_PANEL_DEFAULT_TOP, TRANSLATION_PANEL_DOCK_DELAY,
+    DocumentPage, DocumentView, Glyph, PreparedPageText, RegionDragState, RegionImageExport,
+    RenderCache, RenderKey, SearchMatch, SearchState, SurfaceRenderKeys,
+    TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY, TRANSLATION_PANEL_DEFAULT_RIGHT,
+    TRANSLATION_PANEL_DEFAULT_TOP, TRANSLATION_PANEL_DOCK_DELAY,
     TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY, TRANSLATION_PANEL_EXPOSED_STRIP,
-    TRANSLATION_PANEL_MARGIN, TRANSLATION_PANEL_OVERLAY_PRIORITY,
+    TRANSLATION_PANEL_INITIAL_DOCK_DELAY, TRANSLATION_PANEL_MARGIN,
+    TRANSLATION_PANEL_OVERLAY_PRIORITY, TRANSLATION_PANEL_POPOVER_PRIORITY,
     TRANSLATION_PANEL_PREFERRED_WIDTH, TRANSLATION_PANEL_RETRACT_DELAY,
-    TRANSLATION_PANEL_SNAP_ZONE, TextChunk, TextFormatBlock, TextIndexState, TextLine,
+    TRANSLATION_PANEL_SNAP_ZONE, TextBlock, TextChunk, TextFormatBlock, TextIndexState, TextLine,
     TranslationCardState, TranslationHoverAnimation, TranslationPanelSide, TranslationStatus,
     TranslationViewRole, clamp_translation_panel_edge_y, clamp_translation_panel_position,
     clear_copied_region_selection, default_translation_panel_position,
     page_render::should_start_viewport_render, reset_translation_cards_for_document_replacement,
     retain_valid_annotation_id, translation_hover_interaction_bounds,
-    translation_pair_highlights_enabled, translation_panel_docked_x, translation_panel_snap_side,
+    translation_pair_highlights_enabled, translation_panel_docked_x,
+    translation_panel_initial_dock_should_run, translation_panel_snap_side,
     translation_panel_width, translation_toolbar_enabled,
 };
 use glyphst_ai::ai_chat::{MentionKind, MentionReference};
@@ -624,12 +628,12 @@ fn translation_panel_uses_pane_local_width_and_default_right_edge() {
     let wide_width = translation_panel_width(1_000.0);
     let wide = default_translation_panel_position(1_000.0, wide_width);
     assert_eq!(wide_width, TRANSLATION_PANEL_PREFERRED_WIDTH);
-    assert_eq!(wide.x.as_f32(), 594.0);
+    assert_eq!(wide.x.as_f32(), 602.0);
     assert_eq!(wide.y.as_f32(), TRANSLATION_PANEL_DEFAULT_TOP);
 
     let narrow_width = translation_panel_width(240.0);
     let narrow = default_translation_panel_position(240.0, narrow_width);
-    assert_eq!(narrow_width, 216.0);
+    assert_eq!(narrow_width, 224.0);
     assert_eq!(narrow.x.as_f32(), TRANSLATION_PANEL_MARGIN);
     assert!(narrow.x.as_f32() + narrow_width <= 240.0 - TRANSLATION_PANEL_DEFAULT_RIGHT);
 }
@@ -668,6 +672,51 @@ fn translation_affordances_are_scoped_to_the_active_live_pair() {
 }
 
 #[test]
+fn translation_panel_initial_dock_waits_for_true_idle() {
+    assert!(translation_panel_initial_dock_should_run(
+        true,
+        TranslationViewRole::Translation,
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+    ));
+    for blocked in [
+        (false, true, true, true, false, false, false),
+        (true, false, true, true, false, false, false),
+        (true, true, false, true, false, false, false),
+        (true, true, true, false, false, false, false),
+        (true, true, true, true, true, false, false),
+        (true, true, true, true, false, true, false),
+        (true, true, true, true, false, false, true),
+    ] {
+        let (armed, active, session, at_default, dragging, hovered, menu_open) = blocked;
+        assert!(!translation_panel_initial_dock_should_run(
+            armed,
+            TranslationViewRole::Translation,
+            active,
+            session,
+            at_default,
+            dragging,
+            hovered,
+            menu_open,
+        ));
+    }
+    assert!(!translation_panel_initial_dock_should_run(
+        true,
+        TranslationViewRole::SourceMirror,
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+    ));
+}
+
+#[test]
 fn translation_panel_drag_is_reclamped_after_pane_resize() {
     let resized_width = translation_panel_width(300.0);
     let clamped = clamp_translation_panel_position(
@@ -676,7 +725,7 @@ fn translation_panel_drag_is_reclamped_after_pane_resize() {
         180.0,
         size(px(resized_width), px(48.0)),
     );
-    assert_eq!(clamped.x.as_f32(), 16.0);
+    assert_eq!(clamped.x.as_f32(), 8.0);
     assert_eq!(clamped.y.as_f32(), 124.0);
 
     let tiny_width = translation_panel_width(72.0);
@@ -693,10 +742,10 @@ fn translation_panel_drag_is_reclamped_after_pane_resize() {
 #[test]
 fn translation_panel_layout_stays_bounded_at_reported_pane_widths() {
     assert_eq!(translation_panel_width(590.0), 390.0);
-    assert_eq!(translation_panel_width(320.0), 296.0);
-    assert_eq!(translation_panel_width(220.0), 196.0);
+    assert_eq!(translation_panel_width(320.0), 304.0);
+    assert_eq!(translation_panel_width(220.0), 204.0);
     assert!(translation_panel_width(590.0) >= 300.0);
-    assert!(translation_panel_width(320.0) < 300.0);
+    assert!(translation_panel_width(320.0) >= 300.0);
     assert!(translation_panel_width(220.0) < 300.0);
 }
 
@@ -768,16 +817,115 @@ fn translation_panel_wall_geometry_is_symmetric_and_delayed() {
         viewport_width - panel_width - TRANSLATION_PANEL_MARGIN
     );
     assert_eq!(TRANSLATION_PANEL_DOCK_DELAY, Duration::from_secs(2));
+    assert_eq!(TRANSLATION_PANEL_INITIAL_DOCK_DELAY, Duration::from_secs(6));
     assert_eq!(TRANSLATION_PANEL_RETRACT_DELAY, Duration::from_millis(400));
 }
 
 #[test]
 fn root_notifications_are_above_translation_overlays() {
+    assert!(TRANSLATION_PANEL_POPOVER_PRIORITY > TRANSLATION_PANEL_OVERLAY_PRIORITY);
+    assert!(glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY > TRANSLATION_PANEL_POPOVER_PRIORITY);
     assert!(glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY > TRANSLATION_PANEL_OVERLAY_PRIORITY);
     assert!(
         glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY > TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY
     );
     assert!(TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY > glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY);
+}
+
+#[test]
+fn translated_page_text_replaces_only_its_page_and_rebases_following_ranges() {
+    let mut first = test_glyph('A', 1.0, 5.0);
+    first.page_idx = 0;
+    let mut second = test_glyph('B', 11.0, 15.0);
+    second.page_idx = 1;
+    second.line_idx = 1;
+    second.block_idx = 1;
+    let mut pages = vec![
+        DocumentPage {
+            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            width: 100.0,
+            height: 100.0,
+            offset_y: 0.0,
+            glyph_range: 0..1,
+        },
+        DocumentPage {
+            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            width: 100.0,
+            height: 100.0,
+            offset_y: 108.0,
+            glyph_range: 1..2,
+        },
+    ];
+    let mut glyphs = vec![first, second];
+    let mut text_lines = vec![
+        TextLine {
+            glyph_range: 0..1,
+            bounds: Rect::new(1.0, 0.0, 5.0, 6.0),
+        },
+        TextLine {
+            glyph_range: 1..2,
+            bounds: Rect::new(11.0, 0.0, 15.0, 6.0),
+        },
+    ];
+    let mut text_blocks = vec![
+        TextBlock {
+            id: 0,
+            page_idx: 0,
+            glyph_range: 0..1,
+        },
+        TextBlock {
+            id: 1,
+            page_idx: 1,
+            glyph_range: 1..2,
+        },
+    ];
+    let mut page_line_ranges = vec![0..1, 1..2];
+    let mut page_block_ranges = vec![0..1, 1..2];
+    let mut translated = vec![test_glyph('译', 20.0, 28.0), test_glyph('文', 28.0, 36.0)];
+    for glyph in &mut translated {
+        glyph.page_idx = 0;
+        glyph.quad.ll.y = 18.0;
+        glyph.quad.lr.y = 18.0;
+        glyph.line_rect = Rect::new(20.0, 8.0, 36.0, 18.0);
+    }
+    let replacement = PreparedPageText {
+        glyphs: translated,
+        text_lines: vec![TextLine {
+            glyph_range: 0..2,
+            bounds: Rect::new(20.0, 8.0, 36.0, 18.0),
+        }],
+        text_blocks: vec![TextBlock {
+            id: 0,
+            page_idx: 0,
+            glyph_range: 0..2,
+        }],
+    };
+
+    replace_page_text_data(
+        &mut pages,
+        &mut glyphs,
+        &mut text_lines,
+        &mut text_blocks,
+        &mut page_line_ranges,
+        &mut page_block_ranges,
+        0,
+        replacement,
+    )
+    .unwrap();
+
+    assert_eq!(
+        glyphs.iter().map(|glyph| glyph.c).collect::<String>(),
+        "译文B"
+    );
+    assert_eq!(pages[0].glyph_range, 0..2);
+    assert_eq!(pages[1].glyph_range, 2..3);
+    assert_eq!(page_line_ranges, vec![0..1, 1..2]);
+    assert_eq!(page_block_ranges, vec![0..1, 1..2]);
+    assert_eq!(glyphs[0].quad.ul.x, 20.0);
+    assert_eq!(glyphs[1].quad.lr.y, 18.0);
+    assert_eq!(glyphs[2].quad.ul.x, 11.0);
+    assert_eq!(glyphs[2].line_idx, 1);
+    assert_eq!(glyphs[2].block_idx, 1);
 }
 
 #[test]

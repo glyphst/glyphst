@@ -55,8 +55,8 @@ use glyphst_pdf::{
     RetainedDisplayList,
 };
 use glyphst_pdf_translation_app::{
-    BlockKind, BoundingBox, PdfTranslationService, PdfTranslationSessionRequest,
-    source_text_regions,
+    BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationService,
+    PdfTranslationSessionRequest, source_text_regions,
 };
 use glyphst_translation::{LanguageCode, TranslationRequest, TranslationService};
 use glyphst_translation_ui::{
@@ -89,6 +89,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
+    progress::ProgressCircle,
     searchable_list::SearchableVec,
     select::{Select, SelectEvent, SelectState},
 };
@@ -154,18 +155,20 @@ const FOOTBAR_HEIGHT: f32 = 26.0;
 const FOOTBAR_BUTTON_HEIGHT: f32 = 20.0;
 const TRANSLATION_PANEL_PREFERRED_WIDTH: f32 = 390.0;
 const TRANSLATION_PANEL_MARGIN: f32 = 8.0;
-const TRANSLATION_PANEL_DEFAULT_RIGHT: f32 = 16.0;
+const TRANSLATION_PANEL_DEFAULT_RIGHT: f32 = 8.0;
 const TRANSLATION_PANEL_DEFAULT_TOP: f32 = 12.0;
 const TRANSLATION_PANEL_COMPACT_BREAKPOINT: f32 = 300.0;
-const TRANSLATION_PANEL_DEFAULT_HEIGHT: f32 = 76.0;
+const TRANSLATION_PANEL_DEFAULT_HEIGHT: f32 = 40.0;
 const TRANSLATION_PANEL_SNAP_ZONE: f32 = 12.0;
 const TRANSLATION_PANEL_EXPOSED_STRIP: f32 = 8.0;
+const TRANSLATION_PANEL_INITIAL_DOCK_DELAY: Duration = Duration::from_secs(6);
 const TRANSLATION_PANEL_DOCK_DELAY: Duration = Duration::from_secs(2);
 const TRANSLATION_PANEL_RETRACT_DELAY: Duration = Duration::from_millis(400);
 const TRANSLATION_HOVER_CLEAR_GRACE: Duration = Duration::from_millis(100);
 const TRANSLATION_HOVER_FADE: MotionSpec = MotionSpec::new(120, EASE_OUT);
 const TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY: usize = 4;
 const TRANSLATION_PANEL_OVERLAY_PRIORITY: usize = 5;
+const TRANSLATION_PANEL_POPOVER_PRIORITY: usize = TRANSLATION_PANEL_OVERLAY_PRIORITY + 1;
 const TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY: usize =
     glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY + 1;
 
@@ -356,10 +359,17 @@ struct ReloadData {
 #[derive(Clone)]
 struct RevisionedPageRenderSource {
     revision: u64,
+    text_revision: Option<u64>,
     // The render session borrows the immutable bytes indirectly, but retaining
     // the snapshot here makes that lifetime explicit at the view boundary.
     _snapshot: Arc<DocumentSnapshot>,
     render_session: DocumentRenderSession,
+}
+
+struct PreparedPageText {
+    glyphs: Vec<Glyph>,
+    text_blocks: Vec<TextBlock>,
+    text_lines: Vec<TextLine>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -945,6 +955,26 @@ fn translation_toolbar_enabled(role: TranslationViewRole, pair_active: bool) -> 
     pair_active && role == TranslationViewRole::Translation
 }
 
+fn translation_panel_initial_dock_should_run(
+    armed: bool,
+    role: TranslationViewRole,
+    pair_active: bool,
+    has_session: bool,
+    at_default_position: bool,
+    dragging: bool,
+    panel_hovered: bool,
+    menu_open: bool,
+) -> bool {
+    armed
+        && role == TranslationViewRole::Translation
+        && pair_active
+        && has_session
+        && at_default_position
+        && !dragging
+        && !panel_hovered
+        && !menu_open
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SynchronizedScrollMode {
     Immediate,
@@ -1400,6 +1430,9 @@ pub struct DocumentView {
     translation_panel_placement: TranslationPanelPlacement,
     translation_panel_drag: Option<TranslationPanelDrag>,
     translation_panel_size: Size<Pixels>,
+    translation_panel_initial_dock_armed: bool,
+    translation_panel_initial_dock_generation: u64,
+    translation_panel_initial_dock_task: Option<Task<()>>,
     translation_panel_dock_generation: u64,
     translation_panel_dock_task: Option<Task<()>>,
     translation_panel_retract_generation: u64,

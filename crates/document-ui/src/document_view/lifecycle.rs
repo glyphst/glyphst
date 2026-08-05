@@ -183,6 +183,9 @@ impl DocumentView {
                 px(TRANSLATION_PANEL_PREFERRED_WIDTH),
                 px(TRANSLATION_PANEL_DEFAULT_HEIGHT),
             ),
+            translation_panel_initial_dock_armed: false,
+            translation_panel_initial_dock_generation: 0,
+            translation_panel_initial_dock_task: None,
             translation_panel_dock_generation: 0,
             translation_panel_dock_task: None,
             translation_panel_retract_generation: 0,
@@ -373,7 +376,11 @@ impl DocumentView {
         })
         .detach();
         cx.observe(&popup.state, |_, _, cx| cx.notify()).detach();
-        cx.observe(&pinned.state, |_, _, cx| cx.notify()).detach();
+        cx.observe(&pinned.state, |this, _, cx| {
+            this.sync_translation_panel_initial_dock(cx);
+            cx.notify();
+        })
+        .detach();
         self.translation_popup_language_select = Some(popup);
         self.pinned_translation_language_select = Some(pinned);
     }
