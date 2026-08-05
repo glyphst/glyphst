@@ -150,6 +150,7 @@ impl Render for DocumentView {
                 if !*hovered
                     && this.translation_view_role == TranslationViewRole::Translation
                     && this.translation_pair_active
+                    && this.translation_overlay_enabled
                 {
                     this.schedule_translation_hover_clear(cx);
                 }
@@ -495,6 +496,7 @@ impl Render for DocumentView {
                     this.update_hovered_note(event.position, cx);
                     if this.translation_view_role == TranslationViewRole::Translation
                         && this.translation_pair_active
+                        && this.translation_overlay_enabled
                     {
                         if this.translation_hover_interaction_contains(event.position) {
                             this.cancel_translation_hover_clear();
@@ -516,6 +518,7 @@ impl Render for DocumentView {
                     this.update_hovered_note(event.position, cx);
                     if this.translation_view_role == TranslationViewRole::Translation
                         && this.translation_pair_active
+                        && this.translation_overlay_enabled
                     {
                         this.schedule_translation_hover_clear(cx);
                     }

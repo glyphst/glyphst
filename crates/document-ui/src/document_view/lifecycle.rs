@@ -147,6 +147,9 @@ impl DocumentView {
             view_language: DocumentViewLanguage::Original,
             translation_view_role: TranslationViewRole::None,
             translation_pair_active: false,
+            translation_overlay_enabled: true,
+            translation_position_sync_ready: false,
+            pending_translation_viewport_anchor: None,
             suppress_linked_events: false,
             external_hovered_translation_region: None,
             hovered_translation_region: None,
@@ -377,7 +380,7 @@ impl DocumentView {
         .detach();
         cx.observe(&popup.state, |_, _, cx| cx.notify()).detach();
         cx.observe(&pinned.state, |this, _, cx| {
-            this.sync_translation_panel_initial_dock(cx);
+            this.sync_translation_panel_owned_surfaces(cx);
             cx.notify();
         })
         .detach();

@@ -22,8 +22,8 @@ use super::{
     page_render::should_start_viewport_render, reset_translation_cards_for_document_replacement,
     retain_valid_annotation_id, translation_hover_interaction_bounds,
     translation_pair_highlights_enabled, translation_panel_docked_x,
-    translation_panel_initial_dock_should_run, translation_panel_snap_side,
-    translation_panel_width, translation_toolbar_enabled,
+    translation_panel_initial_dock_should_run, translation_panel_should_retain_expanded,
+    translation_panel_snap_side, translation_panel_width, translation_toolbar_enabled,
 };
 use glyphst_ai::ai_chat::{MentionKind, MentionReference};
 use glyphst_core::{
@@ -642,19 +642,28 @@ fn translation_panel_uses_pane_local_width_and_default_right_edge() {
 fn translation_affordances_are_scoped_to_the_active_live_pair() {
     assert!(!translation_pair_highlights_enabled(
         TranslationViewRole::None,
-        true
+        true,
+        true,
     ));
     assert!(!translation_pair_highlights_enabled(
         TranslationViewRole::Translation,
-        false
+        false,
+        true,
     ));
     assert!(translation_pair_highlights_enabled(
         TranslationViewRole::Translation,
-        true
+        true,
+        true,
     ));
     assert!(translation_pair_highlights_enabled(
         TranslationViewRole::SourceMirror,
-        true
+        true,
+        true,
+    ));
+    assert!(!translation_pair_highlights_enabled(
+        TranslationViewRole::Translation,
+        true,
+        false,
     ));
 
     assert!(translation_toolbar_enabled(
@@ -669,6 +678,16 @@ fn translation_affordances_are_scoped_to_the_active_live_pair() {
         TranslationViewRole::None,
         true
     ));
+}
+
+#[test]
+fn translation_panel_owned_surfaces_hold_a_docked_panel_open() {
+    assert!(!translation_panel_should_retain_expanded(
+        false, false, false
+    ));
+    assert!(translation_panel_should_retain_expanded(true, false, false));
+    assert!(translation_panel_should_retain_expanded(false, true, false));
+    assert!(translation_panel_should_retain_expanded(false, false, true));
 }
 
 #[test]

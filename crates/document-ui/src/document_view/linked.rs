@@ -1,6 +1,159 @@
 use super::*;
 
 impl DocumentView {
+    pub(super) fn translation_viewport_geometry_ready(&self) -> bool {
+        self.viewport_width.is_finite()
+            && self.viewport_height.is_finite()
+            && self.viewport_width > 1.0
+            && self.viewport_height > 1.0
+            && self.effective_scale().is_finite()
+    }
+
+    pub fn live_translation_viewport_anchor(
+        &self,
+        mode: SynchronizedScrollMode,
+    ) -> Option<TranslationViewportAnchor> {
+        if self.format != DocumentFormat::Pdf
+            || self.capabilities.reflow
+            || self.translation_view_role == TranslationViewRole::None
+            || !self.translation_position_sync_ready
+            || !self.translation_viewport_geometry_ready()
+            || self.pages.is_empty()
+        {
+            return None;
+        }
+
+        let (page_idx, center_x, anchor_y, viewport_y_fraction) =
+            if let Some(page_idx) = self.presentation_page_index() {
+                let (page_width, page_height) = self.page_dimensions(page_idx);
+                (page_idx, page_width / 2.0, page_height / 2.0, 0.5)
+            } else {
+                let (scroll_x_doc, scroll_y_doc) = match mode {
+                    SynchronizedScrollMode::Immediate => (self.scroll_x_doc, self.scroll_y_doc),
+                    SynchronizedScrollMode::Target => {
+                        (self.target_scroll_x_doc, self.target_scroll_y_doc)
+                    }
+                };
+                let max_scroll_y = self.max_scroll_y_doc();
+                let viewport_y_fraction = if max_scroll_y <= 0.01 || scroll_y_doc <= 0.01 {
+                    0.0
+                } else if max_scroll_y - scroll_y_doc <= 0.01 {
+                    1.0
+                } else {
+                    0.5
+                };
+                let viewport_height_doc = self.viewport_height / self.effective_scale();
+                let anchor_doc_y = scroll_y_doc + viewport_height_doc * viewport_y_fraction;
+                let page_idx = self.page_index_for_doc_y(anchor_doc_y);
+                let page = self.pages.get(page_idx)?;
+                let (page_width, _) = self.page_dimensions(page_idx);
+                (
+                    page_idx,
+                    page_width / 2.0 + scroll_x_doc,
+                    anchor_doc_y - page.offset_y,
+                    viewport_y_fraction,
+                )
+            };
+        let page = self.pages.get(page_idx)?;
+        let pdf_point = Self::view_point_to_pdf(
+            page.bounds,
+            self.rotation,
+            mupdf::Point {
+                x: center_x,
+                y: anchor_y,
+            },
+        );
+        (pdf_point.x.is_finite() && pdf_point.y.is_finite()).then_some(TranslationViewportAnchor {
+            page_index: page_idx,
+            pdf_x: pdf_point.x,
+            pdf_y: pdf_point.y,
+            viewport_y_fraction,
+            mode,
+        })
+    }
+
+    pub(super) fn emit_live_translation_viewport_changed(
+        &self,
+        mode: SynchronizedScrollMode,
+        cx: &mut Context<Self>,
+    ) {
+        if self.suppress_linked_events {
+            return;
+        }
+        let Some(session_id) = self.translation_pair_session_id else {
+            return;
+        };
+        let Some(anchor) = self.live_translation_viewport_anchor(mode) else {
+            return;
+        };
+        cx.emit(DocumentViewEvent::TranslationViewportChanged { session_id, anchor });
+    }
+
+    pub fn apply_live_translation_viewport_anchor(
+        &mut self,
+        session_id: DocumentTranslationJobId,
+        anchor: TranslationViewportAnchor,
+        cx: &mut Context<Self>,
+    ) {
+        if self.translation_pair_session_id != Some(session_id)
+            || self.translation_view_role == TranslationViewRole::None
+            || self.format != DocumentFormat::Pdf
+            || self.capabilities.reflow
+            || self.pages.get(anchor.page_index).is_none()
+        {
+            return;
+        }
+        self.translation_position_sync_ready = true;
+        if !self.translation_viewport_geometry_ready() {
+            self.pending_translation_viewport_anchor = Some(anchor);
+            return;
+        }
+        self.pending_translation_viewport_anchor = None;
+        let page = &self.pages[anchor.page_index];
+        let point = Self::pdf_point_to_view(
+            page.bounds,
+            self.rotation,
+            mupdf::Point {
+                x: anchor.pdf_x,
+                y: anchor.pdf_y,
+            },
+        );
+        let (page_width, _) = self.page_dimensions(anchor.page_index);
+        let scroll_x_doc = point.x - page_width / 2.0;
+        let viewport_y_fraction = anchor.viewport_y_fraction.clamp(0.0, 1.0);
+        let scroll_y_doc = page.offset_y + point.y
+            - self.viewport_height / self.effective_scale() * viewport_y_fraction;
+        let was_suppressed = self.suppress_linked_events;
+        self.suppress_linked_events = true;
+        if self.is_presentation_mode() {
+            self.set_presentation_page(anchor.page_index, cx);
+        } else {
+            match anchor.mode {
+                SynchronizedScrollMode::Immediate => {
+                    self.set_scroll_doc(scroll_x_doc, scroll_y_doc, cx);
+                }
+                SynchronizedScrollMode::Target => {
+                    self.set_scroll_doc_target(scroll_x_doc, scroll_y_doc, cx);
+                }
+            }
+        }
+        self.suppress_linked_events = was_suppressed;
+    }
+
+    pub(super) fn apply_pending_live_translation_viewport_anchor(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = self.translation_pair_session_id else {
+            self.pending_translation_viewport_anchor = None;
+            return;
+        };
+        let Some(anchor) = self.pending_translation_viewport_anchor.take() else {
+            return;
+        };
+        self.apply_live_translation_viewport_anchor(session_id, anchor, cx);
+    }
+
     fn viewport_center_pdf_anchor(&self) -> Option<(usize, mupdf::Point)> {
         if self.pages.is_empty() {
             return None;
@@ -101,6 +254,7 @@ impl DocumentView {
         if self.translation_view_role != TranslationViewRole::SourceMirror
             || self.translation_pair_session_id != Some(session_id)
             || !self.translation_pair_active
+            || (!self.translation_overlay_enabled && region_id.is_some())
         {
             return;
         }
@@ -117,6 +271,7 @@ impl DocumentView {
     ) {
         if self.translation_view_role != TranslationViewRole::Translation
             || !self.translation_pair_active
+            || (!self.translation_overlay_enabled && region_id.is_some())
             || self.hovered_translation_region == region_id
         {
             return;
@@ -130,6 +285,42 @@ impl DocumentView {
                 session_id,
                 region_id,
             });
+        }
+        cx.notify();
+    }
+
+    pub(super) fn toggle_translation_overlay(&mut self, cx: &mut Context<Self>) {
+        if self.translation_view_role != TranslationViewRole::Translation {
+            return;
+        }
+        self.translation_overlay_enabled = !self.translation_overlay_enabled;
+        if !self.translation_overlay_enabled {
+            self.clear_translation_hover_state(true, cx);
+        }
+        if let Some(session_id) = self.translation_pair_session_id {
+            cx.emit(DocumentViewEvent::TranslationOverlayVisibilityChanged {
+                session_id,
+                enabled: self.translation_overlay_enabled,
+            });
+        }
+        cx.notify();
+    }
+
+    pub fn apply_live_translation_overlay_visibility(
+        &mut self,
+        session_id: DocumentTranslationJobId,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.translation_view_role != TranslationViewRole::SourceMirror
+            || self.translation_pair_session_id != Some(session_id)
+            || self.translation_overlay_enabled == enabled
+        {
+            return;
+        }
+        self.translation_overlay_enabled = enabled;
+        if !enabled {
+            self.clear_translation_hover_state(true, cx);
         }
         cx.notify();
     }

@@ -947,8 +947,12 @@ enum TranslationViewRole {
     SourceMirror,
 }
 
-fn translation_pair_highlights_enabled(role: TranslationViewRole, pair_active: bool) -> bool {
-    pair_active && role != TranslationViewRole::None
+fn translation_pair_highlights_enabled(
+    role: TranslationViewRole,
+    pair_active: bool,
+    overlay_enabled: bool,
+) -> bool {
+    pair_active && overlay_enabled && role != TranslationViewRole::None
 }
 
 fn translation_toolbar_enabled(role: TranslationViewRole, pair_active: bool) -> bool {
@@ -975,6 +979,14 @@ fn translation_panel_initial_dock_should_run(
         && !menu_open
 }
 
+fn translation_panel_should_retain_expanded(
+    panel_hovered: bool,
+    edge_hovered: bool,
+    owned_surface_active: bool,
+) -> bool {
+    panel_hovered || edge_hovered || owned_surface_active
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SynchronizedScrollMode {
     Immediate,
@@ -986,6 +998,31 @@ pub struct SynchronizedScrollDelta {
     pub x_pixels: f32,
     pub y_pixels: f32,
     pub mode: SynchronizedScrollMode,
+}
+
+/// An absolute fixed-layout PDF location used by the two halves of a live
+/// translation pair. Coordinates are expressed in the original, unrotated PDF
+/// page space so each view can preserve its own zoom and rotation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TranslationViewportAnchor {
+    pub page_index: usize,
+    pub pdf_x: f32,
+    pub pdf_y: f32,
+    /// Vertical placement of the PDF point in the viewport: `0.0` is the top,
+    /// `0.5` is the center, and `1.0` is the bottom. Boundary placement keeps
+    /// differently sized or zoomed viewports aligned without overscrolling.
+    pub viewport_y_fraction: f32,
+    pub mode: SynchronizedScrollMode,
+}
+
+fn translation_viewport_anchors_match(
+    left: TranslationViewportAnchor,
+    right: TranslationViewportAnchor,
+) -> bool {
+    left.page_index == right.page_index
+        && (left.pdf_x - right.pdf_x).abs() < 0.01
+        && (left.pdf_y - right.pdf_y).abs() < 0.01
+        && (left.viewport_y_fraction - right.viewport_y_fraction).abs() < 0.001
 }
 
 #[derive(Clone, Copy)]
@@ -1145,6 +1182,14 @@ pub enum DocumentViewEvent {
     TranslationRegionHovered {
         session_id: DocumentTranslationJobId,
         region_id: Option<String>,
+    },
+    TranslationOverlayVisibilityChanged {
+        session_id: DocumentTranslationJobId,
+        enabled: bool,
+    },
+    TranslationViewportChanged {
+        session_id: DocumentTranslationJobId,
+        anchor: TranslationViewportAnchor,
     },
 }
 
@@ -1397,6 +1442,9 @@ pub struct DocumentView {
     view_language: DocumentViewLanguage,
     translation_view_role: TranslationViewRole,
     translation_pair_active: bool,
+    translation_overlay_enabled: bool,
+    translation_position_sync_ready: bool,
+    pending_translation_viewport_anchor: Option<TranslationViewportAnchor>,
     suppress_linked_events: bool,
     external_hovered_translation_region: Option<String>,
     hovered_translation_region: Option<String>,

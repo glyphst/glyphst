@@ -47,7 +47,8 @@ impl DocumentView {
         let failed_translation_highlights = if translation_toolbar_enabled(
             self.translation_view_role,
             self.translation_pair_active,
-        ) {
+        ) && self.translation_overlay_enabled
+        {
             self.translation_failed_hover_regions
                 .iter()
                 .flat_map(|region_id| self.translation_hover_region_highlights(region_id))
@@ -97,6 +98,7 @@ impl DocumentView {
         if !translation_pair_highlights_enabled(
             self.translation_view_role,
             self.translation_pair_active,
+            self.translation_overlay_enabled,
         ) {
             self.translation_hover_animation = None;
             return None;
@@ -232,6 +234,10 @@ impl DocumentView {
         let viewport_height = bounds.size.height.as_f32().max(1.0);
         let viewport_changed = (self.viewport_width - viewport_width).abs() > 0.5
             || (self.viewport_height - viewport_height).abs() > 0.5;
+        let translation_viewport_was_ready = self.translation_viewport_geometry_ready();
+        let resize_anchor = viewport_changed
+            .then(|| self.live_translation_viewport_anchor(SynchronizedScrollMode::Immediate))
+            .flatten();
         self.viewport_origin = bounds.origin;
         self.viewport_width = viewport_width;
         self.viewport_height = viewport_height;
@@ -244,6 +250,28 @@ impl DocumentView {
         } else {
             viewport_width / self.max_page_width.max(1.0)
         };
+        if let (Some(session_id), Some(anchor)) = (self.translation_pair_session_id, resize_anchor)
+        {
+            self.apply_live_translation_viewport_anchor(session_id, anchor, cx);
+        }
+        let pending_anchor = self.pending_translation_viewport_anchor;
+        self.apply_pending_live_translation_viewport_anchor(cx);
+        let resize_was_clamped = resize_anchor.is_some_and(|previous| {
+            self.live_translation_viewport_anchor(SynchronizedScrollMode::Immediate)
+                .is_some_and(|current| !translation_viewport_anchors_match(previous, current))
+        });
+        let pending_was_clamped = pending_anchor.is_some_and(|pending| {
+            self.live_translation_viewport_anchor(pending.mode)
+                .is_some_and(|current| !translation_viewport_anchors_match(pending, current))
+        });
+        if self.translation_viewport_geometry_ready()
+            && ((!translation_viewport_was_ready
+                && self.translation_view_role == TranslationViewRole::SourceMirror)
+                || resize_was_clamped
+                || pending_was_clamped)
+        {
+            self.emit_live_translation_viewport_changed(SynchronizedScrollMode::Immediate, cx);
+        }
         if self.is_presentation_mode() {
             return Ok(self.presentation_paint_data(bounds, scale_factor, window, cx));
         }

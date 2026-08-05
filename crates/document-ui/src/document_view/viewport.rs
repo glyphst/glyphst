@@ -33,6 +33,7 @@ impl DocumentView {
             self.hovered_link = None;
             self.pending_link = None;
             self.schedule_position_save(cx);
+            self.emit_live_translation_viewport_changed(SynchronizedScrollMode::Immediate, cx);
             cx.notify();
         }
 
@@ -75,6 +76,7 @@ impl DocumentView {
             self.hovered_link = None;
             self.pending_link = None;
             self.schedule_position_save(cx);
+            self.emit_live_translation_viewport_changed(SynchronizedScrollMode::Target, cx);
             cx.notify();
         }
 

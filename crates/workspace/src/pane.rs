@@ -316,6 +316,7 @@ pub(crate) struct RecentlyAddedSynchronizedTab {
 pub(crate) struct PaneSynchronizedPresentation {
     pub(crate) group_by_tab: HashMap<EntityId, SynchronizedGroupSummary>,
     pub(crate) paused_tabs: HashSet<EntityId>,
+    pub(crate) pause_locked_tabs: HashSet<EntityId>,
     pub(crate) connection_tabs: HashMap<EntityId, SynchronizedConnectionTabState>,
     pub(crate) connection_color_slot: Option<usize>,
     pub(crate) recently_added: Option<RecentlyAddedSynchronizedTab>,
@@ -910,6 +911,13 @@ impl Pane {
             .connection_tabs
             .get(&tab_id)
             .copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synchronized_pause_locked(&self, tab_id: EntityId) -> bool {
+        self.synchronized_presentation
+            .pause_locked_tabs
+            .contains(&tab_id)
     }
 
     pub(crate) fn set_force_show_tab_bar(
@@ -1566,7 +1574,9 @@ impl Pane {
                             delta: *delta,
                         });
                     }
-                    DocumentViewEvent::TranslationRegionHovered { .. } => {}
+                    DocumentViewEvent::TranslationRegionHovered { .. }
+                    | DocumentViewEvent::TranslationOverlayVisibilityChanged { .. }
+                    | DocumentViewEvent::TranslationViewportChanged { .. } => {}
                 }
             },
         )
@@ -1697,6 +1707,10 @@ impl Pane {
             .get(&tab_id)
             .cloned();
         let is_paused = self.synchronized_presentation.paused_tabs.contains(&tab_id);
+        let pause_locked = self
+            .synchronized_presentation
+            .pause_locked_tabs
+            .contains(&tab_id);
         let pane = cx.entity();
         let popup = PopupMenu::build(window, cx, move |mut menu, _, _| {
             if is_document {
@@ -1726,27 +1740,33 @@ impl Pane {
                             }),
                     );
 
-                    let pause_pane = pane.clone();
-                    let (pause_label, pause_icon, paused) = if is_paused {
-                        (
-                            crate::fl!("synchronized-tabs-resume-scroll"),
-                            IconName::Play,
-                            false,
-                        )
-                    } else {
-                        (
-                            crate::fl!("synchronized-tabs-pause-scroll"),
-                            IconName::Pause,
-                            true,
-                        )
-                    };
-                    menu = menu.item(PopupMenuItem::new(pause_label).icon(pause_icon).on_click(
-                        move |_, _, cx| {
-                            pause_pane.update(cx, |_, cx| {
-                                cx.emit(PaneEvent::SetSynchronizedScrollPaused { tab_id, paused });
-                            });
-                        },
-                    ));
+                    if !pause_locked {
+                        let pause_pane = pane.clone();
+                        let (pause_label, pause_icon, paused) = if is_paused {
+                            (
+                                crate::fl!("synchronized-tabs-resume-scroll"),
+                                IconName::Play,
+                                false,
+                            )
+                        } else {
+                            (
+                                crate::fl!("synchronized-tabs-pause-scroll"),
+                                IconName::Pause,
+                                true,
+                            )
+                        };
+                        menu =
+                            menu.item(PopupMenuItem::new(pause_label).icon(pause_icon).on_click(
+                                move |_, _, cx| {
+                                    pause_pane.update(cx, |_, cx| {
+                                        cx.emit(PaneEvent::SetSynchronizedScrollPaused {
+                                            tab_id,
+                                            paused,
+                                        });
+                                    });
+                                },
+                            ));
+                    }
 
                     let leave_pane = pane.clone();
                     menu = menu.separator().item(

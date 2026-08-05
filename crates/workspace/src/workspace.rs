@@ -43,6 +43,7 @@ use crate::{
         CloseTab, DocumentSidebar, DocumentView, DocumentViewEvent, DuplicateTab, OpenFile,
         OpenKeybindings, OpenNewTab, OpenSettings, OpenWithSystemPicker, ToggleAiPanel,
         ToggleCommandPalette, ToggleNotes, ToggleThumbnailSidebar, ToggleToc, ToggleTransparency,
+        TranslationViewportAnchor,
     },
     library::{
         DocumentPosition, ReaderSidebar, ReaderSynchronizedGroup, ReaderTranslationSession,
@@ -915,7 +916,9 @@ impl Workspace {
                     }
                 }
                 PaneEvent::SetSynchronizedScrollPaused { tab_id, paused } => {
-                    if this.synchronized_tabs.set_paused(*tab_id, *paused) {
+                    if !this.is_live_translation_pair_tab(*tab_id)
+                        && this.synchronized_tabs.set_paused(*tab_id, *paused)
+                    {
                         this.refresh_synchronized_tab_presentation(cx);
                     }
                 }
@@ -1161,6 +1164,11 @@ impl Workspace {
             self.synchronized_connection = None;
         }
         self.repair_synchronized_connection_edges(cx);
+        let pause_locked_tabs = self
+            .live_translation_pairs
+            .values()
+            .flat_map(|pair| [pair.source_id, pair.translated_id])
+            .collect::<HashSet<_>>();
         for pane in self.pane_group.panes() {
             let pane_id = pane.entity_id();
             let tab_ids = pane.read(cx).tab_ids();
@@ -1176,6 +1184,9 @@ impl Workspace {
                 }
                 if self.synchronized_tabs.is_paused(tab_id) {
                     presentation.paused_tabs.insert(tab_id);
+                }
+                if pause_locked_tabs.contains(&tab_id) {
+                    presentation.pause_locked_tabs.insert(tab_id);
                 }
                 if let Some(connection) = &self.synchronized_connection {
                     let state = self.synchronized_connection_tab_state(
@@ -1380,6 +1391,117 @@ impl Workspace {
         cx.notify();
     }
 
+    fn live_translation_pair_for_tab(
+        &self,
+        tab_id: EntityId,
+    ) -> Option<(DocumentTranslationJobId, EntityId, EntityId)> {
+        self.live_translation_pairs
+            .iter()
+            .find_map(|(session_id, pair)| {
+                (pair.source_id == tab_id || pair.translated_id == tab_id).then_some((
+                    *session_id,
+                    pair.source_id,
+                    pair.translated_id,
+                ))
+            })
+    }
+
+    fn live_translation_counterpart(&self, tab_id: EntityId) -> Option<EntityId> {
+        self.live_translation_pair_for_tab(tab_id)
+            .map(|(_, source_id, translated_id)| {
+                if source_id == tab_id {
+                    translated_id
+                } else {
+                    source_id
+                }
+            })
+    }
+
+    fn is_live_translation_pair_tab(&self, tab_id: EntityId) -> bool {
+        self.live_translation_counterpart(tab_id).is_some()
+    }
+
+    fn tab_is_displayed(&self, tab_id: EntityId, cx: &App) -> bool {
+        self.pane_group
+            .panes()
+            .into_iter()
+            .any(|pane| pane.read(cx).active_tab_id() == Some(tab_id))
+    }
+
+    fn document_view_for_tab(&self, tab_id: EntityId, cx: &App) -> Option<Entity<DocumentView>> {
+        self.pane_group
+            .panes()
+            .into_iter()
+            .find_map(|pane| pane.read(cx).document_view_for_id(tab_id))
+    }
+
+    fn synchronize_live_translation_viewport_anchor(
+        &self,
+        session_id: DocumentTranslationJobId,
+        changed_tab: EntityId,
+        anchor: TranslationViewportAnchor,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((pair_session_id, source_id, translated_id)) =
+            self.live_translation_pair_for_tab(changed_tab)
+        else {
+            return;
+        };
+        if pair_session_id != session_id {
+            return;
+        }
+        let counterpart = if changed_tab == source_id {
+            translated_id
+        } else {
+            source_id
+        };
+        let Some(changed_view) = self.document_view_for_tab(changed_tab, cx) else {
+            return;
+        };
+        let Some(counterpart_view) = self.document_view_for_tab(counterpart, cx) else {
+            return;
+        };
+        counterpart_view.update(cx, |view, cx| {
+            view.apply_live_translation_viewport_anchor(session_id, anchor, cx);
+        });
+        let Some(applied) = counterpart_view
+            .read(cx)
+            .live_translation_viewport_anchor(anchor.mode)
+        else {
+            return;
+        };
+        let applied_exactly = applied.page_index == anchor.page_index
+            && (applied.pdf_x - anchor.pdf_x).abs() < 0.01
+            && (applied.pdf_y - anchor.pdf_y).abs() < 0.01
+            && (applied.viewport_y_fraction - anchor.viewport_y_fraction).abs() < 0.001;
+        if !applied_exactly {
+            // Near a document edge, the counterpart may be unable to center
+            // the requested point at its independent zoom. Move the initiating
+            // view to the closest point both viewports can represent.
+            changed_view.update(cx, |view, cx| {
+                view.apply_live_translation_viewport_anchor(session_id, applied, cx);
+            });
+        }
+    }
+
+    fn align_live_translation_counterpart(
+        &self,
+        changed_tab: EntityId,
+        mode: crate::document_view::SynchronizedScrollMode,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((session_id, _, _)) = self.live_translation_pair_for_tab(changed_tab) else {
+            return;
+        };
+        let Some(changed_view) = self.document_view_for_tab(changed_tab, cx) else {
+            return;
+        };
+        let Some(anchor) = changed_view.read(cx).live_translation_viewport_anchor(mode) else {
+            return;
+        };
+        self.synchronize_live_translation_viewport_anchor(session_id, changed_tab, anchor, cx);
+    }
+
     fn propagate_synchronized_scroll(
         &mut self,
         source_tab: gpui::EntityId,
@@ -1392,18 +1514,33 @@ impl Workspace {
         if self.synchronized_tabs.is_paused(source_tab) {
             return;
         }
-        let source_is_displayed = self
-            .pane_group
-            .panes()
-            .into_iter()
-            .any(|pane| pane.read(cx).active_tab_id() == Some(source_tab));
-        if !source_is_displayed {
+        if !self.tab_is_displayed(source_tab, cx) {
             return;
         }
 
+        let translation_counterpart = self.live_translation_counterpart(source_tab);
+        if translation_counterpart.is_some() {
+            self.align_live_translation_counterpart(source_tab, delta.mode, cx);
+        }
+        let mut aligned_translation_tabs = HashSet::new();
         for member_tab in self.synchronized_tabs.member_tabs(group_id) {
-            if member_tab == source_tab || self.synchronized_tabs.is_paused(member_tab) {
+            if member_tab == source_tab
+                || Some(member_tab) == translation_counterpart
+                || aligned_translation_tabs.contains(&member_tab)
+                || self.synchronized_tabs.is_paused(member_tab)
+            {
                 continue;
+            }
+            let translation_pair = self.live_translation_pair_for_tab(member_tab);
+            if let Some((_, pair_source, pair_translated)) = translation_pair {
+                let preferred = if self.tab_is_displayed(pair_source, cx) {
+                    pair_source
+                } else {
+                    pair_translated
+                };
+                if member_tab != preferred {
+                    continue;
+                }
             }
             let Some(pane) = self
                 .pane_group
@@ -1420,6 +1557,11 @@ impl Workspace {
                 document_view.update(cx, |document_view, cx| {
                     document_view.apply_synchronized_scroll_delta(delta, cx);
                 });
+                if let Some((_, pair_source, pair_translated)) = translation_pair {
+                    aligned_translation_tabs.insert(pair_source);
+                    aligned_translation_tabs.insert(pair_translated);
+                    self.align_live_translation_counterpart(member_tab, delta.mode, cx);
+                }
             }
         }
     }
@@ -2742,10 +2884,56 @@ impl Workspace {
         cx.subscribe_in(
             &translated,
             window,
-            move |_, _, event: &DocumentViewEvent, _, cx| {
-                let DocumentViewEvent::TranslationRegionHovered {
+            move |workspace, _, event: &DocumentViewEvent, _, cx| {
+                if let Some(original_target) = original_target.upgrade() {
+                    match event {
+                        DocumentViewEvent::TranslationRegionHovered {
+                            session_id: event_session_id,
+                            region_id,
+                        } if *event_session_id == session_id => {
+                            original_target.update(cx, |view, cx| {
+                                view.apply_live_translation_hover(
+                                    session_id,
+                                    region_id.clone(),
+                                    cx,
+                                );
+                            });
+                        }
+                        DocumentViewEvent::TranslationOverlayVisibilityChanged {
+                            session_id: event_session_id,
+                            enabled,
+                        } if *event_session_id == session_id => {
+                            original_target.update(cx, |view, cx| {
+                                view.apply_live_translation_overlay_visibility(
+                                    session_id, *enabled, cx,
+                                );
+                            });
+                        }
+                        DocumentViewEvent::TranslationViewportChanged {
+                            session_id: event_session_id,
+                            anchor,
+                        } if *event_session_id == session_id => {
+                            workspace.synchronize_live_translation_viewport_anchor(
+                                session_id,
+                                translated_id,
+                                *anchor,
+                                cx,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            },
+        )
+        .detach();
+
+        cx.subscribe_in(
+            &original,
+            window,
+            move |workspace, _, event: &DocumentViewEvent, _, cx| {
+                let DocumentViewEvent::TranslationViewportChanged {
                     session_id: event_session_id,
-                    region_id,
+                    anchor,
                 } = event
                 else {
                     return;
@@ -2753,11 +2941,9 @@ impl Workspace {
                 if *event_session_id != session_id {
                     return;
                 }
-                if let Some(original_target) = original_target.upgrade() {
-                    original_target.update(cx, |view, cx| {
-                        view.apply_live_translation_hover(session_id, region_id.clone(), cx);
-                    });
-                }
+                workspace.synchronize_live_translation_viewport_anchor(
+                    session_id, source_id, *anchor, cx,
+                );
             },
         )
         .detach();
@@ -2772,7 +2958,15 @@ impl Workspace {
                 active: false,
             },
         );
+        self.synchronized_tabs.set_paused(source_id, false);
+        self.synchronized_tabs.set_paused(translated_id, false);
+        if let Some(anchor) = original.read(cx).live_translation_viewport_anchor(
+            crate::document_view::SynchronizedScrollMode::Immediate,
+        ) {
+            self.synchronize_live_translation_viewport_anchor(session_id, source_id, anchor, cx);
+        }
         self.refresh_live_translation_pair_activity(cx);
+        self.refresh_synchronized_tab_presentation(cx);
     }
 
     fn unregister_live_translation_pair(
@@ -2792,6 +2986,7 @@ impl Workspace {
                     view.set_translation_pair_active(session_id, false, cx);
                 });
             }
+            self.refresh_synchronized_tab_presentation(cx);
             return;
         }
 
@@ -3861,7 +4056,7 @@ mod tests {
     use gpui_component::{Root, WindowExt as _};
 
     use super::{
-        SplitDirection, SynchronizedConnectionAnchor, SynchronizedConnectionAnchorEdge,
+        PaneEvent, SplitDirection, SynchronizedConnectionAnchor, SynchronizedConnectionAnchorEdge,
         SynchronizedConnectionCurve, SynchronizedConnectionGroup,
         SynchronizedConnectionInvalidReason, SynchronizedConnectionTabState, Workspace,
         WorkspaceCallbacks, WorkspaceMenu, WorkspaceWindowHandle, WorkspaceWindowRequest,
@@ -3920,11 +4115,14 @@ mod tests {
         ))
     }
 
-    fn write_minimal_pdf(path: &Path) {
+    fn write_minimal_pdf_with_height(path: &Path, height: u32) {
+        let page = format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 {height}] /Resources << >> /Contents 4 0 R >>"
+        );
         let objects = [
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >>",
+            page.as_str(),
             "<< /Length 0 >>\nstream\n\nendstream",
         ];
         let mut bytes = b"%PDF-1.4\n".to_vec();
@@ -3947,6 +4145,10 @@ mod tests {
             .as_bytes(),
         );
         fs::write(path, bytes).unwrap();
+    }
+
+    fn write_minimal_pdf(path: &Path) {
+        write_minimal_pdf_with_height(path, 200);
     }
 
     #[test]
@@ -4189,7 +4391,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let document_path = temporary_pdf_path("restore-duplicates");
-        write_minimal_pdf(&document_path);
+        write_minimal_pdf_with_height(&document_path, 1_000);
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
@@ -4259,6 +4461,10 @@ mod tests {
             root.view().clone().downcast::<Workspace>().unwrap()
         });
         cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        cx.run_until_parked();
 
         workspace.read_with(cx, |workspace, cx| {
             assert!(!workspace.reader_session_restore_pending());
@@ -4282,10 +4488,12 @@ mod tests {
                 Some(left_group)
             );
             assert!(
-                workspace
+                !workspace
                     .synchronized_tabs
                     .is_paused(right_views[0].entity_id())
             );
+            assert!(right.synchronized_pause_locked(right_views[0].entity_id()));
+            assert!(left.synchronized_pause_locked(left_views[1].entity_id()));
             assert_eq!(workspace.live_translation_pairs.len(), 1);
             let (&session_id, pair) = workspace.live_translation_pairs.iter().next().unwrap();
             assert_eq!(pair.source_id, left_views[1].entity_id());
@@ -4312,6 +4520,207 @@ mod tests {
             );
             assert_eq!(translation.request.target_language.as_str(), "zh-hans");
             assert!(translation.original_unit_ids.contains("unit-1"));
+
+            let source_anchor = left_views[1]
+                .read(cx)
+                .live_translation_viewport_anchor(SynchronizedScrollMode::Immediate)
+                .unwrap();
+            let translated_anchor = right_views[0]
+                .read(cx)
+                .live_translation_viewport_anchor(SynchronizedScrollMode::Immediate)
+                .unwrap();
+            assert_eq!(source_anchor.page_index, translated_anchor.page_index);
+            assert!((source_anchor.pdf_x - translated_anchor.pdf_x).abs() < 0.01);
+            assert!((source_anchor.pdf_y - translated_anchor.pdf_y).abs() < 0.01);
+            assert_eq!(left_views[1].read(cx).current_document_position().zoom, 1.5);
+            assert_eq!(
+                right_views[0].read(cx).current_document_position().zoom,
+                2.0
+            );
+        });
+
+        let (source, translated) = workspace.read_with(cx, |workspace, _| {
+            let pair = workspace.live_translation_pairs.values().next().unwrap();
+            (
+                pair.source.upgrade().unwrap(),
+                pair.translated.upgrade().unwrap(),
+            )
+        });
+        let overlay_button_bounds = cx
+            .debug_bounds("translation-session-toggle-overlays")
+            .unwrap();
+        cx.simulate_click(overlay_button_bounds.center(), Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(!translated.read_with(cx, |view, _| view.translation_overlay_enabled()));
+        assert!(!source.read_with(cx, |view, _| view.translation_overlay_enabled()));
+        let overlay_button_bounds = cx
+            .debug_bounds("translation-session-toggle-overlays")
+            .unwrap();
+        cx.simulate_click(overlay_button_bounds.center(), Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(translated.read_with(cx, |view, _| view.translation_overlay_enabled()));
+        assert!(source.read_with(cx, |view, _| view.translation_overlay_enabled()));
+
+        cx.update(|_, cx| {
+            let source_anchor = source
+                .read(cx)
+                .live_translation_viewport_anchor(SynchronizedScrollMode::Immediate)
+                .unwrap();
+            let translated_anchor = translated
+                .read(cx)
+                .live_translation_viewport_anchor(SynchronizedScrollMode::Immediate)
+                .unwrap();
+            assert!(
+                (source_anchor.pdf_y - translated_anchor.pdf_y).abs() < 0.01,
+                "translation anchors diverged before resize: source={source_anchor:?}, translated={translated_anchor:?}"
+            );
+        });
+
+        cx.simulate_resize(size(px(900.0), px(640.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        cx.update(|_, cx| {
+            let source_anchor = source
+                .read(cx)
+                .live_translation_viewport_anchor(SynchronizedScrollMode::Immediate)
+                .unwrap();
+            let translated_anchor = translated
+                .read(cx)
+                .live_translation_viewport_anchor(SynchronizedScrollMode::Immediate)
+                .unwrap();
+            assert!((source_anchor.pdf_x - translated_anchor.pdf_x).abs() < 0.01);
+            assert!(
+                (source_anchor.pdf_y - translated_anchor.pdf_y).abs() < 0.01,
+                "translation anchors diverged after resize: source={source_anchor:?} at {:?}, translated={translated_anchor:?} at {:?}",
+                source.read(cx).current_document_position(),
+                translated.read(cx).current_document_position(),
+            );
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.update_in(cx, |workspace, _, cx| {
+            let third_pane = workspace.active_pane.clone();
+            let third = third_pane.read(cx).active_document_view().unwrap();
+            let group_id = workspace
+                .synchronized_tabs
+                .group_for_tab(source.entity_id())
+                .unwrap();
+            assert!(workspace.synchronized_tabs.add_member(
+                group_id,
+                third.entity_id(),
+                third_pane.entity_id(),
+            ));
+            workspace.refresh_synchronized_tab_presentation(cx);
+            let delta = SynchronizedScrollDelta {
+                x_pixels: 0.0,
+                y_pixels: 48.0,
+                mode: SynchronizedScrollMode::Immediate,
+            };
+            third.update(cx, |view, cx| {
+                view.apply_synchronized_scroll_delta(delta, cx);
+            });
+            workspace.propagate_synchronized_scroll(third.entity_id(), delta, cx);
+            assert_eq!(
+                workspace
+                    .synchronized_tabs
+                    .group_summary(group_id)
+                    .unwrap()
+                    .member_count,
+                3
+            );
+            let source_anchor = source
+                .read(cx)
+                .live_translation_viewport_anchor(SynchronizedScrollMode::Immediate)
+                .unwrap();
+            let translated_anchor = translated
+                .read(cx)
+                .live_translation_viewport_anchor(SynchronizedScrollMode::Immediate)
+                .unwrap();
+            assert!((source_anchor.pdf_x - translated_anchor.pdf_x).abs() < 0.01);
+            assert!(
+                (source_anchor.pdf_y - translated_anchor.pdf_y).abs() < 0.01,
+                "translation anchors diverged after a third synchronized tab moved: source={source_anchor:?}, translated={translated_anchor:?}"
+            );
+            assert!(
+                workspace
+                    .synchronized_tabs
+                    .set_paused(third.entity_id(), true)
+            );
+            assert!(workspace.synchronized_tabs.is_paused(third.entity_id()));
+            workspace
+                .synchronized_tabs
+                .set_paused(third.entity_id(), false);
+        });
+
+        let (source, translated, translated_pane, translated_id, before) =
+            workspace.update_in(cx, |workspace, window, cx| {
+                let pair = workspace.live_translation_pairs.values().next().unwrap();
+                let source = pair.source.upgrade().unwrap();
+                let translated = pair.translated.upgrade().unwrap();
+                let translated_id = translated.entity_id();
+                let translated_pane = workspace
+                    .pane_group
+                    .panes()
+                    .into_iter()
+                    .find(|pane| pane.read(cx).has_tab_id(translated_id))
+                    .unwrap();
+                translated_pane.update(cx, |pane, cx| pane.open_new_tab(window, cx));
+
+                let before = translated.read(cx).current_document_position();
+                source.update(cx, |view, cx| {
+                    view.navigate_to_document_position(
+                        DocumentPosition::fixed(0.0, 80.0, 4.0, 1),
+                        cx,
+                    );
+                });
+                (source, translated, translated_pane, translated_id, before)
+            });
+        cx.run_until_parked();
+        let after = translated.read_with(cx, |view, _| view.current_document_position());
+        assert!(
+            (after.scroll_y_doc - before.scroll_y_doc).abs() > 0.01,
+            "hidden translated position did not update: before={before:?}, after={after:?}"
+        );
+        cx.update(|_, cx| {
+            let source_anchor = source
+                .read(cx)
+                .live_translation_viewport_anchor(SynchronizedScrollMode::Immediate)
+                .unwrap();
+            let translated_anchor = translated
+                .read(cx)
+                .live_translation_viewport_anchor(SynchronizedScrollMode::Immediate)
+                .unwrap();
+            assert!((source_anchor.pdf_x - translated_anchor.pdf_x).abs() < 0.01);
+            assert!((source_anchor.pdf_y - translated_anchor.pdf_y).abs() < 0.01);
+        });
+
+        translated_pane.update(cx, |_, cx| {
+            cx.emit(PaneEvent::SetSynchronizedScrollPaused {
+                tab_id: translated_id,
+                paused: true,
+            });
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(!workspace.synchronized_tabs.is_paused(translated_id));
+            let snapshot = workspace.reader_window_session(window, cx);
+            assert!(
+                snapshot
+                    .synchronized_groups
+                    .iter()
+                    .all(|group| group.paused_tabs.is_empty())
+            );
         });
 
         fs::remove_file(document_path).ok();
