@@ -23,4 +23,5 @@ gitlink.
 
 ## Development Constraint
 
-Do not build Nix derivations unless explicitly requested.
+1. Do not build Nix derivations unless explicitly requested.
+2. Do not use cua-driver since it doesn't support Niri wayland compositor (our dev env) well.
