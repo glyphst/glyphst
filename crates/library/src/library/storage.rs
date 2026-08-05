@@ -296,7 +296,7 @@ impl LibraryStore {
         let write_txn = database.begin_write()?;
         {
             let mut table = write_txn.open_table(UI_STATE_V1_TABLE)?;
-            let encoded = encode(&StoredReaderSessionV1::from(session))?;
+            let encoded = encode(&StoredReaderSessionV2::from(session))?;
             table.insert(READER_SESSION_KEY, encoded.as_slice())?;
         }
         write_txn.commit()?;

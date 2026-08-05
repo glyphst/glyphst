@@ -5,10 +5,12 @@ use std::{
 };
 
 use anyhow::Result;
+use glyphst_translation_ui::service::LanguageCode;
 use glyphst_translation_ui::{
     DocumentTranslationJobEvent, DocumentTranslationJobId, DocumentTranslationJobManager,
     DocumentTranslationNotification, DocumentTranslationSessionNotification,
-    document_translation_notification, document_translation_session_notification,
+    PdfTranslationSessionCacheKey, PdfTranslationSessionRequest, document_translation_notification,
+    document_translation_session_notification,
 };
 use glyphst_ui::{
     activity::ActivityCenter,
@@ -43,8 +45,8 @@ use crate::{
         ToggleCommandPalette, ToggleNotes, ToggleThumbnailSidebar, ToggleToc, ToggleTransparency,
     },
     library::{
-        DocumentPosition, ReaderSidebar, ReaderSynchronizedGroup, ReaderWindowBounds,
-        ReaderWindowSession, ReaderWindowState, normalize_path,
+        DocumentPosition, ReaderSidebar, ReaderSynchronizedGroup, ReaderTranslationSession,
+        ReaderWindowBounds, ReaderWindowSession, ReaderWindowState, normalize_path,
     },
     pane::{
         DraggedTab, Pane, PaneDropTarget, PaneEvent, PaneGroup, PaneSynchronizedPresentation,
@@ -87,6 +89,7 @@ pub struct Workspace {
     restored_tab_ids: HashMap<u64, (EntityId, EntityId)>,
     pending_restored_documents: usize,
     pending_synchronized_groups: Vec<ReaderSynchronizedGroup>,
+    pending_restored_translation_sessions: Vec<ReaderTranslationSession>,
     restored_missing_documents: usize,
     synchronized_connection: Option<SynchronizedConnection>,
     fading_synchronized_connection: Option<FadingSynchronizedConnection>,
@@ -304,6 +307,7 @@ impl Workspace {
             .collect();
         workspace.pending_restored_documents = restored.pending_documents;
         workspace.pending_synchronized_groups = session.synchronized_groups;
+        workspace.pending_restored_translation_sessions = session.translation_sessions;
         workspace.restored_missing_documents = restored.missing_documents;
         workspace.docks.left_sidebar = session.left_sidebar.map(|sidebar| match sidebar {
             ReaderSidebar::Thumbnails => DocumentSidebar::Thumbnails,
@@ -318,7 +322,7 @@ impl Workspace {
             workspace.transparency_enabled,
         );
         if workspace.pending_restored_documents == 0 {
-            workspace.finish_reader_session_restore(cx);
+            workspace.finish_reader_session_restore(window, cx);
         }
         workspace.sync_tab_bar_visibility(cx);
         workspace.focus_active_pane(window, cx);
@@ -359,6 +363,7 @@ impl Workspace {
             restored_tab_ids: HashMap::new(),
             pending_restored_documents: 0,
             pending_synchronized_groups: Vec::new(),
+            pending_restored_translation_sessions: Vec::new(),
             restored_missing_documents: 0,
             synchronized_connection: None,
             fading_synchronized_connection: None,
@@ -589,6 +594,41 @@ impl Workspace {
             gpui::WindowBounds::Fullscreen(_) => ReaderWindowState::Fullscreen,
         };
         let bounds = window_bounds.get_bounds();
+        let mut translation_sessions = self
+            .live_translation_pairs
+            .iter()
+            .filter_map(|(session_id, pair)| {
+                let source_tab = panes.runtime_tab_ids.get(&pair.source_id).copied()?;
+                let translated_tab = panes.runtime_tab_ids.get(&pair.translated_id).copied()?;
+                let snapshot = self
+                    .document_translation_jobs
+                    .read(cx)
+                    .session_snapshot(*session_id)?;
+                let mut original_unit_ids = snapshot
+                    .original_unit_ids
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                original_unit_ids.sort();
+                Some(ReaderTranslationSession {
+                    source_tab,
+                    translated_tab,
+                    source_language: snapshot
+                        .request
+                        .source_language
+                        .as_ref()
+                        .map(|language| language.as_str().to_string()),
+                    target_language: snapshot.request.target_language.as_str().to_string(),
+                    mode: snapshot.mode.as_str().to_string(),
+                    cache_key: snapshot
+                        .cache_key
+                        .as_ref()
+                        .map(|key| key.as_str().to_string()),
+                    original_unit_ids,
+                })
+            })
+            .collect::<Vec<_>>();
+        translation_sessions.sort_by_key(|session| session.translated_tab);
         ReaderWindowSession {
             bounds: ReaderWindowBounds {
                 x: bounds.origin.x.as_f32(),
@@ -609,10 +649,11 @@ impl Workspace {
             synchronized_groups: self
                 .synchronized_tabs
                 .reader_session_groups(&panes.runtime_tab_ids),
+            translation_sessions,
         }
     }
 
-    fn finish_reader_session_restore(&mut self, cx: &mut Context<Self>) {
+    fn finish_reader_session_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let groups = std::mem::take(&mut self.pending_synchronized_groups);
         for group in groups {
             let members = group
@@ -651,6 +692,102 @@ impl Workspace {
                     self.synchronized_tabs.set_paused(*tab_id, true);
                 }
             }
+        }
+        let translation_sessions = std::mem::take(&mut self.pending_restored_translation_sessions);
+        for session in translation_sessions {
+            let Some((source_tab_id, source_pane_id)) =
+                self.restored_tab_ids.get(&session.source_tab).copied()
+            else {
+                continue;
+            };
+            let Some((translated_tab_id, translated_pane_id)) =
+                self.restored_tab_ids.get(&session.translated_tab).copied()
+            else {
+                continue;
+            };
+            let source_pane = self
+                .pane_group
+                .panes()
+                .into_iter()
+                .find(|pane| pane.entity_id() == source_pane_id);
+            let translated_pane = self
+                .pane_group
+                .panes()
+                .into_iter()
+                .find(|pane| pane.entity_id() == translated_pane_id);
+            let (Some(source_pane), Some(translated_pane)) = (source_pane, translated_pane) else {
+                continue;
+            };
+            let Some(source) = source_pane.read(cx).document_view_for_id(source_tab_id) else {
+                continue;
+            };
+            let Some(translated) = translated_pane
+                .read(cx)
+                .document_view_for_id(translated_tab_id)
+            else {
+                continue;
+            };
+            let source_language = match session.source_language.as_deref() {
+                Some(language) => match LanguageCode::new(language) {
+                    Ok(language) => Some(language),
+                    Err(error) => {
+                        eprintln!("failed to restore translation source language: {error:#}");
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            let target_language = match LanguageCode::new(&session.target_language) {
+                Ok(language) => language,
+                Err(error) => {
+                    eprintln!("failed to restore translation target language: {error:#}");
+                    continue;
+                }
+            };
+            let mode = glyphst_settings::DocumentTranslationMode::parse(&session.mode)
+                .unwrap_or(glyphst_settings::DocumentTranslationMode::Auto);
+            let cache_key = session
+                .cache_key
+                .and_then(PdfTranslationSessionCacheKey::parse);
+            let request = PdfTranslationSessionRequest {
+                source_path: source.read(cx).path().to_path_buf(),
+                source_language,
+                target_language,
+            };
+            let settings = cx.global::<SettingsStore>().settings.clone();
+            let session_id = self.document_translation_jobs.update(cx, |manager, cx| {
+                manager.restore_session(
+                    settings,
+                    request,
+                    mode,
+                    cache_key,
+                    session.original_unit_ids.into_iter().collect(),
+                    cx,
+                )
+            });
+            source.update(cx, |view, cx| {
+                view.attach_translation_source_mirror(session_id, cx);
+            });
+            translated.update(cx, |view, cx| {
+                view.attach_translation_session(session_id, cx);
+            });
+            if self
+                .synchronized_tabs
+                .group_for_tab(source_tab_id)
+                .is_none()
+                && self
+                    .synchronized_tabs
+                    .group_for_tab(translated_tab_id)
+                    .is_none()
+            {
+                _ = self.synchronized_tabs.connect_tab_to_source_group(
+                    source_tab_id,
+                    source_pane_id,
+                    translated_tab_id,
+                    translated_pane_id,
+                );
+            }
+            self.register_live_translation_pair(session_id, source, translated, window, cx);
         }
         self.restored_tab_ids.clear();
         self.refresh_synchronized_tab_presentation(cx);
@@ -716,7 +853,7 @@ impl Workspace {
                     this.pending_restored_documents =
                         this.pending_restored_documents.saturating_sub(1);
                     if this.pending_restored_documents == 0 {
-                        this.finish_reader_session_restore(cx);
+                        this.finish_reader_session_restore(window, cx);
                     } else {
                         cx.notify();
                     }
@@ -3737,7 +3874,7 @@ mod tests {
         library::{
             DocumentPosition, LibraryStore, ReaderPaneSession, ReaderPaneTree, ReaderSidebar,
             ReaderSplitAxis, ReaderSynchronizedGroup, ReaderTabKind, ReaderTabSession,
-            ReaderWindowBounds, ReaderWindowSession, ReaderWindowState,
+            ReaderTranslationSession, ReaderWindowBounds, ReaderWindowSession, ReaderWindowState,
         },
         settings::SettingsStore,
     };
@@ -4006,6 +4143,7 @@ mod tests {
             ai_panel_open: true,
             transparency_enabled: false,
             synchronized_groups: Vec::new(),
+            translation_sessions: Vec::new(),
         };
 
         let (root, cx) = cx.add_window_view(move |window, cx| {
@@ -4047,7 +4185,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn reader_session_restores_duplicate_documents_and_synchronized_groups(
+    fn reader_session_restores_duplicate_documents_synchronization_and_translation(
         cx: &mut TestAppContext,
     ) {
         let document_path = temporary_pdf_path("restore-duplicates");
@@ -4101,6 +4239,15 @@ mod tests {
                 tabs: vec![2, 3],
                 paused_tabs: vec![3],
             }],
+            translation_sessions: vec![ReaderTranslationSession {
+                source_tab: 2,
+                translated_tab: 3,
+                source_language: Some("en".to_string()),
+                target_language: "zh-hans".to_string(),
+                mode: "auto".to_string(),
+                cache_key: None,
+                original_unit_ids: vec!["unit-1".to_string()],
+            }],
         };
 
         let (root, cx) = cx.add_window_view(move |window, cx| {
@@ -4139,6 +4286,32 @@ mod tests {
                     .synchronized_tabs
                     .is_paused(right_views[0].entity_id())
             );
+            assert_eq!(workspace.live_translation_pairs.len(), 1);
+            let (&session_id, pair) = workspace.live_translation_pairs.iter().next().unwrap();
+            assert_eq!(pair.source_id, left_views[1].entity_id());
+            assert_eq!(pair.translated_id, right_views[0].entity_id());
+            assert_eq!(
+                right_views[0].read(cx).translation_session_id(),
+                Some(session_id)
+            );
+            assert_eq!(left_views[1].read(cx).translation_session_id(), None);
+            let translation = workspace
+                .document_translation_jobs
+                .read(cx)
+                .session_snapshot(session_id)
+                .unwrap();
+            assert!(translation.can_resume());
+            assert_eq!(
+                translation
+                    .request
+                    .source_language
+                    .as_ref()
+                    .unwrap()
+                    .as_str(),
+                "en"
+            );
+            assert_eq!(translation.request.target_language.as_str(), "zh-hans");
+            assert!(translation.original_unit_ids.contains("unit-1"));
         });
 
         fs::remove_file(document_path).ok();

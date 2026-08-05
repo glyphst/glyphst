@@ -402,13 +402,6 @@ impl Pane {
         let mut tabs = Vec::with_capacity(self.tabs.len());
         let mut active_tab = None;
         for (tab_ix, tab) in self.tabs.iter().enumerate() {
-            if matches!(
-                tab,
-                Tab::Document(document_view)
-                    if document_view.read(cx).translation_session_id().is_some()
-            ) {
-                continue;
-            }
             *next_tab_id = next_tab_id.saturating_add(1);
             let id = *next_tab_id;
             runtime_tab_ids.insert(Self::tab_entity_id(tab), id);

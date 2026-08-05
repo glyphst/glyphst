@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet, hash_map::DefaultHasher};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::DefaultHasher};
 use std::fmt::{self, Write as _};
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -40,6 +40,11 @@ use crate::reviewer::GlyphstPolicyReviewer;
 const ARTIFACT_VERSION: u32 = 7;
 const PIPELINE_VERSION: &str = "native-rust-v26-page-streaming-canonical-previews";
 const CHECKPOINT_VERSION: u32 = 4;
+const LIVE_SESSION_CACHE_VERSION: u32 = 1;
+const LIVE_SESSION_MANIFEST_FILE: &str = "live-session.json";
+const LIVE_SESSION_STATE_FILE: &str = "live-session-state.json";
+const LIVE_SESSION_DOCUMENT_FILE: &str = "live-prepared-document.json";
+const LIVE_SESSION_RESULT_FILE: &str = "live-session-result.json";
 
 #[derive(Clone)]
 pub struct PdfTranslationService {
@@ -56,6 +61,171 @@ struct ArtifactCacheState {
 
 struct ArtifactRunGuard {
     state: Arc<Mutex<ArtifactCacheState>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct LiveSessionCacheManifest {
+    version: u32,
+    pipeline_version: String,
+    fingerprint: String,
+    source_fingerprint: String,
+    request: PdfTranslationSessionRequest,
+    inspection: PdfInspection,
+    warnings: Vec<PdfTranslationWarning>,
+    completed: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+struct LiveSessionPipelineState {
+    units: Option<TranslationRunSnapshot>,
+    page_failures: Vec<PdfTranslationPageFailure>,
+}
+
+struct LiveSessionCacheWriter {
+    job_directory: PathBuf,
+    manifest: LiveSessionCacheManifest,
+    prepared_metadata: Option<DocumentMetadata>,
+    prepared_pages: BTreeMap<usize, Page>,
+    ready_prefix: usize,
+    state: LiveSessionPipelineState,
+}
+
+impl LiveSessionCacheWriter {
+    fn new(
+        job_directory: PathBuf,
+        manifest: LiveSessionCacheManifest,
+    ) -> Result<Self, PdfTranslationError> {
+        let writer = Self {
+            job_directory,
+            manifest,
+            prepared_metadata: None,
+            prepared_pages: BTreeMap::new(),
+            ready_prefix: 0,
+            state: LiveSessionPipelineState::default(),
+        };
+        writer.write_manifest()?;
+        Ok(writer)
+    }
+
+    fn write_manifest(&self) -> Result<(), PdfTranslationError> {
+        write_json_atomically(
+            &self.job_directory.join(LIVE_SESSION_MANIFEST_FILE),
+            &self.manifest,
+            PdfTranslationStage::Preparing,
+        )
+    }
+
+    fn write_state(&self) -> Result<(), PdfTranslationError> {
+        write_json_atomically(
+            &self.job_directory.join(LIVE_SESSION_STATE_FILE),
+            &self.state,
+            PdfTranslationStage::Translating,
+        )
+    }
+
+    fn write_prepared_prefix(&self) -> Result<(), PdfTranslationError> {
+        let Some(metadata) = self.prepared_metadata.clone() else {
+            return Ok(());
+        };
+        let pages = (0..self.ready_prefix)
+            .map(|page_index| self.prepared_pages.get(&page_index).cloned())
+            .collect::<Option<Vec<_>>>();
+        let Some(pages) = pages else {
+            return Ok(());
+        };
+        let document = DocumentV1::new(metadata, pages);
+        write_json_atomically(
+            &self.job_directory.join(LIVE_SESSION_DOCUMENT_FILE),
+            &document,
+            PdfTranslationStage::Normalizing,
+        )
+    }
+
+    fn record(&mut self, update: &PdfTranslationSessionUpdate) -> Result<(), PdfTranslationError> {
+        match update {
+            PdfTranslationSessionUpdate::CacheReady(_) | PdfTranslationSessionUpdate::Finished => {
+                Ok(())
+            }
+            PdfTranslationSessionUpdate::PagePrepared {
+                metadata,
+                page,
+                page_count: _,
+                ready_prefix,
+            } => {
+                self.prepared_metadata = Some(metadata.clone());
+                self.prepared_pages.insert(page.page_index, page.clone());
+                self.ready_prefix = *ready_prefix;
+                self.write_prepared_prefix()
+            }
+            PdfTranslationSessionUpdate::UnitsChanged(units) => {
+                self.state.units = Some(units.clone());
+                self.write_state()
+            }
+            PdfTranslationSessionUpdate::PagePreviewReady(preview) => {
+                let previous_len = self.state.page_failures.len();
+                self.state.page_failures.retain(|failure| {
+                    failure.page_index != preview.page_index
+                        || !matches!(
+                            failure.phase,
+                            TranslationFailurePhase::Layout | TranslationFailurePhase::Preview
+                        )
+                });
+                if self.state.page_failures.len() == previous_len {
+                    Ok(())
+                } else {
+                    self.write_state()
+                }
+            }
+            PdfTranslationSessionUpdate::PageFailed(failure) => {
+                self.state.page_failures.retain(|current| {
+                    current.page_index != failure.page_index || current.phase != failure.phase
+                });
+                self.state.page_failures.push(failure.clone());
+                self.state
+                    .page_failures
+                    .sort_by_key(|failure| (failure.page_index, failure.phase as u8));
+                self.write_state()
+            }
+            PdfTranslationSessionUpdate::Reconciled {
+                ready_prefix,
+                invalidated_unit_ids,
+                ..
+            } => {
+                self.ready_prefix = *ready_prefix;
+                if let Some(units) = self.state.units.as_mut()
+                    && !invalidated_unit_ids.is_empty()
+                {
+                    let invalidated = invalidated_unit_ids.iter().collect::<HashSet<_>>();
+                    units
+                        .resolved_units
+                        .retain(|unit| !invalidated.contains(&unit.id));
+                    units
+                        .failures
+                        .retain(|failure| !invalidated.contains(&failure.id));
+                    self.write_state()?;
+                }
+                self.write_prepared_prefix()
+            }
+        }
+    }
+
+    fn finish(&mut self, result: &PdfTranslationSessionResult) -> Result<(), PdfTranslationError> {
+        self.state.units = Some(TranslationRunSnapshot {
+            resolved_units: result.translated.units.clone(),
+            failures: result.failures.clone(),
+            progress: result.progress.clone(),
+            queue: result.queue.clone(),
+        });
+        self.write_state()?;
+        write_json_atomically(
+            &self.job_directory.join(LIVE_SESSION_RESULT_FILE),
+            result,
+            PdfTranslationStage::Validating,
+        )?;
+        self.manifest.warnings = result.warnings.clone();
+        self.manifest.completed = true;
+        self.write_manifest()
+    }
 }
 
 impl Drop for ArtifactRunGuard {
@@ -205,6 +375,189 @@ impl PdfTranslationService {
         )
     }
 
+    /// Restore a live session strictly from Glyphst's private translation
+    /// artifacts. This path never calls OCR, translation, or review providers.
+    pub fn restore_cached_session(
+        &self,
+        key: &PdfTranslationSessionCacheKey,
+        request: &PdfTranslationSessionRequest,
+        original_unit_ids: &[String],
+        cancellation: CancellationToken,
+        progress_sink: impl TranslationProgressSink + 'static,
+        mut update_sink: impl FnMut(PdfTranslationSessionUpdate) + Send,
+    ) -> Result<Option<PdfTranslationRestoredSession>, PdfTranslationError> {
+        let _run_guard = self.begin_run()?;
+        let job_directory = artifact_root().join(key.as_str());
+        let manifest_path = job_directory.join(LIVE_SESSION_MANIFEST_FILE);
+        let manifest = match fs::read(&manifest_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<LiveSessionCacheManifest>(&bytes).ok())
+        {
+            Some(manifest)
+                if manifest.version == LIVE_SESSION_CACHE_VERSION
+                    && manifest.pipeline_version == PIPELINE_VERSION
+                    && manifest.fingerprint == key.as_str()
+                    && manifest.request == *request =>
+            {
+                manifest
+            }
+            _ => return Ok(None),
+        };
+        let source_snapshot_path = job_directory.join("source-original.pdf");
+        let current_source = match fs::read(&request.source_path) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(None),
+        };
+        let cached_source = match fs::read(&source_snapshot_path) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(None),
+        };
+        if current_source != cached_source {
+            return Ok(None);
+        }
+        cancellation
+            .check()
+            .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Preparing))?;
+
+        let state = fs::read(job_directory.join(LIVE_SESSION_STATE_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<LiveSessionPipelineState>(&bytes).ok())
+            .unwrap_or_default();
+        let result = if manifest.completed {
+            match fs::read(job_directory.join(LIVE_SESSION_RESULT_FILE))
+                .ok()
+                .and_then(|bytes| {
+                    serde_json::from_slice::<PdfTranslationSessionResult>(&bytes).ok()
+                })
+                .filter(|result| {
+                    result.fingerprint == key.as_str()
+                        && result.request == *request
+                        && result.translated.document.validate().is_ok()
+                }) {
+                Some(result) => result,
+                None => return Ok(None),
+            }
+        } else {
+            let document = match fs::read(job_directory.join(LIVE_SESSION_DOCUMENT_FILE))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<DocumentV1>(&bytes).ok())
+                .filter(|document| document.validate().is_ok())
+            {
+                Some(document) => document,
+                None => return Ok(None),
+            };
+            let units = state.units.clone().unwrap_or(TranslationRunSnapshot {
+                resolved_units: Vec::new(),
+                failures: Vec::new(),
+                progress: TranslationRunProgress::default(),
+                queue: TranslationQueueStats::default(),
+            });
+            PdfTranslationSessionResult {
+                request: request.clone(),
+                translated: TranslatedDocument {
+                    document,
+                    units: units.resolved_units,
+                },
+                failures: units.failures,
+                progress: units.progress,
+                queue: units.queue,
+                inspection: manifest.inspection.clone(),
+                source_snapshot_path: source_snapshot_path.clone(),
+                job_directory: job_directory.clone(),
+                fingerprint: manifest.fingerprint.clone(),
+                warnings: manifest.warnings.clone(),
+            }
+        };
+
+        let page_count = manifest
+            .inspection
+            .pages
+            .len()
+            .max(result.translated.document.pages.len());
+        for page in &result.translated.document.pages {
+            update_sink(PdfTranslationSessionUpdate::PagePrepared {
+                metadata: result.translated.document.metadata.clone(),
+                page: page.clone(),
+                page_count,
+                ready_prefix: page.page_index + 1,
+            });
+        }
+        update_sink(PdfTranslationSessionUpdate::UnitsChanged(
+            TranslationRunSnapshot {
+                resolved_units: result.translated.units.clone(),
+                failures: result.failures.clone(),
+                progress: result.progress.clone(),
+                queue: result.queue.clone(),
+            },
+        ));
+        let mut restored_page_failures = state.page_failures.clone();
+        for failure in &restored_page_failures {
+            update_sink(PdfTranslationSessionUpdate::PageFailed(failure.clone()));
+        }
+
+        let mut progress = ProgressTracker::new(progress_sink);
+        progress.report(
+            PdfTranslationStage::Compiling,
+            "Restoring cached translation pages",
+            Some(0),
+            Some(page_count as u32),
+        );
+        for (completed, page) in result.translated.document.pages.iter().enumerate() {
+            cancellation
+                .check()
+                .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Compiling))?;
+            let update = match self.render_session_page_preview(
+                &result,
+                page.page_index,
+                1,
+                original_unit_ids,
+                &cancellation,
+            ) {
+                Ok(preview) => {
+                    restored_page_failures.retain(|failure| {
+                        failure.page_index != page.page_index
+                            || !matches!(
+                                failure.phase,
+                                TranslationFailurePhase::Layout | TranslationFailurePhase::Preview
+                            )
+                    });
+                    PdfTranslationSessionUpdate::PagePreviewReady(preview)
+                }
+                Err(error) => {
+                    let failure = PdfTranslationPageFailure {
+                        page_index: page.page_index,
+                        phase: if error.stage == PdfTranslationStage::Layout {
+                            TranslationFailurePhase::Layout
+                        } else {
+                            TranslationFailurePhase::Preview
+                        },
+                        message: error.message,
+                        retryable: error.retryable,
+                    };
+                    restored_page_failures.retain(|current| {
+                        current.page_index != failure.page_index || current.phase != failure.phase
+                    });
+                    restored_page_failures.push(failure.clone());
+                    PdfTranslationSessionUpdate::PageFailed(failure)
+                }
+            };
+            update_sink(update);
+            progress.report(
+                PdfTranslationStage::Compiling,
+                format!("Restored page {} of {page_count}", completed + 1),
+                Some((completed + 1) as u32),
+                Some(page_count as u32),
+            );
+        }
+        update_sink(PdfTranslationSessionUpdate::Finished);
+        restored_page_failures.sort_by_key(|failure| (failure.page_index, failure.phase as u8));
+        Ok(Some(PdfTranslationRestoredSession {
+            result,
+            page_failures: restored_page_failures,
+            completed: manifest.completed,
+        }))
+    }
+
     pub fn export_session(
         &self,
         settings: Settings,
@@ -292,6 +645,35 @@ impl PdfTranslationService {
             .iter()
             .map(|page| crate::PageGeometry::new(page.width, page.height))
             .collect::<Vec<_>>();
+        let cache_key = PdfTranslationSessionCacheKey::parse(fingerprint.clone())
+            .expect("request fingerprints are lowercase hexadecimal");
+        update_sink(PdfTranslationSessionUpdate::CacheReady(cache_key));
+        let cache_manifest = LiveSessionCacheManifest {
+            version: LIVE_SESSION_CACHE_VERSION,
+            pipeline_version: PIPELINE_VERSION.to_string(),
+            fingerprint: fingerprint.clone(),
+            source_fingerprint: source_fingerprint.clone(),
+            request: session_request.clone(),
+            inspection: inspection.clone(),
+            warnings: Vec::new(),
+            completed: false,
+        };
+        let mut cache_writer =
+            match LiveSessionCacheWriter::new(job_directory.clone(), cache_manifest) {
+                Ok(writer) => Some(writer),
+                Err(error) => {
+                    eprintln!("failed to initialize live PDF translation cache: {error}");
+                    None
+                }
+            };
+        let mut publish_update = |update: PdfTranslationSessionUpdate| {
+            if let Some(writer) = cache_writer.as_mut()
+                && let Err(error) = writer.record(&update)
+            {
+                eprintln!("failed to update live PDF translation cache: {error}");
+            }
+            update_sink(update);
+        };
         progress.finish_stage(PdfTranslationStage::Preparing, "Source PDF inspected");
         let backend = GlyphstTranslationBackend::new(
             self.translation.clone(),
@@ -334,7 +716,7 @@ impl PdfTranslationService {
                     &all_pages,
                     cancellation,
                     progress,
-                    update_sink,
+                    &mut publish_update,
                     &backend,
                     &mut streamed_units,
                     &mut streamed_preview_units,
@@ -351,7 +733,7 @@ impl PdfTranslationService {
                     &automatic_ocr_pages,
                     cancellation,
                     progress,
-                    update_sink,
+                    &mut publish_update,
                     &backend,
                     &mut streamed_units,
                     &mut streamed_preview_units,
@@ -458,11 +840,11 @@ impl PdfTranslationService {
         let ocr_page_failures = ocr_page_failures(&document);
         let ocr_failures = ocr_failure_diagnostics(&document);
         for failure in &ocr_page_failures {
-            update_sink(PdfTranslationSessionUpdate::PageFailed(failure.clone()));
+            publish_update(PdfTranslationSessionUpdate::PageFailed(failure.clone()));
         }
         let page_count = document.pages.len();
         for page in &document.pages {
-            update_sink(PdfTranslationSessionUpdate::PagePrepared {
+            publish_update(PdfTranslationSessionUpdate::PagePrepared {
                 metadata: document.metadata.clone(),
                 page: page.clone(),
                 page_count,
@@ -498,7 +880,7 @@ impl PdfTranslationService {
             .map(|unit| (unit.id.clone(), unit.semantic_hash))
             .collect::<HashMap<_, _>>();
         let mut final_reconciliation_emitted = false;
-        let update_sink = Mutex::new(update_sink);
+        let update_sink = Mutex::new(&mut publish_update);
         let translation_result = std::thread::scope(|scope| {
             let (preview_tx, preview_rx) = sync_mpsc::channel();
             scope.spawn(|| {
@@ -647,10 +1029,7 @@ impl PdfTranslationService {
             job_directory.join("translated-document.json"),
             &outcome.document,
         )?;
-        if let Ok(mut sink) = update_sink.lock() {
-            (**sink)(PdfTranslationSessionUpdate::Finished);
-        }
-        Ok(PdfTranslationSessionResult {
+        let result = PdfTranslationSessionResult {
             request: session_request,
             translated: outcome.document,
             failures: outcome.failures,
@@ -661,7 +1040,18 @@ impl PdfTranslationService {
             job_directory,
             fingerprint,
             warnings,
-        })
+        };
+        if let Ok(mut sink) = update_sink.lock() {
+            (**sink)(PdfTranslationSessionUpdate::Finished);
+        }
+        drop(update_sink);
+        drop(publish_update);
+        if let Some(writer) = cache_writer.as_mut()
+            && let Err(error) = writer.finish(&result)
+        {
+            eprintln!("failed to finish live PDF translation cache: {error}");
+        }
+        Ok(result)
     }
 
     fn export_session_inner(
@@ -1824,7 +2214,7 @@ fn compile_dirty_page_previews<U>(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PdfTranslationRequest {
     pub source_path: PathBuf,
     pub output_path: PathBuf,
@@ -1832,7 +2222,7 @@ pub struct PdfTranslationRequest {
     pub target_language: LanguageCode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PdfTranslationSessionRequest {
     pub source_path: PathBuf,
     pub source_language: Option<LanguageCode>,
@@ -1841,6 +2231,7 @@ pub struct PdfTranslationSessionRequest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PdfTranslationSessionUpdate {
+    CacheReady(PdfTranslationSessionCacheKey),
     PagePrepared {
         metadata: DocumentMetadata,
         page: Page,
@@ -2031,7 +2422,7 @@ pub struct PdfTranslationHoverRegion {
     pub source_regions: Vec<BoundingBox>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PdfTranslationPageFailure {
     pub page_index: usize,
     pub phase: TranslationFailurePhase,
@@ -2039,7 +2430,7 @@ pub struct PdfTranslationPageFailure {
     pub retryable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PdfTranslationSessionResult {
     pub request: PdfTranslationSessionRequest,
     pub translated: TranslatedDocument,
@@ -2051,6 +2442,29 @@ pub struct PdfTranslationSessionResult {
     pub job_directory: PathBuf,
     pub fingerprint: String,
     pub warnings: Vec<PdfTranslationWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PdfTranslationSessionCacheKey(String);
+
+impl PdfTranslationSessionCacheKey {
+    pub fn parse(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (value.len() == 16 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfTranslationRestoredSession {
+    pub result: PdfTranslationSessionResult,
+    pub page_failures: Vec<PdfTranslationPageFailure>,
+    pub completed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3391,6 +3805,15 @@ mod tests {
         assert_eq!(zh_source, ja_source);
         assert_ne!(zh_translation, ja_translation);
         fs::remove_file(source_path).unwrap();
+    }
+
+    #[test]
+    fn live_session_cache_keys_are_fixed_width_hexadecimal() {
+        let key = PdfTranslationSessionCacheKey::parse("0123456789abcdef").unwrap();
+        assert_eq!(key.as_str(), "0123456789abcdef");
+        assert!(PdfTranslationSessionCacheKey::parse("0123456789abcde").is_none());
+        assert!(PdfTranslationSessionCacheKey::parse("../23456789abcdef").is_none());
+        assert!(PdfTranslationSessionCacheKey::parse("0123456789abcdeg").is_none());
     }
 
     #[test]

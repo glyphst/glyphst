@@ -421,9 +421,13 @@ fn load_shared_v1_storage(read_txn: &redb::ReadTransaction, library: &mut Librar
         }
     }
     if let Some(value) = table.get(READER_SESSION_KEY)? {
-        match decode::<StoredReaderSessionV1>(value.value())
-            .and_then(StoredReaderSessionV1::into_domain)
-        {
+        let bytes = value.value();
+        let session = decode::<StoredReaderSessionV2>(bytes)
+            .and_then(StoredReaderSessionV2::into_domain)
+            .or_else(|_| {
+                decode::<StoredReaderSessionV1>(bytes).and_then(StoredReaderSessionV1::into_domain)
+            });
+        match session {
             Ok(session) => library.reader_session = Some(session),
             Err(error) => eprintln!("failed to decode reader session: {error:#}"),
         }
@@ -656,7 +660,7 @@ fn migrate_legacy_storage_v1(database: &Database, library: &Library) -> Result<(
             table.insert(DOCUMENT_BROWSER_SIZE_KEY, encoded.as_slice())?;
         }
         if let Some(session) = &library.reader_session {
-            let encoded = encode(&StoredReaderSessionV1::from(session))?;
+            let encoded = encode(&StoredReaderSessionV2::from(session))?;
             table.insert(READER_SESSION_KEY, encoded.as_slice())?;
         }
     }

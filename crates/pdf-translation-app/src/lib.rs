@@ -7,6 +7,7 @@ pub use job::{
     ArtifactGeometry, PdfTranslationArtifactManifest, PdfTranslationError,
     PdfTranslationExportRequest, PdfTranslationHoverRegion, PdfTranslationHoverRegionKind,
     PdfTranslationPageFailure, PdfTranslationPagePreview, PdfTranslationRequest,
-    PdfTranslationResult, PdfTranslationService, PdfTranslationSessionRequest,
-    PdfTranslationSessionResult, PdfTranslationSessionUpdate, PdfTranslationWarning,
+    PdfTranslationRestoredSession, PdfTranslationResult, PdfTranslationService,
+    PdfTranslationSessionCacheKey, PdfTranslationSessionRequest, PdfTranslationSessionResult,
+    PdfTranslationSessionUpdate, PdfTranslationWarning,
 };

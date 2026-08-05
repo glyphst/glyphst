@@ -1,3 +1,6 @@
+pub use glyphst_pdf_translation_app::{
+    PdfTranslationSessionCacheKey, PdfTranslationSessionRequest,
+};
 pub use glyphst_translation as service;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -8,10 +11,10 @@ use futures::{StreamExt as _, channel::mpsc};
 use glyphst_pdf_translation_app::{
     CancellationToken, DocumentMetadata, DocumentV1, Page, PdfTranslationError,
     PdfTranslationExportRequest, PdfTranslationPageFailure, PdfTranslationPagePreview,
-    PdfTranslationProgress, PdfTranslationRequest, PdfTranslationResult, PdfTranslationService,
-    PdfTranslationSessionRequest, PdfTranslationSessionResult, PdfTranslationSessionUpdate,
-    PdfTranslationStage, PdfTranslationWarning, TranslatedUnit, TranslationFailureDiagnostic,
-    TranslationFailurePhase, TranslationRunProgress,
+    PdfTranslationProgress, PdfTranslationRequest, PdfTranslationRestoredSession,
+    PdfTranslationResult, PdfTranslationService, PdfTranslationSessionResult,
+    PdfTranslationSessionUpdate, PdfTranslationStage, PdfTranslationWarning, TranslatedUnit,
+    TranslationFailureDiagnostic, TranslationFailurePhase, TranslationRunProgress,
 };
 use glyphst_settings::{DocumentTranslationMode, Settings, SettingsStore};
 use glyphst_translation::{LanguageCode, TARGET_LANGUAGES};
@@ -158,6 +161,7 @@ pub struct DocumentTranslationSessionSnapshot {
     pub page_failures: Arc<Vec<PdfTranslationPageFailure>>,
     pub ready_prefix: usize,
     pub original_unit_ids: Arc<HashSet<String>>,
+    pub cache_key: Option<PdfTranslationSessionCacheKey>,
     pub attached_views: usize,
     pub last_export_path: Option<PathBuf>,
     pub last_export_error: Option<SharedString>,
@@ -189,6 +193,10 @@ impl DocumentTranslationSessionSnapshot {
         )
     }
 
+    pub fn can_resume(&self) -> bool {
+        matches!(self.status, DocumentTranslationSessionStatus::Paused { .. })
+    }
+
     pub fn has_failures(&self) -> bool {
         self.failure_count() > 0
     }
@@ -216,6 +224,11 @@ pub enum DocumentTranslationSessionStatus {
     },
     Cancelling {
         progress: Option<PdfTranslationProgress>,
+    },
+    Paused {
+        progress: Option<PdfTranslationProgress>,
+        units: TranslationRunProgress,
+        cache_available: bool,
     },
     Cancelled,
     Completed {
@@ -315,6 +328,7 @@ struct DocumentTranslationSessionRecord {
     prepared_pages: BTreeMap<usize, Page>,
     prepared_page_count: usize,
     preview_generation: u64,
+    pending_cache_restore: bool,
 }
 
 impl DocumentTranslationSessionRecord {
@@ -426,6 +440,7 @@ impl DocumentTranslationJobManager {
                 page_failures: Arc::new(Vec::new()),
                 ready_prefix: 0,
                 original_unit_ids: Arc::new(HashSet::new()),
+                cache_key: None,
                 attached_views: usize::from(foreground),
                 last_export_path: None,
                 last_export_error: None,
@@ -441,12 +456,64 @@ impl DocumentTranslationJobManager {
             prepared_pages: BTreeMap::new(),
             prepared_page_count: 0,
             preview_generation: 0,
+            pending_cache_restore: false,
         });
         self.register_session_background_task(id, cx);
         self.start_next_session(cx);
         if foreground {
             cx.emit(DocumentTranslationJobEvent::OpenSession { id, source_path });
         }
+        cx.notify();
+        id
+    }
+
+    /// Recreate a reader-owned live session without opening or splitting any
+    /// panes. Cached pages are restored in the worker queue and the session is
+    /// left paused unless its durable manifest says it had completed.
+    pub fn restore_session(
+        &mut self,
+        settings: Settings,
+        request: PdfTranslationSessionRequest,
+        mode: DocumentTranslationMode,
+        cache_key: Option<PdfTranslationSessionCacheKey>,
+        original_unit_ids: HashSet<String>,
+        cx: &mut Context<Self>,
+    ) -> DocumentTranslationJobId {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        self.sessions.push_back(DocumentTranslationSessionRecord {
+            snapshot: DocumentTranslationSessionSnapshot {
+                id,
+                request,
+                mode,
+                status: DocumentTranslationSessionStatus::Queued,
+                prepared_document: None,
+                resolved_units: Arc::new(Vec::new()),
+                failures: Arc::new(Vec::new()),
+                page_previews: Arc::new(BTreeMap::new()),
+                page_failures: Arc::new(Vec::new()),
+                ready_prefix: 0,
+                original_unit_ids: Arc::new(original_unit_ids),
+                cache_key,
+                attached_views: 1,
+                last_export_path: None,
+                last_export_error: None,
+            },
+            settings,
+            cancellation: CancellationToken::new(),
+            task: None,
+            result: None,
+            pending_restart: None,
+            pending_export: None,
+            notify_when_finished: false,
+            prepared_metadata: None,
+            prepared_pages: BTreeMap::new(),
+            prepared_page_count: 0,
+            preview_generation: 0,
+            pending_cache_restore: true,
+        });
+        self.register_session_background_task(id, cx);
+        self.start_next_session(cx);
         cx.notify();
         id
     }
@@ -558,6 +625,7 @@ impl DocumentTranslationJobManager {
                     }
                 }
                 DocumentTranslationSessionStatus::Cancelling { .. }
+                | DocumentTranslationSessionStatus::Paused { .. }
                 | DocumentTranslationSessionStatus::Cancelled
                 | DocumentTranslationSessionStatus::Completed { .. }
                 | DocumentTranslationSessionStatus::Failed { .. } => {}
@@ -773,6 +841,30 @@ impl DocumentTranslationJobManager {
         self.reset_session_for_retry(id, None);
         self.remove_session_activity_notice(id, cx);
         cx.emit(DocumentTranslationJobEvent::RemoveSessionNotification { id });
+        self.register_session_background_task(id, cx);
+        self.start_next_session(cx);
+        cx.notify();
+    }
+
+    pub fn resume_session(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+        let can_resume = self.session(id).is_some_and(|session| {
+            matches!(
+                session.snapshot.status,
+                DocumentTranslationSessionStatus::Paused { .. }
+            ) && self.active_session_id != Some(id)
+        });
+        if !can_resume {
+            return;
+        }
+        let original_unit_ids = self
+            .session(id)
+            .map(|session| session.snapshot.original_unit_ids.clone())
+            .unwrap_or_default();
+        self.reset_session_for_retry(id, None);
+        if let Some(session) = self.session_mut(id) {
+            session.snapshot.original_unit_ids = original_unit_ids;
+            session.pending_cache_restore = false;
+        }
         self.register_session_background_task(id, cx);
         self.start_next_session(cx);
         cx.notify();
@@ -1351,6 +1443,10 @@ impl DocumentTranslationJobManager {
             return;
         };
         let id = self.sessions[index].snapshot.id;
+        if self.sessions[index].pending_cache_restore {
+            self.start_cached_session_restore(index, cx);
+            return;
+        }
         if !cx.has_global::<PdfTranslationService>() {
             self.sessions[index].snapshot.status = DocumentTranslationSessionStatus::Failed {
                 stage: PdfTranslationStage::Preparing,
@@ -1410,6 +1506,86 @@ impl DocumentTranslationJobManager {
         cx.notify();
     }
 
+    fn start_cached_session_restore(&mut self, index: usize, cx: &mut Context<Self>) {
+        let id = self.sessions[index].snapshot.id;
+        let Some(cache_key) = self.sessions[index].snapshot.cache_key.clone() else {
+            self.sessions[index].pending_cache_restore = false;
+            self.sessions[index].snapshot.status = DocumentTranslationSessionStatus::Paused {
+                progress: None,
+                units: TranslationRunProgress::default(),
+                cache_available: false,
+            };
+            self.remove_session_background_task(id, cx);
+            self.start_next_session(cx);
+            cx.notify();
+            return;
+        };
+        if !cx.has_global::<PdfTranslationService>() {
+            self.sessions[index].pending_cache_restore = false;
+            self.sessions[index].snapshot.status = DocumentTranslationSessionStatus::Paused {
+                progress: None,
+                units: TranslationRunProgress::default(),
+                cache_available: false,
+            };
+            self.remove_session_background_task(id, cx);
+            self.start_next_session(cx);
+            cx.notify();
+            return;
+        }
+        let request = self.sessions[index].snapshot.request.clone();
+        let original_unit_ids = self.sessions[index]
+            .snapshot
+            .original_unit_ids
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let cancellation = self.sessions[index].cancellation.clone();
+        let service = cx.global::<PdfTranslationService>().clone();
+        let (update_tx, mut update_rx) =
+            mpsc::unbounded::<DocumentTranslationSessionWorkerUpdate>();
+        let progress_tx = update_tx.clone();
+        self.sessions[index].snapshot.status = DocumentTranslationSessionStatus::Running {
+            progress: None,
+            units: TranslationRunProgress::default(),
+        };
+        self.active_session_id = Some(id);
+        self.sync_session_background_task(id, cx);
+        let task = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
+            let result_task = cx.background_spawn(async move {
+                service.restore_cached_session(
+                    &cache_key,
+                    &request,
+                    &original_unit_ids,
+                    cancellation,
+                    move |progress| {
+                        _ = progress_tx.unbounded_send(
+                            DocumentTranslationSessionWorkerUpdate::Progress(progress),
+                        );
+                    },
+                    move |update| {
+                        _ = update_tx.unbounded_send(
+                            DocumentTranslationSessionWorkerUpdate::Pipeline(update),
+                        );
+                    },
+                )
+            });
+            while let Some(update) = update_rx.next().await {
+                if this
+                    .update(cx, |this, cx| this.update_session(id, update, cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let result = result_task.await;
+            _ = this.update(cx, |this, cx| {
+                this.finish_cached_session_restore(id, result, cx)
+            });
+        });
+        self.sessions[index].task = Some(task);
+        cx.notify();
+    }
+
     fn update_session(
         &mut self,
         id: DocumentTranslationJobId,
@@ -1420,6 +1596,11 @@ impl DocumentTranslationJobManager {
             return;
         };
         match update {
+            DocumentTranslationSessionWorkerUpdate::Pipeline(
+                PdfTranslationSessionUpdate::CacheReady(cache_key),
+            ) => {
+                session.snapshot.cache_key = Some(cache_key);
+            }
             DocumentTranslationSessionWorkerUpdate::Progress(progress) => {
                 match &mut session.snapshot.status {
                     DocumentTranslationSessionStatus::Running {
@@ -1568,6 +1749,96 @@ impl DocumentTranslationJobManager {
             DocumentTranslationSessionWorkerUpdate::Progress(progress),
             cx,
         );
+    }
+
+    fn finish_cached_session_restore(
+        &mut self,
+        id: DocumentTranslationJobId,
+        restored: Result<Option<PdfTranslationRestoredSession>, PdfTranslationError>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_session_id == Some(id) {
+            self.active_session_id = None;
+        }
+        let Some(session) = self.session_mut(id) else {
+            self.start_next_session(cx);
+            return;
+        };
+        session.task = None;
+        session.pending_cache_restore = false;
+        let current_progress = match &session.snapshot.status {
+            DocumentTranslationSessionStatus::Running { progress, .. }
+            | DocumentTranslationSessionStatus::Cancelling { progress }
+            | DocumentTranslationSessionStatus::Paused { progress, .. } => progress.clone(),
+            _ => None,
+        };
+        match restored {
+            Ok(Some(restored)) => {
+                let result = Arc::new(restored.result);
+                session.snapshot.prepared_document =
+                    Some(Arc::new(result.translated.document.clone()));
+                session.snapshot.ready_prefix = result.translated.document.pages.len();
+                session.snapshot.resolved_units = Arc::new(result.translated.units.clone());
+                let mut failures = result.failures.clone();
+                failures.extend(
+                    session
+                        .snapshot
+                        .failures
+                        .iter()
+                        .filter(|failure| failure.phase != TranslationFailurePhase::Translation)
+                        .cloned(),
+                );
+                failures.sort_by(|left, right| left.id.cmp(&right.id));
+                failures.dedup_by(|left, right| left.id == right.id && left.phase == right.phase);
+                session.snapshot.failures = Arc::new(failures);
+                let mut page_failures = (*session.snapshot.page_failures).clone();
+                page_failures.extend(restored.page_failures);
+                page_failures.sort_by_key(|failure| (failure.page_index, failure.phase as u8));
+                page_failures.dedup_by(|left, right| {
+                    left.page_index == right.page_index && left.phase == right.phase
+                });
+                session.snapshot.page_failures = Arc::new(page_failures);
+                let failed_units = session.snapshot.failure_count();
+                session.snapshot.status = if restored.completed {
+                    DocumentTranslationSessionStatus::Completed { failed_units }
+                } else {
+                    DocumentTranslationSessionStatus::Paused {
+                        progress: current_progress,
+                        units: result.progress.clone(),
+                        cache_available: true,
+                    }
+                };
+                session.result = Some(result);
+            }
+            Ok(None) => {
+                session.snapshot.status = DocumentTranslationSessionStatus::Paused {
+                    progress: None,
+                    units: TranslationRunProgress::default(),
+                    cache_available: false,
+                };
+            }
+            Err(error) => {
+                session.snapshot.status = DocumentTranslationSessionStatus::Paused {
+                    progress: Some(PdfTranslationProgress {
+                        stage: error.stage,
+                        detail: error.message,
+                        completed: None,
+                        total: None,
+                        translated: None,
+                        cached: None,
+                        retrying: None,
+                        failed: None,
+                        overall_fraction: 0.0,
+                        indeterminate: false,
+                    }),
+                    units: TranslationRunProgress::default(),
+                    cache_available: false,
+                };
+            }
+        }
+        self.remove_session_background_task(id, cx);
+        self.start_next_session(cx);
+        cx.notify();
     }
 
     fn finish_session(
@@ -1746,12 +2017,14 @@ impl DocumentTranslationJobManager {
         session.snapshot.page_failures = Arc::new(Vec::new());
         session.snapshot.ready_prefix = 0;
         session.snapshot.original_unit_ids = Arc::new(HashSet::new());
+        session.snapshot.cache_key = None;
         session.snapshot.last_export_path = None;
         session.snapshot.last_export_error = None;
         session.prepared_metadata = None;
         session.prepared_pages.clear();
         session.prepared_page_count = 0;
         session.preview_generation = session.preview_generation.wrapping_add(1);
+        session.pending_cache_restore = false;
     }
 
     fn session(&self, id: DocumentTranslationJobId) -> Option<&DocumentTranslationSessionRecord> {
@@ -2560,6 +2833,32 @@ fn session_status_content(
                 )
             },
         ),
+        DocumentTranslationSessionStatus::Paused {
+            progress,
+            units,
+            cache_available,
+        } => {
+            let resolved = units.translated + units.cached;
+            let detail = if !cache_available {
+                "The cached translation is unavailable. Resume to rebuild it.".to_string()
+            } else if units.total > 0 {
+                format!(
+                    "{resolved} / {} units cached · Resume to continue.",
+                    units.total
+                )
+            } else {
+                progress.as_ref().map_or_else(
+                    || "Resume to continue this translation.".to_string(),
+                    |progress| progress.detail.clone(),
+                )
+            };
+            (
+                "Translation paused".to_string(),
+                detail,
+                progress.as_ref().map_or(0.0, progress_fraction),
+                false,
+            )
+        }
         DocumentTranslationSessionStatus::Cancelled => (
             "Cancelled".to_string(),
             "Document translation was cancelled.".to_string(),
@@ -2834,6 +3133,7 @@ mod tests {
                 attached_views,
                 last_export_path: None,
                 last_export_error: None,
+                cache_key: None,
             },
             settings: Settings::default(),
             cancellation: CancellationToken::new(),
@@ -2846,6 +3146,7 @@ mod tests {
             prepared_pages: BTreeMap::new(),
             prepared_page_count: 0,
             preview_generation: 0,
+            pending_cache_restore: false,
         }
     }
 
@@ -2918,6 +3219,7 @@ mod tests {
             ]),
             ready_prefix: 2,
             original_unit_ids: Arc::new(HashSet::new()),
+            cache_key: None,
             attached_views: 1,
             last_export_path: None,
             last_export_error: None,
@@ -3031,6 +3333,46 @@ mod tests {
         assert!(!events.iter().any(|event| matches!(
             event,
             DocumentTranslationJobEvent::OpenSession { id, .. } if *id == background
+        )));
+    }
+
+    #[gpui::test]
+    fn restored_session_without_cache_waits_paused_for_explicit_resume(cx: &mut TestAppContext) {
+        cx.update(glyphst_ui::activity::init);
+        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let (_recorder, events) = record_job_events(&manager, cx);
+        let id = manager.update(cx, |manager, cx| {
+            manager.restore_session(
+                Settings::default(),
+                PdfTranslationSessionRequest {
+                    source_path: "/tmp/source.pdf".into(),
+                    source_language: Some(LanguageCode::new("en").unwrap()),
+                    target_language: LanguageCode::new("zh-hans").unwrap(),
+                },
+                DocumentTranslationMode::Auto,
+                None,
+                HashSet::from(["unit-1".to_string()]),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        manager.read_with(cx, |manager, _| {
+            let session = manager.session_snapshot(id).unwrap();
+            assert!(matches!(
+                session.status,
+                DocumentTranslationSessionStatus::Paused {
+                    cache_available: false,
+                    ..
+                }
+            ));
+            assert!(session.can_resume());
+            assert!(session.original_unit_ids.contains("unit-1"));
+            assert_eq!(manager.active_session_id, None);
+        });
+        assert!(!events.borrow().iter().any(|event| matches!(
+            event,
+            DocumentTranslationJobEvent::OpenSession { id: event_id, .. } if *event_id == id
         )));
     }
 

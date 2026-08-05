@@ -496,7 +496,9 @@ impl Render for DocumentView {
                     if this.translation_view_role == TranslationViewRole::Translation
                         && this.translation_pair_active
                     {
-                        if let Some(region_id) =
+                        if this.translation_hover_interaction_contains(event.position) {
+                            this.cancel_translation_hover_clear();
+                        } else if let Some(region_id) =
                             this.translation_hover_region_at_screen(event.position)
                         {
                             this.set_hovered_translation_region(region_id, cx);
@@ -696,13 +698,25 @@ impl Render for DocumentView {
                                             }
 
                                             for highlight in paint_data.linked_hover_highlights {
+                                                let blue = rgb(theme.highlight_blue >> 8);
                                                 window.paint_quad(
                                                     fill(
                                                         highlight.bounds,
-                                                        ui_theme.primary.opacity(
-                                                            (0x44 as f32 / 255.0)
+                                                        blue.opacity(
+                                                            (0x38 as f32 / 255.0)
                                                                 * highlight.opacity,
                                                         ),
+                                                    )
+                                                    .corner_radii(Corners::all(px(5.0))),
+                                                );
+                                                window.paint_quad(
+                                                    outline(
+                                                        highlight.bounds,
+                                                        blue.opacity(
+                                                            (0xa8 as f32 / 255.0)
+                                                                * highlight.opacity,
+                                                        ),
+                                                        BorderStyle::Solid,
                                                     )
                                                     .corner_radii(Corners::all(px(5.0))),
                                                 );

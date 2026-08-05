@@ -114,8 +114,8 @@ impl DocumentView {
         self.cancel_translation_panel_retract();
         self.translation_panel_placement = TranslationPanelPlacement::Default;
         self.translation_panel_drag = None;
-        self.translation_panel_snap_candidate = None;
-        self.translation_panel_dock_surface_hovered = false;
+        self.translation_panel_dock_panel_hovered = false;
+        self.translation_panel_dock_edge_hovered = false;
         self.refresh_translation_session(cx);
         cx.notify();
     }
@@ -157,8 +157,8 @@ impl DocumentView {
             self.cancel_translation_panel_pending_dock();
             self.cancel_translation_panel_retract();
             self.translation_panel_drag = None;
-            self.translation_panel_snap_candidate = None;
-            self.translation_panel_dock_surface_hovered = false;
+            self.translation_panel_dock_panel_hovered = false;
+            self.translation_panel_dock_edge_hovered = false;
         }
         cx.notify();
     }
@@ -185,8 +185,8 @@ impl DocumentView {
         self.cancel_translation_panel_pending_dock();
         self.cancel_translation_panel_retract();
         self.translation_panel_drag = None;
-        self.translation_panel_snap_candidate = None;
-        self.translation_panel_dock_surface_hovered = false;
+        self.translation_panel_dock_panel_hovered = false;
+        self.translation_panel_dock_edge_hovered = false;
         cx.notify();
     }
 
@@ -216,8 +216,8 @@ impl DocumentView {
             self.cancel_translation_panel_pending_dock();
             self.cancel_translation_panel_retract();
             self.translation_panel_drag = None;
-            self.translation_panel_snap_candidate = None;
-            self.translation_panel_dock_surface_hovered = false;
+            self.translation_panel_dock_panel_hovered = false;
+            self.translation_panel_dock_edge_hovered = false;
             if self.translation_view_role == TranslationViewRole::Translation {
                 self.clear_translation_page_sources(cx);
             }
@@ -405,21 +405,12 @@ impl DocumentView {
         self.translation_failed_hover_regions = failed_regions;
     }
 
-    pub(super) fn toggle_hovered_translation_unit(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn toggle_translation_unit(&mut self, unit_id: &str, cx: &mut Context<Self>) {
         let Some(id) = self.translation_session_id else {
             return;
         };
-        let Some(unit_id) = self
-            .hovered_translation_region
-            .as_ref()
-            .and_then(|region_id| self.translation_hover_regions.get(region_id))
-            .and_then(|region| region.unit_id.as_ref())
-            .cloned()
-        else {
-            return;
-        };
         self.document_translation_jobs.update(cx, |manager, cx| {
-            manager.toggle_session_unit_original(id, &unit_id, cx);
+            manager.toggle_session_unit_original(id, unit_id, cx);
         });
     }
 
@@ -427,6 +418,14 @@ impl DocumentView {
         if let Some(id) = self.translation_session_id {
             self.document_translation_jobs.update(cx, |manager, cx| {
                 manager.retry_session_failures(id, cx);
+            });
+        }
+    }
+
+    pub(super) fn resume_translation_session(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.translation_session_id {
+            self.document_translation_jobs.update(cx, |manager, cx| {
+                manager.resume_session(id, cx);
             });
         }
     }
@@ -777,13 +776,21 @@ impl DocumentView {
                 TranslationPanelPlacement::PendingDock {
                     position,
                     side,
-                    y: clamp_translation_panel_edge_y(y, self.viewport_height),
+                    y: clamp_translation_panel_edge_y(
+                        y,
+                        self.viewport_height,
+                        panel_size.height.as_f32(),
+                    ),
                 }
             }
             TranslationPanelPlacement::Docked { side, y, reveal } => {
                 TranslationPanelPlacement::Docked {
                     side,
-                    y: clamp_translation_panel_edge_y(y, self.viewport_height),
+                    y: clamp_translation_panel_edge_y(
+                        y,
+                        self.viewport_height,
+                        panel_size.height.as_f32(),
+                    ),
                     reveal,
                 }
             }
@@ -832,14 +839,20 @@ impl DocumentView {
                 this.translation_panel_placement =
                     TranslationPanelPlacement::Docked { side, y, reveal };
                 this.translation_panel_dock_task = None;
-                this.translation_panel_dock_surface_hovered = false;
+                this.translation_panel_dock_panel_hovered = false;
+                this.translation_panel_dock_edge_hovered = false;
                 cx.notify();
             });
         }));
     }
 
+    fn translation_panel_dock_hovered(&self) -> bool {
+        self.translation_panel_dock_panel_hovered || self.translation_panel_dock_edge_hovered
+    }
+
     pub(super) fn set_translation_panel_dock_surface_hovered(
         &mut self,
+        surface: TranslationPanelDockSurface,
         hovered: bool,
         cx: &mut Context<Self>,
     ) {
@@ -847,11 +860,19 @@ impl DocumentView {
             self.translation_panel_placement,
             TranslationPanelPlacement::Docked { .. }
         ) {
-            self.translation_panel_dock_surface_hovered = false;
+            self.translation_panel_dock_panel_hovered = false;
+            self.translation_panel_dock_edge_hovered = false;
             return;
         }
+        let current = match surface {
+            TranslationPanelDockSurface::Panel => &mut self.translation_panel_dock_panel_hovered,
+            TranslationPanelDockSurface::Edge => &mut self.translation_panel_dock_edge_hovered,
+        };
+        if *current == hovered {
+            return;
+        }
+        *current = hovered;
         if hovered {
-            self.translation_panel_dock_surface_hovered = true;
             self.cancel_translation_panel_retract();
             if let TranslationPanelPlacement::Docked { reveal, .. } =
                 &mut self.translation_panel_placement
@@ -865,7 +886,9 @@ impl DocumentView {
             }
             return;
         }
-        self.translation_panel_dock_surface_hovered = false;
+        if self.translation_panel_dock_hovered() {
+            return;
+        }
         self.translation_panel_retract_generation =
             self.translation_panel_retract_generation.wrapping_add(1);
         self.translation_panel_retract_task = None;
@@ -876,7 +899,7 @@ impl DocumentView {
                 .await;
             _ = this.update(cx, |this, cx| {
                 if this.translation_panel_retract_generation != generation
-                    || this.translation_panel_dock_surface_hovered
+                    || this.translation_panel_dock_hovered()
                 {
                     return;
                 }
@@ -898,7 +921,6 @@ impl DocumentView {
     pub(super) fn translation_panel_viewport_changed(&mut self) {
         self.cancel_translation_panel_pending_dock();
         self.cancel_translation_panel_retract();
-        self.translation_panel_snap_candidate = None;
         self.clamp_translation_panel_placement();
     }
 
@@ -957,8 +979,8 @@ impl DocumentView {
         self.translation_panel_drag = Some(TranslationPanelDrag::Floating {
             pointer_offset: point(pointer.x - origin.x, pointer.y - origin.y),
         });
-        self.translation_panel_snap_candidate =
-            translation_panel_snap_side(origin, panel_size.width.as_f32(), self.viewport_width);
+        self.translation_panel_dock_panel_hovered = false;
+        self.translation_panel_dock_edge_hovered = false;
         cx.notify();
     }
 
@@ -980,8 +1002,6 @@ impl DocumentView {
             panel_size,
         );
         self.translation_panel_placement = TranslationPanelPlacement::Floating(position);
-        self.translation_panel_snap_candidate =
-            translation_panel_snap_side(position, panel_size.width.as_f32(), self.viewport_width);
         cx.notify();
         true
     }
@@ -995,17 +1015,25 @@ impl DocumentView {
             return false;
         };
         let TranslationPanelDrag::Floating { .. } = drag;
-        if let Some(side) = self.translation_panel_snap_candidate.take()
-            && let TranslationPanelPlacement::Floating(position) = self.translation_panel_placement
+        let panel_size = self.translation_panel_effective_size();
+        if let TranslationPanelPlacement::Floating(position) = self.translation_panel_placement
+            && let Some(side) = translation_panel_snap_side(
+                position,
+                panel_size.width.as_f32(),
+                self.viewport_width,
+            )
         {
-            let y = clamp_translation_panel_edge_y(position.y, self.viewport_height);
+            let y = clamp_translation_panel_edge_y(
+                position.y,
+                self.viewport_height,
+                panel_size.height.as_f32(),
+            );
             self.translation_panel_placement =
                 TranslationPanelPlacement::PendingDock { position, side, y };
             self.schedule_translation_panel_dock(cx);
         } else {
             self.cancel_translation_panel_pending_dock();
         }
-        self.translation_panel_snap_candidate = None;
         cx.notify();
         true
     }
@@ -1089,6 +1117,21 @@ impl DocumentView {
             DocumentTranslationSessionStatus::Cancelling { .. } => {
                 ("Cancelling".to_string(), "Stopping translation".to_string())
             }
+            DocumentTranslationSessionStatus::Paused {
+                units,
+                cache_available,
+                ..
+            } => {
+                let resolved = units.translated + units.cached;
+                let detail = if !cache_available {
+                    "Cached pages unavailable · Resume to rebuild".to_string()
+                } else if units.total > 0 {
+                    format!("{resolved} / {} units cached", units.total)
+                } else {
+                    "Ready to resume".to_string()
+                };
+                ("Paused".to_string(), detail)
+            }
             DocumentTranslationSessionStatus::Cancelled => {
                 ("Cancelled".to_string(), "Translation stopped".to_string())
             }
@@ -1124,7 +1167,8 @@ impl DocumentView {
         };
         let language_select = self.pinned_translation_language_select.clone();
         let can_save = snapshot.can_save();
-        let can_retry = snapshot.has_failures() && !snapshot.is_translating();
+        let can_resume = snapshot.can_resume();
+        let can_retry = snapshot.has_failures() && !snapshot.is_translating() && !can_resume;
         let can_cancel = snapshot.is_translating()
             || matches!(
                 snapshot.status,
@@ -1179,6 +1223,19 @@ impl DocumentView {
             .flex_nowrap()
             .items_center()
             .gap_1()
+            .when(can_resume, |this| {
+                this.child(
+                    toolbar_icon_button(
+                        format!("translation-session-{session_id}-resume"),
+                        IconName::Play,
+                    )
+                    .tooltip("Resume translation")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.resume_translation_session(cx);
+                        cx.stop_propagation();
+                    })),
+                )
+            })
             .when(can_retry, |this| {
                 this.child(
                     toolbar_icon_button(
@@ -1308,7 +1365,11 @@ impl DocumentView {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                this.set_translation_panel_dock_surface_hovered(*hovered, cx);
+                this.set_translation_panel_dock_surface_hovered(
+                    TranslationPanelDockSurface::Panel,
+                    *hovered,
+                    cx,
+                );
             }))
             .child(rows)
             .on_prepaint(move |bounds, _, cx| {
@@ -1325,57 +1386,30 @@ impl DocumentView {
             if reveal.is_animating(now) {
                 window.request_animation_frame();
             }
+            let panel_height = self.translation_panel_effective_size().height;
             let panel_x = translation_panel_docked_x(
                 side,
                 reveal.value(now),
                 self.viewport_width,
                 panel_width,
             );
-            let icon = match side {
-                TranslationPanelSide::Left => IconName::ChevronRight,
-                TranslationPanelSide::Right => IconName::ChevronLeft,
-            };
-            let drawer_button = toolbar_icon_button(
-                format!("translation-session-{session_id}-edge-drawer-button"),
-                icon,
-            )
-            .w(px(TRANSLATION_PANEL_EDGE_PILL_WIDTH))
-            .h(px(TRANSLATION_PANEL_EDGE_PILL_HEIGHT))
-            .tooltip("Show translation tools")
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.set_translation_panel_dock_surface_hovered(true, cx);
-                cx.stop_propagation();
-            }));
-            let drawer = div()
+            let edge_surface = div()
                 .id(format!(
-                    "translation-session-{session_id}-edge-drawer-surface"
+                    "translation-session-{session_id}-edge-hover-surface"
                 ))
                 .absolute()
                 .top(y)
-                .w(px(TRANSLATION_PANEL_EDGE_PILL_WIDTH))
-                .h(px(TRANSLATION_PANEL_EDGE_PILL_HEIGHT))
-                .flex()
-                .items_center()
-                .justify_center()
-                .popover_style(cx)
-                .when(side == TranslationPanelSide::Left, |this| {
-                    this.left_0()
-                        .rounded_tl(px(0.0))
-                        .rounded_bl(px(0.0))
-                        .rounded_tr(cx.theme().radius_lg)
-                        .rounded_br(cx.theme().radius_lg)
-                })
-                .when(side == TranslationPanelSide::Right, |this| {
-                    this.right_0()
-                        .rounded_tr(px(0.0))
-                        .rounded_br(px(0.0))
-                        .rounded_tl(cx.theme().radius_lg)
-                        .rounded_bl(cx.theme().radius_lg)
-                })
+                .w(px(TRANSLATION_PANEL_EXPOSED_STRIP))
+                .h(panel_height)
+                .when(side == TranslationPanelSide::Left, |this| this.left_0())
+                .when(side == TranslationPanelSide::Right, |this| this.right_0())
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                    this.set_translation_panel_dock_surface_hovered(*hovered, cx);
-                }))
-                .child(drawer_button);
+                    this.set_translation_panel_dock_surface_hovered(
+                        TranslationPanelDockSurface::Edge,
+                        *hovered,
+                        cx,
+                    );
+                }));
             let positioned_panel = div().absolute().left(panel_x).top(y).child(panel);
             return Some(
                 deferred(
@@ -1384,8 +1418,9 @@ impl DocumentView {
                         .top_0()
                         .left_0()
                         .size_full()
+                        .overflow_hidden()
                         .child(positioned_panel)
-                        .child(drawer),
+                        .child(edge_surface),
                 )
                 .with_priority(TRANSLATION_PANEL_OVERLAY_PRIORITY)
                 .into_any_element(),
@@ -1417,22 +1452,6 @@ impl DocumentView {
                 .flex()
                 .justify_end()
         };
-        let snap_target = self.translation_panel_snap_candidate.map(|side| {
-            let y = dragged_position
-                .map(|position| position.y)
-                .unwrap_or_else(|| px(TRANSLATION_PANEL_DEFAULT_TOP));
-            let target = div()
-                .absolute()
-                .top(clamp_translation_panel_edge_y(y, self.viewport_height))
-                .w(px(TRANSLATION_PANEL_EDGE_PILL_WIDTH))
-                .h(px(TRANSLATION_PANEL_EDGE_PILL_HEIGHT))
-                .rounded_lg()
-                .bg(cx.theme().primary.opacity(0.22));
-            match side {
-                TranslationPanelSide::Left => target.left_0(),
-                TranslationPanelSide::Right => target.right_0(),
-            }
-        });
         let overlay_priority = if self.translation_panel_drag.is_some() {
             // The settled panel belongs below root notifications. During a
             // drag, temporarily lift the source surface so a notification at
@@ -1449,7 +1468,6 @@ impl DocumentView {
                     .top_0()
                     .left_0()
                     .size_full()
-                    .children(snap_target)
                     .child(overlay.child(panel)),
             )
             .with_priority(overlay_priority)
@@ -1493,6 +1511,8 @@ impl DocumentView {
         let toggle_unit_id = unit_id.clone();
         let toggle_region_id = region_id.clone();
         let retry_region_id = region_id.clone();
+        let tools_owner = cx.entity().downgrade();
+        let measured_region_id = region_id.clone();
         Some(
             deferred(
                 anchored()
@@ -1513,7 +1533,18 @@ impl DocumentView {
                             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                                 this.set_translation_hover_tools_hovered(*hovered, cx);
                             }))
+                            .on_prepaint(move |bounds, _, cx| {
+                                if let Some(tools_owner) = tools_owner.upgrade() {
+                                    tools_owner.update(cx, |this, _| {
+                                        this.record_translation_hover_tools_bounds(
+                                            measured_region_id.clone(),
+                                            bounds,
+                                        );
+                                    });
+                                }
+                            })
                             .when_some(toggle_unit_id, |this, unit_id| {
+                                let clicked_unit_id = unit_id.clone();
                                 this.child(
                                     toolbar_icon_button(
                                         format!(
@@ -1529,8 +1560,8 @@ impl DocumentView {
                                         "Use original text"
                                     })
                                     .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.toggle_hovered_translation_unit(cx);
+                                        move |this, _, _, cx| {
+                                            this.toggle_translation_unit(&clicked_unit_id, cx);
                                             cx.stop_propagation();
                                         },
                                     )),

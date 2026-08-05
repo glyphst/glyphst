@@ -6,7 +6,7 @@ pub use library::{
     DocumentRotation, EpubReaderPreferences, Highlight, HighlightColor, HighlightRect,
     HistoryEntry, HistoryEntryPersistenceSnapshot, Library, LibraryStore, Note, ReaderPaneSession,
     ReaderPaneTree, ReaderSessionSnapshot, ReaderSidebar, ReaderSplitAxis, ReaderSynchronizedGroup,
-    ReaderTabKind, ReaderTabSession, ReaderWindowBounds, ReaderWindowSession, ReaderWindowState,
-    ReflowPosition, RegionImageReference, SemanticTextAnchor, SemanticTextRange, SidebarWidths,
-    current_timestamp, normalize_path,
+    ReaderTabKind, ReaderTabSession, ReaderTranslationSession, ReaderWindowBounds,
+    ReaderWindowSession, ReaderWindowState, ReflowPosition, RegionImageReference,
+    SemanticTextAnchor, SemanticTextRange, SidebarWidths, current_timestamp, normalize_path,
 };

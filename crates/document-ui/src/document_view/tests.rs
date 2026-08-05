@@ -9,14 +9,15 @@ use super::{
     DocumentPage, DocumentView, Glyph, RegionDragState, RegionImageExport, RenderCache, RenderKey,
     SearchMatch, SearchState, SurfaceRenderKeys, TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY,
     TRANSLATION_PANEL_DEFAULT_RIGHT, TRANSLATION_PANEL_DEFAULT_TOP, TRANSLATION_PANEL_DOCK_DELAY,
-    TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY, TRANSLATION_PANEL_MARGIN,
-    TRANSLATION_PANEL_OVERLAY_PRIORITY, TRANSLATION_PANEL_PREFERRED_WIDTH,
-    TRANSLATION_PANEL_RETRACT_DELAY, TRANSLATION_PANEL_SNAP_ZONE, TextChunk, TextFormatBlock,
-    TextIndexState, TextLine, TranslationCardState, TranslationHoverAnimation,
-    TranslationPanelSide, TranslationStatus, TranslationViewRole, clamp_translation_panel_edge_y,
-    clamp_translation_panel_position, clear_copied_region_selection,
-    default_translation_panel_position, page_render::should_start_viewport_render,
-    reset_translation_cards_for_document_replacement, retain_valid_annotation_id,
+    TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY, TRANSLATION_PANEL_EXPOSED_STRIP,
+    TRANSLATION_PANEL_MARGIN, TRANSLATION_PANEL_OVERLAY_PRIORITY,
+    TRANSLATION_PANEL_PREFERRED_WIDTH, TRANSLATION_PANEL_RETRACT_DELAY,
+    TRANSLATION_PANEL_SNAP_ZONE, TextChunk, TextFormatBlock, TextIndexState, TextLine,
+    TranslationCardState, TranslationHoverAnimation, TranslationPanelSide, TranslationStatus,
+    TranslationViewRole, clamp_translation_panel_edge_y, clamp_translation_panel_position,
+    clear_copied_region_selection, default_translation_panel_position,
+    page_render::should_start_viewport_render, reset_translation_cards_for_document_replacement,
+    retain_valid_annotation_id, translation_hover_interaction_bounds,
     translation_pair_highlights_enabled, translation_panel_docked_x, translation_panel_snap_side,
     translation_panel_width, translation_toolbar_enabled,
 };
@@ -727,19 +728,19 @@ fn translation_panel_snaps_only_inside_the_edge_magnet_zones() {
         Some(TranslationPanelSide::Right)
     );
     assert_eq!(
-        clamp_translation_panel_edge_y(px(900.0), 180.0).as_f32(),
-        132.0
+        clamp_translation_panel_edge_y(px(900.0), 180.0, 76.0).as_f32(),
+        96.0
     );
 }
 
 #[test]
-fn translation_panel_drawer_geometry_is_symmetric_and_delayed() {
+fn translation_panel_wall_geometry_is_symmetric_and_delayed() {
     let viewport_width = 600.0;
     let panel_width = 200.0;
     assert_eq!(
         translation_panel_docked_x(TranslationPanelSide::Left, 0.0, viewport_width, panel_width,)
             .as_f32(),
-        -panel_width
+        -panel_width + TRANSLATION_PANEL_EXPOSED_STRIP
     );
     assert_eq!(
         translation_panel_docked_x(TranslationPanelSide::Left, 1.0, viewport_width, panel_width,)
@@ -754,7 +755,7 @@ fn translation_panel_drawer_geometry_is_symmetric_and_delayed() {
             panel_width,
         )
         .as_f32(),
-        viewport_width
+        viewport_width - TRANSLATION_PANEL_EXPOSED_STRIP
     );
     assert_eq!(
         translation_panel_docked_x(
@@ -766,7 +767,7 @@ fn translation_panel_drawer_geometry_is_symmetric_and_delayed() {
         .as_f32(),
         viewport_width - panel_width - TRANSLATION_PANEL_MARGIN
     );
-    assert_eq!(TRANSLATION_PANEL_DOCK_DELAY, Duration::from_millis(1500));
+    assert_eq!(TRANSLATION_PANEL_DOCK_DELAY, Duration::from_secs(2));
     assert_eq!(TRANSLATION_PANEL_RETRACT_DELAY, Duration::from_millis(400));
 }
 
@@ -797,6 +798,17 @@ fn translation_hover_animation_retargets_after_becoming_invisible() {
     assert_eq!(animation.width.target(), small.size.width.as_f32());
     assert_eq!(animation.height.target(), small.size.height.as_f32());
     assert_eq!(animation.bounds(now), large);
+}
+
+#[test]
+fn translation_hover_tools_and_the_box_share_one_pointer_envelope() {
+    let highlight = Bounds::new(point(px(20.0), px(30.0)), size(px(240.0), px(60.0)));
+    let tools = Bounds::new(point(px(220.0), px(94.0)), size(px(40.0), px(24.0)));
+    let interaction = translation_hover_interaction_bounds(Some(highlight), tools);
+
+    assert!(interaction.contains(&point(px(240.0), px(92.0))));
+    assert!(interaction.contains(&point(px(240.0), px(106.0))));
+    assert!(!interaction.contains(&point(px(240.0), px(124.0))));
 }
 
 #[test]

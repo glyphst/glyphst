@@ -1327,6 +1327,15 @@ fn persists_reader_session_with_duplicate_document_tabs() {
                 tabs: vec![2, 3],
                 paused_tabs: vec![3],
             }],
+            translation_sessions: vec![ReaderTranslationSession {
+                source_tab: 2,
+                translated_tab: 3,
+                source_language: Some("en".to_string()),
+                target_language: "zh-hans".to_string(),
+                mode: "auto".to_string(),
+                cache_key: Some("0123456789abcdef".to_string()),
+                original_unit_ids: vec!["unit-2".to_string(), "unit-7".to_string()],
+            }],
         }],
     };
 
@@ -1337,6 +1346,68 @@ fn persists_reader_session_with_duplicate_document_tabs() {
 
     let store = LibraryStore::open(database_path.clone()).unwrap();
     assert_eq!(store.reader_session(), Some(&session));
+
+    let _ = fs::remove_file(database_path);
+}
+
+#[test]
+fn loads_v1_reader_sessions_without_translation_metadata() {
+    let database_path = temp_library_path("reader-session-v1-compatibility");
+    let stored = StoredReaderSessionV1 {
+        version: STORAGE_SCHEMA_VERSION,
+        windows: vec![StoredReaderWindowSessionV1 {
+            bounds: ReaderWindowBounds {
+                x: 10.0,
+                y: 20.0,
+                width: 900.0,
+                height: 700.0,
+                state: ReaderWindowState::Windowed,
+            },
+            pane_tree: StoredReaderPaneTreeV1::Pane {
+                id: 1,
+                tabs: vec![StoredReaderTabV1 {
+                    id: 1,
+                    kind: StoredReaderTabKindV1::NewTab,
+                }],
+                active_tab: Some(1),
+            },
+            active_pane: 1,
+            left_sidebar: None,
+            ai_panel_open: false,
+            transparency_enabled: false,
+            synchronized_groups: Vec::new(),
+        }],
+    };
+
+    {
+        let database = Database::create(&database_path).unwrap();
+        ensure_tables(&database).unwrap();
+        let write_txn = database.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(UI_STATE_V1_TABLE).unwrap();
+            table
+                .insert(READER_SESSION_KEY, encode(&stored).unwrap().as_slice())
+                .unwrap();
+        }
+        {
+            let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE).unwrap();
+            migrations
+                .insert(
+                    STORAGE_V1_MIGRATION_KEY,
+                    [STORAGE_SCHEMA_VERSION].as_slice(),
+                )
+                .unwrap();
+            migrations
+                .insert(STORAGE_V2_MIGRATION_KEY, [STORAGE_V2_VERSION].as_slice())
+                .unwrap();
+        }
+        write_txn.commit().unwrap();
+    }
+
+    let store = LibraryStore::open(database_path.clone()).unwrap();
+    let session = store.reader_session().unwrap();
+    assert_eq!(session.windows.len(), 1);
+    assert!(session.windows[0].translation_sessions.is_empty());
 
     let _ = fs::remove_file(database_path);
 }

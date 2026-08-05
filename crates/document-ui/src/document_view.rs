@@ -158,10 +158,9 @@ const TRANSLATION_PANEL_DEFAULT_RIGHT: f32 = 16.0;
 const TRANSLATION_PANEL_DEFAULT_TOP: f32 = 12.0;
 const TRANSLATION_PANEL_COMPACT_BREAKPOINT: f32 = 300.0;
 const TRANSLATION_PANEL_DEFAULT_HEIGHT: f32 = 76.0;
-const TRANSLATION_PANEL_SNAP_ZONE: f32 = 32.0;
-const TRANSLATION_PANEL_EDGE_PILL_WIDTH: f32 = 24.0;
-const TRANSLATION_PANEL_EDGE_PILL_HEIGHT: f32 = 40.0;
-const TRANSLATION_PANEL_DOCK_DELAY: Duration = Duration::from_millis(1500);
+const TRANSLATION_PANEL_SNAP_ZONE: f32 = 12.0;
+const TRANSLATION_PANEL_EXPOSED_STRIP: f32 = 8.0;
+const TRANSLATION_PANEL_DOCK_DELAY: Duration = Duration::from_secs(2);
 const TRANSLATION_PANEL_RETRACT_DELAY: Duration = Duration::from_millis(400);
 const TRANSLATION_HOVER_CLEAR_GRACE: Duration = Duration::from_millis(100);
 const TRANSLATION_HOVER_FADE: MotionSpec = MotionSpec::new(120, EASE_OUT);
@@ -237,16 +236,23 @@ fn translation_panel_docked_x(
         }
     };
     let hidden = match side {
-        TranslationPanelSide::Left => -panel_width,
-        TranslationPanelSide::Right => viewport_width,
+        TranslationPanelSide::Left => -panel_width + TRANSLATION_PANEL_EXPOSED_STRIP,
+        TranslationPanelSide::Right => viewport_width - TRANSLATION_PANEL_EXPOSED_STRIP,
     };
     px(hidden + (shown - hidden) * reveal)
 }
 
-fn clamp_translation_panel_edge_y(y: Pixels, viewport_height: f32) -> Pixels {
-    let maximum = (viewport_height - TRANSLATION_PANEL_EDGE_PILL_HEIGHT - TRANSLATION_PANEL_MARGIN)
-        .max(TRANSLATION_PANEL_MARGIN);
+fn clamp_translation_panel_edge_y(y: Pixels, viewport_height: f32, panel_height: f32) -> Pixels {
+    let maximum =
+        (viewport_height - panel_height - TRANSLATION_PANEL_MARGIN).max(TRANSLATION_PANEL_MARGIN);
     px(y.as_f32().clamp(TRANSLATION_PANEL_MARGIN, maximum))
+}
+
+fn translation_hover_interaction_bounds(
+    highlight_bounds: Option<Bounds<Pixels>>,
+    tools_bounds: Bounds<Pixels>,
+) -> Bounds<Pixels> {
+    highlight_bounds.map_or(tools_bounds, |bounds| bounds.union(&tools_bounds))
 }
 
 static NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
@@ -851,6 +857,12 @@ enum TranslationPanelSide {
     Right,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranslationPanelDockSurface {
+    Panel,
+    Edge,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 enum TranslationPanelPlacement {
     #[default]
@@ -1384,15 +1396,16 @@ pub struct DocumentView {
     translation_hover_clear_generation: u64,
     translation_hover_clear_task: Option<Task<()>>,
     translation_hover_tools_hovered: bool,
+    translation_hover_tools_bounds: Option<(String, Bounds<Pixels>)>,
     translation_panel_placement: TranslationPanelPlacement,
     translation_panel_drag: Option<TranslationPanelDrag>,
-    translation_panel_snap_candidate: Option<TranslationPanelSide>,
     translation_panel_size: Size<Pixels>,
     translation_panel_dock_generation: u64,
     translation_panel_dock_task: Option<Task<()>>,
     translation_panel_retract_generation: u64,
     translation_panel_retract_task: Option<Task<()>>,
-    translation_panel_dock_surface_hovered: bool,
+    translation_panel_dock_panel_hovered: bool,
+    translation_panel_dock_edge_hovered: bool,
     pending_selection_anchor: Option<usize>,
     dragging: bool,
     hovered_link: Option<usize>,

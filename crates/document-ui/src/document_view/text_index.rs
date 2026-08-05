@@ -299,6 +299,7 @@ impl DocumentView {
             self.translation_hover_clear_generation.wrapping_add(1);
         self.translation_hover_clear_task = None;
         self.translation_hover_tools_hovered = false;
+        self.translation_hover_tools_bounds = None;
     }
 
     pub(super) fn replace_translation_document(&mut self) {

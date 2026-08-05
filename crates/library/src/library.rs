@@ -62,6 +62,7 @@ const AI_SESSIONS_V4_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("
 const SIDEBAR_WIDTHS_KEY: &str = "sidebar_widths";
 const DOCUMENT_BROWSER_SIZE_KEY: &str = "document_browser_size";
 const READER_SESSION_KEY: &str = "reader_session";
+const READER_SESSION_STORAGE_V2: u8 = 2;
 const MAX_AI_SESSIONS: usize = 200;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -740,6 +741,35 @@ struct StoredReaderSessionV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderSessionV2 {
+    version: u8,
+    windows: Vec<StoredReaderWindowSessionV2>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderWindowSessionV2 {
+    bounds: ReaderWindowBounds,
+    pane_tree: StoredReaderPaneTreeV1,
+    active_pane: u64,
+    left_sidebar: Option<ReaderSidebar>,
+    ai_panel_open: bool,
+    transparency_enabled: bool,
+    synchronized_groups: Vec<ReaderSynchronizedGroup>,
+    translation_sessions: Vec<StoredReaderTranslationSessionV2>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderTranslationSessionV2 {
+    source_tab: u64,
+    translated_tab: u64,
+    source_language: Option<String>,
+    target_language: String,
+    mode: String,
+    cache_key: Option<String>,
+    original_unit_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredReaderWindowSessionV1 {
     bounds: ReaderWindowBounds,
     pane_tree: StoredReaderPaneTreeV1,
@@ -806,6 +836,32 @@ impl StoredReaderSessionV1 {
     }
 }
 
+impl From<&ReaderSessionSnapshot> for StoredReaderSessionV2 {
+    fn from(session: &ReaderSessionSnapshot) -> Self {
+        Self {
+            version: READER_SESSION_STORAGE_V2,
+            windows: session
+                .windows
+                .iter()
+                .map(StoredReaderWindowSessionV2::from)
+                .collect(),
+        }
+    }
+}
+
+impl StoredReaderSessionV2 {
+    fn into_domain(self) -> Result<ReaderSessionSnapshot> {
+        require_storage_version(self.version, READER_SESSION_STORAGE_V2)?;
+        Ok(ReaderSessionSnapshot {
+            windows: self
+                .windows
+                .into_iter()
+                .map(StoredReaderWindowSessionV2::into_domain)
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
 impl From<&ReaderWindowSession> for StoredReaderWindowSessionV1 {
     fn from(window: &ReaderWindowSession) -> Self {
         Self {
@@ -830,7 +886,74 @@ impl StoredReaderWindowSessionV1 {
             ai_panel_open: self.ai_panel_open,
             transparency_enabled: self.transparency_enabled,
             synchronized_groups: self.synchronized_groups,
+            translation_sessions: Vec::new(),
         })
+    }
+}
+
+impl From<&ReaderWindowSession> for StoredReaderWindowSessionV2 {
+    fn from(window: &ReaderWindowSession) -> Self {
+        Self {
+            bounds: window.bounds,
+            pane_tree: StoredReaderPaneTreeV1::from(&window.pane_tree),
+            active_pane: window.active_pane,
+            left_sidebar: window.left_sidebar,
+            ai_panel_open: window.ai_panel_open,
+            transparency_enabled: window.transparency_enabled,
+            synchronized_groups: window.synchronized_groups.clone(),
+            translation_sessions: window
+                .translation_sessions
+                .iter()
+                .map(StoredReaderTranslationSessionV2::from)
+                .collect(),
+        }
+    }
+}
+
+impl StoredReaderWindowSessionV2 {
+    fn into_domain(self) -> Result<ReaderWindowSession> {
+        Ok(ReaderWindowSession {
+            bounds: self.bounds.sanitized(),
+            pane_tree: self.pane_tree.into_domain()?,
+            active_pane: self.active_pane,
+            left_sidebar: self.left_sidebar,
+            ai_panel_open: self.ai_panel_open,
+            transparency_enabled: self.transparency_enabled,
+            synchronized_groups: self.synchronized_groups,
+            translation_sessions: self
+                .translation_sessions
+                .into_iter()
+                .map(StoredReaderTranslationSessionV2::into_domain)
+                .collect(),
+        })
+    }
+}
+
+impl From<&ReaderTranslationSession> for StoredReaderTranslationSessionV2 {
+    fn from(session: &ReaderTranslationSession) -> Self {
+        Self {
+            source_tab: session.source_tab,
+            translated_tab: session.translated_tab,
+            source_language: session.source_language.clone(),
+            target_language: session.target_language.clone(),
+            mode: session.mode.clone(),
+            cache_key: session.cache_key.clone(),
+            original_unit_ids: session.original_unit_ids.clone(),
+        }
+    }
+}
+
+impl StoredReaderTranslationSessionV2 {
+    fn into_domain(self) -> ReaderTranslationSession {
+        ReaderTranslationSession {
+            source_tab: self.source_tab,
+            translated_tab: self.translated_tab,
+            source_language: self.source_language,
+            target_language: self.target_language,
+            mode: self.mode,
+            cache_key: self.cache_key,
+            original_unit_ids: self.original_unit_ids,
+        }
     }
 }
 
@@ -1433,6 +1556,7 @@ pub struct ReaderWindowSession {
     pub ai_panel_open: bool,
     pub transparency_enabled: bool,
     pub synchronized_groups: Vec<ReaderSynchronizedGroup>,
+    pub translation_sessions: Vec<ReaderTranslationSession>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1491,6 +1615,17 @@ pub struct ReaderPaneSession {
 pub struct ReaderTabSession {
     pub id: u64,
     pub kind: ReaderTabKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderTranslationSession {
+    pub source_tab: u64,
+    pub translated_tab: u64,
+    pub source_language: Option<String>,
+    pub target_language: String,
+    pub mode: String,
+    pub cache_key: Option<String>,
+    pub original_unit_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

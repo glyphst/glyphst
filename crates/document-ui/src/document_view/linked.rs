@@ -121,6 +121,7 @@ impl DocumentView {
         {
             return;
         }
+        self.translation_hover_tools_bounds = None;
         self.hovered_translation_region = region_id.clone();
         if !self.suppress_linked_events
             && let Some(session_id) = self.translation_pair_session_id
@@ -133,7 +134,7 @@ impl DocumentView {
         cx.notify();
     }
 
-    fn cancel_translation_hover_clear(&mut self) {
+    pub(super) fn cancel_translation_hover_clear(&mut self) {
         self.translation_hover_clear_generation =
             self.translation_hover_clear_generation.wrapping_add(1);
         self.translation_hover_clear_task = None;
@@ -192,6 +193,44 @@ impl DocumentView {
         }
     }
 
+    pub(super) fn record_translation_hover_tools_bounds(
+        &mut self,
+        region_id: String,
+        bounds: Bounds<Pixels>,
+    ) {
+        if self.hovered_translation_region.as_deref() == Some(region_id.as_str()) {
+            self.translation_hover_tools_bounds = Some((region_id, bounds));
+        }
+    }
+
+    pub(super) fn translation_hover_interaction_contains(
+        &self,
+        position: GpuiPoint<Pixels>,
+    ) -> bool {
+        let Some(region_id) = self.hovered_translation_region.as_deref() else {
+            return false;
+        };
+        let Some((tools_region_id, tools_bounds)) = self.translation_hover_tools_bounds.as_ref()
+        else {
+            return false;
+        };
+        if tools_region_id != region_id {
+            return false;
+        }
+        let now = Instant::now();
+        let highlight_bounds = self
+            .translation_hover_animation
+            .as_ref()
+            .filter(|animation| animation.region_id == region_id)
+            .map(|animation| animation.bounds(now))
+            .or_else(|| {
+                self.translation_hover_region_highlights(region_id)
+                    .into_iter()
+                    .reduce(|left, right| left.union(&right))
+            });
+        translation_hover_interaction_bounds(highlight_bounds, *tools_bounds).contains(&position)
+    }
+
     pub(super) fn clear_translation_hover_state(
         &mut self,
         reset_animation: bool,
@@ -199,6 +238,7 @@ impl DocumentView {
     ) {
         self.cancel_translation_hover_clear();
         self.translation_hover_tools_hovered = false;
+        self.translation_hover_tools_bounds = None;
         self.publish_hovered_translation_region(None, cx);
         self.external_hovered_translation_region = None;
         if reset_animation {
