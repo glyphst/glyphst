@@ -2,8 +2,12 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
     fmt, fs,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -15,6 +19,8 @@ pub use glyphst_core::{
 use gpui::Global;
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest as _, Sha256};
+use uuid::Uuid;
 
 const MAX_HISTORY_ENTRIES: usize = 100;
 const MAX_DOCUMENT_EDIT_HISTORY_ENTRIES: usize = 100;
@@ -2304,7 +2310,7 @@ pub struct Library {
     pub library_item_tags: Vec<LibraryItemTag>,
     pub library_saved_views: Vec<LibrarySavedView>,
     pub library_collections: Vec<LibraryCollection>,
-    pub library_item_collections: Vec<LibraryItemCollection>,
+    pub library_item_locations: Vec<LibraryItemLocation>,
     pub history: Vec<HistoryEntry>,
     pub bookmarks: Vec<Bookmark>,
     pub highlights: Vec<Highlight>,
@@ -2329,6 +2335,7 @@ pub struct Library {
 pub struct LibraryStore {
     pub library: Library,
     database: Option<Arc<Database>>,
+    managed_library_root: Option<PathBuf>,
     startup_error: Option<String>,
     document_edit_histories: HashMap<PathBuf, DocumentEditHistory>,
     next_document_edit_sequence: u64,

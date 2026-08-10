@@ -1,4 +1,5 @@
 use super::*;
+use redb::ReadableTableMetadata as _;
 
 #[test]
 fn history_path_keys_do_not_collide_for_non_utf8_paths() {
@@ -200,6 +201,37 @@ fn migrates_legacy_storage_without_replacing_legacy_rows() {
                 .insert(SIDEBAR_WIDTHS_KEY, encode(&widths).unwrap().as_slice())
                 .unwrap();
         }
+        {
+            let stale_catalog_item = LibraryItem {
+                id: DocumentId(1),
+                kind: LibraryItemKind::Paper,
+                title: "Legacy linked item".to_string(),
+                creators: Vec::new(),
+                year: None,
+                publication: String::new(),
+                publisher: String::new(),
+                abstract_text: String::new(),
+                subject: String::new(),
+                language: String::new(),
+                identifiers: LibraryIdentifiers::default(),
+                embedded_keywords: Vec::new(),
+                favorite: false,
+                status: ReadingStatus::ToRead,
+                work_note: String::new(),
+                created: 1,
+                updated: 1,
+                trashed_at: None,
+            };
+            let mut table = write_txn.open_table(LIBRARY_ITEMS_V1_TABLE).unwrap();
+            table
+                .insert(
+                    stale_catalog_item.id.0,
+                    encode(&StoredLibraryItemV1::new(&stale_catalog_item))
+                        .unwrap()
+                        .as_slice(),
+                )
+                .unwrap();
+        }
         write_txn.commit().unwrap();
     }
 
@@ -214,6 +246,7 @@ fn migrates_legacy_storage_without_replacing_legacy_rows() {
         assert_eq!(store.notes_for(&document_path), vec![note.clone()]);
         assert_eq!(store.ai_sessions_for(&document_path), vec![session.clone()]);
         assert_eq!(store.sidebar_widths(), Some(widths));
+        assert!(store.library_items().is_empty());
     }
 
     {
@@ -261,6 +294,22 @@ fn migrates_legacy_storage_without_replacing_legacy_rows() {
                 .open_table(STORAGE_MIGRATIONS_TABLE)
                 .unwrap()
                 .get(STORAGE_V1_MIGRATION_KEY)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            read_txn
+                .open_table(LIBRARY_ITEMS_V1_TABLE)
+                .unwrap()
+                .len()
+                .unwrap(),
+            0
+        );
+        assert!(
+            read_txn
+                .open_table(STORAGE_MIGRATIONS_TABLE)
+                .unwrap()
+                .get(MANAGED_LIBRARY_MIGRATION_KEY)
                 .unwrap()
                 .is_some()
         );

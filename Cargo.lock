@@ -2718,6 +2718,8 @@ dependencies = [
  "gpui",
  "redb",
  "serde",
+ "sha2",
+ "uuid",
 ]
 
 [[package]]

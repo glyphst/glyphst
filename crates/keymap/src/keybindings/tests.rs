@@ -498,4 +498,12 @@ fn new_tab_navigation_uses_native_and_vim_defaults() {
         first_action_for(&vim, "shift-g", &["NewTab"]),
         CursorLast::name_for_type()
     );
+    assert!(
+        action_names_for(&vim, "k", &["NewTab", "Input"]).is_empty(),
+        "New Tab navigation must not intercept text input"
+    );
+    assert!(
+        action_names_for(&vim, "k", &["NewTab", "NewTabModal"]).is_empty(),
+        "New Tab navigation must not run behind a modal"
+    );
 }

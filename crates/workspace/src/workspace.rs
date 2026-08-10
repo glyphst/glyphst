@@ -4648,6 +4648,12 @@ mod tests {
             root.view().clone().downcast::<Workspace>().unwrap()
         });
         cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let document_rail = cx
+            .debug_bounds("workspace-document-tool-rail")
+            .expect("document navigation rail");
         let document_id = workspace.update_in(cx, |workspace, window, cx| {
             workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
             let document_id = workspace
@@ -4668,6 +4674,12 @@ mod tests {
         });
         assert!(cx.debug_bounds("home-view").is_some());
         assert!(cx.debug_bounds("toc-sidebar-content").is_none());
+        let home_rail = cx
+            .debug_bounds("home-navigation-rail")
+            .expect("Home navigation rail");
+        assert_eq!(home_rail.left(), document_rail.left());
+        assert_eq!(home_rail.size.width, document_rail.size.width);
+        assert_eq!(home_rail.left(), px(glyphst_ui::style::SURFACE_INSET));
 
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.leave_home(window, cx);
@@ -6422,6 +6434,9 @@ mod tests {
         assert!(cx.debug_bounds("workspace-menu-glyphst").is_some());
         assert!(cx.debug_bounds("workspace-menu-file").is_some());
         assert!(cx.debug_bounds("workspace-menu-tab").is_some());
+        let home = cx.debug_bounds("workspace-home").unwrap();
+        let glyphst_menu = cx.debug_bounds("workspace-menu-glyphst").unwrap();
+        assert!(home.right() <= glyphst_menu.left());
 
         let glyphst = cx.debug_bounds("workspace-menu-glyphst").unwrap().center();
         cx.simulate_click(glyphst, Modifiers::default());

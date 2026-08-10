@@ -38,7 +38,53 @@ pub(super) fn restrict_library_file(path: &Path) -> Result<()> {
 }
 
 pub(super) fn library_path() -> PathBuf {
-    glyphst_core::paths::state_dir().join("library.redb")
+    managed_library_root().join("library.redb")
+}
+
+pub(super) fn managed_library_root() -> PathBuf {
+    glyphst_core::paths::data_dir().join("library")
+}
+
+pub(super) fn ensure_managed_library_directories(root: &Path) -> Result<()> {
+    create_private_directory(root)?;
+    create_private_directory(&root.join("files"))?;
+    create_private_directory(&root.join(".staging"))?;
+    create_private_directory(&root.join(".deleting"))?;
+    Ok(())
+}
+
+pub(super) fn migrate_legacy_library_database(target: &Path) -> Result<()> {
+    if target.exists() {
+        return Ok(());
+    }
+    let legacy = glyphst_core::paths::state_dir().join("library.redb");
+    if !legacy.is_file() {
+        return Ok(());
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow!("library database path has no parent"))?;
+    create_private_directory(parent)?;
+    let staging = parent.join("library.redb.migrating");
+    if staging.exists() {
+        fs::remove_file(&staging)
+            .with_context(|| format!("failed to remove stale {}", staging.display()))?;
+    }
+    fs::copy(&legacy, &staging).with_context(|| {
+        format!(
+            "failed to copy legacy library database from {} to {}",
+            legacy.display(),
+            staging.display()
+        )
+    })?;
+    restrict_library_file(&staging)?;
+    fs::rename(&staging, target).with_context(|| {
+        format!(
+            "failed to install migrated database at {}",
+            target.display()
+        )
+    })?;
+    Ok(())
 }
 
 pub(super) fn ensure_tables(database: &Database) -> Result<()> {
@@ -119,6 +165,9 @@ pub(super) fn ensure_tables(database: &Database) -> Result<()> {
         write_txn.open_table(LIBRARY_ATTACHMENTS_V1_TABLE)?;
     }
     {
+        write_txn.open_table(LIBRARY_ATTACHMENTS_V2_TABLE)?;
+    }
+    {
         write_txn.open_table(LIBRARY_TAGS_V1_TABLE)?;
     }
     {
@@ -133,11 +182,57 @@ pub(super) fn ensure_tables(database: &Database) -> Result<()> {
     {
         write_txn.open_table(LIBRARY_ITEM_COLLECTIONS_V1_TABLE)?;
     }
+    {
+        write_txn.open_table(LIBRARY_ITEM_LOCATIONS_V2_TABLE)?;
+    }
     write_txn.commit()?;
     Ok(())
 }
 
-pub(super) fn load_library(database: &Database) -> Result<Library> {
+pub(super) fn initialize_managed_catalog(database: &Database) -> Result<()> {
+    let write_txn = database.begin_write()?;
+    {
+        let migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        if migrations.get(MANAGED_LIBRARY_MIGRATION_KEY)?.is_some() {
+            return Ok(());
+        }
+    }
+
+    macro_rules! clear_u64_table {
+        ($definition:expr) => {{
+            let mut table = write_txn.open_table($definition)?;
+            let keys = table
+                .iter()?
+                .filter_map(|entry| entry.ok().map(|(key, _)| key.value()))
+                .collect::<Vec<_>>();
+            for key in keys {
+                table.remove(key)?;
+            }
+        }};
+    }
+
+    clear_u64_table!(LIBRARY_ITEMS_V1_TABLE);
+    clear_u64_table!(LIBRARY_ATTACHMENTS_V1_TABLE);
+    clear_u64_table!(LIBRARY_ATTACHMENTS_V2_TABLE);
+    clear_u64_table!(LIBRARY_TAGS_V1_TABLE);
+    clear_u64_table!(LIBRARY_ITEM_TAGS_V1_TABLE);
+    clear_u64_table!(LIBRARY_SAVED_VIEWS_V1_TABLE);
+    clear_u64_table!(LIBRARY_COLLECTIONS_V1_TABLE);
+    clear_u64_table!(LIBRARY_ITEM_COLLECTIONS_V1_TABLE);
+    clear_u64_table!(LIBRARY_ITEM_LOCATIONS_V2_TABLE);
+
+    {
+        let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        migrations.insert(
+            MANAGED_LIBRARY_MIGRATION_KEY,
+            [MANAGED_LIBRARY_STORAGE_VERSION].as_slice(),
+        )?;
+    }
+    write_txn.commit()?;
+    Ok(())
+}
+
+pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<Library> {
     let mut library = Library::default();
     let (
         has_v1_storage,
@@ -192,7 +287,7 @@ pub(super) fn load_library(database: &Database) -> Result<Library> {
         has_v2_storage,
         has_v1_storage,
     )?;
-    load_catalog(&read_txn, &mut library)?;
+    load_catalog(&read_txn, &mut library, managed_root)?;
     drop(read_txn);
 
     library.sanitize();
@@ -217,7 +312,11 @@ pub(super) fn load_library(database: &Database) -> Result<Library> {
     Ok(library)
 }
 
-fn load_catalog(read_txn: &redb::ReadTransaction, library: &mut Library) -> Result<()> {
+fn load_catalog(
+    read_txn: &redb::ReadTransaction,
+    library: &mut Library,
+    managed_root: &Path,
+) -> Result<()> {
     {
         let table = read_txn.open_table(LIBRARY_ITEMS_V1_TABLE)?;
         for entry in table.iter()? {
@@ -231,16 +330,13 @@ fn load_catalog(read_txn: &redb::ReadTransaction, library: &mut Library) -> Resu
         }
     }
     {
-        let table = read_txn.open_table(LIBRARY_ATTACHMENTS_V1_TABLE)?;
+        let table = read_txn.open_table(LIBRARY_ATTACHMENTS_V2_TABLE)?;
         for entry in table.iter()? {
             let (_, value) = entry?;
-            match decode::<StoredLibraryAttachmentV1>(value.value())
-                .and_then(StoredLibraryAttachmentV1::into_domain)
+            match decode::<StoredLibraryAttachmentV2>(value.value())
+                .and_then(|attachment| attachment.into_domain(managed_root))
             {
-                Ok(mut attachment) => {
-                    attachment.path = normalize_path(&attachment.path);
-                    library.library_attachments.push(attachment);
-                }
+                Ok(attachment) => library.library_attachments.push(attachment),
                 Err(error) => eprintln!("failed to decode library attachment: {error:#}"),
             }
         }
@@ -301,23 +397,14 @@ fn load_catalog(read_txn: &redb::ReadTransaction, library: &mut Library) -> Resu
         }
     }
     {
-        let table = read_txn.open_table(LIBRARY_ITEM_COLLECTIONS_V1_TABLE)?;
+        let table = read_txn.open_table(LIBRARY_ITEM_LOCATIONS_V2_TABLE)?;
         for entry in table.iter()? {
-            let (item_id, value) = entry?;
-            match decode::<StoredLibraryItemCollectionsV1>(value.value())
-                .and_then(StoredLibraryItemCollectionsV1::into_domain)
+            let (_, value) = entry?;
+            match decode::<StoredLibraryItemLocationV2>(value.value())
+                .and_then(StoredLibraryItemLocationV2::into_domain)
             {
-                Ok(collection_ids) => {
-                    library
-                        .library_item_collections
-                        .extend(collection_ids.into_iter().map(|collection_id| {
-                            LibraryItemCollection {
-                                item_id: DocumentId(item_id.value()),
-                                collection_id,
-                            }
-                        }));
-                }
-                Err(error) => eprintln!("failed to decode library folder membership: {error:#}"),
+                Ok(location) => library.library_item_locations.push(location),
+                Err(error) => eprintln!("failed to decode library item location: {error:#}"),
             }
         }
     }

@@ -89,6 +89,7 @@ const OVERLAY_CONTEXTS: &[&str] = &[
     "AiPanel",
     "SettingsPanel",
     "ThemeSelector",
+    "NewTabModal",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -163,7 +164,7 @@ impl KeyBindingCategory {
             Self::Workspace => context_without_overlays("Workspace"),
             Self::DocumentView => context_without_overlays("DocumentView"),
             Self::PageOverview => context_without_overlays("GridOverview"),
-            Self::NewTab => context_without_overlays("NewTab"),
+            Self::NewTab => format!("{} && !Input", context_without_overlays("NewTab")),
             Self::SearchResults => "Search".to_string(),
         }
     }

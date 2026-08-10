@@ -10,3 +10,5 @@ glyphst-core = { path = "../core" }
 gpui.workspace = true
 redb.workspace = true
 serde.workspace = true
+sha2.workspace = true
+uuid.workspace = true

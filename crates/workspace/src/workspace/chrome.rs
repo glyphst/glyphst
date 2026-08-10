@@ -178,6 +178,24 @@ impl RenderOnce for WorkspaceTitleBar {
             .items_center()
             .gap_1()
             .children([
+                Button::new("workspace-home")
+                    .small()
+                    .compact()
+                    .ghost()
+                    .icon(IconName::Home)
+                    .tooltip("Toggle Home")
+                    .selected(self.home_active)
+                    .debug_selector(|| "workspace-home".to_string())
+                    .on_click({
+                        let workspace = workspace.clone();
+                        move |_, window, cx| {
+                            cx.stop_propagation();
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.toggle_home(window, cx);
+                            });
+                        }
+                    })
+                    .into_any_element(),
                 Self::menu_button(
                     "workspace-menu-glyphst",
                     crate::fl!("toolbar-menu-glyphst").into(),
@@ -205,24 +223,6 @@ impl RenderOnce for WorkspaceTitleBar {
                     self.open_menu == Some(WorkspaceMenu::Tabs),
                     popup_for(WorkspaceMenu::Tabs),
                 ),
-                Button::new("workspace-home")
-                    .small()
-                    .compact()
-                    .ghost()
-                    .icon(IconName::Home)
-                    .tooltip("Toggle Home")
-                    .selected(self.home_active)
-                    .debug_selector(|| "workspace-home".to_string())
-                    .on_click({
-                        let workspace = workspace.clone();
-                        move |_, window, cx| {
-                            cx.stop_propagation();
-                            workspace.update(cx, |workspace, cx| {
-                                workspace.toggle_home(window, cx);
-                            });
-                        }
-                    })
-                    .into_any_element(),
             ])
             .when_some(self.active_tab_label, |this, label| {
                 this.child(

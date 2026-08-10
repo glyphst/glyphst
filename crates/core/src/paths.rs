@@ -14,9 +14,14 @@ pub fn state_dir() -> PathBuf {
     state_base_dir().join(APP_DIR_NAME)
 }
 
+pub fn data_dir() -> PathBuf {
+    data_base_dir().join(APP_DIR_NAME)
+}
+
 pub fn migrate_legacy_app_dirs() -> io::Result<()> {
     migrate_legacy_dir(&config_base_dir())?;
-    migrate_legacy_dir(&state_base_dir())
+    migrate_legacy_dir(&state_base_dir())?;
+    migrate_legacy_dir(&data_base_dir())
 }
 
 fn config_base_dir() -> PathBuf {
@@ -28,6 +33,12 @@ fn config_base_dir() -> PathBuf {
 fn state_base_dir() -> PathBuf {
     dirs::state_dir()
         .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn data_base_dir() -> PathBuf {
+    dirs::data_dir()
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/share")))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 

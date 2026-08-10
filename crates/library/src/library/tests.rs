@@ -609,6 +609,7 @@ fn failed_edits_do_not_move_and_conflicts_clear_history() {
     let mut unavailable = LibraryStore {
         library: Library::default(),
         database: None,
+        managed_library_root: None,
         startup_error: Some("database startup failed".to_string()),
         document_edit_histories: HashMap::new(),
         next_document_edit_sequence: 0,
@@ -1531,6 +1532,7 @@ fn history_save_fails_when_database_is_unavailable() {
     let mut store = LibraryStore {
         library: Library::default(),
         database: None,
+        managed_library_root: None,
         startup_error: Some("database startup failed".to_string()),
         document_edit_histories: HashMap::new(),
         next_document_edit_sequence: 0,
@@ -1563,6 +1565,7 @@ fn document_preference_writes_fail_when_database_is_unavailable() {
     let mut store = LibraryStore {
         library: Library::default(),
         database: None,
+        managed_library_root: None,
         startup_error: Some("database startup failed".to_string()),
         document_edit_histories: HashMap::new(),
         next_document_edit_sequence: 0,
@@ -2176,7 +2179,7 @@ fn catalog_persists_items_tags_saved_views_and_trash() {
 }
 
 #[test]
-fn catalog_persists_nested_folders_and_safe_multi_membership() {
+fn catalog_persists_nested_folders_and_single_parent_locations() {
     let database_path = temp_library_path("catalog-folders");
     let first_path = database_path.with_extension("first.pdf");
     let second_path = database_path.with_extension("second.pdf");
@@ -2218,7 +2221,11 @@ fn catalog_persists_nested_folders_and_safe_multi_membership() {
                 .unwrap(),
             1
         );
-        assert_eq!(store.direct_collection_items(Some(ml_id)), vec![first_id]);
+        assert!(store.direct_collection_items(Some(ml_id)).is_empty());
+        assert_eq!(
+            store.direct_collection_items(Some(books_id)),
+            vec![first_id]
+        );
         assert_eq!(store.direct_collection_items(None), vec![second_id]);
         assert_eq!(
             store.collection_path_label(ml_id),
@@ -2236,7 +2243,7 @@ fn catalog_persists_nested_folders_and_safe_multi_membership() {
                 .into_iter()
                 .map(|collection| collection.id)
                 .collect::<Vec<_>>(),
-            vec![books_id, ml_id]
+            vec![books_id]
         );
         assert_eq!(store.delete_library_collection(papers_id).unwrap(), 2);
         assert!(store.library_collection(papers_id).is_none());
@@ -2256,7 +2263,8 @@ fn catalog_persists_nested_folders_and_safe_multi_membership() {
 
     let _ = fs::remove_file(first_path);
     let _ = fs::remove_file(second_path);
-    let _ = fs::remove_file(database_path);
+    let _ = fs::remove_file(&database_path);
+    let _ = fs::remove_dir_all(database_path.with_extension("managed-library"));
 }
 
 #[test]
@@ -2275,18 +2283,17 @@ fn relinking_catalog_item_moves_path_backed_reader_data_atomically() {
         else {
             panic!("expected a new library item");
         };
-        store.record_history(&old_path, position(3));
+        let managed_old_path = store.primary_attachment(item_id).unwrap().path.clone();
+        store.record_history(&managed_old_path, position(3));
         store
-            .add_bookmark(&old_path, "bookmark", position(4))
+            .add_bookmark(&managed_old_path, "bookmark", position(4))
             .unwrap();
         store.relink_library_attachment(item_id, &new_path).unwrap();
 
-        assert_eq!(
-            store.primary_attachment(item_id).unwrap().path,
-            normalize_path(&new_path)
-        );
-        assert_eq!(store.history_entries()[0].path, normalize_path(&new_path));
-        assert_eq!(store.bookmarks()[0].path, normalize_path(&new_path));
+        let managed_path = store.primary_attachment(item_id).unwrap().path.clone();
+        assert_ne!(managed_path, normalize_path(&new_path));
+        assert_eq!(store.history_entries()[0].path, managed_path);
+        assert_eq!(store.bookmarks()[0].path, managed_path);
         assert!(old_path.exists());
         assert!(new_path.exists());
     }
@@ -2294,17 +2301,16 @@ fn relinking_catalog_item_moves_path_backed_reader_data_atomically() {
     {
         let store = LibraryStore::open(database_path.clone()).unwrap();
         assert_eq!(store.library_items().len(), 1);
-        assert_eq!(
-            store.library.library_attachments[0].path,
-            normalize_path(&new_path)
-        );
-        assert_eq!(store.history_entries()[0].path, normalize_path(&new_path));
-        assert_eq!(store.bookmarks()[0].path, normalize_path(&new_path));
+        let managed_path = store.library.library_attachments[0].path.clone();
+        assert_ne!(managed_path, normalize_path(&new_path));
+        assert_eq!(store.history_entries()[0].path, managed_path);
+        assert_eq!(store.bookmarks()[0].path, managed_path);
     }
 
     let _ = fs::remove_file(old_path);
     let _ = fs::remove_file(new_path);
-    let _ = fs::remove_file(database_path);
+    let _ = fs::remove_file(&database_path);
+    let _ = fs::remove_dir_all(database_path.with_extension("managed-library"));
 }
 
 #[test]
@@ -2452,6 +2458,170 @@ fn catalog_trash_is_reversible_and_permanent_delete_preserves_source_and_history
     assert!(store.library_item(item_id).is_none());
     assert_eq!(store.history_entries().len(), 1);
     assert!(document_path.exists());
+
+    let _ = fs::remove_file(document_path);
+}
+
+#[test]
+fn managed_import_copies_content_deduplicates_and_deletes_only_owned_files() {
+    let database_path = temp_library_path("managed-import");
+    let managed_root = database_path.with_extension("managed-library");
+    let first_source = database_path.with_extension("first.pdf");
+    let duplicate_source = database_path.with_extension("duplicate.pdf");
+    let content = b"%PDF-1.4\nmanaged library test";
+    fs::write(&first_source, content).unwrap();
+    fs::write(&duplicate_source, content).unwrap();
+
+    let mut store = LibraryStore::open(database_path.clone()).unwrap();
+    let LibraryAddOutcome::Added(item_id) = store
+        .add_linked_item(&first_source, LibraryItemMetadata::for_path(&first_source))
+        .unwrap()
+    else {
+        panic!("expected a new managed item");
+    };
+    let managed_path = store.primary_attachment(item_id).unwrap().path.clone();
+    assert!(managed_path.starts_with(managed_root.join("files")));
+    assert_ne!(managed_path, normalize_path(&first_source));
+    assert_eq!(fs::read(&managed_path).unwrap(), content);
+
+    fs::remove_file(&first_source).unwrap();
+    assert_eq!(fs::read(&managed_path).unwrap(), content);
+    assert!(matches!(
+        store
+            .add_linked_item(
+                &duplicate_source,
+                LibraryItemMetadata::for_path(&duplicate_source),
+            )
+            .unwrap(),
+        LibraryAddOutcome::Existing(id) if id == item_id
+    ));
+    assert_eq!(store.library_items().len(), 1);
+
+    store.trash_library_items(&[item_id]).unwrap();
+    assert!(matches!(
+        store
+            .add_linked_item(
+                &duplicate_source,
+                LibraryItemMetadata::for_path(&duplicate_source),
+            )
+            .unwrap(),
+        LibraryAddOutcome::ExistingInTrash(id) if id == item_id
+    ));
+    assert_eq!(
+        store.permanently_delete_library_items(&[item_id]).unwrap(),
+        1
+    );
+    assert!(!managed_path.exists());
+    assert!(duplicate_source.exists());
+
+    let _ = fs::remove_file(duplicate_source);
+    let _ = fs::remove_file(database_path);
+    let _ = fs::remove_dir_all(managed_root);
+}
+
+#[test]
+fn mixed_tree_moves_are_disjoint_and_can_move_items_back_to_root() {
+    let first_path = temp_library_path("mixed-tree-first").with_extension("pdf");
+    let second_path = temp_library_path("mixed-tree-second").with_extension("pdf");
+    fs::write(&first_path, b"first").unwrap();
+    fs::write(&second_path, b"second").unwrap();
+    let mut store = LibraryStore::memory();
+    let LibraryAddOutcome::Added(first_id) = store
+        .add_linked_item(&first_path, LibraryItemMetadata::for_path(&first_path))
+        .unwrap()
+    else {
+        panic!("expected first item");
+    };
+    let LibraryAddOutcome::Added(second_id) = store
+        .add_linked_item(&second_path, LibraryItemMetadata::for_path(&second_path))
+        .unwrap()
+    else {
+        panic!("expected second item");
+    };
+    let papers = store.create_library_collection(None, "Papers").unwrap();
+    let inner = store
+        .create_library_collection(Some(papers), "Inner")
+        .unwrap();
+    let archive = store.create_library_collection(None, "Archive").unwrap();
+    store.add_items_to_collection(&[first_id], inner).unwrap();
+
+    assert_eq!(
+        store.disjoint_library_nodes(&[
+            LibraryNodeId::Collection(papers),
+            LibraryNodeId::Item(first_id),
+            LibraryNodeId::Item(second_id),
+        ]),
+        vec![
+            LibraryNodeId::Collection(papers),
+            LibraryNodeId::Item(second_id),
+        ]
+    );
+    assert_eq!(
+        store
+            .move_library_nodes(
+                &[
+                    LibraryNodeId::Collection(papers),
+                    LibraryNodeId::Item(first_id),
+                    LibraryNodeId::Item(second_id),
+                ],
+                Some(archive),
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        store.library_collection(papers).unwrap().parent_id,
+        Some(archive)
+    );
+    assert_eq!(store.item_parent(first_id), Some(inner));
+    assert_eq!(store.item_parent(second_id), Some(archive));
+
+    assert_eq!(
+        store
+            .move_library_nodes(&[LibraryNodeId::Item(first_id)], None)
+            .unwrap(),
+        1
+    );
+    assert_eq!(store.item_parent(first_id), None);
+    assert!(
+        store
+            .validate_library_move(&[LibraryNodeId::Collection(papers)], Some(inner))
+            .is_err()
+    );
+
+    let _ = fs::remove_file(first_path);
+    let _ = fs::remove_file(second_path);
+}
+
+#[test]
+fn deleting_a_folder_trashes_its_items_and_restore_recreates_the_path() {
+    let document_path = temp_library_path("folder-trash-restore").with_extension("pdf");
+    fs::write(&document_path, b"document").unwrap();
+    let mut store = LibraryStore::memory();
+    let LibraryAddOutcome::Added(item_id) = store
+        .add_linked_item(
+            &document_path,
+            LibraryItemMetadata::for_path(&document_path),
+        )
+        .unwrap()
+    else {
+        panic!("expected item");
+    };
+    let papers = store.create_library_collection(None, "Papers").unwrap();
+    let topic = store
+        .create_library_collection(Some(papers), "Topic")
+        .unwrap();
+    store.add_items_to_collection(&[item_id], topic).unwrap();
+
+    assert_eq!(store.delete_library_collection(papers).unwrap(), 2);
+    assert!(store.library_item(item_id).unwrap().trashed_at.is_some());
+    assert_eq!(store.item_parent(item_id), None);
+    assert!(store.library_collections().is_empty());
+
+    assert_eq!(store.restore_library_items(&[item_id]).unwrap(), 1);
+    assert!(store.library_item(item_id).unwrap().trashed_at.is_none());
+    let restored_parent = store.item_parent(item_id).unwrap();
+    assert_eq!(store.collection_path_label(restored_parent), "Papers/Topic");
 
     let _ = fs::remove_file(document_path);
 }

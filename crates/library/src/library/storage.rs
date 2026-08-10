@@ -29,6 +29,7 @@ impl LibraryStore {
         Self {
             library: Library::default(),
             database: None,
+            managed_library_root: None,
             startup_error: None,
             document_edit_histories: HashMap::new(),
             next_document_edit_sequence: 0,
@@ -40,7 +41,10 @@ impl LibraryStore {
 
     pub fn load() -> Self {
         let path = library_path();
-        match Self::open(path) {
+        if let Err(error) = migrate_legacy_library_database(&path) {
+            eprintln!("failed to migrate document library database: {error:#}");
+        }
+        match Self::open_with_root(path, managed_library_root()) {
             Ok(store) => store,
             Err(error) => {
                 eprintln!("failed to open document library database: {error:#}");
@@ -51,7 +55,13 @@ impl LibraryStore {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn open(path: PathBuf) -> Result<Self> {
+        let managed_root = path.with_extension("managed-library");
+        Self::open_with_root(path, managed_root)
+    }
+
+    fn open_with_root(path: PathBuf, managed_library_root: PathBuf) -> Result<Self> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -66,11 +76,14 @@ impl LibraryStore {
         };
         restrict_library_file(&path)?;
         ensure_tables(&database)?;
-        let library = load_library(&database)?;
+        initialize_managed_catalog(&database)?;
+        ensure_managed_library_directories(&managed_library_root)?;
+        let library = load_library(&database, &managed_library_root)?;
 
         let store = Self {
             library,
             database: Some(Arc::new(database)),
+            managed_library_root: Some(managed_library_root),
             startup_error: None,
             document_edit_histories: HashMap::new(),
             next_document_edit_sequence: 0,
@@ -356,7 +369,11 @@ impl LibraryStore {
             return Ok(());
         };
         let write_txn = database.begin_write()?;
-        write_catalog_tables(&write_txn, &self.library)?;
+        let root = self
+            .managed_library_root
+            .as_deref()
+            .ok_or_else(|| anyhow!("managed library storage is unavailable"))?;
+        write_catalog_tables(&write_txn, &self.library, root)?;
         write_txn.commit()?;
         Ok(())
     }
@@ -366,7 +383,11 @@ impl LibraryStore {
             return Ok(());
         };
         let write_txn = database.begin_write()?;
-        write_catalog_tables(&write_txn, &self.library)?;
+        let root = self
+            .managed_library_root
+            .as_deref()
+            .ok_or_else(|| anyhow!("managed library storage is unavailable"))?;
+        write_catalog_tables(&write_txn, &self.library, root)?;
         {
             let mut table = write_txn.open_table(HISTORY_V2_TABLE)?;
             let keys = table
@@ -458,7 +479,11 @@ impl LibraryStore {
     }
 }
 
-fn write_catalog_tables(write_txn: &redb::WriteTransaction, library: &Library) -> Result<()> {
+fn write_catalog_tables(
+    write_txn: &redb::WriteTransaction,
+    library: &Library,
+    managed_root: &Path,
+) -> Result<()> {
     {
         let retained = library
             .library_items
@@ -485,7 +510,7 @@ fn write_catalog_tables(write_txn: &redb::WriteTransaction, library: &Library) -
             .iter()
             .map(|attachment| attachment.id.0)
             .collect::<HashSet<_>>();
-        let mut table = write_txn.open_table(LIBRARY_ATTACHMENTS_V1_TABLE)?;
+        let mut table = write_txn.open_table(LIBRARY_ATTACHMENTS_V2_TABLE)?;
         let stale = table
             .iter()?
             .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
@@ -495,7 +520,7 @@ fn write_catalog_tables(write_txn: &redb::WriteTransaction, library: &Library) -
             table.remove(id)?;
         }
         for attachment in &library.library_attachments {
-            let encoded = encode(&StoredLibraryAttachmentV1::new(attachment))?;
+            let encoded = encode(&StoredLibraryAttachmentV2::new(attachment, managed_root)?)?;
             table.insert(attachment.id.0, encoded.as_slice())?;
         }
     }
@@ -585,15 +610,12 @@ fn write_catalog_tables(write_txn: &redb::WriteTransaction, library: &Library) -
         }
     }
     {
-        let mut grouped = HashMap::<u64, Vec<LibraryCollectionId>>::new();
-        for relation in &library.library_item_collections {
-            grouped
-                .entry(relation.item_id.0)
-                .or_default()
-                .push(relation.collection_id);
-        }
-        let retained = grouped.keys().copied().collect::<HashSet<_>>();
-        let mut table = write_txn.open_table(LIBRARY_ITEM_COLLECTIONS_V1_TABLE)?;
+        let retained = library
+            .library_item_locations
+            .iter()
+            .map(|location| location.item_id.0)
+            .collect::<HashSet<_>>();
+        let mut table = write_txn.open_table(LIBRARY_ITEM_LOCATIONS_V2_TABLE)?;
         let stale = table
             .iter()?
             .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
@@ -602,12 +624,9 @@ fn write_catalog_tables(write_txn: &redb::WriteTransaction, library: &Library) -
         for id in stale {
             table.remove(id)?;
         }
-        for (item_id, mut collection_ids) in grouped {
-            collection_ids.sort_by_key(|collection_id| collection_id.0);
-            collection_ids.dedup();
-            let encoded = StoredLibraryItemCollectionsV1::new(collection_ids);
-            let encoded = encode(&encoded)?;
-            table.insert(item_id, encoded.as_slice())?;
+        for location in &library.library_item_locations {
+            let encoded = encode(&StoredLibraryItemLocationV2::new(location))?;
+            table.insert(location.item_id.0, encoded.as_slice())?;
         }
     }
     Ok(())
