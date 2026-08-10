@@ -614,6 +614,7 @@ fn failed_edits_do_not_move_and_conflicts_clear_history() {
         next_document_edit_sequence: 0,
         bookmarks_revision: 0,
         history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
+        catalog_revision: 0,
     };
     assert!(
         unavailable
@@ -1273,6 +1274,80 @@ fn persists_document_browser_size() {
 }
 
 #[test]
+fn persists_application_wide_home_preferences() {
+    let path = temp_library_path("home-preferences");
+    let preferences = HomePreferences {
+        destination: HomeDestination::History,
+        library: BrowserPresentation {
+            view_mode: LibraryViewMode::Grid,
+            sort: LibrarySort {
+                field: LibrarySortField::Creator,
+                direction: LibrarySortDirection::Ascending,
+            },
+        },
+        history: BrowserPresentation::history_default(),
+        trash: BrowserPresentation {
+            view_mode: LibraryViewMode::Grouped,
+            sort: LibrarySort {
+                field: LibrarySortField::Year,
+                direction: LibrarySortDirection::Descending,
+            },
+        },
+    };
+
+    {
+        let mut store = LibraryStore::open(path.clone()).unwrap();
+        store.set_home_preferences(preferences.clone()).unwrap();
+    }
+
+    let store = LibraryStore::open(path.clone()).unwrap();
+    assert_eq!(store.home_preferences(), &preferences);
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn legacy_new_tab_destinations_migrate_to_quick_open_sources() {
+    let presentation = BrowserPresentation {
+        view_mode: LibraryViewMode::Grid,
+        sort: LibrarySort {
+            field: LibrarySortField::Title,
+            direction: LibrarySortDirection::Ascending,
+        },
+    };
+    for destination in [
+        ReaderNewTabDestination::Home,
+        ReaderNewTabDestination::History,
+    ] {
+        let migrated = StoredReaderNewTabSessionV3 {
+            destination,
+            view_mode: presentation.view_mode,
+            sort: presentation.sort,
+        }
+        .into_domain();
+        assert_eq!(migrated.source, QuickOpenSource::History);
+        assert_eq!(migrated.history, presentation);
+    }
+    for destination in [
+        ReaderNewTabDestination::Library,
+        ReaderNewTabDestination::Favorites,
+        ReaderNewTabDestination::Tags,
+        ReaderNewTabDestination::Trash,
+        ReaderNewTabDestination::Tag(LibraryTagId(9)),
+        ReaderNewTabDestination::SavedView(LibrarySavedViewId(7)),
+    ] {
+        let migrated = StoredReaderNewTabSessionV3 {
+            destination,
+            view_mode: presentation.view_mode,
+            sort: presentation.sort,
+        }
+        .into_domain();
+        assert_eq!(migrated.source, QuickOpenSource::Library);
+        assert_eq!(migrated.library, presentation);
+    }
+}
+
+#[test]
 fn persists_reader_session_with_duplicate_document_tabs() {
     let database_path = temp_library_path("reader-session");
     let document_path = PathBuf::from("/tmp/reader-session.pdf");
@@ -1313,13 +1388,24 @@ fn persists_reader_session_with_duplicate_document_tabs() {
                         id: 2,
                         tabs: vec![ReaderTabSession {
                             id: 3,
-                            kind: ReaderTabKind::NewTab,
+                            kind: ReaderTabKind::NewTab(ReaderNewTabSession {
+                                source: QuickOpenSource::Library,
+                                history: BrowserPresentation::history_default(),
+                                library: BrowserPresentation {
+                                    view_mode: LibraryViewMode::Grid,
+                                    sort: LibrarySort {
+                                        field: LibrarySortField::Title,
+                                        direction: LibrarySortDirection::Ascending,
+                                    },
+                                },
+                            }),
                         }],
                         active_tab: Some(3),
                     }),
                 ],
             },
             active_pane: 1,
+            dock_document_tab: Some(2),
             left_sidebar: Some(ReaderSidebar::Notes),
             ai_panel_open: true,
             transparency_enabled: false,
@@ -1450,6 +1536,7 @@ fn history_save_fails_when_database_is_unavailable() {
         next_document_edit_sequence: 0,
         bookmarks_revision: 0,
         history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
+        catalog_revision: 0,
     };
     store.record_history(document_path, position(1));
 
@@ -1481,6 +1568,7 @@ fn document_preference_writes_fail_when_database_is_unavailable() {
         next_document_edit_sequence: 0,
         bookmarks_revision: 0,
         history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
+        catalog_revision: 0,
     };
 
     let language_error = store
@@ -2009,6 +2097,279 @@ fn persists_non_utf8_paths_for_all_path_records() {
     }
 
     let _ = fs::remove_file(database_path);
+}
+
+#[test]
+fn catalog_persists_items_tags_saved_views_and_trash() {
+    let database_path = temp_library_path("catalog-roundtrip");
+    let document_path = database_path.with_extension("pdf");
+    fs::write(&document_path, b"%PDF-1.4\n").unwrap();
+
+    let item_id = {
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut metadata = LibraryItemMetadata::for_path(&document_path);
+        metadata.title = "A Research Paper".to_string();
+        metadata.creators.push(LibraryCreator {
+            name: "Ada Lovelace".to_string(),
+            role: LibraryCreatorRole::Author,
+        });
+        metadata.year = Some(1843);
+        let LibraryAddOutcome::Added(item_id) =
+            store.add_linked_item(&document_path, metadata).unwrap()
+        else {
+            panic!("expected a new library item");
+        };
+        store
+            .add_tag_to_items(&[item_id], "  Machine   Learning ")
+            .unwrap();
+        store.set_library_item_favorite(item_id, true).unwrap();
+        let tag_id = store.library_tags()[0].id;
+        store
+            .save_library_view(
+                "Favorite ML",
+                LibraryFilter {
+                    tag_ids: vec![tag_id],
+                    favorite: Some(true),
+                    ..LibraryFilter::default()
+                },
+                LibrarySort::default(),
+                LibraryViewMode::Table,
+            )
+            .unwrap();
+        item_id
+    };
+
+    {
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        assert_eq!(store.library_items().len(), 1);
+        assert_eq!(store.library_items()[0].title, "A Research Paper");
+        assert_eq!(store.library_tags()[0].name, "Machine Learning");
+        assert_eq!(store.library_saved_views().len(), 1);
+        assert_eq!(
+            store.query_library_items(
+                &store.library_saved_views()[0].filter,
+                store.library_saved_views()[0].sort,
+            ),
+            vec![item_id]
+        );
+        assert_eq!(store.trash_library_items(&[item_id]).unwrap(), 1);
+        assert!(
+            store
+                .query_library_items(&LibraryFilter::default(), LibrarySort::default())
+                .is_empty()
+        );
+        assert_eq!(
+            store.query_library_items(
+                &LibraryFilter {
+                    trash: LibraryTrashFilter::Trashed,
+                    ..LibraryFilter::default()
+                },
+                LibrarySort::default(),
+            ),
+            vec![item_id]
+        );
+        assert!(document_path.exists());
+    }
+
+    let _ = fs::remove_file(document_path);
+    let _ = fs::remove_file(database_path);
+}
+
+#[test]
+fn relinking_catalog_item_moves_path_backed_reader_data_atomically() {
+    let database_path = temp_library_path("catalog-relink");
+    let old_path = database_path.with_extension("old.pdf");
+    let new_path = database_path.with_extension("new.pdf");
+    fs::write(&old_path, b"%PDF-1.4\nold").unwrap();
+    fs::write(&new_path, b"%PDF-1.4\nnew").unwrap();
+
+    {
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let LibraryAddOutcome::Added(item_id) = store
+            .add_linked_item(&old_path, LibraryItemMetadata::for_path(&old_path))
+            .unwrap()
+        else {
+            panic!("expected a new library item");
+        };
+        store.record_history(&old_path, position(3));
+        store
+            .add_bookmark(&old_path, "bookmark", position(4))
+            .unwrap();
+        store.relink_library_attachment(item_id, &new_path).unwrap();
+
+        assert_eq!(
+            store.primary_attachment(item_id).unwrap().path,
+            normalize_path(&new_path)
+        );
+        assert_eq!(store.history_entries()[0].path, normalize_path(&new_path));
+        assert_eq!(store.bookmarks()[0].path, normalize_path(&new_path));
+        assert!(old_path.exists());
+        assert!(new_path.exists());
+    }
+
+    {
+        let store = LibraryStore::open(database_path.clone()).unwrap();
+        assert_eq!(store.library_items().len(), 1);
+        assert_eq!(
+            store.library.library_attachments[0].path,
+            normalize_path(&new_path)
+        );
+        assert_eq!(store.history_entries()[0].path, normalize_path(&new_path));
+        assert_eq!(store.bookmarks()[0].path, normalize_path(&new_path));
+    }
+
+    let _ = fs::remove_file(old_path);
+    let _ = fs::remove_file(new_path);
+    let _ = fs::remove_file(database_path);
+}
+
+#[test]
+fn catalog_queries_compose_facets_and_tag_renames_merge_saved_views() {
+    let first_path = temp_library_path("catalog-query-first").with_extension("pdf");
+    let second_path = temp_library_path("catalog-query-second").with_extension("epub");
+    let third_path = temp_library_path("catalog-query-third").with_extension("pdf");
+    for path in [&first_path, &second_path, &third_path] {
+        fs::write(path, b"document").unwrap();
+    }
+    let mut store = LibraryStore::memory();
+
+    let mut first = LibraryItemMetadata::for_path(&first_path);
+    first.title = "Graph Neural Networks".to_string();
+    first.year = Some(2024);
+    first.creators = vec![LibraryCreator {
+        name: "Ada Researcher".to_string(),
+        role: LibraryCreatorRole::Author,
+    }];
+    let LibraryAddOutcome::Added(first_id) = store.add_linked_item(&first_path, first).unwrap()
+    else {
+        panic!("expected first item");
+    };
+
+    let mut second = LibraryItemMetadata::for_path(&second_path);
+    second.title = "Foundations of Graphs".to_string();
+    second.year = Some(2020);
+    let LibraryAddOutcome::Added(second_id) = store.add_linked_item(&second_path, second).unwrap()
+    else {
+        panic!("expected second item");
+    };
+
+    let mut third = LibraryItemMetadata::for_path(&third_path);
+    third.title = "Unrelated Paper".to_string();
+    third.year = Some(2024);
+    let LibraryAddOutcome::Added(third_id) = store.add_linked_item(&third_path, third).unwrap()
+    else {
+        panic!("expected third item");
+    };
+
+    let theory = store
+        .add_tag_to_items(&[first_id, second_id], "Theory")
+        .unwrap();
+    let reviewed = store
+        .add_tag_to_items(&[first_id, third_id], "Reviewed")
+        .unwrap();
+    store.set_library_item_favorite(first_id, true).unwrap();
+    store
+        .set_library_item_status(first_id, ReadingStatus::Reading)
+        .unwrap();
+
+    assert_eq!(
+        store.query_library_items(
+            &LibraryFilter {
+                tag_ids: vec![theory, reviewed],
+                kinds: vec![LibraryItemKind::Paper],
+                statuses: vec![ReadingStatus::Reading],
+                favorite: Some(true),
+                year_min: Some(2024),
+                text: "ada".to_string(),
+                ..LibraryFilter::default()
+            },
+            LibrarySort::default(),
+        ),
+        vec![first_id]
+    );
+    assert_eq!(
+        store.query_library_items(
+            &LibraryFilter {
+                text: "theory".to_string(),
+                ..LibraryFilter::default()
+            },
+            LibrarySort {
+                field: LibrarySortField::Title,
+                direction: LibrarySortDirection::Ascending,
+            },
+        ),
+        vec![second_id, first_id]
+    );
+
+    store
+        .save_library_view(
+            "Theory",
+            LibraryFilter {
+                tag_ids: vec![theory],
+                ..LibraryFilter::default()
+            },
+            LibrarySort::default(),
+            LibraryViewMode::Table,
+        )
+        .unwrap();
+    assert_eq!(
+        store.rename_library_tag(theory, "reviewed").unwrap(),
+        reviewed
+    );
+    assert_eq!(store.library_tags().len(), 1);
+    assert_eq!(store.tags_for_item(first_id).len(), 1);
+    assert_eq!(
+        store.library_saved_views()[0].filter.tag_ids,
+        vec![reviewed]
+    );
+
+    for path in [first_path, second_path, third_path] {
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[test]
+fn catalog_trash_is_reversible_and_permanent_delete_preserves_source_and_history() {
+    let document_path = temp_library_path("catalog-trash").with_extension("pdf");
+    fs::write(&document_path, b"document").unwrap();
+    let mut store = LibraryStore::memory();
+    let LibraryAddOutcome::Added(item_id) = store
+        .add_linked_item(
+            &document_path,
+            LibraryItemMetadata::for_path(&document_path),
+        )
+        .unwrap()
+    else {
+        panic!("expected a new item");
+    };
+    store.record_history(&document_path, position(2));
+
+    assert_eq!(
+        store.permanently_delete_library_items(&[item_id]).unwrap(),
+        0
+    );
+    assert_eq!(store.trash_library_items(&[item_id]).unwrap(), 1);
+    assert!(matches!(
+        store
+            .add_linked_item(
+                &document_path,
+                LibraryItemMetadata::for_path(&document_path),
+            )
+            .unwrap(),
+        LibraryAddOutcome::ExistingInTrash(id) if id == item_id
+    ));
+    assert_eq!(store.restore_library_items(&[item_id]).unwrap(), 1);
+    assert_eq!(store.trash_library_items(&[item_id]).unwrap(), 1);
+    assert_eq!(
+        store.permanently_delete_library_items(&[item_id]).unwrap(),
+        1
+    );
+
+    assert!(store.library_item(item_id).is_none());
+    assert_eq!(store.history_entries().len(), 1);
+    assert!(document_path.exists());
+
+    let _ = fs::remove_file(document_path);
 }
 
 #[cfg(unix)]

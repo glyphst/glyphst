@@ -569,6 +569,7 @@ impl DocumentView {
             return;
         }
 
+        cx.emit(DocumentViewEvent::SidebarNavigationRequested);
         self.navigate_to_toc_entry(entry_ix, cx);
         self.resume_toc_sidebar_follow(Some(entry_ix));
         cx.notify();
@@ -678,6 +679,9 @@ impl DocumentView {
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener(move |this, _, _, cx| {
+                                                cx.emit(
+                                                    DocumentViewEvent::SidebarNavigationRequested,
+                                                );
                                                 this.navigate_to_note(note_ix, cx);
                                                 cx.stop_propagation();
                                             }),

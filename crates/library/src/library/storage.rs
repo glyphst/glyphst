@@ -34,6 +34,7 @@ impl LibraryStore {
             next_document_edit_sequence: 0,
             bookmarks_revision: 0,
             history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
+            catalog_revision: 0,
         }
     }
 
@@ -75,6 +76,7 @@ impl LibraryStore {
             next_document_edit_sequence: 0,
             bookmarks_revision: 0,
             history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
+            catalog_revision: 0,
         };
         if let Err(error) = store.prune_ai_session_rows() {
             eprintln!("failed to prune expired AI sessions: {error:#}");
@@ -289,6 +291,20 @@ impl LibraryStore {
         Ok(())
     }
 
+    pub(super) fn write_home_preferences(&self, preferences: &HomePreferences) -> Result<()> {
+        let Some(database) = &self.database else {
+            return Ok(());
+        };
+        let write_txn = database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(UI_STATE_V1_TABLE)?;
+            let encoded = encode(&StoredHomePreferencesV1::from(preferences))?;
+            table.insert(HOME_PREFERENCES_KEY, encoded.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
     pub(super) fn write_reader_session(&self, session: &ReaderSessionSnapshot) -> Result<()> {
         let Some(database) = &self.database else {
             return Ok(());
@@ -296,7 +312,7 @@ impl LibraryStore {
         let write_txn = database.begin_write()?;
         {
             let mut table = write_txn.open_table(UI_STATE_V1_TABLE)?;
-            let encoded = encode(&StoredReaderSessionV2::from(session))?;
+            let encoded = encode(&StoredReaderSessionV4::from(session))?;
             table.insert(READER_SESSION_KEY, encoded.as_slice())?;
         }
         write_txn.commit()?;
@@ -334,4 +350,219 @@ impl LibraryStore {
         write_txn.commit()?;
         Ok(())
     }
+
+    pub(super) fn write_catalog(&self) -> Result<()> {
+        let Some(database) = &self.database else {
+            return Ok(());
+        };
+        let write_txn = database.begin_write()?;
+        write_catalog_tables(&write_txn, &self.library)?;
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub(super) fn write_relinked_library(&self) -> Result<()> {
+        let Some(database) = &self.database else {
+            return Ok(());
+        };
+        let write_txn = database.begin_write()?;
+        write_catalog_tables(&write_txn, &self.library)?;
+        {
+            let mut table = write_txn.open_table(HISTORY_V2_TABLE)?;
+            let keys = table
+                .iter()?
+                .filter_map(|entry| entry.ok().map(|(key, _)| key.value().to_vec()))
+                .collect::<Vec<_>>();
+            for key in keys {
+                table.remove(key.as_slice())?;
+            }
+            for entry in &self.library.history {
+                let key = history_key(&entry.path);
+                let encoded = encode(&StoredHistoryEntryV2::from(entry))?;
+                table.insert(key.as_slice(), encoded.as_slice())?;
+            }
+        }
+        {
+            let mut table = write_txn.open_table(BOOKMARKS_V2_TABLE)?;
+            let ids = table
+                .iter()?
+                .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+                .collect::<Vec<_>>();
+            for id in ids {
+                table.remove(id)?;
+            }
+            for entry in &self.library.bookmarks {
+                let encoded = encode(&StoredBookmarkV2::from(entry))?;
+                table.insert(entry.id, encoded.as_slice())?;
+            }
+        }
+        {
+            let mut table = write_txn.open_table(HIGHLIGHTS_V2_TABLE)?;
+            let ids = table
+                .iter()?
+                .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+                .collect::<Vec<_>>();
+            for id in ids {
+                table.remove(id)?;
+            }
+            for entry in &self.library.highlights {
+                let encoded = encode(&StoredHighlightV2::from(entry))?;
+                table.insert(entry.id, encoded.as_slice())?;
+            }
+        }
+        {
+            let mut table = write_txn.open_table(NOTES_V2_TABLE)?;
+            let ids = table
+                .iter()?
+                .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+                .collect::<Vec<_>>();
+            for id in ids {
+                table.remove(id)?;
+            }
+            for entry in &self.library.notes {
+                let encoded = encode(&StoredNoteV2::from(entry))?;
+                table.insert(entry.id, encoded.as_slice())?;
+            }
+        }
+        {
+            let mut table = write_txn.open_table(AI_SESSIONS_V4_TABLE)?;
+            let ids = table
+                .iter()?
+                .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+                .collect::<Vec<_>>();
+            for id in ids {
+                table.remove(id)?;
+            }
+            for entry in &self.library.ai_sessions {
+                let encoded = encode(&StoredAiSessionV4::from(entry))?;
+                table.insert(entry.id, encoded.as_slice())?;
+            }
+        }
+        {
+            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V3_TABLE)?;
+            let keys = table
+                .iter()?
+                .filter_map(|entry| entry.ok().map(|(key, _)| key.value().to_vec()))
+                .collect::<Vec<_>>();
+            for key in keys {
+                table.remove(key.as_slice())?;
+            }
+            for entry in &self.library.document_preferences {
+                let key = history_key(&entry.path);
+                let encoded = encode(&StoredDocumentPreferencesV3::from(entry))?;
+                table.insert(key.as_slice(), encoded.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+}
+
+fn write_catalog_tables(write_txn: &redb::WriteTransaction, library: &Library) -> Result<()> {
+    {
+        let retained = library
+            .library_items
+            .iter()
+            .map(|item| item.id.0)
+            .collect::<HashSet<_>>();
+        let mut table = write_txn.open_table(LIBRARY_ITEMS_V1_TABLE)?;
+        let stale = table
+            .iter()?
+            .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+            .filter(|id| !retained.contains(id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            table.remove(id)?;
+        }
+        for item in &library.library_items {
+            let encoded = encode(&StoredLibraryItemV1::new(item))?;
+            table.insert(item.id.0, encoded.as_slice())?;
+        }
+    }
+    {
+        let retained = library
+            .library_attachments
+            .iter()
+            .map(|attachment| attachment.id.0)
+            .collect::<HashSet<_>>();
+        let mut table = write_txn.open_table(LIBRARY_ATTACHMENTS_V1_TABLE)?;
+        let stale = table
+            .iter()?
+            .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+            .filter(|id| !retained.contains(id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            table.remove(id)?;
+        }
+        for attachment in &library.library_attachments {
+            let encoded = encode(&StoredLibraryAttachmentV1::new(attachment))?;
+            table.insert(attachment.id.0, encoded.as_slice())?;
+        }
+    }
+    {
+        let retained = library
+            .library_tags
+            .iter()
+            .map(|tag| tag.id.0)
+            .collect::<HashSet<_>>();
+        let mut table = write_txn.open_table(LIBRARY_TAGS_V1_TABLE)?;
+        let stale = table
+            .iter()?
+            .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+            .filter(|id| !retained.contains(id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            table.remove(id)?;
+        }
+        for tag in &library.library_tags {
+            let encoded = encode(&StoredLibraryTagV1::new(tag))?;
+            table.insert(tag.id.0, encoded.as_slice())?;
+        }
+    }
+    {
+        let mut grouped = HashMap::<u64, Vec<LibraryTagId>>::new();
+        for relation in &library.library_item_tags {
+            grouped
+                .entry(relation.item_id.0)
+                .or_default()
+                .push(relation.tag_id);
+        }
+        let retained = grouped.keys().copied().collect::<HashSet<_>>();
+        let mut table = write_txn.open_table(LIBRARY_ITEM_TAGS_V1_TABLE)?;
+        let stale = table
+            .iter()?
+            .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+            .filter(|id| !retained.contains(id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            table.remove(id)?;
+        }
+        for (item_id, mut tag_ids) in grouped {
+            tag_ids.sort_by_key(|tag_id| tag_id.0);
+            tag_ids.dedup();
+            let encoded = encode(&StoredLibraryItemTagsV1::new(tag_ids))?;
+            table.insert(item_id, encoded.as_slice())?;
+        }
+    }
+    {
+        let retained = library
+            .library_saved_views
+            .iter()
+            .map(|view| view.id.0)
+            .collect::<HashSet<_>>();
+        let mut table = write_txn.open_table(LIBRARY_SAVED_VIEWS_V1_TABLE)?;
+        let stale = table
+            .iter()?
+            .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+            .filter(|id| !retained.contains(id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            table.remove(id)?;
+        }
+        for view in &library.library_saved_views {
+            let encoded = encode(&StoredLibrarySavedViewV1::new(view))?;
+            table.insert(view.id.0, encoded.as_slice())?;
+        }
+    }
+    Ok(())
 }

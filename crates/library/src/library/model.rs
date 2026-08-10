@@ -51,6 +51,7 @@ impl Library {
     }
 
     pub(super) fn sanitize(&mut self) {
+        self.sanitize_catalog();
         self.history
             .retain(|entry| !entry.path.as_os_str().is_empty());
         self.history.sort_by(|left, right| {

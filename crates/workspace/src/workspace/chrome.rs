@@ -91,6 +91,7 @@ pub(super) struct WorkspaceTitleBar {
     open_menu: Option<WorkspaceMenu>,
     popup_menu: Option<Entity<PopupMenu>>,
     active_tab_label: Option<SharedString>,
+    home_active: bool,
     shell_background: Hsla,
 }
 
@@ -100,6 +101,7 @@ impl WorkspaceTitleBar {
         open_menu: Option<WorkspaceMenu>,
         popup_menu: Option<Entity<PopupMenu>>,
         active_tab_label: Option<SharedString>,
+        home_active: bool,
         shell_background: Hsla,
     ) -> Self {
         Self {
@@ -107,6 +109,7 @@ impl WorkspaceTitleBar {
             open_menu,
             popup_menu,
             active_tab_label,
+            home_active,
             shell_background,
         }
     }
@@ -202,6 +205,24 @@ impl RenderOnce for WorkspaceTitleBar {
                     self.open_menu == Some(WorkspaceMenu::Tabs),
                     popup_for(WorkspaceMenu::Tabs),
                 ),
+                Button::new("workspace-home")
+                    .small()
+                    .compact()
+                    .ghost()
+                    .icon(IconName::Home)
+                    .tooltip("Toggle Home")
+                    .selected(self.home_active)
+                    .debug_selector(|| "workspace-home".to_string())
+                    .on_click({
+                        let workspace = workspace.clone();
+                        move |_, window, cx| {
+                            cx.stop_propagation();
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.toggle_home(window, cx);
+                            });
+                        }
+                    })
+                    .into_any_element(),
             ])
             .when_some(self.active_tab_label, |this, label| {
                 this.child(

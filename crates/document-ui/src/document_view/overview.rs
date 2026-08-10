@@ -524,6 +524,9 @@ impl DocumentView {
                                                                         page_idx, cx,
                                                                     );
                                                                 } else {
+                                                                    cx.emit(
+                                                                        DocumentViewEvent::SidebarNavigationRequested,
+                                                                    );
                                                                     this.navigate_to_pdf_destination(
                                                                         page_idx, None, None, cx,
                                                                     );

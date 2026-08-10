@@ -392,6 +392,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.surface_mode != WorkspaceSurfaceMode::Panes {
+            return;
+        }
         let previous = self.docks.left_sidebar;
         let next = if previous == Some(sidebar) {
             None
@@ -411,6 +414,9 @@ impl Workspace {
     }
 
     pub(super) fn toggle_ai_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.surface_mode != WorkspaceSurfaceMode::Panes {
+            return;
+        }
         if self.docks.ai_panel_open {
             self.close_ai_dock(cx);
             self.focus_active_pane(window, cx);
@@ -421,7 +427,7 @@ impl Workspace {
         let snapshot = self
             .docks
             .snapshot(window.bounds().size.width.as_f32(), true, true);
-        if let Some(document_view) = self.active_pane.read(cx).active_document_view() {
+        if let Some((_, document_view)) = self.dock_document_target(cx) {
             document_view.update(cx, |document_view, cx| {
                 document_view.set_dock_snapshot(snapshot, cx);
                 document_view.ensure_ai_panel(snapshot.widths.ai, true, window, cx);
@@ -459,6 +465,40 @@ impl Workspace {
             DocumentSidebar::Toc => crate::fl!("table-of-contents-title"),
             DocumentSidebar::Notes => crate::fl!("notes-title"),
         }
+    }
+
+    fn render_dock_document_label(
+        &self,
+        document_view: &Entity<DocumentView>,
+        theme: ThemeColor,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let file_name = document_view.read(cx).file_name();
+        div()
+            .id("workspace-dock-document-context")
+            .debug_selector(|| "workspace-dock-document-context".to_string())
+            .h(px(28.0))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .px_2()
+            .border_b(px(1.0))
+            .border_color(theme.border)
+            .bg(theme.sidebar)
+            .text_size(crate::settings::ui_rems(11.0))
+            .text_color(theme.muted_foreground)
+            .cursor_pointer()
+            .hover(move |style| style.bg(theme.list_hover))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.focus_dock_document(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(div().min_w_0().truncate().child(file_name))
+            .into_any_element()
     }
 
     fn render_dock_placeholder(
@@ -648,9 +688,12 @@ impl Workspace {
             return active_document_view.into_any_element();
         }
 
+        let dock_document_view = self
+            .dock_document_target(cx)
+            .map(|(_, document_view)| document_view);
         let loading = self.active_pane.read(cx).active_tab_is_loading();
-        let docks_visible = active_document_view.is_some() || loading;
-        let tool_rail_visible = active_document_view.is_some();
+        let docks_visible = dock_document_view.is_some();
+        let tool_rail_visible = dock_document_view.is_some();
         let mut snapshot = self.docks.snapshot(
             window.bounds().size.width.as_f32(),
             docks_visible,
@@ -669,13 +712,16 @@ impl Workspace {
                 .render(&self.active_pane, theme, dim_inactive_panes, window, cx);
         let mut main_panels = Vec::with_capacity(2);
 
-        if let Some(document_view) = active_document_view.as_ref() {
+        if let Some(document_view) = dock_document_view.as_ref() {
             main_panels.push(self.render_tool_rail(document_view, theme, cx));
         }
 
         if let Some(sidebar) = self.docks.rendered_left_sidebar {
             let content_width = sidebar.width(snapshot.widths).max(SIDEBAR_MIN_WIDTH);
-            let content = active_document_view
+            let owner_label = dock_document_view
+                .as_ref()
+                .map(|document_view| self.render_dock_document_label(document_view, theme, cx));
+            let content = dock_document_view
                 .as_ref()
                 .filter(|document_view| document_view.read(cx).supports_sidebar(sidebar))
                 .map(|document_view| {
@@ -700,7 +746,10 @@ impl Workspace {
                             .h_full()
                             .w(px(content_width))
                             .flex_none()
-                            .child(content),
+                            .flex()
+                            .flex_col()
+                            .children(owner_label)
+                            .child(div().flex_1().min_h_0().overflow_hidden().child(content)),
                     )
                     .when(snapshot.left_sidebar.is_some(), |this| {
                         this.child(Self::render_dock_resize_handle(
@@ -714,7 +763,10 @@ impl Workspace {
 
         let ai_card = if self.docks.render_ai_panel {
             let content_width = snapshot.widths.ai.max(SIDEBAR_MIN_WIDTH);
-            let content = active_document_view
+            let owner_label = dock_document_view
+                .as_ref()
+                .map(|document_view| self.render_dock_document_label(document_view, theme, cx));
+            let content = dock_document_view
                 .as_ref()
                 .map(|document_view| {
                     let panel = document_view.update(cx, |document_view, cx| {
@@ -744,7 +796,10 @@ impl Workspace {
                             .border_1()
                             .border_color(theme.border)
                             .bg(theme.background)
-                            .child(content),
+                            .flex()
+                            .flex_col()
+                            .children(owner_label)
+                            .child(div().flex_1().min_h_0().overflow_hidden().child(content)),
                     )
                     .when(snapshot.ai_panel_open, |this| {
                         this.child(Self::render_dock_resize_handle(

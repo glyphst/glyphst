@@ -42,13 +42,14 @@ use crate::{
     document_view::{
         CloseTab, DocumentSidebar, DocumentView, DocumentViewEvent, DuplicateTab, OpenFile,
         OpenKeybindings, OpenNewTab, OpenSettings, OpenWithSystemPicker, ToggleAiPanel,
-        ToggleCommandPalette, ToggleNotes, ToggleThumbnailSidebar, ToggleToc, ToggleTransparency,
-        TranslationViewportAnchor,
+        ToggleCommandPalette, ToggleHome, ToggleNotes, ToggleThumbnailSidebar, ToggleToc,
+        ToggleTransparency, TranslationViewportAnchor,
     },
     library::{
         DocumentPosition, ReaderSidebar, ReaderSynchronizedGroup, ReaderTranslationSession,
         ReaderWindowBounds, ReaderWindowSession, ReaderWindowState, normalize_path,
     },
+    new_tab::{NewTab, NewTabEvent},
     pane::{
         DraggedTab, Pane, PaneDropTarget, PaneEvent, PaneGroup, PaneSynchronizedPresentation,
         RecentlyAddedSynchronizedTab, SplitDirection, SplitDown, SplitHorizontal, SplitLeft,
@@ -68,9 +69,19 @@ use crate::{
 use chrome::{WorkspaceMenu, WorkspaceTitleBar, build_popup_menu};
 use docks::WorkspaceDockState;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkspaceSurfaceMode {
+    Home,
+    #[default]
+    Panes,
+}
+
 pub struct Workspace {
     pane_group: PaneGroup,
     active_pane: Entity<Pane>,
+    surface_mode: WorkspaceSurfaceMode,
+    home_view: Entity<NewTab>,
+    home_previous_focus_handle: Option<FocusHandle>,
     callbacks: WorkspaceCallbacks,
     focus_handle: FocusHandle,
     document_translation_jobs: Entity<DocumentTranslationJobManager>,
@@ -89,11 +100,13 @@ pub struct Workspace {
     synchronized_tabs: SynchronizedTabRegistry,
     restored_tab_ids: HashMap<u64, (EntityId, EntityId)>,
     pending_restored_documents: usize,
+    pending_dock_document_tab: Option<u64>,
     pending_synchronized_groups: Vec<ReaderSynchronizedGroup>,
     pending_restored_translation_sessions: Vec<ReaderTranslationSession>,
     restored_missing_documents: usize,
     synchronized_connection: Option<SynchronizedConnection>,
     fading_synchronized_connection: Option<FadingSynchronizedConnection>,
+    document_context_mru: Vec<EntityId>,
     docks: WorkspaceDockState,
     transparency_enabled: bool,
     window_settings: WindowSettings,
@@ -246,7 +259,10 @@ impl Workspace {
                     pane.update(cx, |pane, cx| pane.ensure_new_tab(window, cx));
                 }
             }
-            None => pane.update(cx, |pane, cx| pane.ensure_new_tab(window, cx)),
+            None => {
+                pane.update(cx, |pane, cx| pane.ensure_new_tab(window, cx));
+                workspace.enter_home(window, cx);
+            }
         }
         workspace
     }
@@ -307,6 +323,7 @@ impl Workspace {
             .map(|(session_id, tab_id, pane_id)| (session_id, (tab_id, pane_id)))
             .collect();
         workspace.pending_restored_documents = restored.pending_documents;
+        workspace.pending_dock_document_tab = session.dock_document_tab;
         workspace.pending_synchronized_groups = session.synchronized_groups;
         workspace.pending_restored_translation_sessions = session.translation_sessions;
         workspace.restored_missing_documents = restored.missing_documents;
@@ -338,6 +355,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+        let home_focus_handle = cx.focus_handle();
+        let home_view = cx.new(|cx| NewTab::new_home(home_focus_handle, window, cx));
         let docks = WorkspaceDockState::new(cx);
         let window_settings = cx.global::<SettingsStore>().settings.window;
         let transparency_enabled = window_settings.transparency_enabled_by_default();
@@ -345,6 +364,9 @@ impl Workspace {
         let workspace = Self {
             pane_group: PaneGroup::new(pane.clone()),
             active_pane: pane.clone(),
+            surface_mode: WorkspaceSurfaceMode::Panes,
+            home_view: home_view.clone(),
+            home_previous_focus_handle: None,
             callbacks,
             focus_handle,
             document_translation_jobs: document_translation_jobs.clone(),
@@ -363,15 +385,33 @@ impl Workspace {
             synchronized_tabs: SynchronizedTabRegistry::default(),
             restored_tab_ids: HashMap::new(),
             pending_restored_documents: 0,
+            pending_dock_document_tab: None,
             pending_synchronized_groups: Vec::new(),
             pending_restored_translation_sessions: Vec::new(),
             restored_missing_documents: 0,
             synchronized_connection: None,
             fading_synchronized_connection: None,
+            document_context_mru: Vec::new(),
             docks,
             transparency_enabled,
             window_settings,
         };
+
+        cx.subscribe_in(
+            &home_view,
+            window,
+            |this, _, event: &NewTabEvent, window, cx| match event {
+                NewTabEvent::OpenFile => this.open_file(window, cx),
+                NewTabEvent::OpenDocument(path) => {
+                    if let Err(error) =
+                        this.open_document_in_active_pane(path.clone(), None, window, cx)
+                    {
+                        eprintln!("failed to open Home document: {error:#}");
+                    }
+                }
+            },
+        )
+        .detach();
 
         workspace.subscribe_to_pane(&pane, window, cx);
         cx.observe(&document_translation_jobs, |_, _, cx| cx.notify())
@@ -571,7 +611,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let replace_active_new_tab = self.active_pane.read(cx).active_tab_is_new_tab();
-        self.focus_or_open_document(path, None, replace_active_new_tab, window, cx)
+        self.focus_or_open_document(path, None, replace_active_new_tab, window, cx)?;
+        self.surface_mode = WorkspaceSurfaceMode::Panes;
+        self.home_previous_focus_handle = None;
+        cx.notify();
+        Ok(())
     }
 
     pub fn reader_session_restore_pending(&self) -> bool {
@@ -640,6 +684,14 @@ impl Workspace {
             },
             pane_tree: panes.pane_tree,
             active_pane: panes.active_pane,
+            dock_document_tab: self
+                .dock_document_target(cx)
+                .and_then(|(_, document_view)| {
+                    panes
+                        .runtime_tab_ids
+                        .get(&document_view.entity_id())
+                        .copied()
+                }),
             left_sidebar: self.docks.left_sidebar.map(|sidebar| match sidebar {
                 DocumentSidebar::Thumbnails => ReaderSidebar::Thumbnails,
                 DocumentSidebar::Toc => ReaderSidebar::TableOfContents,
@@ -790,6 +842,18 @@ impl Workspace {
             }
             self.register_live_translation_pair(session_id, source, translated, window, cx);
         }
+        if let Some(session_tab_id) = self.pending_dock_document_tab.take()
+            && let Some((tab_id, _)) = self.restored_tab_ids.get(&session_tab_id).copied()
+            && self.document_target_for_id(tab_id, cx).is_some()
+        {
+            self.document_context_mru
+                .retain(|candidate| *candidate != tab_id);
+            self.document_context_mru.insert(0, tab_id);
+        } else {
+            let active_pane = self.active_pane.clone();
+            self.record_document_context(&active_pane, cx);
+        }
+        self.prune_document_context(cx);
         self.restored_tab_ids.clear();
         self.refresh_synchronized_tab_presentation(cx);
         cx.notify();
@@ -809,8 +873,9 @@ impl Workspace {
                 PaneEvent::Activate => {
                     if this.active_pane != pane_for_events {
                         this.active_pane = pane_for_events.clone();
-                        cx.notify();
                     }
+                    this.record_document_context(&pane_for_events, cx);
+                    cx.notify();
                 }
                 PaneEvent::OpenFile => {
                     this.active_pane = pane_for_events.clone();
@@ -822,13 +887,23 @@ impl Workspace {
                     replace_active_new_tab,
                 } => {
                     this.active_pane = pane_for_events.clone();
-                    if let Err(error) = this.focus_or_open_document(
-                        path.clone(),
-                        position.clone(),
-                        *replace_active_new_tab,
-                        window,
-                        cx,
-                    ) {
+                    let result = if *replace_active_new_tab {
+                        this.open_document_in_active_pane(
+                            path.clone(),
+                            position.clone(),
+                            window,
+                            cx,
+                        )
+                    } else {
+                        this.focus_or_open_document(
+                            path.clone(),
+                            position.clone(),
+                            false,
+                            window,
+                            cx,
+                        )
+                    };
+                    if let Err(error) = result {
                         eprintln!("failed to open document: {error:#}");
                     }
                 }
@@ -861,14 +936,20 @@ impl Workspace {
                 }
                 PaneEvent::OpenSettings => this.open_settings_window(cx),
                 PaneEvent::AiPanelDismissed(document_view_id) => {
-                    let active_document_id = pane_for_events
-                        .read(cx)
-                        .active_document_view()
-                        .map(|document_view| document_view.entity_id());
-                    if this.active_pane == pane_for_events
-                        && active_document_id == Some(*document_view_id)
-                    {
+                    let dock_document_id = this
+                        .dock_document_target(cx)
+                        .map(|(_, document_view)| document_view.entity_id());
+                    if dock_document_id == Some(*document_view_id) {
                         this.close_ai_dock(cx);
+                    }
+                }
+                PaneEvent::DocumentSidebarNavigation(document_view_id) => {
+                    if pane_for_events.update(cx, |pane, cx| {
+                        pane.activate_tab_by_id(*document_view_id, true, window, cx)
+                    }) {
+                        this.active_pane = pane_for_events.clone();
+                        this.record_document_context(&pane_for_events, cx);
+                        cx.notify();
                     }
                 }
                 PaneEvent::TabDrop {
@@ -884,9 +965,10 @@ impl Workspace {
                         cx,
                     );
                 }
-                PaneEvent::CloseTab(tab_ix) => {
-                    this.active_pane = pane_for_events.clone();
-                    this.close_tab_in_pane(&pane_for_events, Some(*tab_ix), window, cx);
+                PaneEvent::CloseTab(tab_id) => {
+                    if let Some(tab_ix) = pane_for_events.read(cx).tab_ix_for_entity_id(*tab_id) {
+                        this.close_tab_in_pane(&pane_for_events, Some(tab_ix), window, cx);
+                    }
                 }
                 PaneEvent::DuplicateTab(tab_ix) => {
                     this.active_pane = pane_for_events.clone();
@@ -894,6 +976,7 @@ impl Workspace {
                 }
                 PaneEvent::TabClicked { tab_id, was_active } => {
                     this.active_pane = pane_for_events.clone();
+                    this.record_document_context(&pane_for_events, cx);
                     this.handle_synchronized_tab_click(
                         &pane_for_events,
                         *tab_id,
@@ -941,8 +1024,9 @@ impl Workspace {
         cx.on_focus_in(&focus_handle, window, move |this, _, cx| {
             if this.active_pane != pane_for_focus {
                 this.active_pane = pane_for_focus.clone();
-                cx.notify();
             }
+            this.record_document_context(&pane_for_focus, cx);
+            cx.notify();
         })
         .detach();
 
@@ -950,6 +1034,7 @@ impl Workspace {
         cx.observe(pane, move |this, _, cx| {
             this.refresh_live_translation_pair_activity(cx);
             if this.active_pane == pane_for_observe {
+                this.record_document_context(&pane_for_observe, cx);
                 cx.notify();
             }
         })
@@ -959,6 +1044,163 @@ impl Workspace {
     fn focus_active_pane(&self, window: &mut Window, cx: &mut Context<Self>) {
         let active_pane = self.active_pane.clone();
         active_pane.update(cx, |pane, cx| pane.focus(window, cx));
+    }
+
+    pub fn surface_mode(&self) -> WorkspaceSurfaceMode {
+        self.surface_mode
+    }
+
+    fn enter_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.surface_mode == WorkspaceSurfaceMode::Home {
+            return;
+        }
+        self.set_title_bar_menu_expanded(false, cx);
+        self.close_command_palette(window, cx);
+        self.close_theme_selector(window, cx);
+        if self.document_browser.is_some() {
+            self.close_document_browser(window, cx);
+        }
+        self.home_previous_focus_handle = window
+            .focused(cx)
+            .or_else(|| Some(self.active_pane.read(cx).focus_handle()));
+        self.surface_mode = WorkspaceSurfaceMode::Home;
+        self.home_view.read(cx).focus_handle().focus(window, cx);
+        cx.notify();
+    }
+
+    fn leave_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.surface_mode == WorkspaceSurfaceMode::Panes {
+            return;
+        }
+        self.surface_mode = WorkspaceSurfaceMode::Panes;
+        if let Some(previous_focus) = self.home_previous_focus_handle.take() {
+            previous_focus.focus(window, cx);
+        } else {
+            self.focus_active_pane(window, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.surface_mode {
+            WorkspaceSurfaceMode::Home => self.leave_home(window, cx),
+            WorkspaceSurfaceMode::Panes => self.enter_home(window, cx),
+        }
+    }
+
+    fn open_document_in_active_pane(
+        &mut self,
+        path: PathBuf,
+        position: Option<DocumentPosition>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        if self.document_browser.is_some() {
+            self.close_document_browser(window, cx);
+        }
+        let path = normalize_path(&path);
+        let active_pane = self.active_pane.clone();
+        let replace_active_new_tab = active_pane.read(cx).active_tab_is_new_tab();
+        if let Some(tab_ix) = active_pane.read(cx).document_tab_ix(&path, cx) {
+            active_pane.update(cx, |pane, cx| {
+                pane.activate_existing_document(
+                    tab_ix,
+                    position,
+                    replace_active_new_tab,
+                    window,
+                    cx,
+                );
+            });
+        } else {
+            active_pane.update(cx, |pane, cx| {
+                pane.focus_or_open_document(path, position, replace_active_new_tab, window, cx)
+            })?;
+        }
+        self.surface_mode = WorkspaceSurfaceMode::Panes;
+        self.home_previous_focus_handle = None;
+        cx.notify();
+        Ok(())
+    }
+
+    fn record_document_context(&mut self, pane: &Entity<Pane>, cx: &mut Context<Self>) {
+        let Some(document_view) = pane.read(cx).active_document_view() else {
+            return;
+        };
+        let tab_id = document_view.entity_id();
+        if self.document_context_mru.first().copied() == Some(tab_id) {
+            return;
+        }
+        self.document_context_mru
+            .retain(|candidate| *candidate != tab_id);
+        self.document_context_mru.insert(0, tab_id);
+    }
+
+    fn document_target_for_id(
+        &self,
+        tab_id: EntityId,
+        cx: &App,
+    ) -> Option<(Entity<Pane>, Entity<DocumentView>)> {
+        self.pane_group.panes().into_iter().find_map(|pane| {
+            let document_view = pane.read(cx).active_document_view()?;
+            if document_view.entity_id() != tab_id {
+                return None;
+            }
+            Some((pane, document_view))
+        })
+    }
+
+    fn dock_document_target(&self, cx: &App) -> Option<(Entity<Pane>, Entity<DocumentView>)> {
+        self.document_context_mru
+            .iter()
+            .find_map(|tab_id| self.document_target_for_id(*tab_id, cx))
+            .or_else(|| {
+                self.active_pane
+                    .read(cx)
+                    .active_document_view()
+                    .map(|document_view| (self.active_pane.clone(), document_view))
+            })
+            .or_else(|| {
+                self.pane_group.panes().into_iter().find_map(|pane| {
+                    pane.read(cx)
+                        .active_document_view()
+                        .map(|document_view| (pane, document_view))
+                })
+            })
+    }
+
+    fn prune_document_context(&mut self, cx: &mut Context<Self>) {
+        let document_ids = self
+            .pane_group
+            .panes()
+            .into_iter()
+            .flat_map(|pane| {
+                pane.read(cx)
+                    .document_views()
+                    .into_iter()
+                    .map(|document_view| document_view.entity_id())
+            })
+            .collect::<HashSet<_>>();
+        self.document_context_mru
+            .retain(|tab_id| document_ids.contains(tab_id));
+        if self.document_context_mru.is_empty()
+            && let Some((_, document_view)) = self.dock_document_target(cx)
+        {
+            self.document_context_mru.push(document_view.entity_id());
+        }
+    }
+
+    fn focus_dock_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((pane, document_view)) = self.dock_document_target(cx) else {
+            return;
+        };
+        let tab_id = document_view.entity_id();
+        if pane.update(cx, |pane, cx| {
+            pane.activate_tab_by_id(tab_id, true, window, cx)
+        }) {
+            self.active_pane = pane.clone();
+            self.record_document_context(&pane, cx);
+            cx.notify();
+        }
     }
 
     fn sync_tab_bar_visibility(&mut self, cx: &mut Context<Self>) {
@@ -2066,11 +2308,19 @@ impl Workspace {
 
     fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_title_bar_menu_expanded(false, cx);
+        if self.surface_mode == WorkspaceSurfaceMode::Home
+            && self.active_pane.read(cx).active_tab_is_new_tab()
+        {
+            self.leave_home(window, cx);
+            return;
+        }
+        self.leave_home(window, cx);
         let active_pane = self.active_pane.clone();
         active_pane.update(cx, |pane, cx| pane.open_new_tab(window, cx));
     }
 
     pub fn open_keymap_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.leave_home(window, cx);
         let active_pane = self.active_pane.clone();
         active_pane.update(cx, |pane, cx| pane.open_keymap_tab(window, cx));
     }
@@ -2102,9 +2352,12 @@ impl Workspace {
                     let path = path.clone();
                     let replace_active_new_tab = this.active_pane.read(cx).active_tab_is_new_tab();
                     this.close_document_browser(window, cx);
-                    if let Err(error) =
+                    let result = if this.surface_mode == WorkspaceSurfaceMode::Home {
+                        this.open_document_in_active_pane(path, None, window, cx)
+                    } else {
                         this.focus_or_open_document(path, None, replace_active_new_tab, window, cx)
-                    {
+                    };
+                    if let Err(error) = result {
                         eprintln!("failed to open selected document: {error:#}");
                     }
                 }
@@ -2132,6 +2385,7 @@ impl Workspace {
     }
 
     fn open_system_file_picker(&mut self, cx: &mut Context<Self>) {
+        let opened_from_home = self.surface_mode == WorkspaceSurfaceMode::Home;
         let dialog = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -2147,7 +2401,11 @@ impl Workspace {
                 match this.update_in(cx, |this, window, cx| {
                     let replace_active_new_tab = this.active_pane.read(cx).active_tab_is_new_tab();
                     this.close_document_browser(window, cx);
-                    this.focus_or_open_document(path, None, replace_active_new_tab, window, cx)
+                    if opened_from_home {
+                        this.open_document_in_active_pane(path, None, window, cx)
+                    } else {
+                        this.focus_or_open_document(path, None, replace_active_new_tab, window, cx)
+                    }
                 }) {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => eprintln!("failed to open selected PDF: {error:#}"),
@@ -2183,6 +2441,8 @@ impl Workspace {
                     cx,
                 );
             });
+            self.surface_mode = WorkspaceSurfaceMode::Panes;
+            self.home_previous_focus_handle = None;
             cx.notify();
             return Ok(());
         }
@@ -2191,6 +2451,9 @@ impl Workspace {
         active_pane.update(cx, |pane, cx| {
             pane.focus_or_open_document(path, position, replace_active_new_tab, window, cx)
         })?;
+        self.surface_mode = WorkspaceSurfaceMode::Panes;
+        self.home_previous_focus_handle = None;
+        cx.notify();
         Ok(())
     }
 
@@ -2249,12 +2512,18 @@ impl Workspace {
     }
 
     fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.surface_mode == WorkspaceSurfaceMode::Home {
+            return;
+        }
         self.set_title_bar_menu_expanded(false, cx);
         let active_pane = self.active_pane.clone();
         self.close_tab_in_pane(&active_pane, None, window, cx);
     }
 
     fn duplicate_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.surface_mode != WorkspaceSurfaceMode::Panes {
+            return;
+        }
         let pane = self.active_pane.clone();
         let tab_ix = pane.read(cx).active_tab_ix();
         self.duplicate_tab_in_pane(&pane, tab_ix, window, cx);
@@ -2355,6 +2624,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let pane_was_active = self.active_pane == *pane;
         let closed_tab_id = match tab_ix {
             Some(tab_ix) => pane.read(cx).tab_id_at(tab_ix),
             None => pane.read(cx).active_tab_id(),
@@ -2376,9 +2646,10 @@ impl Workspace {
         });
         if empty {
             self.handle_empty_pane(pane, window, cx);
-        } else {
+        } else if pane_was_active {
             pane.update(cx, |pane, cx| pane.focus(window, cx));
         }
+        self.prune_document_context(cx);
         self.refresh_synchronized_tab_presentation(cx);
         cx.notify();
     }
@@ -2395,6 +2666,7 @@ impl Workspace {
                 pane.focus(window, cx);
             });
             self.active_pane = pane.clone();
+            self.enter_home(window, cx);
             return;
         }
 
@@ -2402,6 +2674,7 @@ impl Workspace {
     }
 
     fn remove_pane(&mut self, pane: &Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
+        let pane_was_active = self.active_pane == *pane;
         let panes = self.pane_group.panes();
         let remove_ix = panes
             .iter()
@@ -2430,11 +2703,14 @@ impl Workspace {
             return;
         }
 
-        let active_ix = remove_ix.min(remaining.len() - 1);
-        self.active_pane = remaining[active_ix].clone();
         self.sync_tab_bar_visibility(cx);
-        self.active_pane
-            .update(cx, |pane, cx| pane.focus(window, cx));
+        if pane_was_active {
+            let active_ix = remove_ix.min(remaining.len() - 1);
+            self.active_pane = remaining[active_ix].clone();
+            self.active_pane
+                .update(cx, |pane, cx| pane.focus(window, cx));
+        }
+        self.prune_document_context(cx);
         self.refresh_synchronized_tab_presentation(cx);
         cx.notify();
     }
@@ -2476,6 +2752,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.surface_mode != WorkspaceSurfaceMode::Panes {
+            return;
+        }
         self.set_title_bar_menu_expanded(false, cx);
         let active_pane = self.active_pane.clone();
         let (initial_path, initial_position) = active_pane
@@ -3080,6 +3359,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.surface_mode != WorkspaceSurfaceMode::Panes {
+            return;
+        }
         if let Some(pane) = self
             .pane_group
             .find_pane_in_direction(&self.active_pane, direction)
@@ -3089,6 +3371,9 @@ impl Workspace {
     }
 
     fn activate_next_pane(&mut self, reverse: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.surface_mode != WorkspaceSurfaceMode::Panes {
+            return;
+        }
         let panes = self.pane_group.panes();
         if panes.len() <= 1 {
             return;
@@ -3106,6 +3391,9 @@ impl Workspace {
     }
 
     fn swap_pane_in_direction(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
+        if self.surface_mode != WorkspaceSurfaceMode::Panes {
+            return;
+        }
         if let Some(target) = self
             .pane_group
             .find_pane_in_direction(&self.active_pane, direction)
@@ -3116,6 +3404,9 @@ impl Workspace {
     }
 
     fn move_pane_to_border(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
+        if self.surface_mode != WorkspaceSurfaceMode::Panes {
+            return;
+        }
         if self
             .pane_group
             .move_to_border(&self.active_pane, direction, cx)
@@ -3130,12 +3421,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.surface_mode != WorkspaceSurfaceMode::Panes {
+            return;
+        }
         self.pane_group
             .resize(&self.active_pane, direction, window, cx);
         cx.notify();
     }
 
     fn close_other_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.surface_mode != WorkspaceSurfaceMode::Panes {
+            return;
+        }
         let sessions = self
             .pane_group
             .panes()
@@ -3226,6 +3523,9 @@ impl Workspace {
     }
 
     fn reset_pane_sizes(&mut self, cx: &mut Context<Self>) {
+        if self.surface_mode != WorkspaceSurfaceMode::Panes {
+            return;
+        }
         self.pane_group.reset_pane_sizes(cx);
         cx.notify();
     }
@@ -3816,21 +4116,34 @@ impl Render for Workspace {
             .settings
             .behavior
             .dim_inactive_panes;
-        let active_pdf_is_presentation = self
-            .active_pane
-            .read(cx)
-            .active_document_view()
-            .is_some_and(|document_view| document_view.read(cx).is_presentation_mode());
+        let active_pdf_is_presentation = self.surface_mode == WorkspaceSurfaceMode::Panes
+            && self
+                .active_pane
+                .read(cx)
+                .active_document_view()
+                .is_some_and(|document_view| document_view.read(cx).is_presentation_mode());
         let title_bar = (!active_pdf_is_presentation).then(|| {
             WorkspaceTitleBar::new(
                 cx.entity(),
                 self.title_bar_open_menu,
                 self.title_bar_popup_menu.clone(),
-                self.active_tab_label(cx),
+                if self.surface_mode == WorkspaceSurfaceMode::Home {
+                    Some("Home".into())
+                } else {
+                    self.active_tab_label(cx)
+                },
+                self.surface_mode == WorkspaceSurfaceMode::Home,
                 shell,
             )
         });
-        let synchronized_connection = self.render_synchronized_connection(theme, window, cx);
+        let synchronized_connection = (self.surface_mode == WorkspaceSurfaceMode::Panes)
+            .then(|| self.render_synchronized_connection(theme, window, cx))
+            .flatten();
+        let body = if self.surface_mode == WorkspaceSurfaceMode::Home {
+            self.home_view.clone().into_any_element()
+        } else {
+            self.render_body(theme, dim_inactive_panes, window, cx)
+        };
         div()
             .id("workspace")
             .size_full()
@@ -3889,6 +4202,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &OpenNewTab, window, cx| {
                 this.open_new_tab(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleHome, window, cx| {
+                this.toggle_home(window, cx);
             }))
             .on_action(cx.listener(|this, _: &DuplicateTab, window, cx| {
                 this.duplicate_active_tab(window, cx);
@@ -4008,7 +4324,7 @@ impl Render for Workspace {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .child(self.render_body(theme, dim_inactive_panes, window, cx)),
+                    .child(body),
             )
             .children(synchronized_connection)
             .when_some(self.command_palette.clone(), |this, palette| {
@@ -4059,17 +4375,18 @@ mod tests {
         PaneEvent, SplitDirection, SynchronizedConnectionAnchor, SynchronizedConnectionAnchorEdge,
         SynchronizedConnectionCurve, SynchronizedConnectionGroup,
         SynchronizedConnectionInvalidReason, SynchronizedConnectionTabState, Workspace,
-        WorkspaceCallbacks, WorkspaceMenu, WorkspaceWindowHandle, WorkspaceWindowRequest,
-        live_translation_pair_is_active,
+        WorkspaceCallbacks, WorkspaceMenu, WorkspaceSurfaceMode, WorkspaceWindowHandle,
+        WorkspaceWindowRequest, live_translation_pair_is_active,
     };
     use crate::{
         document_view::{
             DocumentSidebar, RenderCache, SynchronizedScrollDelta, SynchronizedScrollMode,
         },
         library::{
-            DocumentPosition, LibraryStore, ReaderPaneSession, ReaderPaneTree, ReaderSidebar,
-            ReaderSplitAxis, ReaderSynchronizedGroup, ReaderTabKind, ReaderTabSession,
-            ReaderTranslationSession, ReaderWindowBounds, ReaderWindowSession, ReaderWindowState,
+            DocumentPosition, LibraryStore, ReaderNewTabSession, ReaderPaneSession, ReaderPaneTree,
+            ReaderSidebar, ReaderSplitAxis, ReaderSynchronizedGroup, ReaderTabKind,
+            ReaderTabSession, ReaderTranslationSession, ReaderWindowBounds, ReaderWindowSession,
+            ReaderWindowState,
         },
         settings::SettingsStore,
     };
@@ -4273,7 +4590,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn documentless_workspace_starts_on_a_new_tab(cx: &mut TestAppContext) {
+    fn documentless_workspace_starts_on_home_with_a_backing_new_tab(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
@@ -4294,8 +4611,184 @@ mod tests {
         });
 
         workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.surface_mode, WorkspaceSurfaceMode::Home);
             assert!(workspace.active_pane.read(cx).active_tab_is_new_tab());
         });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("home-view").is_some());
+        assert!(cx.debug_bounds("home-navigation-rail").is_some());
+        assert!(cx.debug_bounds("workspace-home").is_some());
+        assert!(cx.debug_bounds("workspace-pane-column").is_none());
+    }
+
+    #[gpui::test]
+    fn home_toggle_preserves_the_document_workspace_and_requested_docks(cx: &mut TestAppContext) {
+        let document_path = temporary_pdf_path("home-toggle-preserves-workspace");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+        let document_id = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
+            let document_id = workspace
+                .active_pane
+                .read(cx)
+                .active_document_view()
+                .unwrap()
+                .entity_id();
+            workspace.enter_home(window, cx);
+            document_id
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.surface_mode, WorkspaceSurfaceMode::Home);
+            assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Toc));
+        });
+        assert!(cx.debug_bounds("home-view").is_some());
+        assert!(cx.debug_bounds("toc-sidebar-content").is_none());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.leave_home(window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.surface_mode, WorkspaceSurfaceMode::Panes);
+            assert_eq!(
+                workspace.active_pane.read(cx).active_tab_id(),
+                Some(document_id)
+            );
+        });
+        assert!(cx.debug_bounds("toc-sidebar-content").is_some());
+
+        fs::remove_file(document_path).unwrap();
+    }
+
+    #[gpui::test]
+    fn closing_the_last_tab_enters_home_and_keeps_a_quick_open_tab(cx: &mut TestAppContext) {
+        let document_path = temporary_pdf_path("last-tab-enters-home");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_active_tab(window, cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.surface_mode, WorkspaceSurfaceMode::Home);
+            assert_eq!(workspace.pane_group.panes().len(), 1);
+            assert!(workspace.active_pane.read(cx).active_tab_is_new_tab());
+        });
+
+        fs::remove_file(document_path).unwrap();
+    }
+
+    #[gpui::test]
+    fn home_open_targets_the_previous_active_pane_even_when_document_exists_elsewhere(
+        cx: &mut TestAppContext,
+    ) {
+        let document_path = temporary_pdf_path("home-strict-active-pane");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (left_pane, right_pane) = workspace.update_in(cx, |workspace, window, cx| {
+            let panes = workspace.pane_group.panes();
+            let left_pane = panes[0].clone();
+            let right_pane = panes[1].clone();
+            right_pane.update(cx, |pane, cx| pane.open_new_tab(window, cx));
+            workspace.close_tab_in_pane_now(&right_pane, Some(0), window, cx);
+            workspace.active_pane = right_pane.clone();
+            workspace.enter_home(window, cx);
+            (left_pane, right_pane)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .open_document_in_active_pane(document_path.clone(), None, window, cx)
+                .unwrap();
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.surface_mode, WorkspaceSurfaceMode::Panes);
+            assert_eq!(workspace.active_pane, right_pane);
+            assert!(
+                left_pane
+                    .read(cx)
+                    .document_tab_ix(&document_path, cx)
+                    .is_some()
+            );
+            assert!(
+                right_pane
+                    .read(cx)
+                    .document_tab_ix(&document_path, cx)
+                    .is_some()
+            );
+        });
+
+        fs::remove_file(document_path).unwrap();
     }
 
     #[gpui::test]
@@ -4326,7 +4819,7 @@ mod tests {
                         id: 1,
                         tabs: vec![ReaderTabSession {
                             id: 1,
-                            kind: ReaderTabKind::NewTab,
+                            kind: ReaderTabKind::NewTab(ReaderNewTabSession::default()),
                         }],
                         active_tab: Some(1),
                     }),
@@ -4341,6 +4834,7 @@ mod tests {
                 ],
             },
             active_pane: 2,
+            dock_document_tab: None,
             left_sidebar: Some(ReaderSidebar::Notes),
             ai_panel_open: true,
             transparency_enabled: false,
@@ -4434,6 +4928,7 @@ mod tests {
                 ],
             },
             active_pane: 1,
+            dock_document_tab: Some(2),
             left_sidebar: None,
             ai_panel_open: false,
             transparency_enabled: true,
@@ -4477,6 +4972,12 @@ mod tests {
             assert_eq!(right_views.len(), 1);
             assert_ne!(left_views[0], left_views[1]);
             assert_eq!(left.active_tab_ix(), 1);
+            assert_eq!(
+                workspace
+                    .dock_document_target(cx)
+                    .map(|(_, document)| document.entity_id()),
+                Some(left_views[1].entity_id())
+            );
             let left_group = workspace
                 .synchronized_tabs
                 .group_for_tab(left_views[1].entity_id())
@@ -5563,6 +6064,7 @@ mod tests {
             root.view().clone().downcast::<Workspace>().unwrap()
         });
         workspace.update_in(cx, |workspace, window, cx| {
+            workspace.leave_home(window, cx);
             workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
             workspace.toggle_ai_dock(window, cx);
             workspace.open_new_tab(window, cx);
@@ -5988,6 +6490,7 @@ mod tests {
         });
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.open_new_tab(window, cx);
+            workspace.open_new_tab(window, cx);
         });
         cx.update(|window, cx| {
             _ = window.draw(cx);
@@ -6048,6 +6551,7 @@ mod tests {
         });
         let top_left = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
         workspace.update_in(cx, |workspace, window, cx| {
+            workspace.leave_home(window, cx);
             workspace.split_active_pane(SplitDirection::Right, window, cx);
         });
         let top_right = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
@@ -6252,5 +6756,268 @@ mod tests {
 
         fs::remove_file(first_path).unwrap();
         fs::remove_file(second_path).unwrap();
+    }
+
+    #[gpui::test]
+    fn single_pane_new_tab_suspends_document_docks_until_document_is_visible(
+        cx: &mut TestAppContext,
+    ) {
+        let document_path = temporary_pdf_path("new-tab-sticky-docks");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+
+        let document_id = workspace.update_in(cx, |workspace, window, cx| {
+            let document_id = workspace
+                .active_pane
+                .read(cx)
+                .active_document_view()
+                .unwrap()
+                .entity_id();
+            workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
+            workspace.toggle_ai_dock(window, cx);
+            workspace.open_new_tab(window, cx);
+            document_id
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.active_pane.read(cx).active_tab_is_new_tab());
+            assert!(workspace.dock_document_target(cx).is_none());
+            assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Toc));
+            assert!(workspace.docks.ai_panel_open);
+        });
+        assert!(cx.debug_bounds("workspace-left-dock").is_none());
+        assert!(cx.debug_bounds("workspace-ai-dock").is_none());
+        assert!(cx.debug_bounds("toc-sidebar-content").is_none());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let pane = workspace.active_pane.clone();
+            assert!(pane.update(cx, |pane, cx| {
+                pane.activate_tab_by_id(document_id, true, window, cx)
+            }));
+            workspace.record_document_context(&pane, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.active_pane.read(cx).active_tab_id(),
+                Some(document_id)
+            );
+        });
+        assert!(cx.debug_bounds("workspace-left-dock").is_some());
+        assert!(cx.debug_bounds("workspace-ai-dock").is_some());
+        assert!(cx.debug_bounds("toc-sidebar-content").is_some());
+
+        fs::remove_file(document_path).unwrap();
+    }
+
+    #[gpui::test]
+    fn closing_new_tab_in_inactive_pane_does_not_activate_it_or_hide_sidebar(
+        cx: &mut TestAppContext,
+    ) {
+        let document_path = temporary_pdf_path("inactive-pane-new-tab-close");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (left_pane, right_pane, left_document_id) =
+            workspace.update_in(cx, |workspace, window, cx| {
+                let panes = workspace.pane_group.panes();
+                let left_pane = panes[0].clone();
+                let right_pane = panes[1].clone();
+                right_pane.update(cx, |pane, cx| pane.open_new_tab(window, cx));
+                workspace.active_pane = left_pane.clone();
+                left_pane.update(cx, |pane, cx| pane.focus(window, cx));
+                workspace.record_document_context(&left_pane, cx);
+                workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
+                let left_document_id = left_pane
+                    .read(cx)
+                    .active_document_view()
+                    .unwrap()
+                    .entity_id();
+                (left_pane, right_pane, left_document_id)
+            });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(right_pane.read_with(cx, |pane, _| pane.active_tab_is_new_tab()));
+        assert!(cx.debug_bounds("toc-sidebar-content").is_some());
+
+        let close = cx
+            .debug_bounds("pane-tab-close-1")
+            .expect("inactive pane New Tab close button")
+            .center();
+        cx.simulate_mouse_down(close, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.active_pane, left_pane);
+            assert_eq!(
+                workspace
+                    .dock_document_target(cx)
+                    .map(|(_, document)| document.entity_id()),
+                Some(left_document_id)
+            );
+        });
+        assert!(cx.debug_bounds("toc-sidebar-content").is_some());
+
+        cx.simulate_mouse_up(close, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.active_pane, left_pane);
+            assert_eq!(right_pane.read(cx).len(), 1);
+            assert!(!right_pane.read(cx).active_tab_is_new_tab());
+            assert_eq!(
+                workspace
+                    .dock_document_target(cx)
+                    .map(|(_, document)| document.entity_id()),
+                Some(left_document_id)
+            );
+        });
+        assert!(cx.debug_bounds("toc-sidebar-content").is_some());
+
+        fs::remove_file(document_path).unwrap();
+    }
+
+    #[gpui::test]
+    fn removing_dock_owner_pane_does_not_fall_back_to_hidden_document(cx: &mut TestAppContext) {
+        let document_path = temporary_pdf_path("removed-owner-hidden-document");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (left_pane, right_pane, right_document_id) =
+            workspace.update_in(cx, |workspace, window, cx| {
+                let panes = workspace.pane_group.panes();
+                let left_pane = panes[0].clone();
+                let right_pane = panes[1].clone();
+                let right_document_id = right_pane
+                    .read(cx)
+                    .active_document_view()
+                    .expect("split document")
+                    .entity_id();
+                right_pane.update(cx, |pane, cx| pane.open_new_tab(window, cx));
+                workspace.active_pane = left_pane.clone();
+                left_pane.update(cx, |pane, cx| pane.focus(window, cx));
+                workspace.record_document_context(&left_pane, cx);
+                workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
+                workspace.active_pane = right_pane.clone();
+                right_pane.update(cx, |pane, cx| pane.focus(window, cx));
+                (left_pane, right_pane, right_document_id)
+            });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("toc-sidebar-content").is_some());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_tab_in_pane_now(&left_pane, None, window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.pane_group.panes().len(), 1);
+            assert_eq!(workspace.active_pane, right_pane);
+            assert!(right_pane.read(cx).active_tab_is_new_tab());
+            assert!(workspace.dock_document_target(cx).is_none());
+            assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Toc));
+        });
+        assert!(cx.debug_bounds("workspace-left-dock").is_none());
+        assert!(cx.debug_bounds("toc-sidebar-content").is_none());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(right_pane.update(cx, |pane, cx| {
+                pane.activate_tab_by_id(right_document_id, true, window, cx)
+            }));
+            workspace.record_document_context(&right_pane, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace
+                    .dock_document_target(cx)
+                    .map(|(_, document)| document.entity_id()),
+                Some(right_document_id)
+            );
+        });
+        assert!(cx.debug_bounds("toc-sidebar-content").is_some());
+
+        fs::remove_file(document_path).unwrap();
     }
 }

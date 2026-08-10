@@ -9,13 +9,13 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Datelike as _, Local, Utc};
 use glyphst_core::DocumentFormat;
 use gpui::{
-    AnyElement, Context, Corners, Entity, EventEmitter, FocusHandle, IntoElement, Modifiers,
-    MouseButton, MouseDownEvent, Pixels, Render, RenderImage, ScrollStrategy, SharedString,
-    Subscription, UniformListScrollHandle, Window, canvas, div, fill, point, prelude::*, px, rgb,
-    transparent_black, uniform_list,
+    AnyElement, App, Context, Corners, Entity, EventEmitter, FocusHandle, IntoElement, Modifiers,
+    MouseButton, MouseDownEvent, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render,
+    RenderImage, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window,
+    canvas, div, fill, point, prelude::*, px, rgb, transparent_black, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Selectable as _, Sizable as _, ThemeColor,
@@ -38,7 +38,13 @@ pub use glyphst_actions::new_tab::{
 use crate::{
     document_view::{NextHalfPage, PreviousHalfPage, ScrollLineDown, ScrollLineUp},
     icons::{Icon, IconName},
-    library::{HistoryEntry, LibraryStore},
+    library::{
+        BrowserPresentation, DocumentId, HistoryEntry, HomeDestination, LibraryAddOutcome,
+        LibraryCreator, LibraryCreatorRole, LibraryFilter, LibraryItem, LibraryItemKind,
+        LibraryItemMetadata, LibrarySort, LibrarySortDirection, LibrarySortField, LibraryStore,
+        LibraryTagId, LibraryTrashFilter, LibraryViewMode, QuickOpenSource,
+        ReaderNewTabDestination, ReaderNewTabSession, ReadingStatus,
+    },
     scrollbar::{ScrollbarHandle as _, WithScrollbar as _},
     settings::{NewTabViewMode, SettingsStore, ui_rems},
 };
@@ -60,6 +66,11 @@ const DETAILS_LOCATION_BREAKPOINT: f32 = 760.0;
 const DETAILS_FORMAT_SIZE_BREAKPOINT: f32 = 620.0;
 const DETAILS_LAST_OPENED_BREAKPOINT: f32 = 480.0;
 const NEW_TAB_HEADER_HEIGHT: f32 = 88.0;
+const NEW_TAB_NAV_WIDTH: f32 = 176.0;
+const NEW_TAB_NARROW_BREAKPOINT: f32 = 520.0;
+const NEW_TAB_EXPANDED_BREAKPOINT: f32 = 800.0;
+const NEW_TAB_WIDE_PORTRAIT_BREAKPOINT: f32 = 1100.0;
+const NEW_TAB_INSPECTOR_WIDTH: f32 = 320.0;
 const THUMBNAIL_CACHE_VERSION: &str = "v1";
 const MAX_PERSISTENT_THUMBNAILS: usize = 256;
 
@@ -167,6 +178,7 @@ struct NewTabCardState {
 
 #[derive(Clone)]
 struct NewTabEntry {
+    item_id: Option<DocumentId>,
     path: PathBuf,
     file_name: SharedString,
     directory: SharedString,
@@ -175,6 +187,15 @@ struct NewTabEntry {
     format_size: SharedString,
     last_opened: SharedString,
     format: Option<DocumentFormat>,
+    favorite: bool,
+    status: Option<ReadingStatus>,
+    missing: bool,
+    title_sort: SharedString,
+    creator_sort: SharedString,
+    year: Option<i32>,
+    date_added: Option<u64>,
+    last_opened_timestamp: Option<u64>,
+    search_text: SharedString,
 }
 
 impl NewTabEntry {
@@ -191,6 +212,39 @@ impl NewTabEntry {
 enum NewTabItemKey {
     OpenFile,
     Document(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum NewTabLayoutClass {
+    Narrow,
+    #[default]
+    Compact,
+    Expanded,
+}
+
+impl NewTabLayoutClass {
+    fn for_size(width: f32, height: f32, previous: Self) -> Self {
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return previous;
+        }
+        match previous {
+            Self::Narrow if width < NEW_TAB_NARROW_BREAKPOINT + 20.0 => Self::Narrow,
+            Self::Expanded
+                if width >= NEW_TAB_EXPANDED_BREAKPOINT - 40.0
+                    && (width >= height * 0.95
+                        || width >= NEW_TAB_WIDE_PORTRAIT_BREAKPOINT - 40.0) =>
+            {
+                Self::Expanded
+            }
+            _ if width < NEW_TAB_NARROW_BREAKPOINT => Self::Narrow,
+            _ if width >= NEW_TAB_EXPANDED_BREAKPOINT
+                && (width >= height || width >= NEW_TAB_WIDE_PORTRAIT_BREAKPOINT) =>
+            {
+                Self::Expanded
+            }
+            _ => Self::Compact,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,7 +288,21 @@ pub(crate) enum NewTabEvent {
     OpenDocument(PathBuf),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LibraryBrowserHost {
+    QuickOpen,
+    Home,
+}
+
+#[derive(Clone, Debug)]
+struct LibraryBrowserSession {
+    destination: ReaderNewTabDestination,
+    view_mode: LibraryViewMode,
+    sort: LibrarySort,
+}
+
 pub struct NewTab {
+    host: LibraryBrowserHost,
     entries: Vec<NewTabEntry>,
     filtered_entries: Vec<usize>,
     thumbnails: HashMap<PathBuf, ThumbnailState>,
@@ -243,12 +311,43 @@ pub struct NewTab {
     scroll: UniformListScrollHandle,
     cols: usize,
     viewport_width: f32,
+    viewport_height: f32,
+    layout_class: NewTabLayoutClass,
+    session: LibraryBrowserSession,
+    quick_session: Option<ReaderNewTabSession>,
+    kind_filter: Option<LibraryItemKind>,
+    status_filter: Option<ReadingStatus>,
+    observed_catalog_revision: u64,
+    nav_menu_open: bool,
+    inspector_open: bool,
+    note_expanded: bool,
+    metadata_editor_open: bool,
+    metadata_kind: LibraryItemKind,
+    saved_view_editor_open: bool,
+    tag_editor_id: Option<LibraryTagId>,
+    permanent_delete_prompt_pending: bool,
+    work_note_input: Entity<InputState>,
+    tag_input: Entity<InputState>,
+    metadata_title_input: Entity<InputState>,
+    metadata_creators_input: Entity<InputState>,
+    metadata_year_input: Entity<InputState>,
+    metadata_publication_input: Entity<InputState>,
+    metadata_publisher_input: Entity<InputState>,
+    metadata_doi_input: Entity<InputState>,
+    metadata_isbn_input: Entity<InputState>,
+    metadata_arxiv_input: Entity<InputState>,
+    metadata_subject_input: Entity<InputState>,
+    metadata_language_input: Entity<InputState>,
+    metadata_abstract_input: Entity<InputState>,
+    saved_view_name_input: Entity<InputState>,
+    tag_editor_name_input: Entity<InputState>,
+    note_item_id: Option<DocumentId>,
     selecting: bool,
     selection: BTreeSet<PathBuf>,
     focused_item: NewTabItemKey,
     selection_anchor: Option<PathBuf>,
-    observed_view_mode: NewTabViewMode,
     _search_subscription: Subscription,
+    _work_note_subscription: Subscription,
 }
 
 impl NewTab {
@@ -260,21 +359,79 @@ impl NewTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let view_mode = match cx.global::<SettingsStore>().settings.new_tab.view_mode {
+            NewTabViewMode::Grid => LibraryViewMode::Grid,
+            NewTabViewMode::Grouped => LibraryViewMode::Grouped,
+            NewTabViewMode::Table => LibraryViewMode::Table,
+        };
+        let mut session = ReaderNewTabSession::default();
+        session.library.view_mode = view_mode;
+        Self::new_with_session(focus_handle, session, window, cx)
+    }
+
+    pub(crate) fn new_with_session(
+        focus_handle: FocusHandle,
+        session: ReaderNewTabSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let presentation = session.presentation(session.source);
+        Self::new_with_host(
+            focus_handle,
+            LibraryBrowserSession {
+                destination: match session.source {
+                    QuickOpenSource::History => ReaderNewTabDestination::History,
+                    QuickOpenSource::Library => ReaderNewTabDestination::Library,
+                },
+                view_mode: presentation.view_mode,
+                sort: presentation.sort,
+            },
+            Some(session),
+            LibraryBrowserHost::QuickOpen,
+            window,
+            cx,
+        )
+    }
+
+    pub(crate) fn new_home(
+        focus_handle: FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let preferences = cx.global::<LibraryStore>().home_preferences().clone();
+        let presentation = preferences.presentation(preferences.destination);
+        Self::new_with_host(
+            focus_handle,
+            LibraryBrowserSession {
+                destination: match preferences.destination {
+                    HomeDestination::Library => ReaderNewTabDestination::Library,
+                    HomeDestination::History => ReaderNewTabDestination::History,
+                    HomeDestination::Trash => ReaderNewTabDestination::Trash,
+                },
+                view_mode: presentation.view_mode,
+                sort: presentation.sort,
+            },
+            None,
+            LibraryBrowserHost::Home,
+            window,
+            cx,
+        )
+    }
+
+    fn new_with_host(
+        focus_handle: FocusHandle,
+        session: LibraryBrowserSession,
+        quick_session: Option<ReaderNewTabSession>,
+        host: LibraryBrowserHost,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         if !cx.has_global::<ThumbnailCache>() {
             cx.set_global(ThumbnailCache::new());
         }
-        let entries = {
-            let store = cx.global_mut::<LibraryStore>();
-            if let Err(error) = store.remove_missing_history_entries() {
-                eprintln!("failed to save pruned PDF history: {error:#}");
-            }
-
-            store
-                .history_entries()
-                .iter()
-                .map(NewTabEntry::from_history)
-                .collect::<Vec<_>>()
-        };
+        let store = cx.global::<LibraryStore>();
+        let entries = Self::entries_for_session(store, &session, None, None);
+        let observed_catalog_revision = store.catalog_revision();
         let filtered_entries = (0..entries.len()).collect::<Vec<_>>();
         let focused_item = entries
             .first()
@@ -287,9 +444,46 @@ impl NewTab {
         });
         let _search_subscription =
             cx.subscribe_in(&search_input, window, Self::on_search_input_event);
+        let work_note_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .rows(10)
+                .soft_wrap(true)
+                .placeholder("Write a Markdown research note…")
+        });
+        let _work_note_subscription =
+            cx.subscribe_in(&work_note_input, window, Self::on_work_note_input_event);
+        let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add a tag…"));
+        let metadata_title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Title"));
+        let metadata_creators_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder("Creators, separated by semicolons"));
+        let metadata_year_input = cx.new(|cx| InputState::new(window, cx).placeholder("Year"));
+        let metadata_publication_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Publication or venue"));
+        let metadata_publisher_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Publisher"));
+        let metadata_doi_input = cx.new(|cx| InputState::new(window, cx).placeholder("DOI"));
+        let metadata_isbn_input = cx.new(|cx| InputState::new(window, cx).placeholder("ISBN"));
+        let metadata_arxiv_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("arXiv identifier"));
+        let metadata_subject_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Subject"));
+        let metadata_language_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Language"));
+        let metadata_abstract_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .rows(8)
+                .soft_wrap(true)
+                .placeholder("Abstract or summary")
+        });
+        let saved_view_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Saved view name"));
+        let tag_editor_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Tag name"));
 
-        let observed_view_mode = cx.global::<SettingsStore>().settings.new_tab.view_mode;
-        let board = Self {
+        Self {
+            host,
             entries,
             filtered_entries,
             thumbnails: HashMap::new(),
@@ -298,24 +492,226 @@ impl NewTab {
             scroll: UniformListScrollHandle::new(),
             cols: DEFAULT_COLS,
             viewport_width: 0.0,
+            viewport_height: 0.0,
+            layout_class: NewTabLayoutClass::default(),
+            session,
+            quick_session,
+            kind_filter: None,
+            status_filter: None,
+            observed_catalog_revision,
+            nav_menu_open: false,
+            inspector_open: false,
+            note_expanded: false,
+            metadata_editor_open: false,
+            metadata_kind: LibraryItemKind::Paper,
+            saved_view_editor_open: false,
+            tag_editor_id: None,
+            permanent_delete_prompt_pending: false,
+            work_note_input,
+            tag_input,
+            metadata_title_input,
+            metadata_creators_input,
+            metadata_year_input,
+            metadata_publication_input,
+            metadata_publisher_input,
+            metadata_doi_input,
+            metadata_isbn_input,
+            metadata_arxiv_input,
+            metadata_subject_input,
+            metadata_language_input,
+            metadata_abstract_input,
+            saved_view_name_input,
+            tag_editor_name_input,
+            note_item_id: None,
             selecting: false,
             selection: BTreeSet::new(),
             focused_item,
             selection_anchor: None,
-            observed_view_mode,
             _search_subscription,
-        };
+            _work_note_subscription,
+        }
+    }
 
-        cx.observe_global::<SettingsStore>(|this, cx| {
-            let mode = cx.global::<SettingsStore>().settings.new_tab.view_mode;
-            if this.observed_view_mode != mode {
-                this.observed_view_mode = mode;
-                this.scroll_focused(mode);
+    pub(crate) fn focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
+    pub(crate) fn session_state(&self) -> ReaderNewTabSession {
+        let mut state = self.quick_session.clone().unwrap_or_default();
+        let source = match self.session.destination {
+            ReaderNewTabDestination::History => QuickOpenSource::History,
+            _ => QuickOpenSource::Library,
+        };
+        state.source = source;
+        state.set_presentation(
+            source,
+            BrowserPresentation {
+                view_mode: self.session.view_mode,
+                sort: self.session.sort,
+            },
+        );
+        state
+    }
+
+    fn current_presentation(&self) -> BrowserPresentation {
+        BrowserPresentation {
+            view_mode: self.session.view_mode,
+            sort: self.session.sort,
+        }
+    }
+
+    fn quick_source(destination: &ReaderNewTabDestination) -> QuickOpenSource {
+        if *destination == ReaderNewTabDestination::History {
+            QuickOpenSource::History
+        } else {
+            QuickOpenSource::Library
+        }
+    }
+
+    fn home_destination(destination: &ReaderNewTabDestination) -> HomeDestination {
+        match destination {
+            ReaderNewTabDestination::History => HomeDestination::History,
+            ReaderNewTabDestination::Trash => HomeDestination::Trash,
+            ReaderNewTabDestination::Home
+            | ReaderNewTabDestination::Library
+            | ReaderNewTabDestination::Favorites
+            | ReaderNewTabDestination::Tags
+            | ReaderNewTabDestination::Tag(_)
+            | ReaderNewTabDestination::SavedView(_) => HomeDestination::Library,
+        }
+    }
+
+    fn persist_current_presentation(&mut self, cx: &mut Context<Self>) {
+        let presentation = self.current_presentation();
+        match self.host {
+            LibraryBrowserHost::QuickOpen => {
+                let source = Self::quick_source(&self.session.destination);
+                if let Some(session) = self.quick_session.as_mut() {
+                    session.source = source;
+                    session.set_presentation(source, presentation);
+                }
             }
-            cx.notify();
-        })
-        .detach();
-        board
+            LibraryBrowserHost::Home => {
+                let destination = Self::home_destination(&self.session.destination);
+                let mut preferences = cx.global::<LibraryStore>().home_preferences().clone();
+                preferences.destination = destination;
+                preferences.set_presentation(destination, presentation);
+                if let Err(error) = cx
+                    .global_mut::<LibraryStore>()
+                    .set_home_preferences(preferences)
+                {
+                    eprintln!("failed to persist Home preferences: {error:#}");
+                }
+            }
+        }
+    }
+
+    fn filter_for_destination(
+        store: &LibraryStore,
+        destination: &ReaderNewTabDestination,
+    ) -> LibraryFilter {
+        let mut filter = LibraryFilter::default();
+        match destination {
+            ReaderNewTabDestination::Favorites => filter.favorite = Some(true),
+            ReaderNewTabDestination::Trash => filter.trash = LibraryTrashFilter::Trashed,
+            ReaderNewTabDestination::Tag(tag_id) => filter.tag_ids.push(*tag_id),
+            ReaderNewTabDestination::SavedView(view_id) => {
+                if let Some(view) = store
+                    .library_saved_views()
+                    .iter()
+                    .find(|view| view.id == *view_id)
+                {
+                    filter = view.filter.clone();
+                }
+            }
+            ReaderNewTabDestination::Home
+            | ReaderNewTabDestination::Library
+            | ReaderNewTabDestination::History
+            | ReaderNewTabDestination::Tags => {}
+        }
+        filter
+    }
+
+    fn entries_for_session(
+        store: &LibraryStore,
+        session: &LibraryBrowserSession,
+        kind_filter: Option<LibraryItemKind>,
+        status_filter: Option<ReadingStatus>,
+    ) -> Vec<NewTabEntry> {
+        if session.destination == ReaderNewTabDestination::History {
+            let mut entries = store
+                .history_entries()
+                .iter()
+                .map(|history| {
+                    let item = store.library_item_for_path(&history.path);
+                    NewTabEntry::from_history_and_item(history, item)
+                })
+                .collect::<Vec<_>>();
+            Self::sort_entries(&mut entries, session.sort);
+            return entries;
+        }
+        if matches!(session.destination, ReaderNewTabDestination::Tags) {
+            return Vec::new();
+        }
+
+        let mut filter = Self::filter_for_destination(store, &session.destination);
+        if let Some(kind) = kind_filter {
+            filter.kinds = vec![kind];
+        }
+        if let Some(status) = status_filter {
+            filter.statuses = vec![status];
+        }
+        let mut ids = store.query_library_items(&filter, session.sort);
+        if session.destination == ReaderNewTabDestination::Home {
+            ids.sort_by_key(|id| {
+                let item = store.library_item(*id).expect("queried item must exist");
+                let rank = if item.status == ReadingStatus::Reading {
+                    0
+                } else if item.favorite {
+                    1
+                } else {
+                    2
+                };
+                (rank, std::cmp::Reverse(item.updated))
+            });
+            ids.truncate(24);
+        }
+        let mut entries = ids
+            .into_iter()
+            .filter_map(|id| NewTabEntry::from_library(store, id))
+            .collect::<Vec<_>>();
+        if session.destination == ReaderNewTabDestination::Home {
+            entries.extend(
+                store
+                    .history_entries()
+                    .iter()
+                    .filter(|history| store.library_item_for_path(&history.path).is_none())
+                    .take(12)
+                    .map(NewTabEntry::from_history),
+            );
+        }
+        entries
+    }
+
+    fn sort_entries(entries: &mut [NewTabEntry], sort: LibrarySort) {
+        entries.sort_by(|left, right| {
+            let primary = match sort.field {
+                LibrarySortField::Title => left.title_sort.cmp(&right.title_sort),
+                LibrarySortField::Creator => left.creator_sort.cmp(&right.creator_sort),
+                LibrarySortField::Year => left.year.cmp(&right.year),
+                LibrarySortField::DateAdded => left.date_added.cmp(&right.date_added),
+                LibrarySortField::LastOpened => {
+                    left.last_opened_timestamp.cmp(&right.last_opened_timestamp)
+                }
+            };
+            let ordering = primary
+                .then_with(|| left.title_sort.cmp(&right.title_sort))
+                .then_with(|| left.path.cmp(&right.path));
+            match sort.direction {
+                LibrarySortDirection::Ascending => ordering,
+                LibrarySortDirection::Descending => ordering.reverse(),
+            }
+        });
     }
 
     fn start_thumbnail_render(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -391,24 +787,42 @@ impl NewTab {
         ((available_width - cards_width) / (cols - 1) as f32).max(GRID_GAP)
     }
 
-    fn update_viewport(&mut self, viewport_width: f32, cx: &mut Context<Self>) {
-        if !viewport_width.is_finite() || viewport_width <= 0.0 {
+    fn update_viewport(
+        &mut self,
+        viewport_width: f32,
+        viewport_height: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if !viewport_width.is_finite()
+            || !viewport_height.is_finite()
+            || viewport_width <= 0.0
+            || viewport_height <= 0.0
+        {
             return;
         }
 
-        let width_changed = (viewport_width - self.viewport_width).abs() > VIEWPORT_WIDTH_EPSILON;
+        let size_changed = (viewport_width - self.viewport_width).abs() > VIEWPORT_WIDTH_EPSILON
+            || (viewport_height - self.viewport_height).abs() > VIEWPORT_WIDTH_EPSILON;
         self.viewport_width = viewport_width;
+        self.viewport_height = viewport_height;
+        let layout_class =
+            NewTabLayoutClass::for_size(viewport_width, viewport_height, self.layout_class);
         let cols = Self::cols_for_width(viewport_width);
-        if cols == self.cols && !width_changed {
+        if cols == self.cols && layout_class == self.layout_class && !size_changed {
             return;
         }
 
         self.cols = cols;
+        self.layout_class = layout_class;
         cx.notify();
     }
 
-    fn view_mode(&self, cx: &Context<Self>) -> NewTabViewMode {
-        cx.global::<SettingsStore>().settings.new_tab.view_mode
+    fn view_mode(&self, _cx: &Context<Self>) -> NewTabViewMode {
+        match self.session.view_mode {
+            LibraryViewMode::Grid => NewTabViewMode::Grid,
+            LibraryViewMode::Grouped => NewTabViewMode::Grouped,
+            LibraryViewMode::Table => NewTabViewMode::Table,
+        }
     }
 
     fn set_view_mode(&mut self, mode: NewTabViewMode, cx: &mut Context<Self>) {
@@ -416,15 +830,25 @@ impl NewTab {
             return;
         }
 
-        let mut settings = cx.global::<SettingsStore>().settings.clone();
-        settings.new_tab.view_mode = mode;
-        if let Err(error) = cx
-            .global_mut::<SettingsStore>()
-            .set_settings(settings.clone())
+        self.session.view_mode = match mode {
+            NewTabViewMode::Grid => LibraryViewMode::Grid,
+            NewTabViewMode::Grouped => LibraryViewMode::Grouped,
+            NewTabViewMode::Table => LibraryViewMode::Table,
+        };
+        self.persist_current_presentation(cx);
+        if self.host == LibraryBrowserHost::QuickOpen
+            && self.session.destination == ReaderNewTabDestination::Library
         {
-            eprintln!("failed to persist new tab view mode: {error:#}");
-            cx.global_mut::<SettingsStore>()
-                .set_settings_in_memory(settings);
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            settings.new_tab.view_mode = mode;
+            if let Err(error) = cx
+                .global_mut::<SettingsStore>()
+                .set_settings(settings.clone())
+            {
+                eprintln!("failed to persist new tab view mode: {error:#}");
+                cx.global_mut::<SettingsStore>()
+                    .set_settings_in_memory(settings);
+            }
         }
 
         self.scroll_focused(mode);
@@ -441,6 +865,7 @@ impl NewTab {
                 query.is_empty()
                     || entry.file_name.to_lowercase().contains(&query)
                     || entry.directory.to_lowercase().contains(&query)
+                    || entry.search_text.to_lowercase().contains(&query)
             })
             .map(|(entry_ix, _)| entry_ix)
             .collect();
@@ -520,7 +945,7 @@ impl NewTab {
     fn row_for_item(&self, item_ix: usize, mode: NewTabViewMode) -> usize {
         match mode {
             NewTabViewMode::Grid => item_ix / self.cols.max(1),
-            NewTabViewMode::List | NewTabViewMode::Details => item_ix,
+            NewTabViewMode::Grouped | NewTabViewMode::Table => item_ix,
         }
     }
 
@@ -534,7 +959,7 @@ impl NewTab {
     fn row_height(mode: NewTabViewMode) -> f32 {
         match mode {
             NewTabViewMode::Grid => GRID_ROW_HEIGHT,
-            NewTabViewMode::List | NewTabViewMode::Details => LIST_ROW_HEIGHT,
+            NewTabViewMode::Grouped | NewTabViewMode::Table => LIST_ROW_HEIGHT,
         }
     }
 
@@ -551,6 +976,9 @@ impl NewTab {
     }
 
     fn enter_select(&mut self, cx: &mut Context<Self>) {
+        if self.host != LibraryBrowserHost::Home {
+            return;
+        }
         self.selecting = true;
         if self.focused_item == NewTabItemKey::OpenFile
             && let Some(first) = self.entry_for_item(0)
@@ -640,6 +1068,7 @@ impl NewTab {
         &mut self,
         path: PathBuf,
         modifiers: Modifiers,
+        click_count: usize,
         cx: &mut Context<Self>,
     ) {
         let target_item_ix = self
@@ -655,7 +1084,15 @@ impl NewTab {
         } else {
             self.focused_item = NewTabItemKey::Document(path.clone());
             self.selection_anchor = Some(path.clone());
-            self.open_document(path, cx);
+            self.selection.clear();
+            self.selection.insert(path.clone());
+            if self.host == LibraryBrowserHost::Home {
+                self.inspector_open = true;
+            }
+            if click_count >= 2 {
+                self.open_document(path, cx);
+            }
+            cx.notify();
         }
     }
 
@@ -738,18 +1175,89 @@ impl NewTab {
         cx.notify();
     }
 
-    fn delete_selected(&mut self, cx: &mut Context<Self>) {
+    fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.host != LibraryBrowserHost::Home {
+            return;
+        }
+        if self.selection.is_empty() {
+            return;
+        }
+
+        if matches!(self.session.destination, ReaderNewTabDestination::Trash) {
+            if self.permanent_delete_prompt_pending {
+                return;
+            }
+            let count = self.selection.len();
+            let detail = format!(
+                "This permanently removes {count} catalog {}. The linked source files and reading data are not deleted.",
+                if count == 1 { "record" } else { "records" }
+            );
+            let confirmation = window.prompt(
+                PromptLevel::Warning,
+                "Delete permanently?",
+                Some(&detail),
+                &[
+                    PromptButton::ok("Delete Permanently"),
+                    PromptButton::cancel("Cancel"),
+                ],
+                cx,
+            );
+            self.permanent_delete_prompt_pending = true;
+            cx.spawn_in(window, async move |this, cx| {
+                let confirmed = confirmation.await == Ok(0);
+                _ = this.update_in(cx, |this, _, cx| {
+                    this.permanent_delete_prompt_pending = false;
+                    if confirmed {
+                        this.delete_selected_now(cx);
+                    } else {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
+
+        self.delete_selected_now(cx);
+    }
+
+    fn delete_selected_now(&mut self, cx: &mut Context<Self>) {
         if self.selection.is_empty() {
             return;
         }
 
         let paths = self.selection.iter().cloned().collect::<Vec<_>>();
+        let item_ids = self
+            .entries
+            .iter()
+            .filter(|entry| self.selection.contains(&entry.path))
+            .filter_map(|entry| entry.item_id)
+            .collect::<Vec<_>>();
+        let history_only_paths = self
+            .entries
+            .iter()
+            .filter(|entry| self.selection.contains(&entry.path) && entry.item_id.is_none())
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
         let focused_ix = self.focused_index();
 
         {
             let store = cx.global_mut::<LibraryStore>();
-            if let Err(error) = store.remove_history_entries(&paths) {
-                eprintln!("failed to remove history entries: {error:#}");
+            let result = match &self.session.destination {
+                ReaderNewTabDestination::History => {
+                    store.remove_history_entries(&paths).map(|_| ())
+                }
+                ReaderNewTabDestination::Trash => store
+                    .permanently_delete_library_items(&item_ids)
+                    .map(|_| ()),
+                _ => store.trash_library_items(&item_ids).and_then(|_| {
+                    store
+                        .remove_history_entries(&history_only_paths)
+                        .map(|_| ())
+                }),
+            };
+            if let Err(error) = result {
+                eprintln!("failed to remove New Tab items: {error:#}");
             }
         }
 
@@ -769,11 +1277,9 @@ impl NewTab {
 
     fn refresh_entries(&mut self, cx: &mut Context<Self>) {
         let store = cx.global::<LibraryStore>();
-        self.entries = store
-            .history_entries()
-            .iter()
-            .map(NewTabEntry::from_history)
-            .collect();
+        self.entries =
+            Self::entries_for_session(store, &self.session, self.kind_filter, self.status_filter);
+        self.observed_catalog_revision = store.catalog_revision();
         self.update_filter(cx);
         let existing = self
             .entries
@@ -788,6 +1294,1910 @@ impl NewTab {
         {
             self.selection_anchor = None;
         }
+    }
+
+    fn set_destination(
+        &mut self,
+        destination: ReaderNewTabDestination,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host == LibraryBrowserHost::QuickOpen
+            && !matches!(
+                destination,
+                ReaderNewTabDestination::History | ReaderNewTabDestination::Library
+            )
+        {
+            return;
+        }
+        if self.session.destination == destination {
+            self.nav_menu_open = false;
+            cx.notify();
+            return;
+        }
+        self.persist_current_presentation(cx);
+        let presentation = match self.host {
+            LibraryBrowserHost::QuickOpen => {
+                let source = Self::quick_source(&destination);
+                let session = self.quick_session.get_or_insert_with(Default::default);
+                session.source = source;
+                session.presentation(source)
+            }
+            LibraryBrowserHost::Home => {
+                let home_destination = Self::home_destination(&destination);
+                cx.global::<LibraryStore>()
+                    .home_preferences()
+                    .presentation(home_destination)
+            }
+        };
+        self.session.sort = presentation.sort;
+        self.session.view_mode = presentation.view_mode;
+        if let ReaderNewTabDestination::SavedView(view_id) = destination
+            && let Some(view) = cx
+                .global::<LibraryStore>()
+                .library_saved_views()
+                .iter()
+                .find(|view| view.id == view_id)
+        {
+            self.session.sort = view.sort;
+            self.session.view_mode = view.view_mode;
+        }
+        self.session.destination = destination;
+        self.persist_current_presentation(cx);
+        self.nav_menu_open = false;
+        self.inspector_open = false;
+        self.note_expanded = false;
+        self.selecting = false;
+        self.selection.clear();
+        self.selection_anchor = None;
+        self.search_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.refresh_entries(cx);
+        self.focused_item = self
+            .entries
+            .first()
+            .map(|entry| NewTabItemKey::Document(entry.path.clone()))
+            .unwrap_or(NewTabItemKey::OpenFile);
+        cx.notify();
+    }
+
+    fn sort_field_label(field: LibrarySortField) -> &'static str {
+        match field {
+            LibrarySortField::Title => "Title",
+            LibrarySortField::Creator => "Creator",
+            LibrarySortField::Year => "Year",
+            LibrarySortField::DateAdded => "Added",
+            LibrarySortField::LastOpened => "Opened",
+        }
+    }
+
+    fn cycle_sort_field(&mut self, cx: &mut Context<Self>) {
+        self.session.sort.field = match self.session.sort.field {
+            LibrarySortField::Title => LibrarySortField::Creator,
+            LibrarySortField::Creator => LibrarySortField::Year,
+            LibrarySortField::Year => LibrarySortField::DateAdded,
+            LibrarySortField::DateAdded => LibrarySortField::LastOpened,
+            LibrarySortField::LastOpened => LibrarySortField::Title,
+        };
+        self.persist_current_presentation(cx);
+        self.refresh_entries(cx);
+        cx.notify();
+    }
+
+    fn toggle_sort_direction(&mut self, cx: &mut Context<Self>) {
+        self.session.sort.direction = match self.session.sort.direction {
+            LibrarySortDirection::Ascending => LibrarySortDirection::Descending,
+            LibrarySortDirection::Descending => LibrarySortDirection::Ascending,
+        };
+        self.persist_current_presentation(cx);
+        self.refresh_entries(cx);
+        cx.notify();
+    }
+
+    fn cycle_kind_filter(&mut self, cx: &mut Context<Self>) {
+        if self.host != LibraryBrowserHost::Home {
+            return;
+        }
+        self.kind_filter = match self.kind_filter {
+            None => Some(LibraryItemKind::Paper),
+            Some(LibraryItemKind::Paper) => Some(LibraryItemKind::Book),
+            Some(LibraryItemKind::Book) => Some(LibraryItemKind::Other),
+            Some(LibraryItemKind::Other) => None,
+        };
+        self.refresh_entries(cx);
+        cx.notify();
+    }
+
+    fn cycle_status_filter(&mut self, cx: &mut Context<Self>) {
+        if self.host != LibraryBrowserHost::Home {
+            return;
+        }
+        self.status_filter = match self.status_filter {
+            None => Some(ReadingStatus::ToRead),
+            Some(ReadingStatus::ToRead) => Some(ReadingStatus::Reading),
+            Some(ReadingStatus::Reading) => Some(ReadingStatus::Read),
+            Some(ReadingStatus::Read) => None,
+        };
+        self.refresh_entries(cx);
+        cx.notify();
+    }
+
+    fn selected_item_id(&self) -> Option<DocumentId> {
+        let path = match &self.focused_item {
+            NewTabItemKey::Document(path) => path,
+            NewTabItemKey::OpenFile => return None,
+        };
+        self.entries
+            .iter()
+            .find(|entry| entry.path == *path)
+            .and_then(|entry| entry.item_id)
+    }
+
+    fn selected_entry(&self) -> Option<&NewTabEntry> {
+        let path = match &self.focused_item {
+            NewTabItemKey::Document(path) => path,
+            NewTabItemKey::OpenFile => return None,
+        };
+        self.entries.iter().find(|entry| entry.path == *path)
+    }
+
+    fn sync_work_note_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let item_id = self.selected_item_id();
+        if item_id == self.note_item_id {
+            return;
+        }
+        self.note_item_id = item_id;
+        let note = item_id
+            .and_then(|id| cx.global::<LibraryStore>().library_item(id))
+            .map(|item| item.work_note.clone())
+            .unwrap_or_default();
+        self.work_note_input
+            .update(cx, |input, cx| input.set_value(note, window, cx));
+    }
+
+    fn on_work_note_input_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(event, InputEvent::Change) {
+            return;
+        }
+        let Some(item_id) = self.note_item_id else {
+            return;
+        };
+        let note = input.read(cx).value().to_string();
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .set_library_item_note(item_id, note)
+        {
+            eprintln!("failed to save library work note: {error:#}");
+        }
+        self.observed_catalog_revision = cx.global::<LibraryStore>().catalog_revision();
+        cx.notify();
+    }
+
+    fn add_files(&mut self, cx: &mut Context<Self>) {
+        if self.host != LibraryBrowserHost::Home {
+            return;
+        }
+        let dialog = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Add books and papers".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = dialog.await else {
+                return;
+            };
+            let extracted = cx
+                .background_spawn(async move {
+                    paths
+                        .into_iter()
+                        .map(|path| {
+                            let metadata = extract_library_metadata(&path);
+                            (path, metadata)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                for (path, metadata) in extracted {
+                    match metadata.and_then(|metadata| {
+                        cx.global_mut::<LibraryStore>()
+                            .add_linked_item(&path, metadata)
+                    }) {
+                        Ok(
+                            LibraryAddOutcome::Added(_)
+                            | LibraryAddOutcome::Existing(_)
+                            | LibraryAddOutcome::ExistingInTrash(_),
+                        ) => {}
+                        Err(error) => {
+                            eprintln!("failed to add {} to the library: {error:#}", path.display())
+                        }
+                    }
+                }
+                this.refresh_entries(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn add_selected_history_item(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry().cloned() else {
+            return;
+        };
+        if entry.item_id.is_some() {
+            return;
+        }
+        let path = entry.path.clone();
+        cx.spawn(async move |this, cx| {
+            let metadata_path = path.clone();
+            let metadata = cx
+                .background_spawn(async move { extract_library_metadata(&metadata_path) })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                match metadata.and_then(|metadata| {
+                    cx.global_mut::<LibraryStore>()
+                        .add_linked_item(&path, metadata)
+                }) {
+                    Ok(_) => this.refresh_entries(cx),
+                    Err(error) => {
+                        eprintln!("failed to add {} to the library: {error:#}", path.display())
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn toggle_selected_favorite(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_item_id() else {
+            return;
+        };
+        let favorite = cx
+            .global::<LibraryStore>()
+            .library_item(id)
+            .is_some_and(|item| !item.favorite);
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .set_library_item_favorite(id, favorite)
+        {
+            eprintln!("failed to update favorite: {error:#}");
+        }
+        self.refresh_entries(cx);
+        cx.notify();
+    }
+
+    fn cycle_selected_status(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_item_id() else {
+            return;
+        };
+        let status = match cx
+            .global::<LibraryStore>()
+            .library_item(id)
+            .map(|item| item.status)
+        {
+            Some(ReadingStatus::ToRead) => ReadingStatus::Reading,
+            Some(ReadingStatus::Reading) => ReadingStatus::Read,
+            Some(ReadingStatus::Read) | None => ReadingStatus::ToRead,
+        };
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .set_library_item_status(id, status)
+        {
+            eprintln!("failed to update reading status: {error:#}");
+        }
+        self.refresh_entries(cx);
+        cx.notify();
+    }
+
+    fn restore_selected_items(&mut self, cx: &mut Context<Self>) {
+        let ids = self
+            .entries
+            .iter()
+            .filter(|entry| self.selection.contains(&entry.path))
+            .filter_map(|entry| entry.item_id)
+            .collect::<Vec<_>>();
+        if let Err(error) = cx.global_mut::<LibraryStore>().restore_library_items(&ids) {
+            eprintln!("failed to restore library items: {error:#}");
+        }
+        self.refresh_entries(cx);
+        self.selection.clear();
+        cx.notify();
+    }
+
+    fn add_tag_to_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item_id) = self.selected_item_id() else {
+            return;
+        };
+        let name = self.tag_input.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .add_tag_to_items(&[item_id], &name)
+        {
+            eprintln!("failed to add library tag: {error:#}");
+            return;
+        }
+        self.tag_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.refresh_entries(cx);
+        cx.notify();
+    }
+
+    fn remove_tag_from_selected(&mut self, tag_id: LibraryTagId, cx: &mut Context<Self>) {
+        let Some(item_id) = self.selected_item_id() else {
+            return;
+        };
+        let retained = cx
+            .global::<LibraryStore>()
+            .tags_for_item(item_id)
+            .into_iter()
+            .map(|tag| tag.id)
+            .filter(|candidate| *candidate != tag_id)
+            .collect::<Vec<_>>();
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .set_item_tags(item_id, &retained)
+        {
+            eprintln!("failed to remove library tag: {error:#}");
+        }
+        self.refresh_entries(cx);
+        cx.notify();
+    }
+
+    fn open_saved_view_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let suggested = match &self.session.destination {
+            ReaderNewTabDestination::Favorites => "Favorite works",
+            ReaderNewTabDestination::Tag(_) => "Tagged works",
+            ReaderNewTabDestination::SavedView(_) => "Copy of saved view",
+            _ => "Research view",
+        };
+        self.saved_view_name_input
+            .update(cx, |input, cx| input.set_value(suggested, window, cx));
+        self.saved_view_editor_open = true;
+        cx.notify();
+    }
+
+    fn save_current_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .saved_view_name_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            return;
+        }
+        let mut filter =
+            Self::filter_for_destination(cx.global::<LibraryStore>(), &self.session.destination);
+        let search = self.search_input.read(cx).value().trim().to_string();
+        if !search.is_empty() {
+            filter.text = search;
+        }
+        let result = cx.global_mut::<LibraryStore>().save_library_view(
+            &name,
+            filter,
+            self.session.sort,
+            self.session.view_mode,
+        );
+        match result {
+            Ok(view_id) => {
+                self.saved_view_editor_open = false;
+                self.set_destination(ReaderNewTabDestination::SavedView(view_id), window, cx);
+            }
+            Err(error) => eprintln!("failed to save library view: {error:#}"),
+        }
+        cx.notify();
+    }
+
+    fn delete_current_saved_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ReaderNewTabDestination::SavedView(view_id) = self.session.destination else {
+            return;
+        };
+        let confirmation = window.prompt(
+            PromptLevel::Warning,
+            "Delete saved view?",
+            Some("The books and papers matched by this view remain in your library."),
+            &[
+                PromptButton::ok("Delete View"),
+                PromptButton::cancel("Cancel"),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if confirmation.await != Ok(0) {
+                return;
+            }
+            _ = this.update_in(cx, |this, window, cx| {
+                if let Err(error) = cx.global_mut::<LibraryStore>().delete_library_view(view_id) {
+                    eprintln!("failed to delete saved library view: {error:#}");
+                    return;
+                }
+                this.set_destination(ReaderNewTabDestination::Library, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn open_tag_editor(
+        &mut self,
+        tag_id: LibraryTagId,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tag_editor_id = Some(tag_id);
+        self.tag_editor_name_input
+            .update(cx, |input, cx| input.set_value(name, window, cx));
+        cx.notify();
+    }
+
+    fn save_tag_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(tag_id) = self.tag_editor_id else {
+            return;
+        };
+        let name = self
+            .tag_editor_name_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            return;
+        }
+        match cx
+            .global_mut::<LibraryStore>()
+            .rename_library_tag(tag_id, &name)
+        {
+            Ok(result_id) => {
+                if self.session.destination == ReaderNewTabDestination::Tag(tag_id) {
+                    self.session.destination = ReaderNewTabDestination::Tag(result_id);
+                }
+                self.tag_editor_id = None;
+                self.refresh_entries(cx);
+            }
+            Err(error) => eprintln!("failed to rename library tag: {error:#}"),
+        }
+        cx.notify();
+    }
+
+    fn delete_edited_tag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tag_id) = self.tag_editor_id else {
+            return;
+        };
+        let confirmation = window.prompt(
+            PromptLevel::Warning,
+            "Delete tag?",
+            Some("This removes the tag from every work. It does not delete any library item."),
+            &[
+                PromptButton::ok("Delete Tag"),
+                PromptButton::cancel("Cancel"),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if confirmation.await != Ok(0) {
+                return;
+            }
+            _ = this.update_in(cx, |this, window, cx| {
+                if let Err(error) = cx.global_mut::<LibraryStore>().delete_library_tag(tag_id) {
+                    eprintln!("failed to delete library tag: {error:#}");
+                    return;
+                }
+                this.tag_editor_id = None;
+                if this.session.destination == ReaderNewTabDestination::Tag(tag_id) {
+                    this.set_destination(ReaderNewTabDestination::Tags, window, cx);
+                } else {
+                    this.refresh_entries(cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn open_metadata_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item_id) = self.selected_item_id() else {
+            return;
+        };
+        let Some(item) = cx.global::<LibraryStore>().library_item(item_id).cloned() else {
+            return;
+        };
+        let creators = item
+            .creators
+            .iter()
+            .map(|creator| creator.name.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let mut set = |input: &Entity<InputState>, value: String| {
+            input.update(cx, |input, cx| input.set_value(value, window, cx));
+        };
+        self.metadata_kind = item.kind;
+        set(&self.metadata_title_input, item.title);
+        set(&self.metadata_creators_input, creators);
+        set(
+            &self.metadata_year_input,
+            item.year.map(|year| year.to_string()).unwrap_or_default(),
+        );
+        set(&self.metadata_publication_input, item.publication);
+        set(&self.metadata_publisher_input, item.publisher);
+        set(
+            &self.metadata_doi_input,
+            item.identifiers.doi.unwrap_or_default(),
+        );
+        set(
+            &self.metadata_isbn_input,
+            item.identifiers.isbn.unwrap_or_default(),
+        );
+        set(
+            &self.metadata_arxiv_input,
+            item.identifiers.arxiv.unwrap_or_default(),
+        );
+        set(&self.metadata_subject_input, item.subject);
+        set(&self.metadata_language_input, item.language);
+        set(&self.metadata_abstract_input, item.abstract_text);
+        self.metadata_editor_open = true;
+        cx.notify();
+    }
+
+    fn save_metadata_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(item_id) = self.selected_item_id() else {
+            return;
+        };
+        let Some(mut item) = cx.global::<LibraryStore>().library_item(item_id).cloned() else {
+            return;
+        };
+        item.kind = self.metadata_kind;
+        item.title = self.metadata_title_input.read(cx).value().to_string();
+        item.creators = self
+            .metadata_creators_input
+            .read(cx)
+            .value()
+            .split(';')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| LibraryCreator {
+                name: name.to_string(),
+                role: LibraryCreatorRole::Author,
+            })
+            .collect();
+        item.year = self
+            .metadata_year_input
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<i32>()
+            .ok();
+        item.publication = self.metadata_publication_input.read(cx).value().to_string();
+        item.publisher = self.metadata_publisher_input.read(cx).value().to_string();
+        let optional_value = |input: &Entity<InputState>, cx: &App| {
+            let value = input.read(cx).value().trim().to_string();
+            (!value.is_empty()).then_some(value)
+        };
+        item.identifiers.doi = optional_value(&self.metadata_doi_input, cx);
+        item.identifiers.isbn = optional_value(&self.metadata_isbn_input, cx);
+        item.identifiers.arxiv = optional_value(&self.metadata_arxiv_input, cx);
+        item.subject = self.metadata_subject_input.read(cx).value().to_string();
+        item.language = self.metadata_language_input.read(cx).value().to_string();
+        item.abstract_text = self.metadata_abstract_input.read(cx).value().to_string();
+        match cx.global_mut::<LibraryStore>().update_library_item(item) {
+            Ok(()) => {
+                self.metadata_editor_open = false;
+                self.refresh_entries(cx);
+            }
+            Err(error) => eprintln!("failed to update library metadata: {error:#}"),
+        }
+        cx.notify();
+    }
+
+    fn locate_selected_attachment(&mut self, cx: &mut Context<Self>) {
+        let Some(item_id) = self.selected_item_id() else {
+            return;
+        };
+        let dialog = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Locate linked book or paper".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = dialog.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            _ = this.update(cx, |this, cx| {
+                match cx
+                    .global_mut::<LibraryStore>()
+                    .relink_library_attachment(item_id, &path)
+                {
+                    Ok(()) => this.refresh_entries(cx),
+                    Err(error) => eprintln!("failed to relink library attachment: {error:#}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn trash_selected_item(&mut self, cx: &mut Context<Self>) {
+        let Some(item_id) = self.selected_item_id() else {
+            return;
+        };
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .trash_library_items(&[item_id])
+        {
+            eprintln!("failed to move library item to Trash: {error:#}");
+        }
+        self.refresh_entries(cx);
+        self.selection.clear();
+        cx.notify();
+    }
+
+    fn destination_label(destination: &ReaderNewTabDestination, store: &LibraryStore) -> String {
+        match destination {
+            ReaderNewTabDestination::Home => "Home".to_string(),
+            ReaderNewTabDestination::Library => "Library".to_string(),
+            ReaderNewTabDestination::Favorites => "Favorites".to_string(),
+            ReaderNewTabDestination::History => "History".to_string(),
+            ReaderNewTabDestination::Tags => "Tags".to_string(),
+            ReaderNewTabDestination::Trash => "Trash".to_string(),
+            ReaderNewTabDestination::Tag(id) => store
+                .library_tags()
+                .iter()
+                .find(|tag| tag.id == *id)
+                .map(|tag| format!("#{}", tag.name))
+                .unwrap_or_else(|| "Tag".to_string()),
+            ReaderNewTabDestination::SavedView(id) => store
+                .library_saved_views()
+                .iter()
+                .find(|view| view.id == *id)
+                .map(|view| view.name.clone())
+                .unwrap_or_else(|| "Saved View".to_string()),
+        }
+    }
+
+    fn render_destination_button(
+        destination: ReaderNewTabDestination,
+        label: String,
+        icon: IconName,
+        selected: bool,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = format!("new-tab-nav-{destination:?}");
+        let debug_label = label.clone();
+        let mut button = Button::new(id)
+            .debug_selector(move || format!("new-tab-nav-{debug_label}"))
+            .ghost()
+            .selected(selected)
+            .icon(icon)
+            .label(label);
+        if compact {
+            button = button.xsmall().compact();
+        } else {
+            button = button.small().w_full();
+        }
+        button
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.set_destination(destination.clone(), window, cx);
+                cx.stop_propagation();
+            }))
+            .into_any_element()
+    }
+
+    fn primary_destinations() -> [(ReaderNewTabDestination, &'static str, IconName); 6] {
+        [
+            (ReaderNewTabDestination::Home, "Home", IconName::AppWindow),
+            (
+                ReaderNewTabDestination::Library,
+                "Library",
+                IconName::BookOpen,
+            ),
+            (
+                ReaderNewTabDestination::Favorites,
+                "Favorites",
+                IconName::Circle,
+            ),
+            (
+                ReaderNewTabDestination::History,
+                "History",
+                IconName::RotateCcw,
+            ),
+            (ReaderNewTabDestination::Tags, "Tags", IconName::Link2),
+            (ReaderNewTabDestination::Trash, "Trash", IconName::Trash2),
+        ]
+    }
+
+    fn home_destinations() -> [(ReaderNewTabDestination, &'static str, IconName); 3] {
+        [
+            (
+                ReaderNewTabDestination::Library,
+                "Library",
+                IconName::BookOpen,
+            ),
+            (
+                ReaderNewTabDestination::History,
+                "History",
+                IconName::RotateCcw,
+            ),
+            (ReaderNewTabDestination::Trash, "Trash", IconName::Trash2),
+        ]
+    }
+
+    fn render_quick_source_selector(
+        &self,
+        theme: ThemeColor,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.session.destination.clone();
+        let label = Self::destination_label(&selected, cx.global::<LibraryStore>());
+        let mut selector = div().relative().child(
+            Button::new("new-tab-source-selector")
+                .debug_selector(|| "new-tab-source-selector".to_string())
+                .small()
+                .ghost()
+                .label(label)
+                .icon(IconName::ChevronDown)
+                .selected(self.nav_menu_open)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.nav_menu_open = !this.nav_menu_open;
+                    cx.stop_propagation();
+                    cx.notify();
+                })),
+        );
+        if self.nav_menu_open {
+            let menu = div()
+                .id("new-tab-source-menu")
+                .debug_selector(|| "new-tab-source-menu".to_string())
+                .absolute()
+                .top(px(30.0))
+                .left_0()
+                .w(px(180.0))
+                .p_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.popover)
+                .shadow_lg()
+                .children([
+                    Self::render_destination_button(
+                        ReaderNewTabDestination::History,
+                        "History".to_string(),
+                        IconName::RotateCcw,
+                        selected == ReaderNewTabDestination::History,
+                        false,
+                        cx,
+                    ),
+                    Self::render_destination_button(
+                        ReaderNewTabDestination::Library,
+                        "Library".to_string(),
+                        IconName::BookOpen,
+                        selected == ReaderNewTabDestination::Library,
+                        false,
+                        cx,
+                    ),
+                ]);
+            selector = selector.child(menu);
+        }
+        selector.into_any_element()
+    }
+
+    fn render_library_filter_menu(&self, theme: ThemeColor, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.session.destination.clone();
+        let tags = cx
+            .global::<LibraryStore>()
+            .library_tags()
+            .iter()
+            .map(|tag| (tag.id, tag.name.clone()))
+            .collect::<Vec<_>>();
+        let saved_views = cx
+            .global::<LibraryStore>()
+            .library_saved_views()
+            .iter()
+            .map(|view| (view.id, view.name.clone()))
+            .collect::<Vec<_>>();
+        let active_filter = !matches!(selected, ReaderNewTabDestination::Library);
+        let mut control = div().relative().child(
+            Button::new("home-library-filter-menu")
+                .debug_selector(|| "home-library-filter-menu".to_string())
+                .xsmall()
+                .outline()
+                .icon(IconName::Link2)
+                .label("Filters")
+                .selected(active_filter || self.nav_menu_open)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.nav_menu_open = !this.nav_menu_open;
+                    cx.stop_propagation();
+                    cx.notify();
+                })),
+        );
+        if self.nav_menu_open {
+            let mut menu = div()
+                .id("home-library-filter-popover")
+                .debug_selector(|| "home-library-filter-popover".to_string())
+                .absolute()
+                .top(px(28.0))
+                .right_0()
+                .w(px(240.0))
+                .max_h(px(420.0))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.popover)
+                .shadow_lg()
+                .child(Self::render_destination_button(
+                    ReaderNewTabDestination::Library,
+                    "All Library Items".to_string(),
+                    IconName::BookOpen,
+                    selected == ReaderNewTabDestination::Library,
+                    false,
+                    cx,
+                ))
+                .child(Self::render_destination_button(
+                    ReaderNewTabDestination::Favorites,
+                    "Favorites".to_string(),
+                    IconName::Circle,
+                    selected == ReaderNewTabDestination::Favorites,
+                    false,
+                    cx,
+                ));
+            if !saved_views.is_empty() {
+                menu = menu.child(
+                    div()
+                        .mt_2()
+                        .px_2()
+                        .text_size(ui_rems(10.0))
+                        .text_color(theme.muted_foreground)
+                        .child("SAVED VIEWS"),
+                );
+                for (id, name) in saved_views {
+                    menu = menu.child(Self::render_destination_button(
+                        ReaderNewTabDestination::SavedView(id),
+                        name,
+                        IconName::Table2,
+                        selected == ReaderNewTabDestination::SavedView(id),
+                        false,
+                        cx,
+                    ));
+                }
+            }
+            menu = menu.child(Self::render_destination_button(
+                ReaderNewTabDestination::Tags,
+                "Manage Tags".to_string(),
+                IconName::Pencil,
+                selected == ReaderNewTabDestination::Tags,
+                false,
+                cx,
+            ));
+            if !tags.is_empty() {
+                menu = menu.child(
+                    div()
+                        .mt_2()
+                        .px_2()
+                        .text_size(ui_rems(10.0))
+                        .text_color(theme.muted_foreground)
+                        .child("TAGS"),
+                );
+                for (id, name) in tags {
+                    menu = menu.child(Self::render_destination_button(
+                        ReaderNewTabDestination::Tag(id),
+                        format!("#{name}"),
+                        IconName::Link2,
+                        selected == ReaderNewTabDestination::Tag(id),
+                        false,
+                        cx,
+                    ));
+                }
+            }
+            control = control.child(menu);
+        }
+        control.into_any_element()
+    }
+
+    fn render_navigation(&self, theme: ThemeColor, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.session.destination.clone();
+        if self.host == LibraryBrowserHost::Home {
+            let destinations = Self::home_destinations();
+            let mut navigation = div()
+                .id("home-navigation-rail")
+                .debug_selector(|| "home-navigation-rail".to_string())
+                .w(px(NEW_TAB_NAV_WIDTH))
+                .h_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .border_r(px(1.0))
+                .border_color(theme.border)
+                .bg(theme.sidebar);
+            for (destination, label, icon) in destinations.iter().take(2) {
+                navigation = navigation.child(Self::render_destination_button(
+                    destination.clone(),
+                    (*label).to_string(),
+                    *icon,
+                    selected == *destination,
+                    false,
+                    cx,
+                ));
+            }
+            let (destination, label, icon) = &destinations[2];
+            return navigation
+                .child(div().flex_1())
+                .child(Self::render_destination_button(
+                    destination.clone(),
+                    (*label).to_string(),
+                    *icon,
+                    selected == *destination,
+                    false,
+                    cx,
+                ))
+                .into_any_element();
+        }
+        let store = cx.global::<LibraryStore>();
+        let tag_destinations = store
+            .library_tags()
+            .iter()
+            .map(|tag| {
+                (
+                    ReaderNewTabDestination::Tag(tag.id),
+                    format!("#{}", tag.name),
+                )
+            })
+            .collect::<Vec<_>>();
+        let saved_destinations = store
+            .library_saved_views()
+            .iter()
+            .map(|view| {
+                (
+                    ReaderNewTabDestination::SavedView(view.id),
+                    view.name.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let current_label = Self::destination_label(&selected, store);
+
+        if self.layout_class == NewTabLayoutClass::Expanded {
+            let mut navigation = div()
+                .id("new-tab-navigation-rail")
+                .debug_selector(|| "new-tab-navigation-rail".to_string())
+                .w(px(NEW_TAB_NAV_WIDTH))
+                .h_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .border_r(px(1.0))
+                .border_color(theme.border)
+                .bg(theme.sidebar);
+            for (destination, label, icon) in Self::primary_destinations() {
+                navigation = navigation.child(Self::render_destination_button(
+                    destination.clone(),
+                    label.to_string(),
+                    icon,
+                    selected == destination,
+                    false,
+                    cx,
+                ));
+            }
+            if !saved_destinations.is_empty() {
+                navigation = navigation.child(
+                    div()
+                        .mt_2()
+                        .px_2()
+                        .text_size(ui_rems(10.0))
+                        .text_color(theme.muted_foreground)
+                        .child("SAVED VIEWS"),
+                );
+                for (destination, label) in saved_destinations {
+                    navigation = navigation.child(Self::render_destination_button(
+                        destination.clone(),
+                        label,
+                        IconName::Table2,
+                        selected == destination,
+                        false,
+                        cx,
+                    ));
+                }
+            }
+            if !tag_destinations.is_empty() {
+                navigation = navigation.child(
+                    div()
+                        .mt_2()
+                        .px_2()
+                        .text_size(ui_rems(10.0))
+                        .text_color(theme.muted_foreground)
+                        .child("TAGS"),
+                );
+                for (destination, label) in tag_destinations.into_iter().take(12) {
+                    navigation = navigation.child(Self::render_destination_button(
+                        destination.clone(),
+                        label,
+                        IconName::Link2,
+                        selected == destination,
+                        false,
+                        cx,
+                    ));
+                }
+            }
+            return navigation.into_any_element();
+        }
+
+        let mut bar = div()
+            .id("new-tab-navigation-top")
+            .debug_selector(|| "new-tab-navigation-top".to_string())
+            .relative()
+            .h(px(40.0))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .border_b(px(1.0))
+            .border_color(theme.border)
+            .bg(theme.sidebar);
+        if self.layout_class == NewTabLayoutClass::Narrow {
+            bar = bar
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(ui_rems(13.0))
+                        .child(current_label),
+                )
+                .child(
+                    Button::new("new-tab-nav-menu")
+                        .xsmall()
+                        .compact()
+                        .ghost()
+                        .icon(IconName::Menu)
+                        .label("Browse")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.nav_menu_open = !this.nav_menu_open;
+                            cx.stop_propagation();
+                            cx.notify();
+                        })),
+                );
+        } else {
+            for (destination, label, icon) in Self::primary_destinations() {
+                bar = bar.child(Self::render_destination_button(
+                    destination.clone(),
+                    label.to_string(),
+                    icon,
+                    selected == destination,
+                    true,
+                    cx,
+                ));
+            }
+            if !saved_destinations.is_empty() || !tag_destinations.is_empty() {
+                bar = bar.child(
+                    Button::new("new-tab-nav-more")
+                        .xsmall()
+                        .compact()
+                        .ghost()
+                        .icon(IconName::Menu)
+                        .label("More")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.nav_menu_open = !this.nav_menu_open;
+                            cx.stop_propagation();
+                            cx.notify();
+                        })),
+                );
+            }
+        }
+        if self.nav_menu_open {
+            let mut menu = div()
+                .id("new-tab-nav-overflow")
+                .debug_selector(|| "new-tab-nav-overflow".to_string())
+                .absolute()
+                .top(px(38.0))
+                .right(px(8.0))
+                .w(px(220.0))
+                .max_h(px(420.0))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.popover)
+                .shadow_lg();
+            for (destination, label, icon) in Self::primary_destinations() {
+                menu = menu.child(Self::render_destination_button(
+                    destination.clone(),
+                    label.to_string(),
+                    icon,
+                    selected == destination,
+                    false,
+                    cx,
+                ));
+            }
+            for (destination, label) in saved_destinations {
+                menu = menu.child(Self::render_destination_button(
+                    destination.clone(),
+                    label,
+                    IconName::Table2,
+                    selected == destination,
+                    false,
+                    cx,
+                ));
+            }
+            for (destination, label) in tag_destinations {
+                menu = menu.child(Self::render_destination_button(
+                    destination.clone(),
+                    label,
+                    IconName::Link2,
+                    selected == destination,
+                    false,
+                    cx,
+                ));
+            }
+            bar = bar.child(menu);
+        }
+        bar.into_any_element()
+    }
+
+    fn render_tags_content(&self, theme: ThemeColor, cx: &mut Context<Self>) -> AnyElement {
+        let tags = cx.global::<LibraryStore>().library_tags().to_vec();
+        let relations = cx
+            .global::<LibraryStore>()
+            .library
+            .library_item_tags
+            .clone();
+        div()
+            .id("new-tab-tags-content")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(tags.into_iter().map(|tag| {
+                let count = relations
+                    .iter()
+                    .filter(|relation| relation.tag_id == tag.id)
+                    .count();
+                let destination = ReaderNewTabDestination::Tag(tag.id);
+                let tag_id = tag.id;
+                let tag_name = tag.name.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        Button::new(("new-tab-tag", tag.id.0 as usize))
+                            .small()
+                            .outline()
+                            .flex_1()
+                            .label(format!("#{}  ({count})", tag.name))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.set_destination(destination.clone(), window, cx);
+                                cx.stop_propagation();
+                            })),
+                    )
+                    .child(
+                        Button::new(("new-tab-tag-edit", tag_id.0 as usize))
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Pencil)
+                            .tooltip("Rename, merge, or delete tag")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_tag_editor(tag_id, tag_name.clone(), window, cx);
+                                cx.stop_propagation();
+                            })),
+                    )
+            }))
+            .when(
+                cx.global::<LibraryStore>().library_tags().is_empty(),
+                |this| {
+                    this.flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.muted_foreground)
+                        .child("Tags added to works will appear here.")
+                },
+            )
+            .into_any_element()
+    }
+
+    fn render_inspector(&self, theme: ThemeColor, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let entry = self.selected_entry()?.clone();
+        let item = entry
+            .item_id
+            .and_then(|id| cx.global::<LibraryStore>().library_item(id).cloned());
+        let item_tags = item
+            .as_ref()
+            .map(|item| {
+                cx.global::<LibraryStore>()
+                    .tags_for_item(item.id)
+                    .into_iter()
+                    .map(|tag| (tag.id, tag.name.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut inspector = div()
+            .id("new-tab-item-inspector")
+            .debug_selector(|| "new-tab-item-inspector".to_string())
+            .w(px(NEW_TAB_INSPECTOR_WIDTH))
+            .h_full()
+            .flex_none()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_3()
+            .border_l(px(1.0))
+            .border_color(theme.border)
+            .bg(theme.sidebar)
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(ui_rems(15.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(entry.file_name.clone()),
+                    )
+                    .child(
+                        Button::new("new-tab-inspector-close")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::X)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.inspector_open = false;
+                                cx.stop_propagation();
+                                cx.notify();
+                            })),
+                    ),
+            );
+        if let Some(item) = item {
+            let creators = item
+                .creators
+                .iter()
+                .map(|creator| creator.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let status = match item.status {
+                ReadingStatus::ToRead => "To Read",
+                ReadingStatus::Reading => "Reading",
+                ReadingStatus::Read => "Read",
+            };
+            inspector = inspector
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child(if creators.is_empty() {
+                            "Unknown creator".to_string()
+                        } else {
+                            creators
+                        }),
+                )
+                .when_some(item.year, |this, year| this.child(format!("Year: {year}")))
+                .when(!item.publication.is_empty(), |this| {
+                    this.child(format!("Publication: {}", item.publication))
+                })
+                .when(!item_tags.is_empty(), |this| {
+                    this.child(div().flex().flex_wrap().gap_1().children(
+                        item_tags.clone().into_iter().map(|(tag_id, name)| {
+                            Button::new(("new-tab-inspector-tag", tag_id.0 as usize))
+                                .xsmall()
+                                .outline()
+                                .label(format!("#{name} ×"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.remove_tag_from_selected(tag_id, cx);
+                                    cx.stop_propagation();
+                                }))
+                        }),
+                    ))
+                })
+                .when(entry.missing, |this| {
+                    this.child(
+                        div()
+                            .text_color(theme.danger)
+                            .child("Linked file is missing. Use Locate/Relink from item actions."),
+                    )
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .child(
+                            Button::new("new-tab-inspector-favorite")
+                                .xsmall()
+                                .outline()
+                                .label(if item.favorite {
+                                    "Unfavorite"
+                                } else {
+                                    "Favorite"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_selected_favorite(cx);
+                                    cx.stop_propagation();
+                                })),
+                        )
+                        .child(
+                            Button::new("new-tab-inspector-status")
+                                .xsmall()
+                                .outline()
+                                .label(status)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.cycle_selected_status(cx);
+                                    cx.stop_propagation();
+                                })),
+                        )
+                        .child(
+                            Button::new("new-tab-inspector-edit-metadata")
+                                .xsmall()
+                                .outline()
+                                .icon(IconName::Pencil)
+                                .label("Edit Metadata")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_metadata_editor(window, cx);
+                                    cx.stop_propagation();
+                                })),
+                        )
+                        .child(
+                            Button::new("new-tab-inspector-locate")
+                                .xsmall()
+                                .outline()
+                                .icon(IconName::LocateFixed)
+                                .label(if entry.missing { "Locate" } else { "Relink" })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.locate_selected_attachment(cx);
+                                    cx.stop_propagation();
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h(px(30.0))
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.background)
+                                .child(Input::new(&self.tag_input).small().appearance(false)),
+                        )
+                        .child(
+                            Button::new("new-tab-inspector-add-tag")
+                                .xsmall()
+                                .primary()
+                                .icon(IconName::Plus)
+                                .label("Tag")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_tag_to_selected(window, cx);
+                                    cx.stop_propagation();
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt_2()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child("Research note")
+                        .child(
+                            Button::new("new-tab-note-expand")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::ArrowUpRight)
+                                .label("Expand")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.note_expanded = true;
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .min_h(px(180.0))
+                        .rounded(cx.theme().radius)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.background)
+                        .child(Input::new(&self.work_note_input).appearance(false)),
+                )
+                .when(item.trashed_at.is_none(), |this| {
+                    this.child(
+                        Button::new("new-tab-inspector-trash")
+                            .small()
+                            .danger()
+                            .icon(IconName::Trash2)
+                            .label("Move to Trash")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.trash_selected_item(cx);
+                                cx.stop_propagation();
+                            })),
+                    )
+                });
+        } else {
+            inspector = inspector
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child("This file is in History but not in your library."),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .text_size(ui_rems(11.0))
+                        .child(format!("Path: {}", entry.path.display()))
+                        .child(format!("Format: {}", entry.format_size))
+                        .child(format!("Progress: {}", entry.progress))
+                        .child(format!("Last opened: {}", entry.last_opened)),
+                )
+                .child(
+                    Button::new("new-tab-add-selected-to-library")
+                        .small()
+                        .primary()
+                        .icon(IconName::Plus)
+                        .label("Add to Library")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.add_selected_history_item(cx);
+                            cx.stop_propagation();
+                        })),
+                );
+        }
+        Some(inspector.into_any_element())
+    }
+
+    fn render_note_overlay(&self, theme: ThemeColor, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("new-tab-note-overlay")
+            .debug_selector(|| "new-tab-note-overlay".to_string())
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .left_0()
+            .p_6()
+            .bg(theme.overlay)
+            .child(
+                div()
+                    .id("new-tab-metadata-card")
+                    .size_full()
+                    .max_w(px(900.0))
+                    .mx_auto()
+                    .flex()
+                    .flex_col()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .h(px(44.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_3()
+                            .border_b(px(1.0))
+                            .border_color(theme.border)
+                            .child("Research note (Markdown)")
+                            .child(
+                                Button::new("new-tab-note-overlay-close")
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(IconName::X)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.note_expanded = false;
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .p_3()
+                            .child(Input::new(&self.work_note_input).appearance(false)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_metadata_overlay(&self, theme: ThemeColor, cx: &mut Context<Self>) -> AnyElement {
+        let field = |label: &'static str, input: &Entity<InputState>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(ui_rems(11.0))
+                        .text_color(theme.muted_foreground)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .min_h(px(32.0))
+                        .rounded(cx.theme().radius)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.background)
+                        .child(Input::new(input).small().appearance(false)),
+                )
+        };
+        div()
+            .id("new-tab-metadata-overlay")
+            .debug_selector(|| "new-tab-metadata-overlay".to_string())
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .left_0()
+            .p_6()
+            .bg(theme.overlay)
+            .child(
+                div()
+                    .id("new-tab-metadata-card")
+                    .size_full()
+                    .max_w(px(760.0))
+                    .mx_auto()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.popover)
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(ui_rems(16.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("Edit academic metadata"),
+                            )
+                            .child(
+                                Button::new("new-tab-metadata-close")
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(IconName::X)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.metadata_editor_open = false;
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(ui_rems(11.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child("Item type"),
+                            )
+                            .child(
+                                div().flex().gap_1().children(
+                                    [
+                                        (LibraryItemKind::Paper, "Paper"),
+                                        (LibraryItemKind::Book, "Book"),
+                                        (LibraryItemKind::Other, "Other"),
+                                    ]
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(
+                                        |(index, (kind, label))| {
+                                            Button::new(("new-tab-metadata-kind", index))
+                                                .small()
+                                                .outline()
+                                                .selected(self.metadata_kind == kind)
+                                                .label(label)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.metadata_kind = kind;
+                                                    cx.stop_propagation();
+                                                    cx.notify();
+                                                }))
+                                        },
+                                    ),
+                                ),
+                            ),
+                    )
+                    .child(field("Title", &self.metadata_title_input))
+                    .child(field("Creators", &self.metadata_creators_input))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(field("Year", &self.metadata_year_input)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(field("Language", &self.metadata_language_input)),
+                            ),
+                    )
+                    .child(field(
+                        "Publication or venue",
+                        &self.metadata_publication_input,
+                    ))
+                    .child(field("Publisher", &self.metadata_publisher_input))
+                    .child(field("DOI", &self.metadata_doi_input))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(field("ISBN", &self.metadata_isbn_input)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(field("arXiv", &self.metadata_arxiv_input)),
+                            ),
+                    )
+                    .child(field("Subject", &self.metadata_subject_input))
+                    .child(field("Abstract or summary", &self.metadata_abstract_input))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("new-tab-metadata-cancel")
+                                    .small()
+                                    .outline()
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.metadata_editor_open = false;
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("new-tab-metadata-save")
+                                    .small()
+                                    .primary()
+                                    .label("Save")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.save_metadata_editor(cx);
+                                        cx.stop_propagation();
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_saved_view_overlay(&self, theme: ThemeColor, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("new-tab-saved-view-overlay")
+            .debug_selector(|| "new-tab-saved-view-overlay".to_string())
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .left_0()
+            .p_6()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(420.0))
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.popover)
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .text_size(ui_rems(16.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Save current library view"),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child("The current destination, search, sort, and layout will be reusable from the navigation panel."),
+                    )
+                    .child(
+                        div()
+                            .h(px(34.0))
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.background)
+                            .child(
+                                Input::new(&self.saved_view_name_input)
+                                    .small()
+                                    .appearance(false),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("new-tab-saved-view-cancel")
+                                    .small()
+                                    .outline()
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.saved_view_editor_open = false;
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("new-tab-saved-view-save")
+                                    .small()
+                                    .primary()
+                                    .label("Save View")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.save_current_view(window, cx);
+                                        cx.stop_propagation();
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_tag_editor_overlay(&self, theme: ThemeColor, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("new-tab-tag-editor-overlay")
+            .debug_selector(|| "new-tab-tag-editor-overlay".to_string())
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .left_0()
+            .p_6()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(420.0))
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.popover)
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .text_size(ui_rems(16.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Edit tag"),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child("Renaming to an existing tag merges their assignments."),
+                    )
+                    .child(
+                        div()
+                            .h(px(34.0))
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.background)
+                            .child(
+                                Input::new(&self.tag_editor_name_input)
+                                    .small()
+                                    .appearance(false),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                Button::new("new-tab-tag-editor-delete")
+                                    .small()
+                                    .danger()
+                                    .icon(IconName::Trash2)
+                                    .label("Delete Tag")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.delete_edited_tag(window, cx);
+                                        cx.stop_propagation();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("new-tab-tag-editor-cancel")
+                                            .small()
+                                            .outline()
+                                            .label("Cancel")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.tag_editor_id = None;
+                                                cx.stop_propagation();
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("new-tab-tag-editor-save")
+                                            .small()
+                                            .primary()
+                                            .label("Save")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.save_tag_editor(cx);
+                                                cx.stop_propagation();
+                                            })),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_toolbar_button(
@@ -816,15 +3226,15 @@ impl NewTab {
                 IconName::LayoutGrid,
                 crate::fl!("new-tab-view-grid"),
             ),
-            NewTabViewMode::List => (
-                "new-tab-view-list",
+            NewTabViewMode::Grouped => (
+                "new-tab-view-grouped",
                 IconName::LayoutList,
-                crate::fl!("new-tab-view-list"),
+                crate::fl!("new-tab-view-grouped"),
             ),
-            NewTabViewMode::Details => (
-                "new-tab-view-details",
+            NewTabViewMode::Table => (
+                "new-tab-view-table",
                 IconName::Table2,
-                crate::fl!("new-tab-view-details"),
+                crate::fl!("new-tab-view-table"),
             ),
         };
 
@@ -900,7 +3310,12 @@ impl NewTab {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.handle_document_pointer(path.clone(), event.modifiers, cx);
+                    this.handle_document_pointer(
+                        path.clone(),
+                        event.modifiers,
+                        event.click_count,
+                        cx,
+                    );
                     cx.stop_propagation();
                 }),
             )
@@ -1004,7 +3419,12 @@ impl NewTab {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.handle_document_pointer(path.clone(), event.modifiers, cx);
+                    this.handle_document_pointer(
+                        path.clone(),
+                        event.modifiers,
+                        event.click_count,
+                        cx,
+                    );
                     cx.stop_propagation();
                 }),
             );
@@ -1092,6 +3512,194 @@ impl NewTab {
             .py_0p5()
             .child(row)
             .into_any_element()
+    }
+
+    fn render_document_span(
+        entry: &NewTabEntry,
+        state: NewTabItemState,
+        theme: ThemeColor,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let path = entry.path.clone();
+        let mut span = div()
+            .id(("new-tab-grouped-item", state.item_ix))
+            .debug_selector(|| "new-tab-grouped-item".to_string())
+            .h(px(40.0))
+            .min_w(px(190.0))
+            .max_w(px(320.0))
+            .flex_1()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(if state.focused {
+                theme.ring
+            } else if state.selected {
+                theme.primary
+            } else {
+                theme.border
+            })
+            .bg(if state.selected {
+                theme.primary.opacity(0x18 as f32 / 255.0)
+            } else {
+                theme.popover
+            })
+            .hover(move |style| style.bg(theme.list_hover))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.handle_document_pointer(
+                        path.clone(),
+                        event.modifiers,
+                        event.click_count,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            );
+        if state.selecting {
+            span = span.child(
+                Checkbox::new(("new-tab-grouped-selection", state.item_ix))
+                    .xsmall()
+                    .checked(state.selected)
+                    .tab_stop(false),
+            );
+        }
+        span.child(
+            Icon::new(entry.icon())
+                .size(ui_rems(16.0))
+                .text_color(if entry.missing {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                }),
+        )
+        .child(div().min_w_0().truncate().child(entry.file_name.clone()))
+        .into_any_element()
+    }
+
+    fn grouped_time_label(timestamp: Option<u64>, unknown: &'static str) -> String {
+        let Some(timestamp) = timestamp
+            .and_then(|timestamp| i64::try_from(timestamp).ok())
+            .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
+        else {
+            return unknown.to_string();
+        };
+        let date = timestamp.with_timezone(&Local).date_naive();
+        let today = Local::now().date_naive();
+        if date == today {
+            "Today".to_string()
+        } else if date.iso_week() == today.iso_week() {
+            "This Week".to_string()
+        } else if date.year() == today.year() && date.month() == today.month() {
+            "This Month".to_string()
+        } else {
+            "Earlier".to_string()
+        }
+    }
+
+    fn grouped_alpha_label(value: &str, empty: &'static str) -> String {
+        let value = value.trim();
+        if value.is_empty() {
+            return empty.to_string();
+        }
+        value
+            .chars()
+            .next()
+            .filter(|character| character.is_alphabetic())
+            .map(|character| character.to_uppercase().collect::<String>())
+            .unwrap_or_else(|| "#".to_string())
+    }
+
+    fn grouped_sections(&self) -> Vec<(String, Vec<usize>)> {
+        let mut groups = HashMap::<String, Vec<usize>>::new();
+        for (item_ix, entry_ix) in self.filtered_entries.iter().copied().enumerate() {
+            let entry = &self.entries[entry_ix];
+            let label = match self.session.sort.field {
+                LibrarySortField::DateAdded => {
+                    Self::grouped_time_label(entry.date_added, "Unknown")
+                }
+                LibrarySortField::LastOpened => {
+                    Self::grouped_time_label(entry.last_opened_timestamp, "Never Opened")
+                }
+                LibrarySortField::Year => entry
+                    .year
+                    .map(|year| year.to_string())
+                    .unwrap_or_else(|| "Unknown".to_string()),
+                LibrarySortField::Title => Self::grouped_alpha_label(&entry.title_sort, "#"),
+                LibrarySortField::Creator => {
+                    Self::grouped_alpha_label(&entry.creator_sort, "Unknown")
+                }
+            };
+            groups.entry(label).or_default().push(item_ix);
+        }
+
+        let direction = self.session.sort.direction;
+        let field = self.session.sort.field;
+        let mut labels = groups.keys().cloned().collect::<Vec<_>>();
+        labels.sort_by(|left, right| {
+            let ordering = match field {
+                LibrarySortField::DateAdded | LibrarySortField::LastOpened => {
+                    let rank = |label: &str| match (direction, label) {
+                        (_, "Never Opened" | "Unknown") => 4,
+                        (LibrarySortDirection::Descending, "Today") => 0,
+                        (LibrarySortDirection::Descending, "This Week") => 1,
+                        (LibrarySortDirection::Descending, "This Month") => 2,
+                        (LibrarySortDirection::Descending, "Earlier") => 3,
+                        (LibrarySortDirection::Ascending, "Earlier") => 0,
+                        (LibrarySortDirection::Ascending, "This Month") => 1,
+                        (LibrarySortDirection::Ascending, "This Week") => 2,
+                        (LibrarySortDirection::Ascending, "Today") => 3,
+                        _ => 4,
+                    };
+                    rank(left).cmp(&rank(right))
+                }
+                LibrarySortField::Year => {
+                    if left == "Unknown" {
+                        std::cmp::Ordering::Greater
+                    } else if right == "Unknown" {
+                        std::cmp::Ordering::Less
+                    } else {
+                        let ordering = left
+                            .parse::<i32>()
+                            .unwrap_or_default()
+                            .cmp(&right.parse::<i32>().unwrap_or_default());
+                        if direction == LibrarySortDirection::Ascending {
+                            ordering
+                        } else {
+                            ordering.reverse()
+                        }
+                    }
+                }
+                LibrarySortField::Title | LibrarySortField::Creator => {
+                    let left_last = left == "#" || left == "Unknown";
+                    let right_last = right == "#" || right == "Unknown";
+                    match (left_last, right_last) {
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        _ => {
+                            let ordering = left.cmp(right);
+                            if direction == LibrarySortDirection::Ascending {
+                                ordering
+                            } else {
+                                ordering.reverse()
+                            }
+                        }
+                    }
+                }
+            };
+            ordering.then_with(|| left.cmp(right))
+        });
+        labels
+            .into_iter()
+            .map(|label| {
+                let items = groups.remove(&label).unwrap_or_default();
+                (label, items)
+            })
+            .collect()
     }
 
     fn render_empty_hint(height: f32, filtering: bool, theme: ThemeColor) -> AnyElement {
@@ -1277,61 +3885,72 @@ impl NewTab {
     }
 
     fn render_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let item_count = self.item_count();
-        let rows = item_count + usize::from(item_count == 0);
         let filtering = !self.search_input.read(cx).value().trim().is_empty();
-        let show_location = !self.viewport_width.is_finite()
-            || self.viewport_width <= 0.0
-            || self.viewport_width >= DETAILS_LAST_OPENED_BREAKPOINT;
-        let scroll = self.scroll.clone();
+        let sections = self.grouped_sections();
+        let theme = cx.theme().colors;
+        let _ = window;
+
+        if sections.is_empty() {
+            return div()
+                .id("new-tab-content")
+                .flex_1()
+                .min_h_0()
+                .child(Self::render_empty_hint(240.0, filtering, theme))
+                .into_any_element();
+        }
+
+        let mut content = div()
+            .id("new-tab-grouped-list")
+            .debug_selector(|| "new-tab-grouped-list".to_string())
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4();
+        for (section_ix, (label, item_indices)) in sections.into_iter().enumerate() {
+            let mut items = div()
+                .id(("new-tab-grouped-section-items", section_ix))
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .items_start()
+                .gap_2();
+            for item_ix in item_indices {
+                let entry = self
+                    .entry_for_item(item_ix)
+                    .expect("grouped document item must have an entry")
+                    .clone();
+                items = items.child(Self::render_document_span(
+                    &entry,
+                    self.item_state(item_ix),
+                    theme,
+                    cx,
+                ));
+            }
+            content = content.child(
+                div()
+                    .id(("new-tab-grouped-section", section_ix))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(ui_rems(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child(label),
+                    )
+                    .child(items),
+            );
+        }
 
         div()
             .id("new-tab-content")
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .child(
-                div()
-                    .relative()
-                    .size_full()
-                    .child(
-                        uniform_list(
-                            "new-tab-compact-list",
-                            rows,
-                            cx.processor(move |this, visible_range: Range<usize>, _, cx| {
-                                let theme = cx.theme().colors;
-                                visible_range
-                                    .map(|item_ix| {
-                                        if item_ix >= item_count {
-                                            return Self::render_empty_hint(
-                                                LIST_ROW_HEIGHT,
-                                                filtering,
-                                                theme,
-                                            );
-                                        }
-
-                                        let entry = this
-                                            .entry_for_item(item_ix)
-                                            .expect("document item must have an entry")
-                                            .clone();
-                                        Self::render_document_row(
-                                            &entry,
-                                            this.item_state(item_ix),
-                                            false,
-                                            DetailsColumns::for_width(this.viewport_width),
-                                            show_location,
-                                            theme,
-                                            cx,
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                            }),
-                        )
-                        .track_scroll(&scroll)
-                        .size_full(),
-                    )
-                    .vertical_scrollbar_for_with_id(&scroll, "new-tab-scrollbar", window, cx),
-            )
+            .child(content)
             .into_any_element()
     }
 
@@ -1473,7 +4092,7 @@ impl NewTab {
 
 impl NewTabEntry {
     fn from_history(entry: &HistoryEntry) -> Self {
-        let file_name = entry
+        let file_name: SharedString = entry
             .path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -1530,15 +4149,127 @@ impl NewTabEntry {
             });
 
         Self {
+            item_id: None,
             path: entry.path.clone(),
-            file_name,
+            file_name: file_name.clone(),
             directory,
             last_read,
             progress,
             format_size,
             last_opened,
             format,
+            favorite: false,
+            status: None,
+            missing: !entry.path.exists(),
+            title_sort: file_name.to_lowercase().into(),
+            creator_sort: "".into(),
+            year: None,
+            date_added: None,
+            last_opened_timestamp: Some(entry.opened),
+            search_text: String::new().into(),
         }
+    }
+
+    fn from_history_and_item(entry: &HistoryEntry, item: Option<&LibraryItem>) -> Self {
+        let mut result = Self::from_history(entry);
+        if let Some(item) = item {
+            result.apply_library_item(item, &[]);
+        }
+        result
+    }
+
+    fn from_library(store: &LibraryStore, item_id: DocumentId) -> Option<Self> {
+        let item = store.library_item(item_id)?;
+        let attachment = store.primary_attachment(item_id)?;
+        let history = store
+            .history_entries()
+            .iter()
+            .find(|history| history.path == attachment.path);
+        let mut result = if let Some(history) = history {
+            Self::from_history(history)
+        } else {
+            let format_label = match attachment.format {
+                DocumentFormat::Pdf => "PDF",
+                DocumentFormat::Epub => "EPUB",
+            };
+            Self {
+                item_id: None,
+                path: attachment.path.clone(),
+                file_name: item.title.clone().into(),
+                directory: attachment
+                    .path
+                    .parent()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default()
+                    .into(),
+                last_read: "Not opened yet".into(),
+                progress: "—".into(),
+                format_size: format!(
+                    "{format_label} · {}",
+                    format_file_size(attachment.file_size)
+                )
+                .into(),
+                last_opened: "—".into(),
+                format: Some(attachment.format),
+                favorite: false,
+                status: None,
+                missing: attachment.is_missing(),
+                title_sort: item.title.to_lowercase().into(),
+                creator_sort: "".into(),
+                year: item.year,
+                date_added: Some(item.created),
+                last_opened_timestamp: None,
+                search_text: String::new().into(),
+            }
+        };
+        let tags = store
+            .tags_for_item(item_id)
+            .into_iter()
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        result.apply_library_item(item, &tags);
+        Some(result)
+    }
+
+    fn apply_library_item(&mut self, item: &LibraryItem, tags: &[String]) {
+        self.item_id = Some(item.id);
+        self.file_name = item.title.clone().into();
+        self.title_sort = item.title.to_lowercase().into();
+        let creators = item
+            .creators
+            .iter()
+            .map(|creator| creator.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !creators.is_empty() {
+            self.directory = creators.clone().into();
+        }
+        self.creator_sort = creators.to_lowercase().into();
+        self.year = item.year;
+        self.date_added = Some(item.created);
+        self.favorite = item.favorite;
+        self.status = Some(item.status);
+        self.last_read = match item.status {
+            ReadingStatus::ToRead => "To Read".into(),
+            ReadingStatus::Reading => "Reading".into(),
+            ReadingStatus::Read => "Read".into(),
+        };
+        self.search_text = [
+            creators,
+            item.year.map(|year| year.to_string()).unwrap_or_default(),
+            item.publication.clone(),
+            item.publisher.clone(),
+            item.abstract_text.clone(),
+            item.subject.clone(),
+            item.language.clone(),
+            item.identifiers.doi.clone().unwrap_or_default(),
+            item.identifiers.isbn.clone().unwrap_or_default(),
+            item.identifiers.arxiv.clone().unwrap_or_default(),
+            item.embedded_keywords.join(" "),
+            tags.join(" "),
+        ]
+        .join(" ")
+        .into();
     }
 }
 
@@ -1562,6 +4293,10 @@ impl EventEmitter<NewTabEvent> for NewTab {}
 
 impl Render for NewTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if cx.global::<LibraryStore>().catalog_revision() != self.observed_catalog_revision {
+            self.refresh_entries(cx);
+        }
+        self.sync_work_note_input(window, cx);
         let theme = cx.theme().colors;
         let view_mode = self.view_mode(cx);
         let measure_view = cx.entity();
@@ -1571,7 +4306,8 @@ impl Render for NewTab {
                 let measure_view = measure_view.clone();
                 move |bounds, _window, cx| {
                     let width = bounds.size.width.as_f32();
-                    measure_view.update(cx, |this, cx| this.update_viewport(width, cx));
+                    let height = bounds.size.height.as_f32();
+                    measure_view.update(cx, |this, cx| this.update_viewport(width, height, cx));
                 }
             },
             |_, _, _, _| {},
@@ -1581,11 +4317,41 @@ impl Render for NewTab {
         .left_0()
         .size_full();
 
-        let content = match view_mode {
-            NewTabViewMode::Grid => self.render_grid(window, cx),
-            NewTabViewMode::List => self.render_list(window, cx),
-            NewTabViewMode::Details => self.render_details(window, cx),
+        let content = match &self.session.destination {
+            ReaderNewTabDestination::Tags => self.render_tags_content(theme, cx),
+            _ => match view_mode {
+                NewTabViewMode::Grid => self.render_grid(window, cx),
+                NewTabViewMode::Grouped => self.render_list(window, cx),
+                NewTabViewMode::Table => self.render_details(window, cx),
+            },
         };
+        let management_host = self.host == LibraryBrowserHost::Home;
+        let wide_inspector = management_host && self.viewport_width >= 960.0;
+        let inspector = (wide_inspector && self.inspector_open)
+            .then(|| self.render_inspector(theme, cx))
+            .flatten();
+        let inspector_overlay = (management_host && !wide_inspector && self.inspector_open)
+            .then(|| self.render_inspector(theme, cx))
+            .flatten()
+            .map(|inspector| {
+                div()
+                    .id("new-tab-item-inspector-overlay")
+                    .absolute()
+                    .top(px(NEW_TAB_HEADER_HEIGHT))
+                    .right_0()
+                    .bottom_0()
+                    .w(px(NEW_TAB_INSPECTOR_WIDTH))
+                    .shadow_lg()
+                    .child(inspector)
+                    .into_any_element()
+            });
+        let content = div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .child(content)
+            .children(inspector);
 
         let selecting = self.selecting;
         let has_selection = !self.selection.is_empty();
@@ -1596,6 +4362,55 @@ impl Render for NewTab {
             .global::<LibraryStore>()
             .startup_error()
             .map(|error| format!("Library unavailable. Changes will not be saved: {error}"));
+        let destination_title =
+            Self::destination_label(&self.session.destination, cx.global::<LibraryStore>());
+        let in_trash = matches!(self.session.destination, ReaderNewTabDestination::Trash);
+        let in_history = matches!(self.session.destination, ReaderNewTabDestination::History);
+        let can_save_view = management_host
+            && matches!(
+                self.session.destination,
+                ReaderNewTabDestination::Library
+                    | ReaderNewTabDestination::Favorites
+                    | ReaderNewTabDestination::Tag(_)
+                    | ReaderNewTabDestination::SavedView(_)
+            );
+        let is_saved_view = management_host
+            && matches!(
+                self.session.destination,
+                ReaderNewTabDestination::SavedView(_)
+            );
+        let can_sort = matches!(
+            self.session.destination,
+            ReaderNewTabDestination::Library
+                | ReaderNewTabDestination::Favorites
+                | ReaderNewTabDestination::History
+                | ReaderNewTabDestination::Trash
+                | ReaderNewTabDestination::Tag(_)
+                | ReaderNewTabDestination::SavedView(_)
+        );
+        let sort_label = Self::sort_field_label(self.session.sort.field);
+        let sort_ascending = self.session.sort.direction == LibrarySortDirection::Ascending;
+        let library_management = management_host
+            && matches!(
+                self.session.destination,
+                ReaderNewTabDestination::Library
+                    | ReaderNewTabDestination::Favorites
+                    | ReaderNewTabDestination::Tags
+                    | ReaderNewTabDestination::Tag(_)
+                    | ReaderNewTabDestination::SavedView(_)
+            );
+        let kind_filter_label = match self.kind_filter {
+            None => "All Types",
+            Some(LibraryItemKind::Paper) => "Papers",
+            Some(LibraryItemKind::Book) => "Books",
+            Some(LibraryItemKind::Other) => "Other",
+        };
+        let status_filter_label = match self.status_filter {
+            None => "All Statuses",
+            Some(ReadingStatus::ToRead) => "To Read",
+            Some(ReadingStatus::Reading) => "Reading",
+            Some(ReadingStatus::Read) => "Read",
+        };
 
         let header =
             div()
@@ -1617,10 +4432,14 @@ impl Render for NewTab {
                         .child(
                             div()
                                 .flex()
-                                .items_baseline()
+                                .items_center()
                                 .gap_2()
                                 .text_size(ui_rems(14.0))
-                                .child(crate::fl!("new-tab-recent-pdfs"))
+                                .child(if management_host {
+                                    div().child(destination_title).into_any_element()
+                                } else {
+                                    self.render_quick_source_selector(theme, cx)
+                                })
                                 .child(
                                     div()
                                         .text_size(ui_rems(11.0))
@@ -1643,18 +4462,35 @@ impl Render for NewTab {
                                     )
                                 }),
                         )
-                        .child(
-                            Button::new("new-tab-open-file")
-                                .debug_selector(|| "new-tab-open-file".to_string())
-                                .small()
-                                .primary()
-                                .icon(IconName::FolderOpen)
-                                .label(crate::fl!("new-tab-open-file"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.open_file(cx);
-                                    cx.stop_propagation();
-                                })),
-                        ),
+                        .child({
+                            let mut actions = div().flex().items_center().gap_1().child(
+                                Button::new("new-tab-open-file")
+                                    .debug_selector(|| "new-tab-open-file".to_string())
+                                    .small()
+                                    .outline()
+                                    .icon(IconName::FolderOpen)
+                                    .label(crate::fl!("new-tab-open-file"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open_file(cx);
+                                        cx.stop_propagation();
+                                    })),
+                            );
+                            if management_host {
+                                actions = actions.child(
+                                    Button::new("new-tab-add-files")
+                                        .debug_selector(|| "new-tab-add-files".to_string())
+                                        .small()
+                                        .primary()
+                                        .icon(IconName::Plus)
+                                        .label("Add Files")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.add_files(cx);
+                                            cx.stop_propagation();
+                                        })),
+                                );
+                            }
+                            actions
+                        }),
                 )
                 .child(
                     div()
@@ -1686,32 +4522,136 @@ impl Render for NewTab {
                                 )),
                         )
                         .child({
-                            let mut toolbar = div()
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .gap_1()
+                            let mut toolbar = div().flex().flex_none().items_center().gap_1();
+                            if library_management {
+                                toolbar = toolbar
+                                    .child(self.render_library_filter_menu(theme, cx))
+                                    .child(
+                                        Button::new("home-library-kind-filter")
+                                            .xsmall()
+                                            .outline()
+                                            .label(kind_filter_label)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.cycle_kind_filter(cx);
+                                                cx.stop_propagation();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("home-library-status-filter")
+                                            .xsmall()
+                                            .outline()
+                                            .label(status_filter_label)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.cycle_status_filter(cx);
+                                                cx.stop_propagation();
+                                            })),
+                                    );
+                            }
+                            if can_sort {
+                                toolbar = toolbar
+                                    .child(
+                                        Button::new("new-tab-sort-field")
+                                            .xsmall()
+                                            .outline()
+                                            .label(sort_label)
+                                            .tooltip("Change sort field")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.cycle_sort_field(cx);
+                                                cx.stop_propagation();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("new-tab-sort-direction")
+                                            .xsmall()
+                                            .ghost()
+                                            .icon(if sort_ascending {
+                                                IconName::ChevronUp
+                                            } else {
+                                                IconName::ChevronDown
+                                            })
+                                            .tooltip(if sort_ascending {
+                                                "Ascending"
+                                            } else {
+                                                "Descending"
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_sort_direction(cx);
+                                                cx.stop_propagation();
+                                            })),
+                                    );
+                            }
+                            toolbar = toolbar
                                 .child(Self::render_view_button(
                                     NewTabViewMode::Grid,
                                     view_mode,
                                     cx,
                                 ))
                                 .child(Self::render_view_button(
-                                    NewTabViewMode::List,
+                                    NewTabViewMode::Grouped,
                                     view_mode,
                                     cx,
                                 ))
                                 .child(Self::render_view_button(
-                                    NewTabViewMode::Details,
+                                    NewTabViewMode::Table,
                                     view_mode,
                                     cx,
-                                ))
-                                .child(div().mx_1().h(px(18.0)).w(px(1.0)).bg(theme.border));
-                            if selecting && has_selection {
+                                ));
+                            if can_save_view {
+                                toolbar = toolbar.child(
+                                    Button::new("new-tab-save-current-view")
+                                        .xsmall()
+                                        .ghost()
+                                        .icon(IconName::Table2)
+                                        .tooltip("Save current view")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_saved_view_editor(window, cx);
+                                            cx.stop_propagation();
+                                        })),
+                                );
+                            }
+                            if is_saved_view {
+                                toolbar = toolbar.child(
+                                    Button::new("new-tab-delete-current-view")
+                                        .xsmall()
+                                        .ghost()
+                                        .icon(IconName::Trash2)
+                                        .tooltip("Delete saved view")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.delete_current_saved_view(window, cx);
+                                            cx.stop_propagation();
+                                        })),
+                                );
+                            }
+                            toolbar =
+                                toolbar.child(div().mx_1().h(px(18.0)).w(px(1.0)).bg(theme.border));
+                            if management_host && has_selection && self.viewport_width < 960.0 {
+                                toolbar = toolbar.child(Self::render_toolbar_button(
+                                    "Details".to_string(),
+                                    |this, _, cx| {
+                                        this.inspector_open = true;
+                                        cx.notify();
+                                    },
+                                    cx,
+                                ));
+                            }
+                            if management_host && selecting && has_selection {
+                                if in_trash {
+                                    toolbar = toolbar.child(Self::render_toolbar_button(
+                                        "Restore".to_string(),
+                                        |this, _, cx| this.restore_selected_items(cx),
+                                        cx,
+                                    ));
+                                }
                                 toolbar = toolbar
                                     .child(Self::render_toolbar_button(
-                                        crate::fl!("new-tab-remove-from-recents"),
-                                        |this, _, cx| this.delete_selected(cx),
+                                        if in_trash {
+                                            "Delete Permanently".to_string()
+                                        } else if in_history {
+                                            crate::fl!("new-tab-remove-from-recents")
+                                        } else {
+                                            "Move to Trash".to_string()
+                                        },
+                                        |this, window, cx| this.delete_selected(window, cx),
                                         cx,
                                     ))
                                     .child(Self::render_toolbar_button(
@@ -1719,13 +4659,13 @@ impl Render for NewTab {
                                         |this, _, cx| this.cancel_select(cx),
                                         cx,
                                     ));
-                            } else if selecting {
+                            } else if management_host && selecting {
                                 toolbar = toolbar.child(Self::render_toolbar_button(
                                     crate::fl!("cancel"),
                                     |this, _, cx| this.cancel_select(cx),
                                     cx,
                                 ));
-                            } else {
+                            } else if management_host {
                                 toolbar = toolbar.child(Self::render_toolbar_button(
                                     crate::fl!("select"),
                                     |this, _, cx| this.enter_select(cx),
@@ -1736,8 +4676,54 @@ impl Render for NewTab {
                         }),
                 );
 
+        let error_banner = library_error.map(|error| {
+            div()
+                .mx_3()
+                .mt_3()
+                .p_2()
+                .rounded(px(4.0))
+                .bg(theme.list_hover)
+                .text_color(theme.primary)
+                .child(error)
+                .into_any_element()
+        });
+        let mut main_column = div().flex_1().min_w_0().min_h_0().flex().flex_col();
+        main_column = main_column
+            .children(error_banner)
+            .child(header)
+            .child(content);
+        let workspace_content = if management_host {
+            div()
+                .size_full()
+                .flex()
+                .child(self.render_navigation(theme, cx))
+                .child(main_column)
+                .into_any_element()
+        } else {
+            main_column.into_any_element()
+        };
+        let note_overlay =
+            (management_host && self.note_expanded).then(|| self.render_note_overlay(theme, cx));
+        let metadata_overlay = (management_host && self.metadata_editor_open)
+            .then(|| self.render_metadata_overlay(theme, cx));
+        let saved_view_overlay = (management_host && self.saved_view_editor_open)
+            .then(|| self.render_saved_view_overlay(theme, cx));
+        let tag_editor_overlay = (management_host && self.tag_editor_id.is_some())
+            .then(|| self.render_tag_editor_overlay(theme, cx));
+
         div()
-            .id("new-tab")
+            .id(if management_host {
+                "home-view"
+            } else {
+                "new-tab"
+            })
+            .debug_selector(move || {
+                if management_host {
+                    "home-view".to_string()
+                } else {
+                    "new-tab".to_string()
+                }
+            })
             .relative()
             .size_full()
             .key_context("NewTab")
@@ -1764,8 +4750,8 @@ impl Render for NewTab {
             .on_action(cx.listener(|this, _: &CancelSelect, _, cx| {
                 this.cancel_select(cx);
             }))
-            .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| {
-                this.delete_selected(cx);
+            .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| {
+                this.delete_selected(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CursorUp, _, cx| {
                 this.move_cursor(CursorMove::Up, false, cx);
@@ -1818,21 +4804,66 @@ impl Render for NewTab {
             .text_size(ui_rems(12.0))
             .text_color(theme.foreground)
             .child(measure)
-            .when_some(library_error, |this, error| {
-                this.child(
-                    div()
-                        .mx_3()
-                        .mt_3()
-                        .p_2()
-                        .rounded(px(4.0))
-                        .bg(theme.list_hover)
-                        .text_color(theme.primary)
-                        .child(error),
-                )
-            })
-            .child(header)
-            .child(content)
+            .child(workspace_content)
+            .children(inspector_overlay)
+            .children(note_overlay)
+            .children(metadata_overlay)
+            .children(saved_view_overlay)
+            .children(tag_editor_overlay)
     }
+}
+
+fn extract_library_metadata(path: &Path) -> Result<LibraryItemMetadata> {
+    let mut metadata = LibraryItemMetadata::for_path(path);
+    let document = match mupdf::Document::open(path) {
+        Ok(document) => document,
+        Err(error) => {
+            eprintln!(
+                "failed to extract embedded metadata from {}; using the filename instead: {error:#}",
+                path.display()
+            );
+            return Ok(metadata);
+        }
+    };
+    let read = |name| {
+        document
+            .metadata(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    if let Some(title) = read(mupdf::MetadataName::Title) {
+        metadata.title = title;
+    }
+    if let Some(authors) = read(mupdf::MetadataName::Author) {
+        metadata.creators = authors
+            .split([';', '\n'])
+            .map(str::trim)
+            .filter(|author| !author.is_empty())
+            .map(|name| LibraryCreator {
+                name: name.to_string(),
+                role: LibraryCreatorRole::Author,
+            })
+            .collect();
+    }
+    metadata.subject = read(mupdf::MetadataName::Subject).unwrap_or_default();
+    if let Some(keywords) = read(mupdf::MetadataName::Keywords) {
+        metadata.embedded_keywords = keywords
+            .split([',', ';', '\n'])
+            .map(str::trim)
+            .filter(|keyword| !keyword.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    if let Some(date) = read(mupdf::MetadataName::CreationDate) {
+        metadata.year = date
+            .as_bytes()
+            .windows(4)
+            .filter_map(|digits| std::str::from_utf8(digits).ok())
+            .filter_map(|digits| digits.parse::<i32>().ok())
+            .find(|year| (1000..=3000).contains(year));
+    }
+    Ok(metadata)
 }
 
 fn thumbnail_cache_dir() -> PathBuf {
@@ -1994,16 +5025,19 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use gpui::{AppContext as _, TestAppContext, px};
+    use gpui::{AppContext as _, TestAppContext};
     use gpui_component::Root;
     use image::Rgba;
 
     use super::{
-        CursorMove, DetailsColumns, LIST_ROW_HEIGHT, NewTab, NewTabEntry, NewTabItemKey,
+        CursorMove, DetailsColumns, NewTab, NewTabEntry, NewTabItemKey, NewTabLayoutClass,
         ThumbnailCacheKey, format_file_size, persist_cover_thumbnail,
     };
     use crate::{
-        library::{DocumentPosition, HistoryEntry, LibraryStore},
+        library::{
+            DocumentPosition, HistoryEntry, LibrarySort, LibrarySortDirection, LibrarySortField,
+            LibraryStore, LibraryViewMode, ReaderNewTabSession,
+        },
         settings::{NewTabViewMode, SettingsStore},
     };
 
@@ -2020,6 +5054,7 @@ mod tests {
 
     fn test_entry(path: &str) -> NewTabEntry {
         NewTabEntry {
+            item_id: None,
             path: PathBuf::from(path),
             file_name: path.into(),
             directory: "/tmp".into(),
@@ -2028,6 +5063,15 @@ mod tests {
             format_size: "PDF · 1 KiB".into(),
             last_opened: "2026-07-28 12:00".into(),
             format: Some(glyphst_core::DocumentFormat::Pdf),
+            favorite: false,
+            status: None,
+            missing: false,
+            title_sort: path.to_lowercase().into(),
+            creator_sort: "".into(),
+            year: None,
+            date_added: None,
+            last_opened_timestamp: None,
+            search_text: String::new().into(),
         }
     }
 
@@ -2076,6 +5120,68 @@ mod tests {
     }
 
     #[test]
+    fn responsive_layout_uses_orientation_and_hysteresis() {
+        assert_eq!(
+            NewTabLayoutClass::for_size(480.0, 700.0, NewTabLayoutClass::Compact),
+            NewTabLayoutClass::Narrow
+        );
+        assert_eq!(
+            NewTabLayoutClass::for_size(530.0, 700.0, NewTabLayoutClass::Narrow),
+            NewTabLayoutClass::Narrow
+        );
+        assert_eq!(
+            NewTabLayoutClass::for_size(600.0, 700.0, NewTabLayoutClass::Narrow),
+            NewTabLayoutClass::Compact
+        );
+        assert_eq!(
+            NewTabLayoutClass::for_size(900.0, 700.0, NewTabLayoutClass::Compact),
+            NewTabLayoutClass::Expanded
+        );
+        assert_eq!(
+            NewTabLayoutClass::for_size(900.0, 1_200.0, NewTabLayoutClass::Compact),
+            NewTabLayoutClass::Compact
+        );
+        assert_eq!(
+            NewTabLayoutClass::for_size(1_120.0, 1_400.0, NewTabLayoutClass::Compact),
+            NewTabLayoutClass::Expanded
+        );
+        assert_eq!(
+            NewTabLayoutClass::for_size(770.0, 700.0, NewTabLayoutClass::Expanded),
+            NewTabLayoutClass::Expanded
+        );
+    }
+
+    #[gpui::test]
+    fn new_tab_keeps_its_own_navigation_view_and_sort_state(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+        });
+        let expected = ReaderNewTabSession {
+            source: crate::library::QuickOpenSource::Library,
+            history: crate::library::BrowserPresentation::history_default(),
+            library: crate::library::BrowserPresentation {
+                view_mode: LibraryViewMode::Grid,
+                sort: LibrarySort {
+                    field: LibrarySortField::Title,
+                    direction: LibrarySortDirection::Ascending,
+                },
+            },
+        };
+        let restored = expected.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let view =
+                cx.new(|cx| NewTab::new_with_session(cx.focus_handle(), restored, window, cx));
+            Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<NewTab>().unwrap()
+        });
+        assert_eq!(view.read_with(cx, |view, _| view.session_state()), expected);
+    }
+
+    #[test]
     fn selection_ranges_follow_the_visible_document_order() {
         let entries = vec![
             test_entry("/tmp/a.pdf"),
@@ -2119,6 +5225,19 @@ mod tests {
         assert_eq!(format_file_size(2 * 1024 * 1024), "2.0 MiB");
     }
 
+    #[test]
+    fn grouped_labels_cover_timeline_and_alphabetic_fallbacks() {
+        let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap();
+        assert_eq!(NewTab::grouped_time_label(Some(now), "Unknown"), "Today");
+        assert_eq!(
+            NewTab::grouped_time_label(None, "Never Opened"),
+            "Never Opened"
+        );
+        assert_eq!(NewTab::grouped_alpha_label("Ada Lovelace", "Unknown"), "A");
+        assert_eq!(NewTab::grouped_alpha_label("123 notes", "Unknown"), "#");
+        assert_eq!(NewTab::grouped_alpha_label("", "Unknown"), "Unknown");
+    }
+
     #[gpui::test]
     fn open_file_and_search_stay_in_the_header_across_view_modes(cx: &mut TestAppContext) {
         let directory = temporary_directory("new-tab-view-modes");
@@ -2142,23 +5261,23 @@ mod tests {
         assert!(cx.debug_bounds("new-tab-open-file").is_some());
         assert!(cx.debug_bounds("new-tab-search").is_some());
         assert!(cx.debug_bounds("new-tab-view-grid").is_some());
-        assert!(cx.debug_bounds("new-tab-view-list").is_some());
-        assert!(cx.debug_bounds("new-tab-view-details").is_some());
+        assert!(cx.debug_bounds("new-tab-view-grouped").is_some());
+        assert!(cx.debug_bounds("new-tab-view-table").is_some());
 
-        let list = cx.debug_bounds("new-tab-view-list").unwrap().center();
+        let list = cx.debug_bounds("new-tab-view-grouped").unwrap().center();
         cx.simulate_click(list, gpui::Modifiers::default());
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
         assert!(cx.debug_bounds("new-tab-open-file").is_some());
 
-        let details = cx.debug_bounds("new-tab-view-details").unwrap().center();
+        let details = cx.debug_bounds("new-tab-view-table").unwrap().center();
         cx.simulate_click(details, gpui::Modifiers::default());
         cx.update(|window, cx| {
             _ = window.draw(cx);
             assert_eq!(
                 cx.global::<SettingsStore>().settings.new_tab.view_mode,
-                NewTabViewMode::Details
+                NewTabViewMode::Table
             );
         });
         assert!(cx.debug_bounds("new-tab-open-file").is_some());
@@ -2167,7 +5286,40 @@ mod tests {
     }
 
     #[gpui::test]
-    fn history_rows_keep_their_slot_and_align_with_details_header(cx: &mut TestAppContext) {
+    fn quick_open_hides_management_while_home_exposes_it(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+        });
+
+        let (_quick_root, quick_cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| NewTab::new(cx.focus_handle(), window, cx));
+            Root::new(view, window, cx)
+        });
+        quick_cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(quick_cx.debug_bounds("new-tab-source-selector").is_some());
+        assert!(quick_cx.debug_bounds("home-navigation-rail").is_none());
+        assert!(quick_cx.debug_bounds("new-tab-add-files").is_none());
+        assert!(quick_cx.debug_bounds("home-library-filter-menu").is_none());
+
+        let (_home_root, home_cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| NewTab::new_home(cx.focus_handle(), window, cx));
+            Root::new(view, window, cx)
+        });
+        home_cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(home_cx.debug_bounds("home-navigation-rail").is_some());
+        assert!(home_cx.debug_bounds("new-tab-add-files").is_some());
+        assert!(home_cx.debug_bounds("home-library-filter-menu").is_some());
+        assert!(home_cx.debug_bounds("new-tab-source-selector").is_none());
+    }
+
+    #[gpui::test]
+    fn history_supports_grouped_spans_and_table_alignment(cx: &mut TestAppContext) {
         let directory = temporary_directory("new-tab-rounded-rows");
         fs::create_dir(&directory).unwrap();
         let path = directory.join("document.pdf");
@@ -2178,7 +5330,7 @@ mod tests {
             let mut settings_store = SettingsStore::memory();
             settings_store.state_path = directory.join("settings.kdl");
             let mut settings = settings_store.settings.clone();
-            settings.new_tab.view_mode = NewTabViewMode::List;
+            settings.new_tab.view_mode = NewTabViewMode::Grouped;
             settings_store.set_settings_in_memory(settings);
             cx.set_global(settings_store);
 
@@ -2198,18 +5350,11 @@ mod tests {
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
-        let slot = cx
-            .debug_bounds("new-tab-history-row-slot")
-            .expect("history row slot");
-        let row = cx.debug_bounds("new-tab-history-row").expect("history row");
-        assert_eq!(slot.size.height, px(LIST_ROW_HEIGHT));
-        assert_eq!(row.left(), slot.left() + px(4.0));
-        assert_eq!(row.top(), slot.top() + px(2.0));
-        assert_eq!(row.size.width, slot.size.width - px(8.0));
-        assert_eq!(row.size.height, slot.size.height - px(4.0));
+        assert!(cx.debug_bounds("new-tab-grouped-list").is_some());
+        assert!(cx.debug_bounds("new-tab-grouped-item").is_some());
 
         view.update_in(cx, |this, _, cx| {
-            this.set_view_mode(NewTabViewMode::Details, cx);
+            this.set_view_mode(NewTabViewMode::Table, cx);
         });
         cx.update(|window, cx| {
             _ = window.draw(cx);
@@ -2241,7 +5386,7 @@ mod tests {
             gpui_component::init(cx);
             let mut settings_store = SettingsStore::memory();
             let mut settings = settings_store.settings.clone();
-            settings.new_tab.view_mode = NewTabViewMode::List;
+            settings.new_tab.view_mode = NewTabViewMode::Grouped;
             settings_store.set_settings_in_memory(settings);
             cx.set_global(settings_store);
 
@@ -2268,7 +5413,7 @@ mod tests {
                 Some(NewTabItemKey::Document(paths[0].clone()))
             );
 
-            this.handle_document_pointer(paths[0].clone(), gpui::Modifiers::secondary_key(), cx);
+            this.handle_document_pointer(paths[0].clone(), gpui::Modifiers::secondary_key(), 1, cx);
             assert_eq!(this.selection, BTreeSet::from([paths[0].clone()]));
             this.handle_document_pointer(
                 paths[2].clone(),
@@ -2276,6 +5421,7 @@ mod tests {
                     shift: true,
                     ..Default::default()
                 },
+                1,
                 cx,
             );
             assert_eq!(this.selection.len(), 3);

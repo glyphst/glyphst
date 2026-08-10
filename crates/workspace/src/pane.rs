@@ -40,8 +40,8 @@ use crate::{
     },
     icons::{Icon, IconName},
     library::{
-        DocumentPosition, LibraryStore, ReaderPaneSession, ReaderPaneTree, ReaderSplitAxis,
-        ReaderTabKind, ReaderTabSession, normalize_path,
+        DocumentPosition, LibraryStore, ReaderNewTabSession, ReaderPaneSession, ReaderPaneTree,
+        ReaderSplitAxis, ReaderTabKind, ReaderTabSession, normalize_path,
     },
     new_tab::{NewTab, NewTabEvent},
     settings::{SettingsStore, TabBarVisibility, ui_rems},
@@ -266,11 +266,12 @@ pub(crate) enum PaneEvent {
     },
     OpenSettings,
     AiPanelDismissed(EntityId),
+    DocumentSidebarNavigation(EntityId),
     TabDrop {
         dragged_tab: Box<DraggedTab>,
         target: PaneDropTarget,
     },
-    CloseTab(usize),
+    CloseTab(EntityId),
     DuplicateTab(usize),
     TabClicked {
         tab_id: EntityId,
@@ -410,7 +411,7 @@ impl Pane {
                 active_tab = Some(id);
             }
             let kind = match tab {
-                Tab::NewTab(_) => ReaderTabKind::NewTab,
+                Tab::NewTab(new_tab) => ReaderTabKind::NewTab(new_tab.read(cx).session_state()),
                 Tab::LoadingDocument(loading) => {
                     let loading = loading.read(cx);
                     ReaderTabKind::Document {
@@ -445,7 +446,9 @@ impl Pane {
         let mut restored = RestoredPaneTabs::default();
         for tab in &session.tabs {
             let runtime_tab = match &tab.kind {
-                ReaderTabKind::NewTab => Some(self.create_new_tab(window, cx)),
+                ReaderTabKind::NewTab(state) => {
+                    Some(self.create_new_tab_with_session(state.clone(), window, cx))
+                }
                 ReaderTabKind::Keymap => Some(self.create_keymap_tab(window, cx)),
                 ReaderTabKind::Document { path, position } => {
                     if !path.exists() || !Self::is_supported_document_path(path) {
@@ -1480,8 +1483,11 @@ impl Pane {
             self.focus(window, cx);
         }
 
-        cx.global_mut::<LibraryStore>()
-            .record_history(&path, initial_position);
+        let library = cx.global_mut::<LibraryStore>();
+        library.record_history(&path, initial_position);
+        if let Err(error) = library.mark_library_item_opened(&path) {
+            eprintln!("failed to update library reading status: {error:#}");
+        }
         for job_id in job_ids {
             cx.emit(PaneEvent::DocumentOpenFinished {
                 job_id,
@@ -1500,6 +1506,21 @@ impl Pane {
     fn create_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Tab {
         let focus_handle = self.focus_handle.clone();
         let new_tab = cx.new(|cx| NewTab::new(focus_handle.clone(), window, cx));
+        self.subscribe_to_new_tab(&new_tab, window, cx);
+        let tab = Tab::NewTab(new_tab);
+        self.register_tab_focus_handle(&tab, focus_handle);
+        tab
+    }
+
+    fn create_new_tab_with_session(
+        &mut self,
+        state: ReaderNewTabSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Tab {
+        let focus_handle = self.focus_handle.clone();
+        let new_tab =
+            cx.new(|cx| NewTab::new_with_session(focus_handle.clone(), state, window, cx));
         self.subscribe_to_new_tab(&new_tab, window, cx);
         let tab = Tab::NewTab(new_tab);
         self.register_tab_focus_handle(&tab, focus_handle);
@@ -1567,6 +1588,9 @@ impl Pane {
                     DocumentViewEvent::OpenSettings => cx.emit(PaneEvent::OpenSettings),
                     DocumentViewEvent::AiPanelDismissed => {
                         cx.emit(PaneEvent::AiPanelDismissed(document_view_id))
+                    }
+                    DocumentViewEvent::SidebarNavigationRequested => {
+                        cx.emit(PaneEvent::DocumentSidebarNavigation(document_view_id))
                     }
                     DocumentViewEvent::SynchronizedScroll(delta) => {
                         cx.emit(PaneEvent::DocumentScrolled {
@@ -1799,8 +1823,8 @@ impl Pane {
                     .icon(IconName::X)
                     .on_click(move |_, _, cx| {
                         close_pane.update(cx, |pane, cx| {
-                            if let Some(tab_ix) = pane.tab_ix_for_entity_id(tab_id) {
-                                cx.emit(PaneEvent::CloseTab(tab_ix));
+                            if pane.has_tab_id(tab_id) {
+                                cx.emit(PaneEvent::CloseTab(tab_id));
                             }
                         });
                     }),
@@ -1896,8 +1920,10 @@ impl Pane {
             .debug_selector(move || format!("pane-tab-close-{tab_ix}"))
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
-                close_pane.update(cx, |_, cx| {
-                    cx.emit(PaneEvent::CloseTab(tab_ix));
+                close_pane.update(cx, |pane, cx| {
+                    if pane.has_tab_id(tab_id) {
+                        cx.emit(PaneEvent::CloseTab(tab_id));
+                    }
                 });
             });
 
@@ -2107,6 +2133,7 @@ impl Pane {
                 cx.stop_propagation();
                 new_tab_pane.update(cx, |pane, cx| {
                     pane.open_new_tab(window, cx);
+                    cx.emit(PaneEvent::Activate);
                 });
             });
 
@@ -2266,10 +2293,6 @@ impl Render for Pane {
             .flex_col()
             .overflow_hidden()
             .track_focus(&self.focus_handle)
-            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                this.focus_handle.focus(window, cx);
-                cx.emit(PaneEvent::Activate);
-            }))
             .when(show_tab_bar, |this| {
                 this.child(self.render_tab_bar(theme, window, cx))
             })
@@ -2279,6 +2302,10 @@ impl Render for Pane {
                     .min_h_0()
                     .relative()
                     .overflow_hidden()
+                    .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        this.focus_handle.focus(window, cx);
+                        cx.emit(PaneEvent::Activate);
+                    }))
                     .child(self.active_tab_content())
                     .child(self.render_drop_overlay(theme, cx)),
             )

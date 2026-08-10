@@ -103,6 +103,7 @@ pub mod document_viewer {
             OpenFile,
             OpenWithSystemPicker,
             OpenNewTab,
+            ToggleHome,
             OpenQuickAsk,
             OpenGoToPage,
             CloseTab,

@@ -112,6 +112,21 @@ pub(super) fn ensure_tables(database: &Database) -> Result<()> {
     {
         write_txn.open_table(AI_SESSIONS_V4_TABLE)?;
     }
+    {
+        write_txn.open_table(LIBRARY_ITEMS_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_ATTACHMENTS_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_TAGS_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_ITEM_TAGS_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_SAVED_VIEWS_V1_TABLE)?;
+    }
     write_txn.commit()?;
     Ok(())
 }
@@ -171,6 +186,7 @@ pub(super) fn load_library(database: &Database) -> Result<Library> {
         has_v2_storage,
         has_v1_storage,
     )?;
+    load_catalog(&read_txn, &mut library)?;
     drop(read_txn);
 
     library.sanitize();
@@ -193,6 +209,80 @@ pub(super) fn load_library(database: &Database) -> Result<Library> {
         migrate_ai_sessions_v4(database, &library)?;
     }
     Ok(library)
+}
+
+fn load_catalog(read_txn: &redb::ReadTransaction, library: &mut Library) -> Result<()> {
+    {
+        let table = read_txn.open_table(LIBRARY_ITEMS_V1_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredLibraryItemV1>(value.value())
+                .and_then(StoredLibraryItemV1::into_domain)
+            {
+                Ok(item) => library.library_items.push(item),
+                Err(error) => eprintln!("failed to decode library item: {error:#}"),
+            }
+        }
+    }
+    {
+        let table = read_txn.open_table(LIBRARY_ATTACHMENTS_V1_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredLibraryAttachmentV1>(value.value())
+                .and_then(StoredLibraryAttachmentV1::into_domain)
+            {
+                Ok(mut attachment) => {
+                    attachment.path = normalize_path(&attachment.path);
+                    library.library_attachments.push(attachment);
+                }
+                Err(error) => eprintln!("failed to decode library attachment: {error:#}"),
+            }
+        }
+    }
+    {
+        let table = read_txn.open_table(LIBRARY_TAGS_V1_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredLibraryTagV1>(value.value())
+                .and_then(StoredLibraryTagV1::into_domain)
+            {
+                Ok(tag) => library.library_tags.push(tag),
+                Err(error) => eprintln!("failed to decode library tag: {error:#}"),
+            }
+        }
+    }
+    {
+        let table = read_txn.open_table(LIBRARY_ITEM_TAGS_V1_TABLE)?;
+        for entry in table.iter()? {
+            let (item_id, value) = entry?;
+            match decode::<StoredLibraryItemTagsV1>(value.value())
+                .and_then(StoredLibraryItemTagsV1::into_domain)
+            {
+                Ok(tag_ids) => {
+                    library
+                        .library_item_tags
+                        .extend(tag_ids.into_iter().map(|tag_id| LibraryItemTag {
+                            item_id: DocumentId(item_id.value()),
+                            tag_id,
+                        }));
+                }
+                Err(error) => eprintln!("failed to decode library item tags: {error:#}"),
+            }
+        }
+    }
+    {
+        let table = read_txn.open_table(LIBRARY_SAVED_VIEWS_V1_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredLibrarySavedViewV1>(value.value())
+                .and_then(StoredLibrarySavedViewV1::into_domain)
+            {
+                Ok(view) => library.library_saved_views.push(view),
+                Err(error) => eprintln!("failed to decode library saved view: {error:#}"),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn load_storage_v2(
@@ -420,10 +510,24 @@ fn load_shared_v1_storage(read_txn: &redb::ReadTransaction, library: &mut Librar
             Err(error) => eprintln!("failed to decode document browser size: {error:#}"),
         }
     }
+    if let Some(value) = table.get(HOME_PREFERENCES_KEY)? {
+        match decode::<StoredHomePreferencesV1>(value.value())
+            .and_then(StoredHomePreferencesV1::into_domain)
+        {
+            Ok(preferences) => library.home_preferences = preferences,
+            Err(error) => eprintln!("failed to decode Home preferences: {error:#}"),
+        }
+    }
     if let Some(value) = table.get(READER_SESSION_KEY)? {
         let bytes = value.value();
-        let session = decode::<StoredReaderSessionV2>(bytes)
-            .and_then(StoredReaderSessionV2::into_domain)
+        let session = decode::<StoredReaderSessionV4>(bytes)
+            .and_then(StoredReaderSessionV4::into_domain)
+            .or_else(|_| {
+                decode::<StoredReaderSessionV3>(bytes).and_then(StoredReaderSessionV3::into_domain)
+            })
+            .or_else(|_| {
+                decode::<StoredReaderSessionV2>(bytes).and_then(StoredReaderSessionV2::into_domain)
+            })
             .or_else(|_| {
                 decode::<StoredReaderSessionV1>(bytes).and_then(StoredReaderSessionV1::into_domain)
             });
@@ -659,6 +763,8 @@ fn migrate_legacy_storage_v1(database: &Database, library: &Library) -> Result<(
             let encoded = encode(&StoredDocumentBrowserSizeV1::from(size))?;
             table.insert(DOCUMENT_BROWSER_SIZE_KEY, encoded.as_slice())?;
         }
+        let encoded = encode(&StoredHomePreferencesV1::from(&library.home_preferences))?;
+        table.insert(HOME_PREFERENCES_KEY, encoded.as_slice())?;
         if let Some(session) = &library.reader_session {
             let encoded = encode(&StoredReaderSessionV2::from(session))?;
             table.insert(READER_SESSION_KEY, encoded.as_slice())?;

@@ -1176,6 +1176,7 @@ pub enum DocumentViewEvent {
     },
     OpenSettings,
     AiPanelDismissed,
+    SidebarNavigationRequested,
     SynchronizedScroll(SynchronizedScrollDelta),
     /// A canonical content-region id emitted only by the active translated
     /// half of a live session pair.

@@ -9,8 +9,8 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow};
 pub use glyphst_core::{
-    DocumentRotation, EpubReaderPreferences, HighlightColor, RegionImageReference,
-    SemanticTextAnchor,
+    DocumentFormat, DocumentId, DocumentRotation, EpubReaderPreferences, HighlightColor,
+    RegionImageReference, SemanticTextAnchor,
 };
 use gpui::Global;
 use redb::{Database, ReadableTable, TableDefinition};
@@ -61,8 +61,11 @@ const AI_SESSIONS_V4_VERSION: u8 = 4;
 const AI_SESSIONS_V4_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v4");
 const SIDEBAR_WIDTHS_KEY: &str = "sidebar_widths";
 const DOCUMENT_BROWSER_SIZE_KEY: &str = "document_browser_size";
+const HOME_PREFERENCES_KEY: &str = "home_preferences";
 const READER_SESSION_KEY: &str = "reader_session";
 const READER_SESSION_STORAGE_V2: u8 = 2;
+const READER_SESSION_STORAGE_V3: u8 = 3;
+const READER_SESSION_STORAGE_V4: u8 = 4;
 const MAX_AI_SESSIONS: usize = 200;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -735,6 +738,28 @@ struct StoredDocumentBrowserSizeV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredHomePreferencesV1 {
+    version: u8,
+    preferences: HomePreferences,
+}
+
+impl From<&HomePreferences> for StoredHomePreferencesV1 {
+    fn from(preferences: &HomePreferences) -> Self {
+        Self {
+            version: STORAGE_SCHEMA_VERSION,
+            preferences: preferences.clone(),
+        }
+    }
+}
+
+impl StoredHomePreferencesV1 {
+    fn into_domain(self) -> Result<HomePreferences> {
+        require_storage_version(self.version, STORAGE_SCHEMA_VERSION)?;
+        Ok(self.preferences)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredReaderSessionV1 {
     version: u8,
     windows: Vec<StoredReaderWindowSessionV1>,
@@ -744,6 +769,44 @@ struct StoredReaderSessionV1 {
 struct StoredReaderSessionV2 {
     version: u8,
     windows: Vec<StoredReaderWindowSessionV2>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderSessionV3 {
+    version: u8,
+    windows: Vec<StoredReaderWindowSessionV3>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderSessionV4 {
+    version: u8,
+    windows: Vec<StoredReaderWindowSessionV4>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderWindowSessionV4 {
+    bounds: ReaderWindowBounds,
+    pane_tree: StoredReaderPaneTreeV3,
+    active_pane: u64,
+    dock_document_tab: Option<u64>,
+    left_sidebar: Option<ReaderSidebar>,
+    ai_panel_open: bool,
+    transparency_enabled: bool,
+    synchronized_groups: Vec<ReaderSynchronizedGroup>,
+    translation_sessions: Vec<StoredReaderTranslationSessionV2>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderWindowSessionV3 {
+    bounds: ReaderWindowBounds,
+    pane_tree: StoredReaderPaneTreeV2,
+    active_pane: u64,
+    dock_document_tab: Option<u64>,
+    left_sidebar: Option<ReaderSidebar>,
+    ai_panel_open: bool,
+    transparency_enabled: bool,
+    synchronized_groups: Vec<ReaderSynchronizedGroup>,
+    translation_sessions: Vec<StoredReaderTranslationSessionV2>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -792,6 +855,113 @@ enum StoredReaderPaneTreeV1 {
         ratios: Vec<f32>,
         children: Vec<StoredReaderPaneTreeV1>,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum StoredReaderPaneTreeV2 {
+    Pane {
+        id: u64,
+        tabs: Vec<StoredReaderTabV2>,
+        active_tab: Option<u64>,
+    },
+    Split {
+        axis: ReaderSplitAxis,
+        ratios: Vec<f32>,
+        children: Vec<StoredReaderPaneTreeV2>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum StoredReaderPaneTreeV3 {
+    Pane {
+        id: u64,
+        tabs: Vec<StoredReaderTabV3>,
+        active_tab: Option<u64>,
+    },
+    Split {
+        axis: ReaderSplitAxis,
+        ratios: Vec<f32>,
+        children: Vec<StoredReaderPaneTreeV3>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderTabV3 {
+    id: u64,
+    kind: StoredReaderTabKindV3,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum StoredReaderTabKindV3 {
+    NewTab(ReaderNewTabSession),
+    Document {
+        path: StoredPathV1,
+        position: DocumentPosition,
+    },
+    Keymap,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderTabV2 {
+    id: u64,
+    kind: StoredReaderTabKindV2,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum StoredReaderTabKindV2 {
+    NewTab(StoredReaderNewTabSessionV3),
+    Document {
+        path: StoredPathV1,
+        position: DocumentPosition,
+    },
+    Keymap,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReaderNewTabSessionV3 {
+    destination: ReaderNewTabDestination,
+    view_mode: LibraryViewMode,
+    sort: LibrarySort,
+}
+
+impl From<&ReaderNewTabSession> for StoredReaderNewTabSessionV3 {
+    fn from(session: &ReaderNewTabSession) -> Self {
+        let presentation = session.presentation(session.source);
+        Self {
+            destination: match session.source {
+                QuickOpenSource::History => ReaderNewTabDestination::History,
+                QuickOpenSource::Library => ReaderNewTabDestination::Library,
+            },
+            view_mode: presentation.view_mode,
+            sort: presentation.sort,
+        }
+    }
+}
+
+impl StoredReaderNewTabSessionV3 {
+    fn into_domain(self) -> ReaderNewTabSession {
+        let source = match self.destination {
+            ReaderNewTabDestination::Home | ReaderNewTabDestination::History => {
+                QuickOpenSource::History
+            }
+            ReaderNewTabDestination::Library
+            | ReaderNewTabDestination::Favorites
+            | ReaderNewTabDestination::Tags
+            | ReaderNewTabDestination::Trash
+            | ReaderNewTabDestination::Tag(_)
+            | ReaderNewTabDestination::SavedView(_) => QuickOpenSource::Library,
+        };
+        let mut session = ReaderNewTabSession::default();
+        session.source = source;
+        session.set_presentation(
+            source,
+            BrowserPresentation {
+                view_mode: self.view_mode,
+                sort: self.sort,
+            },
+        );
+        session
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -862,6 +1032,58 @@ impl StoredReaderSessionV2 {
     }
 }
 
+impl From<&ReaderSessionSnapshot> for StoredReaderSessionV3 {
+    fn from(session: &ReaderSessionSnapshot) -> Self {
+        Self {
+            version: READER_SESSION_STORAGE_V3,
+            windows: session
+                .windows
+                .iter()
+                .map(StoredReaderWindowSessionV3::from)
+                .collect(),
+        }
+    }
+}
+
+impl StoredReaderSessionV3 {
+    fn into_domain(self) -> Result<ReaderSessionSnapshot> {
+        require_storage_version(self.version, READER_SESSION_STORAGE_V3)?;
+        Ok(ReaderSessionSnapshot {
+            windows: self
+                .windows
+                .into_iter()
+                .map(StoredReaderWindowSessionV3::into_domain)
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
+impl From<&ReaderSessionSnapshot> for StoredReaderSessionV4 {
+    fn from(session: &ReaderSessionSnapshot) -> Self {
+        Self {
+            version: READER_SESSION_STORAGE_V4,
+            windows: session
+                .windows
+                .iter()
+                .map(StoredReaderWindowSessionV4::from)
+                .collect(),
+        }
+    }
+}
+
+impl StoredReaderSessionV4 {
+    fn into_domain(self) -> Result<ReaderSessionSnapshot> {
+        require_storage_version(self.version, READER_SESSION_STORAGE_V4)?;
+        Ok(ReaderSessionSnapshot {
+            windows: self
+                .windows
+                .into_iter()
+                .map(StoredReaderWindowSessionV4::into_domain)
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
 impl From<&ReaderWindowSession> for StoredReaderWindowSessionV1 {
     fn from(window: &ReaderWindowSession) -> Self {
         Self {
@@ -882,6 +1104,7 @@ impl StoredReaderWindowSessionV1 {
             bounds: self.bounds.sanitized(),
             pane_tree: self.pane_tree.into_domain()?,
             active_pane: self.active_pane,
+            dock_document_tab: None,
             left_sidebar: self.left_sidebar,
             ai_panel_open: self.ai_panel_open,
             transparency_enabled: self.transparency_enabled,
@@ -916,6 +1139,87 @@ impl StoredReaderWindowSessionV2 {
             bounds: self.bounds.sanitized(),
             pane_tree: self.pane_tree.into_domain()?,
             active_pane: self.active_pane,
+            dock_document_tab: None,
+            left_sidebar: self.left_sidebar,
+            ai_panel_open: self.ai_panel_open,
+            transparency_enabled: self.transparency_enabled,
+            synchronized_groups: self.synchronized_groups,
+            translation_sessions: self
+                .translation_sessions
+                .into_iter()
+                .map(StoredReaderTranslationSessionV2::into_domain)
+                .collect(),
+        })
+    }
+}
+
+impl From<&ReaderWindowSession> for StoredReaderWindowSessionV3 {
+    fn from(window: &ReaderWindowSession) -> Self {
+        Self {
+            bounds: window.bounds,
+            pane_tree: StoredReaderPaneTreeV2::from(&window.pane_tree),
+            active_pane: window.active_pane,
+            dock_document_tab: window.dock_document_tab,
+            left_sidebar: window.left_sidebar,
+            ai_panel_open: window.ai_panel_open,
+            transparency_enabled: window.transparency_enabled,
+            synchronized_groups: window.synchronized_groups.clone(),
+            translation_sessions: window
+                .translation_sessions
+                .iter()
+                .map(StoredReaderTranslationSessionV2::from)
+                .collect(),
+        }
+    }
+}
+
+impl StoredReaderWindowSessionV3 {
+    fn into_domain(self) -> Result<ReaderWindowSession> {
+        Ok(ReaderWindowSession {
+            bounds: self.bounds.sanitized(),
+            pane_tree: self.pane_tree.into_domain()?,
+            active_pane: self.active_pane,
+            dock_document_tab: self.dock_document_tab,
+            left_sidebar: self.left_sidebar,
+            ai_panel_open: self.ai_panel_open,
+            transparency_enabled: self.transparency_enabled,
+            synchronized_groups: self.synchronized_groups,
+            translation_sessions: self
+                .translation_sessions
+                .into_iter()
+                .map(StoredReaderTranslationSessionV2::into_domain)
+                .collect(),
+        })
+    }
+}
+
+impl From<&ReaderWindowSession> for StoredReaderWindowSessionV4 {
+    fn from(window: &ReaderWindowSession) -> Self {
+        Self {
+            bounds: window.bounds,
+            pane_tree: StoredReaderPaneTreeV3::from(&window.pane_tree),
+            active_pane: window.active_pane,
+            dock_document_tab: window.dock_document_tab,
+            left_sidebar: window.left_sidebar,
+            ai_panel_open: window.ai_panel_open,
+            transparency_enabled: window.transparency_enabled,
+            synchronized_groups: window.synchronized_groups.clone(),
+            translation_sessions: window
+                .translation_sessions
+                .iter()
+                .map(StoredReaderTranslationSessionV2::from)
+                .collect(),
+        }
+    }
+}
+
+impl StoredReaderWindowSessionV4 {
+    fn into_domain(self) -> Result<ReaderWindowSession> {
+        Ok(ReaderWindowSession {
+            bounds: self.bounds.sanitized(),
+            pane_tree: self.pane_tree.into_domain()?,
+            active_pane: self.active_pane,
+            dock_document_tab: self.dock_document_tab,
             left_sidebar: self.left_sidebar,
             ai_panel_open: self.ai_panel_open,
             transparency_enabled: self.transparency_enabled,
@@ -1009,10 +1313,114 @@ impl StoredReaderPaneTreeV1 {
     }
 }
 
+impl From<&ReaderPaneTree> for StoredReaderPaneTreeV2 {
+    fn from(tree: &ReaderPaneTree) -> Self {
+        match tree {
+            ReaderPaneTree::Pane(pane) => Self::Pane {
+                id: pane.id,
+                tabs: pane.tabs.iter().map(StoredReaderTabV2::from).collect(),
+                active_tab: pane.active_tab,
+            },
+            ReaderPaneTree::Split {
+                axis,
+                ratios,
+                children,
+            } => Self::Split {
+                axis: *axis,
+                ratios: ratios.clone(),
+                children: children.iter().map(Self::from).collect(),
+            },
+        }
+    }
+}
+
+impl StoredReaderPaneTreeV2 {
+    fn into_domain(self) -> Result<ReaderPaneTree> {
+        match self {
+            Self::Pane {
+                id,
+                tabs,
+                active_tab,
+            } => Ok(ReaderPaneTree::Pane(ReaderPaneSession {
+                id,
+                tabs: tabs
+                    .into_iter()
+                    .map(StoredReaderTabV2::into_domain)
+                    .collect::<Result<_>>()?,
+                active_tab,
+            })),
+            Self::Split {
+                axis,
+                ratios,
+                children,
+            } => Ok(ReaderPaneTree::Split {
+                axis,
+                ratios: sanitize_ratios(ratios, children.len()),
+                children: children
+                    .into_iter()
+                    .map(Self::into_domain)
+                    .collect::<Result<_>>()?,
+            }),
+        }
+    }
+}
+
+impl From<&ReaderPaneTree> for StoredReaderPaneTreeV3 {
+    fn from(tree: &ReaderPaneTree) -> Self {
+        match tree {
+            ReaderPaneTree::Pane(pane) => Self::Pane {
+                id: pane.id,
+                tabs: pane.tabs.iter().map(StoredReaderTabV3::from).collect(),
+                active_tab: pane.active_tab,
+            },
+            ReaderPaneTree::Split {
+                axis,
+                ratios,
+                children,
+            } => Self::Split {
+                axis: *axis,
+                ratios: ratios.clone(),
+                children: children.iter().map(Self::from).collect(),
+            },
+        }
+    }
+}
+
+impl StoredReaderPaneTreeV3 {
+    fn into_domain(self) -> Result<ReaderPaneTree> {
+        match self {
+            Self::Pane {
+                id,
+                tabs,
+                active_tab,
+            } => Ok(ReaderPaneTree::Pane(ReaderPaneSession {
+                id,
+                tabs: tabs
+                    .into_iter()
+                    .map(StoredReaderTabV3::into_domain)
+                    .collect::<Result<_>>()?,
+                active_tab,
+            })),
+            Self::Split {
+                axis,
+                ratios,
+                children,
+            } => Ok(ReaderPaneTree::Split {
+                axis,
+                ratios: sanitize_ratios(ratios, children.len()),
+                children: children
+                    .into_iter()
+                    .map(Self::into_domain)
+                    .collect::<Result<_>>()?,
+            }),
+        }
+    }
+}
+
 impl From<&ReaderTabSession> for StoredReaderTabV1 {
     fn from(tab: &ReaderTabSession) -> Self {
         let kind = match &tab.kind {
-            ReaderTabKind::NewTab => StoredReaderTabKindV1::NewTab,
+            ReaderTabKind::NewTab(_) => StoredReaderTabKindV1::NewTab,
             ReaderTabKind::Document { path, position } => StoredReaderTabKindV1::Document {
                 path: StoredPathV1::from_path(path),
                 position: position.clone(),
@@ -1026,12 +1434,70 @@ impl From<&ReaderTabSession> for StoredReaderTabV1 {
 impl StoredReaderTabV1 {
     fn into_domain(self) -> Result<ReaderTabSession> {
         let kind = match self.kind {
-            StoredReaderTabKindV1::NewTab => ReaderTabKind::NewTab,
+            StoredReaderTabKindV1::NewTab => ReaderTabKind::NewTab(ReaderNewTabSession::default()),
             StoredReaderTabKindV1::Document { path, position } => ReaderTabKind::Document {
                 path: normalize_path(&path.into_path()?),
                 position,
             },
             StoredReaderTabKindV1::Keymap => ReaderTabKind::Keymap,
+        };
+        Ok(ReaderTabSession { id: self.id, kind })
+    }
+}
+
+impl From<&ReaderTabSession> for StoredReaderTabV2 {
+    fn from(tab: &ReaderTabSession) -> Self {
+        let kind = match &tab.kind {
+            ReaderTabKind::NewTab(state) => {
+                StoredReaderTabKindV2::NewTab(StoredReaderNewTabSessionV3::from(state))
+            }
+            ReaderTabKind::Document { path, position } => StoredReaderTabKindV2::Document {
+                path: StoredPathV1::from_path(path),
+                position: position.clone(),
+            },
+            ReaderTabKind::Keymap => StoredReaderTabKindV2::Keymap,
+        };
+        Self { id: tab.id, kind }
+    }
+}
+
+impl StoredReaderTabV2 {
+    fn into_domain(self) -> Result<ReaderTabSession> {
+        let kind = match self.kind {
+            StoredReaderTabKindV2::NewTab(state) => ReaderTabKind::NewTab(state.into_domain()),
+            StoredReaderTabKindV2::Document { path, position } => ReaderTabKind::Document {
+                path: normalize_path(&path.into_path()?),
+                position,
+            },
+            StoredReaderTabKindV2::Keymap => ReaderTabKind::Keymap,
+        };
+        Ok(ReaderTabSession { id: self.id, kind })
+    }
+}
+
+impl From<&ReaderTabSession> for StoredReaderTabV3 {
+    fn from(tab: &ReaderTabSession) -> Self {
+        let kind = match &tab.kind {
+            ReaderTabKind::NewTab(state) => StoredReaderTabKindV3::NewTab(state.clone()),
+            ReaderTabKind::Document { path, position } => StoredReaderTabKindV3::Document {
+                path: StoredPathV1::from_path(path),
+                position: position.clone(),
+            },
+            ReaderTabKind::Keymap => StoredReaderTabKindV3::Keymap,
+        };
+        Self { id: tab.id, kind }
+    }
+}
+
+impl StoredReaderTabV3 {
+    fn into_domain(self) -> Result<ReaderTabSession> {
+        let kind = match self.kind {
+            StoredReaderTabKindV3::NewTab(state) => ReaderTabKind::NewTab(state),
+            StoredReaderTabKindV3::Document { path, position } => ReaderTabKind::Document {
+                path: normalize_path(&path.into_path()?),
+                position,
+            },
+            StoredReaderTabKindV3::Keymap => ReaderTabKind::Keymap,
         };
         Ok(ReaderTabSession { id: self.id, kind })
     }
@@ -1552,6 +2018,7 @@ pub struct ReaderWindowSession {
     pub bounds: ReaderWindowBounds,
     pub pane_tree: ReaderPaneTree,
     pub active_pane: u64,
+    pub dock_document_tab: Option<u64>,
     pub left_sidebar: Option<ReaderSidebar>,
     pub ai_panel_open: bool,
     pub transparency_enabled: bool,
@@ -1617,6 +2084,146 @@ pub struct ReaderTabSession {
     pub kind: ReaderTabKind,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReaderNewTabDestination {
+    #[default]
+    Home,
+    Library,
+    Favorites,
+    History,
+    Tags,
+    Trash,
+    Tag(LibraryTagId),
+    SavedView(LibrarySavedViewId),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuickOpenSource {
+    #[default]
+    History,
+    Library,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPresentation {
+    pub view_mode: LibraryViewMode,
+    pub sort: LibrarySort,
+}
+
+impl BrowserPresentation {
+    pub fn history_default() -> Self {
+        Self {
+            view_mode: LibraryViewMode::Grouped,
+            sort: LibrarySort {
+                field: LibrarySortField::LastOpened,
+                direction: LibrarySortDirection::Descending,
+            },
+        }
+    }
+
+    pub fn library_default() -> Self {
+        Self {
+            view_mode: LibraryViewMode::Table,
+            sort: LibrarySort {
+                field: LibrarySortField::DateAdded,
+                direction: LibrarySortDirection::Descending,
+            },
+        }
+    }
+
+    pub fn trash_default() -> Self {
+        Self::library_default()
+    }
+}
+
+impl Default for BrowserPresentation {
+    fn default() -> Self {
+        Self::library_default()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderNewTabSession {
+    pub source: QuickOpenSource,
+    pub history: BrowserPresentation,
+    pub library: BrowserPresentation,
+}
+
+impl Default for ReaderNewTabSession {
+    fn default() -> Self {
+        Self {
+            source: QuickOpenSource::History,
+            history: BrowserPresentation::history_default(),
+            library: BrowserPresentation::library_default(),
+        }
+    }
+}
+
+impl ReaderNewTabSession {
+    pub fn presentation(&self, source: QuickOpenSource) -> BrowserPresentation {
+        match source {
+            QuickOpenSource::History => self.history,
+            QuickOpenSource::Library => self.library,
+        }
+    }
+
+    pub fn set_presentation(&mut self, source: QuickOpenSource, presentation: BrowserPresentation) {
+        match source {
+            QuickOpenSource::History => self.history = presentation,
+            QuickOpenSource::Library => self.library = presentation,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HomeDestination {
+    #[default]
+    Library,
+    History,
+    Trash,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomePreferences {
+    pub destination: HomeDestination,
+    pub library: BrowserPresentation,
+    pub history: BrowserPresentation,
+    pub trash: BrowserPresentation,
+}
+
+impl Default for HomePreferences {
+    fn default() -> Self {
+        Self {
+            destination: HomeDestination::Library,
+            library: BrowserPresentation::library_default(),
+            history: BrowserPresentation::history_default(),
+            trash: BrowserPresentation::trash_default(),
+        }
+    }
+}
+
+impl HomePreferences {
+    pub fn presentation(&self, destination: HomeDestination) -> BrowserPresentation {
+        match destination {
+            HomeDestination::Library => self.library,
+            HomeDestination::History => self.history,
+            HomeDestination::Trash => self.trash,
+        }
+    }
+
+    pub fn set_presentation(
+        &mut self,
+        destination: HomeDestination,
+        presentation: BrowserPresentation,
+    ) {
+        match destination {
+            HomeDestination::Library => self.library = presentation,
+            HomeDestination::History => self.history = presentation,
+            HomeDestination::Trash => self.trash = presentation,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReaderTranslationSession {
     pub source_tab: u64,
@@ -1630,7 +2237,7 @@ pub struct ReaderTranslationSession {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReaderTabKind {
-    NewTab,
+    NewTab(ReaderNewTabSession),
     Document {
         path: PathBuf,
         position: DocumentPosition,
@@ -1691,6 +2298,11 @@ impl DocumentPreferences {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Library {
+    pub library_items: Vec<LibraryItem>,
+    pub library_attachments: Vec<LibraryAttachment>,
+    pub library_tags: Vec<LibraryTag>,
+    pub library_item_tags: Vec<LibraryItemTag>,
+    pub library_saved_views: Vec<LibrarySavedView>,
     pub history: Vec<HistoryEntry>,
     pub bookmarks: Vec<Bookmark>,
     pub highlights: Vec<Highlight>,
@@ -1698,12 +2310,17 @@ pub struct Library {
     pub ai_sessions: Vec<AiSession>,
     pub sidebar_widths: Option<SidebarWidths>,
     pub document_browser_size: Option<DocumentBrowserSize>,
+    pub home_preferences: HomePreferences,
     pub reader_session: Option<ReaderSessionSnapshot>,
     pub document_preferences: Vec<DocumentPreferences>,
     next_bookmark_id: u64,
     next_highlight_id: u64,
     next_note_id: u64,
     next_ai_session_id: u64,
+    next_library_item_id: u64,
+    next_library_attachment_id: u64,
+    next_library_tag_id: u64,
+    next_library_saved_view_id: u64,
 }
 
 pub struct LibraryStore {
@@ -1714,6 +2331,7 @@ pub struct LibraryStore {
     next_document_edit_sequence: u64,
     bookmarks_revision: u64,
     history_entry_revisions: Arc<Mutex<HashMap<PathBuf, u64>>>,
+    catalog_revision: u64,
 }
 
 pub struct HistoryEntryPersistenceSnapshot {
@@ -1833,6 +2451,7 @@ impl Error for DocumentEditConflict {}
 mod ai_sessions;
 mod annotations;
 mod bookmarks;
+mod catalog;
 mod edits;
 mod history;
 mod model;
@@ -1842,6 +2461,7 @@ mod sidebar;
 mod storage;
 mod storage_helpers;
 
+pub use catalog::*;
 use storage_helpers::require_storage_version;
 
 pub fn normalize_path(path: &Path) -> PathBuf {

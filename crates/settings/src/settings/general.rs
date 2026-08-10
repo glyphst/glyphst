@@ -30,26 +30,26 @@ impl RestoreOnStartup {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NewTabViewMode {
-    #[default]
     Grid,
-    List,
-    Details,
+    Grouped,
+    #[default]
+    Table,
 }
 
 impl NewTabViewMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Grid => "grid",
-            Self::List => "list",
-            Self::Details => "details",
+            Self::Grouped => "grouped",
+            Self::Table => "table",
         }
     }
 
     pub(super) fn from_str(value: &str) -> Option<Self> {
         match value {
             "grid" => Some(Self::Grid),
-            "list" | "line" => Some(Self::List),
-            "details" | "detailed" | "detailed_list" => Some(Self::Details),
+            "grouped" | "list" | "line" => Some(Self::Grouped),
+            "table" | "details" | "detailed" | "detailed_list" => Some(Self::Table),
             _ => None,
         }
     }

@@ -322,8 +322,10 @@ theme-overrides {
 fn parses_and_exports_new_tab_view_mode() {
     for (value, expected) in [
         ("grid", NewTabViewMode::Grid),
-        ("list", NewTabViewMode::List),
-        ("details", NewTabViewMode::Details),
+        ("grouped", NewTabViewMode::Grouped),
+        ("list", NewTabViewMode::Grouped),
+        ("table", NewTabViewMode::Table),
+        ("details", NewTabViewMode::Table),
     ] {
         let settings = parse_settings(&format!(
             r#"
@@ -346,7 +348,7 @@ new_tab {{
 }
 
 #[test]
-fn invalid_new_tab_view_mode_uses_grid_default() {
+fn invalid_new_tab_view_mode_uses_table_default() {
     let settings = parse_settings(
         r#"
 new_tab {
@@ -356,7 +358,7 @@ new_tab {
     )
     .unwrap();
 
-    assert_eq!(settings.new_tab.view_mode, NewTabViewMode::Grid);
+    assert_eq!(settings.new_tab.view_mode, NewTabViewMode::Table);
 }
 
 #[test]

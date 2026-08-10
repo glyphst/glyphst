@@ -20,4 +20,14 @@ impl LibraryStore {
         self.library.document_browser_size = Some(size);
         Ok(())
     }
+
+    pub fn home_preferences(&self) -> &HomePreferences {
+        &self.library.home_preferences
+    }
+
+    pub fn set_home_preferences(&mut self, preferences: HomePreferences) -> Result<()> {
+        self.write_home_preferences(&preferences)?;
+        self.library.home_preferences = preferences;
+        Ok(())
+    }
 }
