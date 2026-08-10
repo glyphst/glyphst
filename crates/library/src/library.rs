@@ -2303,6 +2303,8 @@ pub struct Library {
     pub library_tags: Vec<LibraryTag>,
     pub library_item_tags: Vec<LibraryItemTag>,
     pub library_saved_views: Vec<LibrarySavedView>,
+    pub library_collections: Vec<LibraryCollection>,
+    pub library_item_collections: Vec<LibraryItemCollection>,
     pub history: Vec<HistoryEntry>,
     pub bookmarks: Vec<Bookmark>,
     pub highlights: Vec<Highlight>,
@@ -2321,6 +2323,7 @@ pub struct Library {
     next_library_attachment_id: u64,
     next_library_tag_id: u64,
     next_library_saved_view_id: u64,
+    next_library_collection_id: u64,
 }
 
 pub struct LibraryStore {

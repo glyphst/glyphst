@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     ops::Range,
@@ -35,14 +35,15 @@ pub use glyphst_actions::new_tab::{
     ToggleFocused,
 };
 
+use crate::navigation_rail::{slim_navigation_button, slim_navigation_rail};
 use crate::{
     document_view::{NextHalfPage, PreviousHalfPage, ScrollLineDown, ScrollLineUp},
     icons::{Icon, IconName},
     library::{
         BrowserPresentation, DocumentId, HistoryEntry, HomeDestination, LibraryAddOutcome,
-        LibraryCreator, LibraryCreatorRole, LibraryFilter, LibraryItem, LibraryItemKind,
-        LibraryItemMetadata, LibrarySort, LibrarySortDirection, LibrarySortField, LibraryStore,
-        LibraryTagId, LibraryTrashFilter, LibraryViewMode, QuickOpenSource,
+        LibraryCollectionId, LibraryCreator, LibraryCreatorRole, LibraryFilter, LibraryItem,
+        LibraryItemKind, LibraryItemMetadata, LibrarySort, LibrarySortDirection, LibrarySortField,
+        LibraryStore, LibraryTagId, LibraryTrashFilter, LibraryViewMode, QuickOpenSource,
         ReaderNewTabDestination, ReaderNewTabSession, ReadingStatus,
     },
     scrollbar::{ScrollbarHandle as _, WithScrollbar as _},
@@ -301,6 +302,66 @@ struct LibraryBrowserSession {
     sort: LibrarySort,
 }
 
+#[derive(Clone, Debug)]
+enum LibraryTreeRow {
+    Root,
+    Collection {
+        id: LibraryCollectionId,
+        depth: usize,
+    },
+    Document {
+        entry_ix: usize,
+        depth: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FolderEditor {
+    collection_id: Option<LibraryCollectionId>,
+    parent_id: Option<LibraryCollectionId>,
+}
+
+#[derive(Clone)]
+struct DraggedLibraryItems {
+    ids: Vec<DocumentId>,
+}
+
+impl Render for DraggedLibraryItems {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_2()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(if self.ids.len() == 1 {
+                "1 library item".to_string()
+            } else {
+                format!("{} library items", self.ids.len())
+            })
+    }
+}
+
+#[derive(Clone)]
+struct DraggedLibraryCollection {
+    id: LibraryCollectionId,
+    name: SharedString,
+}
+
+impl Render for DraggedLibraryCollection {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_2()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(self.name.clone())
+    }
+}
+
 pub struct NewTab {
     host: LibraryBrowserHost,
     entries: Vec<NewTabEntry>,
@@ -315,6 +376,11 @@ pub struct NewTab {
     layout_class: NewTabLayoutClass,
     session: LibraryBrowserSession,
     quick_session: Option<ReaderNewTabSession>,
+    current_collection: Option<LibraryCollectionId>,
+    expanded_collections: BTreeSet<LibraryCollectionId>,
+    library_tree_rows: Vec<LibraryTreeRow>,
+    folder_editor: Option<FolderEditor>,
+    folder_delete_prompt_pending: bool,
     kind_filter: Option<LibraryItemKind>,
     status_filter: Option<ReadingStatus>,
     observed_catalog_revision: u64,
@@ -341,6 +407,7 @@ pub struct NewTab {
     metadata_abstract_input: Entity<InputState>,
     saved_view_name_input: Entity<InputState>,
     tag_editor_name_input: Entity<InputState>,
+    folder_name_input: Entity<InputState>,
     note_item_id: Option<DocumentId>,
     selecting: bool,
     selection: BTreeSet<PathBuf>,
@@ -481,8 +548,9 @@ impl NewTab {
             cx.new(|cx| InputState::new(window, cx).placeholder("Saved view name"));
         let tag_editor_name_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Tag name"));
+        let folder_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder name"));
 
-        Self {
+        let mut this = Self {
             host,
             entries,
             filtered_entries,
@@ -496,6 +564,11 @@ impl NewTab {
             layout_class: NewTabLayoutClass::default(),
             session,
             quick_session,
+            current_collection: None,
+            expanded_collections: BTreeSet::new(),
+            library_tree_rows: Vec::new(),
+            folder_editor: None,
+            folder_delete_prompt_pending: false,
             kind_filter: None,
             status_filter: None,
             observed_catalog_revision,
@@ -522,6 +595,7 @@ impl NewTab {
             metadata_abstract_input,
             saved_view_name_input,
             tag_editor_name_input,
+            folder_name_input,
             note_item_id: None,
             selecting: false,
             selection: BTreeSet::new(),
@@ -529,7 +603,9 @@ impl NewTab {
             selection_anchor: None,
             _search_subscription,
             _work_note_subscription,
-        }
+        };
+        this.refresh_entries(cx);
+        this
     }
 
     pub(crate) fn focus_handle(&self) -> FocusHandle {
@@ -851,13 +927,49 @@ impl NewTab {
             }
         }
 
+        self.update_filter(cx);
         self.scroll_focused(mode);
         cx.refresh_windows();
     }
 
+    fn append_collection_tree_rows(
+        store: &LibraryStore,
+        parent_id: Option<LibraryCollectionId>,
+        depth: usize,
+        entries_by_id: &HashMap<DocumentId, usize>,
+        expanded: &BTreeSet<LibraryCollectionId>,
+        rows: &mut Vec<LibraryTreeRow>,
+    ) {
+        for collection in store.child_collections(parent_id) {
+            rows.push(LibraryTreeRow::Collection {
+                id: collection.id,
+                depth,
+            });
+            if expanded.contains(&collection.id) {
+                Self::append_collection_tree_rows(
+                    store,
+                    Some(collection.id),
+                    depth + 1,
+                    entries_by_id,
+                    expanded,
+                    rows,
+                );
+            }
+        }
+        let mut entry_indices = store
+            .direct_collection_items(parent_id)
+            .into_iter()
+            .filter_map(|item_id| entries_by_id.get(&item_id).copied())
+            .collect::<Vec<_>>();
+        entry_indices.sort_unstable();
+        for entry_ix in entry_indices {
+            rows.push(LibraryTreeRow::Document { entry_ix, depth });
+        }
+    }
+
     fn update_filter(&mut self, cx: &mut Context<Self>) {
         let query = self.search_input.read(cx).value().trim().to_lowercase();
-        self.filtered_entries = self
+        let mut filtered_entries = self
             .entries
             .iter()
             .enumerate()
@@ -868,7 +980,57 @@ impl NewTab {
                     || entry.search_text.to_lowercase().contains(&query)
             })
             .map(|(entry_ix, _)| entry_ix)
-            .collect();
+            .collect::<Vec<_>>();
+
+        self.library_tree_rows.clear();
+        if self.session.destination == ReaderNewTabDestination::Library && query.is_empty() {
+            let store = cx.global::<LibraryStore>();
+            if self
+                .current_collection
+                .is_some_and(|id| store.library_collection(id).is_none())
+            {
+                self.current_collection = None;
+            }
+            match self.session.view_mode {
+                LibraryViewMode::Grid | LibraryViewMode::Grouped => {
+                    let direct_ids = store
+                        .direct_collection_items(self.current_collection)
+                        .into_iter()
+                        .collect::<HashSet<_>>();
+                    filtered_entries.retain(|entry_ix| {
+                        self.entries[*entry_ix]
+                            .item_id
+                            .is_some_and(|id| direct_ids.contains(&id))
+                    });
+                }
+                LibraryViewMode::Table => {
+                    let entries_by_id = self
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(entry_ix, entry)| entry.item_id.map(|id| (id, entry_ix)))
+                        .collect::<HashMap<_, _>>();
+                    self.library_tree_rows.push(LibraryTreeRow::Root);
+                    Self::append_collection_tree_rows(
+                        store,
+                        None,
+                        1,
+                        &entries_by_id,
+                        &self.expanded_collections,
+                        &mut self.library_tree_rows,
+                    );
+                    filtered_entries = self
+                        .library_tree_rows
+                        .iter()
+                        .filter_map(|row| match row {
+                            LibraryTreeRow::Document { entry_ix, .. } => Some(*entry_ix),
+                            LibraryTreeRow::Root | LibraryTreeRow::Collection { .. } => None,
+                        })
+                        .collect();
+                }
+            }
+        }
+        self.filtered_entries = filtered_entries;
 
         if self.item_index(&self.focused_item).is_none() {
             self.focused_item = self
@@ -1479,10 +1641,213 @@ impl NewTab {
         cx.notify();
     }
 
+    fn enter_collection(&mut self, id: LibraryCollectionId, cx: &mut Context<Self>) {
+        if cx.global::<LibraryStore>().library_collection(id).is_none() {
+            return;
+        }
+        self.current_collection = Some(id);
+        self.selection.clear();
+        self.selection_anchor = None;
+        self.inspector_open = false;
+        self.update_filter(cx);
+        cx.notify();
+    }
+
+    fn enter_collection_parent(&mut self, id: Option<LibraryCollectionId>, cx: &mut Context<Self>) {
+        self.current_collection = id.filter(|id| {
+            cx.global::<LibraryStore>()
+                .library_collection(*id)
+                .is_some()
+        });
+        self.selection.clear();
+        self.selection_anchor = None;
+        self.inspector_open = false;
+        self.update_filter(cx);
+        cx.notify();
+    }
+
+    fn toggle_collection_expanded(&mut self, id: LibraryCollectionId, cx: &mut Context<Self>) {
+        if !self.expanded_collections.insert(id) {
+            self.expanded_collections.remove(&id);
+        }
+        self.update_filter(cx);
+        cx.notify();
+    }
+
+    fn open_new_folder_editor(
+        &mut self,
+        parent_id: Option<LibraryCollectionId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host != LibraryBrowserHost::Home {
+            return;
+        }
+        self.folder_name_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.folder_editor = Some(FolderEditor {
+            collection_id: None,
+            parent_id,
+        });
+        cx.notify();
+    }
+
+    fn open_rename_folder_editor(
+        &mut self,
+        id: LibraryCollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host != LibraryBrowserHost::Home {
+            return;
+        }
+        let Some(collection) = cx.global::<LibraryStore>().library_collection(id) else {
+            return;
+        };
+        let name = collection.name.clone();
+        let parent_id = collection.parent_id;
+        self.folder_name_input
+            .update(cx, |input, cx| input.set_value(name, window, cx));
+        self.folder_editor = Some(FolderEditor {
+            collection_id: Some(id),
+            parent_id,
+        });
+        cx.notify();
+    }
+
+    fn save_folder_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.folder_editor else {
+            return;
+        };
+        let name = self.folder_name_input.read(cx).value().to_string();
+        let result = if let Some(id) = editor.collection_id {
+            cx.global_mut::<LibraryStore>()
+                .rename_library_collection(id, &name)
+                .map(|_| id)
+        } else {
+            cx.global_mut::<LibraryStore>()
+                .create_library_collection(editor.parent_id, &name)
+        };
+        match result {
+            Ok(id) => {
+                self.folder_editor = None;
+                if editor.parent_id.is_some() {
+                    self.expanded_collections.insert(editor.parent_id.unwrap());
+                }
+                if editor.collection_id.is_none() {
+                    self.expanded_collections.insert(id);
+                }
+                self.refresh_entries(cx);
+            }
+            Err(error) => eprintln!("failed to save library folder: {error:#}"),
+        }
+        cx.notify();
+    }
+
+    fn request_delete_folder(
+        &mut self,
+        id: LibraryCollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host != LibraryBrowserHost::Home || self.folder_delete_prompt_pending {
+            return;
+        }
+        let Some(collection) = cx.global::<LibraryStore>().library_collection(id) else {
+            return;
+        };
+        let name = collection.name.clone();
+        let confirmation = window.prompt(
+            PromptLevel::Warning,
+            "Delete folder?",
+            Some(&format!(
+                "Delete {name:?} and its subfolders? Library items and source files remain available."
+            )),
+            &[
+                PromptButton::ok("Delete Folder"),
+                PromptButton::cancel("Cancel"),
+            ],
+            cx,
+        );
+        self.folder_delete_prompt_pending = true;
+        cx.spawn_in(window, async move |this, cx| {
+            let confirmed = confirmation.await == Ok(0);
+            _ = this.update_in(cx, |this, _, cx| {
+                this.folder_delete_prompt_pending = false;
+                if confirmed {
+                    match cx
+                        .global_mut::<LibraryStore>()
+                        .delete_library_collection(id)
+                    {
+                        Ok(_) => {
+                            if this.current_collection == Some(id)
+                                || this.current_collection.is_some_and(|current| {
+                                    cx.global::<LibraryStore>()
+                                        .library_collection(current)
+                                        .is_none()
+                                })
+                            {
+                                this.current_collection = None;
+                            }
+                            this.expanded_collections.retain(|collection_id| {
+                                cx.global::<LibraryStore>()
+                                    .library_collection(*collection_id)
+                                    .is_some()
+                            });
+                            this.refresh_entries(cx);
+                        }
+                        Err(error) => eprintln!("failed to delete library folder: {error:#}"),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn add_dragged_items_to_collection(
+        &mut self,
+        ids: &[DocumentId],
+        collection_id: LibraryCollectionId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host != LibraryBrowserHost::Home {
+            return;
+        }
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .add_items_to_collection(ids, collection_id)
+        {
+            eprintln!("failed to add library items to folder: {error:#}");
+        }
+        self.refresh_entries(cx);
+        cx.notify();
+    }
+
+    fn move_dragged_collection(
+        &mut self,
+        id: LibraryCollectionId,
+        parent_id: Option<LibraryCollectionId>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host != LibraryBrowserHost::Home {
+            return;
+        }
+        if let Err(error) = cx
+            .global_mut::<LibraryStore>()
+            .move_library_collection(id, parent_id)
+        {
+            eprintln!("failed to move library folder: {error:#}");
+        }
+        self.refresh_entries(cx);
+        cx.notify();
+    }
+
     fn add_files(&mut self, cx: &mut Context<Self>) {
         if self.host != LibraryBrowserHost::Home {
             return;
         }
+        let target_collection = self.current_collection;
         let dialog = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -1505,20 +1870,27 @@ impl NewTab {
                 })
                 .await;
             _ = this.update(cx, |this, cx| {
+                let mut added_ids = Vec::new();
                 for (path, metadata) in extracted {
                     match metadata.and_then(|metadata| {
                         cx.global_mut::<LibraryStore>()
                             .add_linked_item(&path, metadata)
                     }) {
-                        Ok(
-                            LibraryAddOutcome::Added(_)
-                            | LibraryAddOutcome::Existing(_)
-                            | LibraryAddOutcome::ExistingInTrash(_),
-                        ) => {}
+                        Ok(LibraryAddOutcome::Added(id) | LibraryAddOutcome::Existing(id)) => {
+                            added_ids.push(id);
+                        }
+                        Ok(LibraryAddOutcome::ExistingInTrash(_)) => {}
                         Err(error) => {
                             eprintln!("failed to add {} to the library: {error:#}", path.display())
                         }
                     }
+                }
+                if let Some(collection_id) = target_collection
+                    && let Err(error) = cx
+                        .global_mut::<LibraryStore>()
+                        .add_items_to_collection(&added_ids, collection_id)
+                {
+                    eprintln!("failed to add imported items to folder: {error:#}");
                 }
                 this.refresh_entries(cx);
                 cx.notify();
@@ -1649,6 +2021,33 @@ impl NewTab {
             .set_item_tags(item_id, &retained)
         {
             eprintln!("failed to remove library tag: {error:#}");
+        }
+        self.refresh_entries(cx);
+        cx.notify();
+    }
+
+    fn toggle_selected_collection(
+        &mut self,
+        collection_id: LibraryCollectionId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item_id) = self.selected_item_id() else {
+            return;
+        };
+        let assigned = cx
+            .global::<LibraryStore>()
+            .collections_for_item(item_id)
+            .into_iter()
+            .any(|collection| collection.id == collection_id);
+        let result = if assigned {
+            cx.global_mut::<LibraryStore>()
+                .remove_items_from_collection(&[item_id], collection_id)
+        } else {
+            cx.global_mut::<LibraryStore>()
+                .add_items_to_collection(&[item_id], collection_id)
+        };
+        if let Err(error) = result {
+            eprintln!("failed to update library folder membership: {error:#}");
         }
         self.refresh_entries(cx);
         cx.notify();
@@ -2218,40 +2617,38 @@ impl NewTab {
         let selected = self.session.destination.clone();
         if self.host == LibraryBrowserHost::Home {
             let destinations = Self::home_destinations();
-            let mut navigation = div()
-                .id("home-navigation-rail")
-                .debug_selector(|| "home-navigation-rail".to_string())
-                .w(px(NEW_TAB_NAV_WIDTH))
-                .h_full()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_2()
-                .border_r(px(1.0))
-                .border_color(theme.border)
-                .bg(theme.sidebar);
+            let mut navigation = slim_navigation_rail("home-navigation-rail", theme);
             for (destination, label, icon) in destinations.iter().take(2) {
-                navigation = navigation.child(Self::render_destination_button(
-                    destination.clone(),
-                    (*label).to_string(),
-                    *icon,
-                    selected == *destination,
-                    false,
-                    cx,
-                ));
+                let destination = destination.clone();
+                navigation = navigation.child(
+                    slim_navigation_button(
+                        format!("home-nav-{destination:?}"),
+                        *icon,
+                        selected == destination,
+                        *label,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_destination(destination.clone(), window, cx);
+                        cx.stop_propagation();
+                    })),
+                );
             }
             let (destination, label, icon) = &destinations[2];
+            let destination = destination.clone();
             return navigation
                 .child(div().flex_1())
-                .child(Self::render_destination_button(
-                    destination.clone(),
-                    (*label).to_string(),
-                    *icon,
-                    selected == *destination,
-                    false,
-                    cx,
-                ))
+                .child(
+                    slim_navigation_button(
+                        format!("home-nav-{destination:?}"),
+                        *icon,
+                        selected == destination,
+                        *label,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_destination(destination.clone(), window, cx);
+                        cx.stop_propagation();
+                    })),
+                )
                 .into_any_element();
         }
         let store = cx.global::<LibraryStore>();
@@ -2541,6 +2938,33 @@ impl NewTab {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let (assigned_collection_ids, collection_options) = item
+            .as_ref()
+            .map(|item| {
+                let store = cx.global::<LibraryStore>();
+                let assigned = store
+                    .collections_for_item(item.id)
+                    .into_iter()
+                    .map(|collection| collection.id)
+                    .collect::<HashSet<_>>();
+                let mut options = store
+                    .library_collections()
+                    .iter()
+                    .map(|collection| {
+                        (
+                            collection.id,
+                            store.collection_path_label(collection.id),
+                            store
+                                .collection_ancestors(collection.id)
+                                .len()
+                                .saturating_sub(1),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                options.sort_by(|left, right| left.1.cmp(&right.1));
+                (assigned, options)
+            })
+            .unwrap_or_default();
         let mut inspector = div()
             .id("new-tab-item-inspector")
             .debug_selector(|| "new-tab-item-inspector".to_string())
@@ -2679,6 +3103,50 @@ impl NewTab {
                                 })),
                         ),
                 )
+                .child(
+                    div()
+                        .mt_1()
+                        .text_size(ui_rems(11.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.muted_foreground)
+                        .child("FOLDERS"),
+                )
+                .when(collection_options.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child("Create a folder to organize this item."),
+                    )
+                })
+                .children(collection_options.into_iter().map(|(id, path, depth)| {
+                    let checked = assigned_collection_ids.contains(&id);
+                    div()
+                        .id(("new-tab-inspector-folder", id.0 as usize))
+                        .debug_selector(|| "new-tab-inspector-folder".to_string())
+                        .h(px(30.0))
+                        .w_full()
+                        .pl(px(depth as f32 * 12.0))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded(cx.theme().radius)
+                        .hover(move |style| style.bg(theme.list_hover))
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.toggle_selected_collection(id, cx);
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .child(
+                            Checkbox::new(("new-tab-inspector-folder-check", id.0 as usize))
+                                .xsmall()
+                                .checked(checked)
+                                .tab_stop(false),
+                        )
+                        .child(div().min_w_0().truncate().child(path))
+                }))
                 .child(
                     div()
                         .flex()
@@ -3252,6 +3720,278 @@ impl NewTab {
             }))
     }
 
+    fn visible_child_collections(
+        &self,
+        cx: &Context<Self>,
+    ) -> Vec<(LibraryCollectionId, SharedString)> {
+        if self.session.destination != ReaderNewTabDestination::Library
+            || !self.search_input.read(cx).value().trim().is_empty()
+        {
+            return Vec::new();
+        }
+        cx.global::<LibraryStore>()
+            .child_collections(self.current_collection)
+            .into_iter()
+            .map(|collection| (collection.id, collection.name.clone().into()))
+            .collect()
+    }
+
+    fn render_collection_item(
+        &self,
+        id: LibraryCollectionId,
+        name: SharedString,
+        grouped: bool,
+        theme: ThemeColor,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let management = self.host == LibraryBrowserHost::Home;
+        let enter_id = id;
+        let drag_name = name.clone();
+        let mut item = div()
+            .id(("library-folder-item", id.0 as usize))
+            .debug_selector(|| "library-folder-item".to_string())
+            .relative()
+            .flex_none()
+            .max_w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .hover(move |style| style.bg(theme.list_hover))
+            .cursor_pointer()
+            .when(grouped, |item| item.h(px(40.0)).w_auto())
+            .when(!grouped, |item| {
+                item.w(px(CARD_WIDTH))
+                    .h(px(92.0))
+                    .flex_col()
+                    .justify_center()
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.enter_collection(enter_id, cx);
+                cx.stop_propagation();
+            }));
+        if management {
+            let dragged = DraggedLibraryCollection {
+                id,
+                name: drag_name,
+            };
+            item = item
+                .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+                .drag_over::<DraggedLibraryItems>(move |style, _, _, _| {
+                    style.border_color(theme.primary).bg(theme.list_hover)
+                })
+                .on_drop(
+                    cx.listener(move |this, dragged: &DraggedLibraryItems, _, cx| {
+                        this.add_dragged_items_to_collection(&dragged.ids, id, cx);
+                    }),
+                )
+                .drag_over::<DraggedLibraryCollection>(move |style, _, _, _| {
+                    style.border_color(theme.primary).bg(theme.list_hover)
+                })
+                .on_drop(
+                    cx.listener(move |this, dragged: &DraggedLibraryCollection, _, cx| {
+                        this.move_dragged_collection(dragged.id, Some(id), cx);
+                    }),
+                );
+        }
+
+        let mut label = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                Icon::new(IconName::FolderOpen)
+                    .size(ui_rems(if grouped { 16.0 } else { 22.0 }))
+                    .text_color(theme.muted_foreground),
+            )
+            .child(div().min_w_0().truncate().child(name));
+        if management {
+            label = label.child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_0p5()
+                    .child(
+                        Button::new(("library-folder-new-child", id.0 as usize))
+                            .xsmall()
+                            .compact()
+                            .ghost()
+                            .icon(IconName::Plus)
+                            .tooltip("New subfolder")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_new_folder_editor(Some(id), window, cx);
+                                cx.stop_propagation();
+                            })),
+                    )
+                    .child(
+                        Button::new(("library-folder-rename", id.0 as usize))
+                            .xsmall()
+                            .compact()
+                            .ghost()
+                            .icon(IconName::Pencil)
+                            .tooltip("Rename folder")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_rename_folder_editor(id, window, cx);
+                                cx.stop_propagation();
+                            })),
+                    )
+                    .child(
+                        Button::new(("library-folder-delete", id.0 as usize))
+                            .xsmall()
+                            .compact()
+                            .ghost()
+                            .icon(IconName::Trash2)
+                            .tooltip("Delete folder")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.request_delete_folder(id, window, cx);
+                                cx.stop_propagation();
+                            })),
+                    ),
+            );
+        }
+        item.child(label).into_any_element()
+    }
+
+    fn render_collection_breadcrumb(
+        &self,
+        theme: ThemeColor,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.session.destination != ReaderNewTabDestination::Library
+            || !self.search_input.read(cx).value().trim().is_empty()
+            || self.session.view_mode == LibraryViewMode::Table
+        {
+            return None;
+        }
+        let mut crumbs = vec![(None, "Library".to_string())];
+        if let Some(id) = self.current_collection {
+            crumbs.extend(
+                cx.global::<LibraryStore>()
+                    .collection_ancestors(id)
+                    .into_iter()
+                    .map(|collection| (Some(collection.id), collection.name.clone())),
+            );
+        }
+        let management = self.host == LibraryBrowserHost::Home;
+        let mut breadcrumb = div()
+            .id("library-folder-breadcrumb")
+            .debug_selector(|| "library-folder-breadcrumb".to_string())
+            .h(px(34.0))
+            .flex_none()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .px_4()
+            .border_b(px(1.0))
+            .border_color(theme.border);
+        for (ix, (id, label)) in crumbs.into_iter().enumerate() {
+            if ix > 0 {
+                breadcrumb = breadcrumb.child(
+                    Icon::new(IconName::ChevronRight)
+                        .size(ui_rems(12.0))
+                        .text_color(theme.muted_foreground),
+                );
+            }
+            let mut crumb = Button::new(("library-folder-crumb", ix))
+                .xsmall()
+                .ghost()
+                .label(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.enter_collection_parent(id, cx);
+                    cx.stop_propagation();
+                }));
+            if management {
+                crumb = crumb
+                    .drag_over::<DraggedLibraryCollection>(move |style, _, _, _| {
+                        style.bg(theme.list_hover)
+                    })
+                    .on_drop(cx.listener(
+                        move |this, dragged: &DraggedLibraryCollection, _, cx| {
+                            this.move_dragged_collection(dragged.id, id, cx);
+                        },
+                    ));
+            }
+            breadcrumb = breadcrumb.child(crumb);
+        }
+        Some(breadcrumb.into_any_element())
+    }
+
+    fn render_folder_editor_overlay(
+        &self,
+        theme: ThemeColor,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let editor = self.folder_editor?;
+        let title = if editor.collection_id.is_some() {
+            "Rename Folder"
+        } else {
+            "New Folder"
+        };
+        Some(
+            div()
+                .id("library-folder-editor-overlay")
+                .debug_selector(|| "library-folder-editor-overlay".to_string())
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(transparent_black().opacity(0.35))
+                .child(
+                    div()
+                        .w(px(360.0))
+                        .max_w_full()
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.popover)
+                        .shadow_lg()
+                        .child(div().text_size(ui_rems(14.0)).child(title))
+                        .child(Input::new(&self.folder_name_input).small())
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("library-folder-editor-cancel")
+                                        .small()
+                                        .outline()
+                                        .label("Cancel")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.folder_editor = None;
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("library-folder-editor-save")
+                                        .small()
+                                        .primary()
+                                        .label("Save")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.save_folder_editor(cx);
+                                            cx.stop_propagation();
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn item_state(&self, item_ix: usize) -> NewTabItemState {
         let key = self.item_key(item_ix);
         let selected = key.as_ref().is_some_and(|key| match key {
@@ -3266,9 +4006,28 @@ impl NewTab {
         }
     }
 
+    fn drag_ids_for_entry(&self, entry: &NewTabEntry) -> Vec<DocumentId> {
+        if self.host != LibraryBrowserHost::Home {
+            return Vec::new();
+        }
+        if self.selection.contains(&entry.path) {
+            let ids = self
+                .entries
+                .iter()
+                .filter(|candidate| self.selection.contains(&candidate.path))
+                .filter_map(|candidate| candidate.item_id)
+                .collect::<HashSet<_>>();
+            if !ids.is_empty() {
+                return ids.into_iter().collect();
+            }
+        }
+        entry.item_id.into_iter().collect()
+    }
+
     fn render_document_card(
         entry: &NewTabEntry,
         state: NewTabCardState,
+        drag_ids: Vec<DocumentId>,
         theme: ThemeColor,
         page_color: u32,
         cx: &mut Context<Self>,
@@ -3291,6 +4050,8 @@ impl NewTab {
             theme.popover
         };
 
+        let draggable = !drag_ids.is_empty();
+        let dragged = DraggedLibraryItems { ids: drag_ids };
         div()
             .id(("new-tab-card", item.item_ix))
             .flex()
@@ -3319,6 +4080,9 @@ impl NewTab {
                     cx.stop_propagation();
                 }),
             )
+            .when(draggable, |card| {
+                card.on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+            })
             .when(item.selecting, |card| {
                 card.child(
                     Checkbox::new(("new-tab-card-selection", item.item_ix))
@@ -3373,6 +4137,7 @@ impl NewTab {
     fn render_document_row(
         entry: &NewTabEntry,
         state: NewTabItemState,
+        drag_ids: Vec<DocumentId>,
         details: bool,
         columns: DetailsColumns,
         show_list_location: bool,
@@ -3387,6 +4152,8 @@ impl NewTab {
         let progress = entry.progress.clone();
         let icon = entry.icon();
 
+        let draggable = !drag_ids.is_empty();
+        let dragged = DraggedLibraryItems { ids: drag_ids };
         let mut row = div()
             .id(if details {
                 ("new-tab-details-row", state.item_ix)
@@ -3427,7 +4194,10 @@ impl NewTab {
                     );
                     cx.stop_propagation();
                 }),
-            );
+            )
+            .when(draggable, |row| {
+                row.on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+            });
 
         if state.selecting {
             row = row.child(
@@ -3517,17 +4287,20 @@ impl NewTab {
     fn render_document_span(
         entry: &NewTabEntry,
         state: NewTabItemState,
+        drag_ids: Vec<DocumentId>,
         theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let path = entry.path.clone();
+        let draggable = !drag_ids.is_empty();
+        let dragged = DraggedLibraryItems { ids: drag_ids };
         let mut span = div()
             .id(("new-tab-grouped-item", state.item_ix))
             .debug_selector(|| "new-tab-grouped-item".to_string())
             .h(px(40.0))
-            .min_w(px(190.0))
-            .max_w(px(320.0))
-            .flex_1()
+            .w_auto()
+            .max_w_full()
+            .flex_none()
             .flex()
             .items_center()
             .gap_2()
@@ -3559,7 +4332,10 @@ impl NewTab {
                     );
                     cx.stop_propagation();
                 }),
-            );
+            )
+            .when(draggable, |span| {
+                span.on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+            });
         if state.selecting {
             span = span.child(
                 Checkbox::new(("new-tab-grouped-selection", state.item_ix))
@@ -3785,16 +4561,43 @@ impl NewTab {
         let filtering = !self.search_input.read(cx).value().trim().is_empty();
         let horizontal_gap = Self::horizontal_gap(self.viewport_width, cols);
         let scroll = self.scroll.clone();
+        let breadcrumb = self.render_collection_breadcrumb(cx.theme().colors, cx);
+        let folders = self.visible_child_collections(cx);
+        let folder_grid = (!folders.is_empty()).then(|| {
+            let mut grid = div()
+                .id("library-folder-grid")
+                .debug_selector(|| "library-folder-grid".to_string())
+                .flex_none()
+                .max_h(px(220.0))
+                .overflow_y_scroll()
+                .flex()
+                .flex_wrap()
+                .items_start()
+                .gap_3()
+                .px(px(GRID_PADDING_X))
+                .py_3();
+            for (id, name) in folders {
+                grid =
+                    grid.child(self.render_collection_item(id, name, false, cx.theme().colors, cx));
+            }
+            grid.into_any_element()
+        });
 
         div()
             .id("new-tab-content")
             .flex_1()
             .min_h_0()
             .overflow_hidden()
+            .flex()
+            .flex_col()
+            .children(breadcrumb)
+            .children(folder_grid)
             .child(
                 div()
                     .relative()
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
                     .child(
                         uniform_list(
                             "new-tab-grid",
@@ -3857,6 +4660,7 @@ impl NewTab {
                                                         thumbnail,
                                                         item: this.item_state(item_ix),
                                                     },
+                                                    this.drag_ids_for_entry(&entry),
                                                     theme,
                                                     page_color,
                                                     cx,
@@ -3889,12 +4693,17 @@ impl NewTab {
         let sections = self.grouped_sections();
         let theme = cx.theme().colors;
         let _ = window;
+        let breadcrumb = self.render_collection_breadcrumb(theme, cx);
+        let folders = self.visible_child_collections(cx);
 
-        if sections.is_empty() {
+        if sections.is_empty() && folders.is_empty() {
             return div()
                 .id("new-tab-content")
                 .flex_1()
                 .min_h_0()
+                .flex()
+                .flex_col()
+                .children(breadcrumb)
                 .child(Self::render_empty_hint(240.0, filtering, theme))
                 .into_any_element();
         }
@@ -3902,12 +4711,29 @@ impl NewTab {
         let mut content = div()
             .id("new-tab-grouped-list")
             .debug_selector(|| "new-tab-grouped-list".to_string())
-            .size_full()
+            .flex_1()
+            .min_h_0()
+            .w_full()
             .overflow_y_scroll()
             .flex()
             .flex_col()
             .gap_4()
             .p_4();
+        if !folders.is_empty() {
+            let mut folder_items = div()
+                .id("library-folder-spans")
+                .debug_selector(|| "library-folder-spans".to_string())
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .items_start()
+                .gap_2();
+            for (id, name) in folders {
+                folder_items =
+                    folder_items.child(self.render_collection_item(id, name, true, theme, cx));
+            }
+            content = content.child(folder_items);
+        }
         for (section_ix, (label, item_indices)) in sections.into_iter().enumerate() {
             let mut items = div()
                 .id(("new-tab-grouped-section-items", section_ix))
@@ -3924,6 +4750,7 @@ impl NewTab {
                 items = items.child(Self::render_document_span(
                     &entry,
                     self.item_state(item_ix),
+                    self.drag_ids_for_entry(&entry),
                     theme,
                     cx,
                 ));
@@ -3950,6 +4777,9 @@ impl NewTab {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
+            .flex()
+            .flex_col()
+            .children(breadcrumb)
             .child(content)
             .into_any_element()
     }
@@ -4019,10 +4849,157 @@ impl NewTab {
             .into_any_element()
     }
 
+    fn render_collection_tree_row(
+        &self,
+        id: Option<LibraryCollectionId>,
+        depth: usize,
+        theme: ThemeColor,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let management = self.host == LibraryBrowserHost::Home;
+        let (name, expanded) = match id {
+            Some(id) => {
+                let Some(collection) = cx.global::<LibraryStore>().library_collection(id) else {
+                    return div().h(px(LIST_ROW_HEIGHT)).into_any_element();
+                };
+                (
+                    collection.name.clone(),
+                    self.expanded_collections.contains(&id),
+                )
+            }
+            None => ("Library".to_string(), true),
+        };
+        let row_id = id.map_or(0, |id| id.0 as usize);
+        let mut row = div()
+            .id(("library-folder-tree-row", row_id))
+            .debug_selector(|| "library-folder-tree-row".to_string())
+            .h(px(LIST_ROW_HEIGHT))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .pr_3()
+            .pl(px(14.0 + depth as f32 * 20.0))
+            .border_b(px(1.0))
+            .border_color(theme.border.opacity(0x70 as f32 / 255.0))
+            .hover(move |style| style.bg(theme.list_hover));
+        if let Some(id) = id {
+            row = row
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_collection_expanded(id, cx);
+                    cx.stop_propagation();
+                }));
+            if management {
+                let dragged = DraggedLibraryCollection {
+                    id,
+                    name: name.clone().into(),
+                };
+                row = row
+                    .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+                    .drag_over::<DraggedLibraryItems>(move |style, _, _, _| {
+                        style.bg(theme.list_hover).border_color(theme.primary)
+                    })
+                    .on_drop(
+                        cx.listener(move |this, dragged: &DraggedLibraryItems, _, cx| {
+                            this.add_dragged_items_to_collection(&dragged.ids, id, cx);
+                        }),
+                    )
+                    .drag_over::<DraggedLibraryCollection>(move |style, _, _, _| {
+                        style.bg(theme.list_hover).border_color(theme.primary)
+                    })
+                    .on_drop(cx.listener(
+                        move |this, dragged: &DraggedLibraryCollection, _, cx| {
+                            this.move_dragged_collection(dragged.id, Some(id), cx);
+                        },
+                    ));
+            }
+        } else if management {
+            row = row
+                .drag_over::<DraggedLibraryCollection>(move |style, _, _, _| {
+                    style.bg(theme.list_hover).border_color(theme.primary)
+                })
+                .on_drop(
+                    cx.listener(move |this, dragged: &DraggedLibraryCollection, _, cx| {
+                        this.move_dragged_collection(dragged.id, None, cx);
+                    }),
+                );
+        }
+
+        row = row
+            .child(
+                Icon::new(if id.is_some() {
+                    if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    }
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(ui_rems(12.0))
+                .text_color(theme.muted_foreground),
+            )
+            .child(
+                Icon::new(IconName::FolderOpen)
+                    .size(ui_rems(16.0))
+                    .text_color(theme.muted_foreground),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(name));
+        if management {
+            let parent_id = id;
+            row = row.child(
+                Button::new(("library-tree-new-folder", row_id))
+                    .xsmall()
+                    .compact()
+                    .ghost()
+                    .icon(IconName::Plus)
+                    .tooltip("New subfolder")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_new_folder_editor(parent_id, window, cx);
+                        cx.stop_propagation();
+                    })),
+            );
+            if let Some(id) = id {
+                row = row
+                    .child(
+                        Button::new(("library-tree-rename-folder", row_id))
+                            .xsmall()
+                            .compact()
+                            .ghost()
+                            .icon(IconName::Pencil)
+                            .tooltip("Rename folder")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_rename_folder_editor(id, window, cx);
+                                cx.stop_propagation();
+                            })),
+                    )
+                    .child(
+                        Button::new(("library-tree-delete-folder", row_id))
+                            .xsmall()
+                            .compact()
+                            .ghost()
+                            .icon(IconName::Trash2)
+                            .tooltip("Delete folder")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.request_delete_folder(id, window, cx);
+                                cx.stop_propagation();
+                            })),
+                    );
+            }
+        }
+        row.into_any_element()
+    }
+
     fn render_details(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let item_count = self.item_count();
-        let rows = item_count + usize::from(item_count == 0);
         let filtering = !self.search_input.read(cx).value().trim().is_empty();
+        let tree_mode = self.session.destination == ReaderNewTabDestination::Library && !filtering;
+        let item_count = if tree_mode {
+            self.library_tree_rows.len()
+        } else {
+            self.item_count()
+        };
+        let rows = item_count + usize::from(item_count == 0);
         let columns = DetailsColumns::for_width(self.viewport_width);
         let scroll = self.scroll.clone();
 
@@ -4056,19 +5033,63 @@ impl NewTab {
                                             );
                                         }
 
-                                        let entry = this
-                                            .entry_for_item(item_ix)
-                                            .expect("document item must have an entry")
-                                            .clone();
-                                        Self::render_document_row(
-                                            &entry,
-                                            this.item_state(item_ix),
-                                            true,
-                                            columns,
-                                            false,
-                                            theme,
-                                            cx,
-                                        )
+                                        if tree_mode {
+                                            match this.library_tree_rows[item_ix].clone() {
+                                                LibraryTreeRow::Root => this
+                                                    .render_collection_tree_row(None, 0, theme, cx),
+                                                LibraryTreeRow::Collection { id, depth } => this
+                                                    .render_collection_tree_row(
+                                                        Some(id),
+                                                        depth,
+                                                        theme,
+                                                        cx,
+                                                    ),
+                                                LibraryTreeRow::Document { entry_ix, depth } => {
+                                                    let entry = this.entries[entry_ix].clone();
+                                                    let state = NewTabItemState {
+                                                        item_ix,
+                                                        focused: this.focused_item
+                                                            == NewTabItemKey::Document(
+                                                                entry.path.clone(),
+                                                            ),
+                                                        selecting: this.selecting,
+                                                        selected: this
+                                                            .selection
+                                                            .contains(&entry.path),
+                                                    };
+                                                    div()
+                                                        .h(px(LIST_ROW_HEIGHT))
+                                                        .w_full()
+                                                        .pl(px(depth as f32 * 20.0))
+                                                        .child(Self::render_document_row(
+                                                            &entry,
+                                                            state,
+                                                            this.drag_ids_for_entry(&entry),
+                                                            true,
+                                                            columns,
+                                                            false,
+                                                            theme,
+                                                            cx,
+                                                        ))
+                                                        .into_any_element()
+                                                }
+                                            }
+                                        } else {
+                                            let entry = this
+                                                .entry_for_item(item_ix)
+                                                .expect("document item must have an entry")
+                                                .clone();
+                                            Self::render_document_row(
+                                                &entry,
+                                                this.item_state(item_ix),
+                                                this.drag_ids_for_entry(&entry),
+                                                true,
+                                                columns,
+                                                false,
+                                                theme,
+                                                cx,
+                                            )
+                                        }
                                     })
                                     .collect::<Vec<_>>()
                             }),
@@ -4228,6 +5249,21 @@ impl NewTabEntry {
             .map(|tag| tag.name.clone())
             .collect::<Vec<_>>();
         result.apply_library_item(item, &tags);
+        let collection_paths = store
+            .collections_for_item(item_id)
+            .into_iter()
+            .map(|collection| store.collection_path_label(collection.id))
+            .collect::<Vec<_>>();
+        if !collection_paths.is_empty() {
+            let collection_paths = collection_paths.join(" · ");
+            let secondary = result.directory.to_string();
+            result.directory = if secondary.is_empty() {
+                collection_paths.clone().into()
+            } else {
+                format!("{secondary} · {collection_paths}").into()
+            };
+            result.search_text = format!("{} {collection_paths}", result.search_text).into();
+        }
         Some(result)
     }
 
@@ -4366,52 +5402,16 @@ impl Render for NewTab {
             Self::destination_label(&self.session.destination, cx.global::<LibraryStore>());
         let in_trash = matches!(self.session.destination, ReaderNewTabDestination::Trash);
         let in_history = matches!(self.session.destination, ReaderNewTabDestination::History);
-        let can_save_view = management_host
-            && matches!(
-                self.session.destination,
-                ReaderNewTabDestination::Library
-                    | ReaderNewTabDestination::Favorites
-                    | ReaderNewTabDestination::Tag(_)
-                    | ReaderNewTabDestination::SavedView(_)
-            );
-        let is_saved_view = management_host
-            && matches!(
-                self.session.destination,
-                ReaderNewTabDestination::SavedView(_)
-            );
-        let can_sort = matches!(
-            self.session.destination,
-            ReaderNewTabDestination::Library
-                | ReaderNewTabDestination::Favorites
-                | ReaderNewTabDestination::History
-                | ReaderNewTabDestination::Trash
-                | ReaderNewTabDestination::Tag(_)
-                | ReaderNewTabDestination::SavedView(_)
-        );
+        // Retain the persisted advanced presentation state for compatibility,
+        // but keep its controls out of the current clean browser UI.
+        let can_save_view = false;
+        let is_saved_view = false;
+        let can_sort = false;
+        let library_management = false;
         let sort_label = Self::sort_field_label(self.session.sort.field);
         let sort_ascending = self.session.sort.direction == LibrarySortDirection::Ascending;
-        let library_management = management_host
-            && matches!(
-                self.session.destination,
-                ReaderNewTabDestination::Library
-                    | ReaderNewTabDestination::Favorites
-                    | ReaderNewTabDestination::Tags
-                    | ReaderNewTabDestination::Tag(_)
-                    | ReaderNewTabDestination::SavedView(_)
-            );
-        let kind_filter_label = match self.kind_filter {
-            None => "All Types",
-            Some(LibraryItemKind::Paper) => "Papers",
-            Some(LibraryItemKind::Book) => "Books",
-            Some(LibraryItemKind::Other) => "Other",
-        };
-        let status_filter_label = match self.status_filter {
-            None => "All Statuses",
-            Some(ReadingStatus::ToRead) => "To Read",
-            Some(ReadingStatus::Reading) => "Reading",
-            Some(ReadingStatus::Read) => "Read",
-        };
-
+        let kind_filter_label = "All Types";
+        let status_filter_label = "All Statuses";
         let header =
             div()
                 .flex()
@@ -4489,6 +5489,91 @@ impl Render for NewTab {
                                         })),
                                 );
                             }
+                            if management_host
+                                && self.session.destination == ReaderNewTabDestination::Library
+                            {
+                                let parent_id = if view_mode == NewTabViewMode::Table {
+                                    None
+                                } else {
+                                    self.current_collection
+                                };
+                                actions = actions.child(
+                                    Button::new("home-library-new-folder")
+                                        .debug_selector(|| "home-library-new-folder".to_string())
+                                        .small()
+                                        .outline()
+                                        .icon(IconName::Plus)
+                                        .label("New Folder")
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.open_new_folder_editor(parent_id, window, cx);
+                                            cx.stop_propagation();
+                                        })),
+                                );
+                            }
+                            actions = actions
+                                .child(Self::render_view_button(
+                                    NewTabViewMode::Grid,
+                                    view_mode,
+                                    cx,
+                                ))
+                                .child(Self::render_view_button(
+                                    NewTabViewMode::Grouped,
+                                    view_mode,
+                                    cx,
+                                ))
+                                .child(Self::render_view_button(
+                                    NewTabViewMode::Table,
+                                    view_mode,
+                                    cx,
+                                ));
+                            if management_host && has_selection && self.viewport_width < 960.0 {
+                                actions = actions.child(Self::render_toolbar_button(
+                                    "Details".to_string(),
+                                    |this, _, cx| {
+                                        this.inspector_open = true;
+                                        cx.notify();
+                                    },
+                                    cx,
+                                ));
+                            }
+                            if management_host && selecting && has_selection {
+                                if in_trash {
+                                    actions = actions.child(Self::render_toolbar_button(
+                                        "Restore".to_string(),
+                                        |this, _, cx| this.restore_selected_items(cx),
+                                        cx,
+                                    ));
+                                }
+                                actions = actions
+                                    .child(Self::render_toolbar_button(
+                                        if in_trash {
+                                            "Delete Permanently".to_string()
+                                        } else if in_history {
+                                            crate::fl!("new-tab-remove-from-recents")
+                                        } else {
+                                            "Move to Trash".to_string()
+                                        },
+                                        |this, window, cx| this.delete_selected(window, cx),
+                                        cx,
+                                    ))
+                                    .child(Self::render_toolbar_button(
+                                        crate::fl!("cancel-selection"),
+                                        |this, _, cx| this.cancel_select(cx),
+                                        cx,
+                                    ));
+                            } else if management_host && selecting {
+                                actions = actions.child(Self::render_toolbar_button(
+                                    crate::fl!("cancel"),
+                                    |this, _, cx| this.cancel_select(cx),
+                                    cx,
+                                ));
+                            } else if management_host {
+                                actions = actions.child(Self::render_toolbar_button(
+                                    crate::fl!("select"),
+                                    |this, _, cx| this.enter_select(cx),
+                                    cx,
+                                ));
+                            }
                             actions
                         }),
                 )
@@ -4521,158 +5606,160 @@ impl Render for NewTab {
                                     Input::new(&self.search_input).small().appearance(false),
                                 )),
                         )
-                        .child({
-                            let mut toolbar = div().flex().flex_none().items_center().gap_1();
-                            if library_management {
+                        .when(false, |search_row| {
+                            search_row.child({
+                                let mut toolbar = div().flex().flex_none().items_center().gap_1();
+                                if library_management {
+                                    toolbar = toolbar
+                                        .child(self.render_library_filter_menu(theme, cx))
+                                        .child(
+                                            Button::new("home-library-kind-filter")
+                                                .xsmall()
+                                                .outline()
+                                                .label(kind_filter_label)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.cycle_kind_filter(cx);
+                                                    cx.stop_propagation();
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("home-library-status-filter")
+                                                .xsmall()
+                                                .outline()
+                                                .label(status_filter_label)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.cycle_status_filter(cx);
+                                                    cx.stop_propagation();
+                                                })),
+                                        );
+                                }
+                                if can_sort {
+                                    toolbar = toolbar
+                                        .child(
+                                            Button::new("new-tab-sort-field")
+                                                .xsmall()
+                                                .outline()
+                                                .label(sort_label)
+                                                .tooltip("Change sort field")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.cycle_sort_field(cx);
+                                                    cx.stop_propagation();
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("new-tab-sort-direction")
+                                                .xsmall()
+                                                .ghost()
+                                                .icon(if sort_ascending {
+                                                    IconName::ChevronUp
+                                                } else {
+                                                    IconName::ChevronDown
+                                                })
+                                                .tooltip(if sort_ascending {
+                                                    "Ascending"
+                                                } else {
+                                                    "Descending"
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.toggle_sort_direction(cx);
+                                                    cx.stop_propagation();
+                                                })),
+                                        );
+                                }
                                 toolbar = toolbar
-                                    .child(self.render_library_filter_menu(theme, cx))
-                                    .child(
-                                        Button::new("home-library-kind-filter")
-                                            .xsmall()
-                                            .outline()
-                                            .label(kind_filter_label)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.cycle_kind_filter(cx);
-                                                cx.stop_propagation();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("home-library-status-filter")
-                                            .xsmall()
-                                            .outline()
-                                            .label(status_filter_label)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.cycle_status_filter(cx);
-                                                cx.stop_propagation();
-                                            })),
-                                    );
-                            }
-                            if can_sort {
-                                toolbar = toolbar
-                                    .child(
-                                        Button::new("new-tab-sort-field")
-                                            .xsmall()
-                                            .outline()
-                                            .label(sort_label)
-                                            .tooltip("Change sort field")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.cycle_sort_field(cx);
-                                                cx.stop_propagation();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("new-tab-sort-direction")
+                                    .child(Self::render_view_button(
+                                        NewTabViewMode::Grid,
+                                        view_mode,
+                                        cx,
+                                    ))
+                                    .child(Self::render_view_button(
+                                        NewTabViewMode::Grouped,
+                                        view_mode,
+                                        cx,
+                                    ))
+                                    .child(Self::render_view_button(
+                                        NewTabViewMode::Table,
+                                        view_mode,
+                                        cx,
+                                    ));
+                                if can_save_view {
+                                    toolbar = toolbar.child(
+                                        Button::new("new-tab-save-current-view")
                                             .xsmall()
                                             .ghost()
-                                            .icon(if sort_ascending {
-                                                IconName::ChevronUp
-                                            } else {
-                                                IconName::ChevronDown
-                                            })
-                                            .tooltip(if sort_ascending {
-                                                "Ascending"
-                                            } else {
-                                                "Descending"
-                                            })
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.toggle_sort_direction(cx);
+                                            .icon(IconName::Table2)
+                                            .tooltip("Save current view")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.open_saved_view_editor(window, cx);
                                                 cx.stop_propagation();
                                             })),
                                     );
-                            }
-                            toolbar = toolbar
-                                .child(Self::render_view_button(
-                                    NewTabViewMode::Grid,
-                                    view_mode,
-                                    cx,
-                                ))
-                                .child(Self::render_view_button(
-                                    NewTabViewMode::Grouped,
-                                    view_mode,
-                                    cx,
-                                ))
-                                .child(Self::render_view_button(
-                                    NewTabViewMode::Table,
-                                    view_mode,
-                                    cx,
-                                ));
-                            if can_save_view {
-                                toolbar = toolbar.child(
-                                    Button::new("new-tab-save-current-view")
-                                        .xsmall()
-                                        .ghost()
-                                        .icon(IconName::Table2)
-                                        .tooltip("Save current view")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.open_saved_view_editor(window, cx);
-                                            cx.stop_propagation();
-                                        })),
-                                );
-                            }
-                            if is_saved_view {
-                                toolbar = toolbar.child(
-                                    Button::new("new-tab-delete-current-view")
-                                        .xsmall()
-                                        .ghost()
-                                        .icon(IconName::Trash2)
-                                        .tooltip("Delete saved view")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.delete_current_saved_view(window, cx);
-                                            cx.stop_propagation();
-                                        })),
-                                );
-                            }
-                            toolbar =
-                                toolbar.child(div().mx_1().h(px(18.0)).w(px(1.0)).bg(theme.border));
-                            if management_host && has_selection && self.viewport_width < 960.0 {
-                                toolbar = toolbar.child(Self::render_toolbar_button(
-                                    "Details".to_string(),
-                                    |this, _, cx| {
-                                        this.inspector_open = true;
-                                        cx.notify();
-                                    },
-                                    cx,
-                                ));
-                            }
-                            if management_host && selecting && has_selection {
-                                if in_trash {
+                                }
+                                if is_saved_view {
+                                    toolbar = toolbar.child(
+                                        Button::new("new-tab-delete-current-view")
+                                            .xsmall()
+                                            .ghost()
+                                            .icon(IconName::Trash2)
+                                            .tooltip("Delete saved view")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.delete_current_saved_view(window, cx);
+                                                cx.stop_propagation();
+                                            })),
+                                    );
+                                }
+                                toolbar = toolbar
+                                    .child(div().mx_1().h(px(18.0)).w(px(1.0)).bg(theme.border));
+                                if management_host && has_selection && self.viewport_width < 960.0 {
                                     toolbar = toolbar.child(Self::render_toolbar_button(
-                                        "Restore".to_string(),
-                                        |this, _, cx| this.restore_selected_items(cx),
+                                        "Details".to_string(),
+                                        |this, _, cx| {
+                                            this.inspector_open = true;
+                                            cx.notify();
+                                        },
                                         cx,
                                     ));
                                 }
-                                toolbar = toolbar
-                                    .child(Self::render_toolbar_button(
-                                        if in_trash {
-                                            "Delete Permanently".to_string()
-                                        } else if in_history {
-                                            crate::fl!("new-tab-remove-from-recents")
-                                        } else {
-                                            "Move to Trash".to_string()
-                                        },
-                                        |this, window, cx| this.delete_selected(window, cx),
-                                        cx,
-                                    ))
-                                    .child(Self::render_toolbar_button(
-                                        crate::fl!("cancel-selection"),
+                                if management_host && selecting && has_selection {
+                                    if in_trash {
+                                        toolbar = toolbar.child(Self::render_toolbar_button(
+                                            "Restore".to_string(),
+                                            |this, _, cx| this.restore_selected_items(cx),
+                                            cx,
+                                        ));
+                                    }
+                                    toolbar = toolbar
+                                        .child(Self::render_toolbar_button(
+                                            if in_trash {
+                                                "Delete Permanently".to_string()
+                                            } else if in_history {
+                                                crate::fl!("new-tab-remove-from-recents")
+                                            } else {
+                                                "Move to Trash".to_string()
+                                            },
+                                            |this, window, cx| this.delete_selected(window, cx),
+                                            cx,
+                                        ))
+                                        .child(Self::render_toolbar_button(
+                                            crate::fl!("cancel-selection"),
+                                            |this, _, cx| this.cancel_select(cx),
+                                            cx,
+                                        ));
+                                } else if management_host && selecting {
+                                    toolbar = toolbar.child(Self::render_toolbar_button(
+                                        crate::fl!("cancel"),
                                         |this, _, cx| this.cancel_select(cx),
                                         cx,
                                     ));
-                            } else if management_host && selecting {
-                                toolbar = toolbar.child(Self::render_toolbar_button(
-                                    crate::fl!("cancel"),
-                                    |this, _, cx| this.cancel_select(cx),
-                                    cx,
-                                ));
-                            } else if management_host {
-                                toolbar = toolbar.child(Self::render_toolbar_button(
-                                    crate::fl!("select"),
-                                    |this, _, cx| this.enter_select(cx),
-                                    cx,
-                                ));
-                            }
-                            toolbar
+                                } else if management_host {
+                                    toolbar = toolbar.child(Self::render_toolbar_button(
+                                        crate::fl!("select"),
+                                        |this, _, cx| this.enter_select(cx),
+                                        cx,
+                                    ));
+                                }
+                                toolbar
+                            })
                         }),
                 );
 
@@ -4710,6 +5797,9 @@ impl Render for NewTab {
             .then(|| self.render_saved_view_overlay(theme, cx));
         let tag_editor_overlay = (management_host && self.tag_editor_id.is_some())
             .then(|| self.render_tag_editor_overlay(theme, cx));
+        let folder_editor_overlay = management_host
+            .then(|| self.render_folder_editor_overlay(theme, cx))
+            .flatten();
 
         div()
             .id(if management_host {
@@ -4810,6 +5900,7 @@ impl Render for NewTab {
             .children(metadata_overlay)
             .children(saved_view_overlay)
             .children(tag_editor_overlay)
+            .children(folder_editor_overlay)
     }
 }
 
@@ -5314,15 +6405,104 @@ mod tests {
         });
         assert!(home_cx.debug_bounds("home-navigation-rail").is_some());
         assert!(home_cx.debug_bounds("new-tab-add-files").is_some());
-        assert!(home_cx.debug_bounds("home-library-filter-menu").is_some());
+        assert!(home_cx.debug_bounds("home-library-new-folder").is_some());
+        assert!(home_cx.debug_bounds("home-library-filter-menu").is_none());
+        assert!(home_cx.debug_bounds("home-library-kind-filter").is_none());
+        assert!(home_cx.debug_bounds("home-library-status-filter").is_none());
+        assert!(home_cx.debug_bounds("new-tab-sort-field").is_none());
+        assert!(home_cx.debug_bounds("new-tab-sort-direction").is_none());
         assert!(home_cx.debug_bounds("new-tab-source-selector").is_none());
+    }
+
+    #[gpui::test]
+    fn library_folders_browse_as_cards_and_expand_as_a_table_tree(cx: &mut TestAppContext) {
+        let (papers_id, theory_id) = cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            let mut library = LibraryStore::memory();
+            let papers_id = library.create_library_collection(None, "Papers").unwrap();
+            let theory_id = library
+                .create_library_collection(Some(papers_id), "Type Theory")
+                .unwrap();
+            cx.set_global(library);
+            (papers_id, theory_id)
+        });
+
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| NewTab::new_home(cx.focus_handle(), window, cx));
+            Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<NewTab>().unwrap()
+        });
+        view.update_in(cx, |this, _, cx| {
+            this.set_view_mode(NewTabViewMode::Grid, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("library-folder-grid").is_some());
+        assert!(cx.debug_bounds("library-folder-item").is_some());
+        assert!(cx.debug_bounds("library-folder-breadcrumb").is_some());
+
+        let papers = cx.debug_bounds("library-folder-item").unwrap().center();
+        cx.simulate_click(papers, gpui::Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert_eq!(
+            view.read_with(cx, |this, _| this.current_collection),
+            Some(papers_id)
+        );
+        assert!(cx.debug_bounds("library-folder-item").is_some());
+
+        view.update_in(cx, |this, window, cx| {
+            this.search_input.update(cx, |input, cx| {
+                input.set_value("type", window, cx);
+            });
+            this.update_filter(cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("library-folder-item").is_none());
+        assert_eq!(
+            view.read_with(cx, |this, _| this.current_collection),
+            Some(papers_id)
+        );
+
+        view.update_in(cx, |this, window, cx| {
+            this.search_input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+            this.update_filter(cx);
+            this.set_view_mode(NewTabViewMode::Table, cx);
+            this.toggle_collection_expanded(papers_id, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("library-folder-tree-row").is_some());
+        assert!(view.read_with(cx, |this, _| {
+            this.library_tree_rows.iter().any(|row| {
+                matches!(
+                    row,
+                    super::LibraryTreeRow::Collection { id, depth: 2 }
+                        if *id == theory_id
+                )
+            })
+        }));
     }
 
     #[gpui::test]
     fn history_supports_grouped_spans_and_table_alignment(cx: &mut TestAppContext) {
         let directory = temporary_directory("new-tab-rounded-rows");
         fs::create_dir(&directory).unwrap();
-        let path = directory.join("document.pdf");
+        let path = directory.join(
+            "a-very-long-academic-paper-title-that-remains-visible-until-the-span-reaches-its-parent.pdf",
+        );
         fs::write(&path, b"document").unwrap();
 
         cx.update(|cx| {
@@ -5351,7 +6531,10 @@ mod tests {
             _ = window.draw(cx);
         });
         assert!(cx.debug_bounds("new-tab-grouped-list").is_some());
-        assert!(cx.debug_bounds("new-tab-grouped-item").is_some());
+        let grouped_item = cx
+            .debug_bounds("new-tab-grouped-item")
+            .expect("grouped item");
+        assert!(grouped_item.size.width > gpui::px(320.0));
 
         view.update_in(cx, |this, _, cx| {
             this.set_view_mode(NewTabViewMode::Table, cx);

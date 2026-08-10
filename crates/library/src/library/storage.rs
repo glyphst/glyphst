@@ -564,5 +564,51 @@ fn write_catalog_tables(write_txn: &redb::WriteTransaction, library: &Library) -
             table.insert(view.id.0, encoded.as_slice())?;
         }
     }
+    {
+        let retained = library
+            .library_collections
+            .iter()
+            .map(|collection| collection.id.0)
+            .collect::<HashSet<_>>();
+        let mut table = write_txn.open_table(LIBRARY_COLLECTIONS_V1_TABLE)?;
+        let stale = table
+            .iter()?
+            .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+            .filter(|id| !retained.contains(id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            table.remove(id)?;
+        }
+        for collection in &library.library_collections {
+            let encoded = encode(&StoredLibraryCollectionV1::new(collection))?;
+            table.insert(collection.id.0, encoded.as_slice())?;
+        }
+    }
+    {
+        let mut grouped = HashMap::<u64, Vec<LibraryCollectionId>>::new();
+        for relation in &library.library_item_collections {
+            grouped
+                .entry(relation.item_id.0)
+                .or_default()
+                .push(relation.collection_id);
+        }
+        let retained = grouped.keys().copied().collect::<HashSet<_>>();
+        let mut table = write_txn.open_table(LIBRARY_ITEM_COLLECTIONS_V1_TABLE)?;
+        let stale = table
+            .iter()?
+            .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+            .filter(|id| !retained.contains(id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            table.remove(id)?;
+        }
+        for (item_id, mut collection_ids) in grouped {
+            collection_ids.sort_by_key(|collection_id| collection_id.0);
+            collection_ids.dedup();
+            let encoded = StoredLibraryItemCollectionsV1::new(collection_ids);
+            let encoded = encode(&encoded)?;
+            table.insert(item_id, encoded.as_slice())?;
+        }
+    }
     Ok(())
 }

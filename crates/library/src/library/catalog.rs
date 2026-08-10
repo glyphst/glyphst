@@ -12,6 +12,10 @@ pub(super) const LIBRARY_ITEM_TAGS_V1_TABLE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("library_item_tags_v1");
 pub(super) const LIBRARY_SAVED_VIEWS_V1_TABLE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("library_saved_views_v1");
+pub(super) const LIBRARY_COLLECTIONS_V1_TABLE: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("library_collections_v1");
+pub(super) const LIBRARY_ITEM_COLLECTIONS_V1_TABLE: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("library_item_collections_v1");
 pub(super) const LIBRARY_CATALOG_STORAGE_VERSION: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -22,6 +26,9 @@ pub struct LibraryTagId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LibrarySavedViewId(pub u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct LibraryCollectionId(pub u64);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LibraryItemKind {
@@ -110,6 +117,22 @@ pub struct LibraryTag {
 pub struct LibraryItemTag {
     pub item_id: DocumentId,
     pub tag_id: LibraryTagId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryCollection {
+    pub id: LibraryCollectionId,
+    pub parent_id: Option<LibraryCollectionId>,
+    pub name: String,
+    pub normalized_name: String,
+    pub created: u64,
+    pub updated: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LibraryItemCollection {
+    pub item_id: DocumentId,
+    pub collection_id: LibraryCollectionId,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,11 +380,55 @@ impl StoredLibrarySavedViewV1 {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct StoredLibraryCollectionV1 {
+    version: u8,
+    collection: LibraryCollection,
+}
+
+impl StoredLibraryCollectionV1 {
+    pub(super) fn new(collection: &LibraryCollection) -> Self {
+        Self {
+            version: LIBRARY_CATALOG_STORAGE_VERSION,
+            collection: collection.clone(),
+        }
+    }
+
+    pub(super) fn into_domain(self) -> Result<LibraryCollection> {
+        require_storage_version(self.version, LIBRARY_CATALOG_STORAGE_VERSION)?;
+        Ok(self.collection)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct StoredLibraryItemCollectionsV1 {
+    version: u8,
+    collection_ids: Vec<LibraryCollectionId>,
+}
+
+impl StoredLibraryItemCollectionsV1 {
+    pub(super) fn new(collection_ids: Vec<LibraryCollectionId>) -> Self {
+        Self {
+            version: LIBRARY_CATALOG_STORAGE_VERSION,
+            collection_ids,
+        }
+    }
+
+    pub(super) fn into_domain(self) -> Result<Vec<LibraryCollectionId>> {
+        require_storage_version(self.version, LIBRARY_CATALOG_STORAGE_VERSION)?;
+        Ok(self.collection_ids)
+    }
+}
+
 fn clean_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn normalize_tag_name(value: &str) -> String {
+    clean_text(value).to_lowercase()
+}
+
+fn normalize_collection_name(value: &str) -> String {
     clean_text(value).to_lowercase()
 }
 
@@ -451,6 +518,95 @@ impl Library {
             .sort_by_key(|relation| (relation.item_id.0, relation.tag_id.0));
         self.library_item_tags.dedup();
 
+        self.library_collections.retain_mut(|collection| {
+            collection.name = clean_text(&collection.name);
+            collection.normalized_name = normalize_collection_name(&collection.name);
+            collection.updated = collection.updated.max(collection.created);
+            collection.id.0 > 0 && !collection.normalized_name.is_empty()
+        });
+        self.library_collections
+            .sort_by_key(|collection| collection.id.0);
+        self.library_collections
+            .dedup_by_key(|collection| collection.id.0);
+
+        let mut collection_ids = self
+            .library_collections
+            .iter()
+            .map(|collection| collection.id)
+            .collect::<HashSet<_>>();
+        for collection in &mut self.library_collections {
+            if collection.parent_id == Some(collection.id)
+                || collection
+                    .parent_id
+                    .is_some_and(|parent_id| !collection_ids.contains(&parent_id))
+            {
+                collection.parent_id = None;
+            }
+        }
+
+        let mut sibling_names = HashSet::new();
+        self.library_collections.retain(|collection| {
+            sibling_names.insert((collection.parent_id, collection.normalized_name.clone()))
+        });
+        collection_ids = self
+            .library_collections
+            .iter()
+            .map(|collection| collection.id)
+            .collect();
+        for collection in &mut self.library_collections {
+            if collection
+                .parent_id
+                .is_some_and(|parent_id| !collection_ids.contains(&parent_id))
+            {
+                collection.parent_id = None;
+            }
+        }
+
+        let mut parents = self
+            .library_collections
+            .iter()
+            .map(|collection| (collection.id, collection.parent_id))
+            .collect::<HashMap<_, _>>();
+        let ordered_ids = self
+            .library_collections
+            .iter()
+            .map(|collection| collection.id)
+            .collect::<Vec<_>>();
+        for id in ordered_ids {
+            let mut visited = HashSet::new();
+            let mut cursor = Some(id);
+            let mut cyclic = false;
+            while let Some(candidate) = cursor {
+                if !visited.insert(candidate) {
+                    cyclic = true;
+                    break;
+                }
+                cursor = parents.get(&candidate).copied().flatten();
+            }
+            if cyclic {
+                if let Some(collection) = self
+                    .library_collections
+                    .iter_mut()
+                    .find(|collection| collection.id == id)
+                {
+                    collection.parent_id = None;
+                }
+                parents.insert(id, None);
+            }
+        }
+
+        collection_ids = self
+            .library_collections
+            .iter()
+            .map(|collection| collection.id)
+            .collect();
+        self.library_item_collections.retain(|relation| {
+            item_ids.contains(&relation.item_id) && collection_ids.contains(&relation.collection_id)
+        });
+        self.library_item_collections
+            .sort_by_key(|relation| (relation.item_id.0, relation.collection_id.0));
+        self.library_item_collections.dedup();
+
         self.library_saved_views.retain_mut(|view| {
             view.name = clean_text(&view.name);
             view.filter
@@ -495,6 +651,14 @@ impl Library {
                 .unwrap_or(0)
                 .saturating_add(1),
         );
+        self.next_library_collection_id = self.next_library_collection_id.max(
+            self.library_collections
+                .iter()
+                .map(|collection| collection.id.0)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+        );
     }
 }
 
@@ -513,6 +677,110 @@ impl LibraryStore {
 
     pub fn library_saved_views(&self) -> &[LibrarySavedView] {
         &self.library.library_saved_views
+    }
+
+    pub fn library_collections(&self) -> &[LibraryCollection] {
+        &self.library.library_collections
+    }
+
+    pub fn library_collection(&self, id: LibraryCollectionId) -> Option<&LibraryCollection> {
+        self.library
+            .library_collections
+            .iter()
+            .find(|collection| collection.id == id)
+    }
+
+    pub fn child_collections(
+        &self,
+        parent_id: Option<LibraryCollectionId>,
+    ) -> Vec<&LibraryCollection> {
+        let mut collections = self
+            .library
+            .library_collections
+            .iter()
+            .filter(|collection| collection.parent_id == parent_id)
+            .collect::<Vec<_>>();
+        collections.sort_by(|left, right| {
+            left.normalized_name
+                .cmp(&right.normalized_name)
+                .then_with(|| left.id.0.cmp(&right.id.0))
+        });
+        collections
+    }
+
+    pub fn collections_for_item(&self, id: DocumentId) -> Vec<&LibraryCollection> {
+        let collection_ids = self
+            .library
+            .library_item_collections
+            .iter()
+            .filter(|relation| relation.item_id == id)
+            .map(|relation| relation.collection_id)
+            .collect::<HashSet<_>>();
+        let mut collections = self
+            .library
+            .library_collections
+            .iter()
+            .filter(|collection| collection_ids.contains(&collection.id))
+            .collect::<Vec<_>>();
+        collections.sort_by(|left, right| {
+            self.collection_path_label(left.id)
+                .cmp(&self.collection_path_label(right.id))
+        });
+        collections
+    }
+
+    pub fn direct_collection_items(
+        &self,
+        collection_id: Option<LibraryCollectionId>,
+    ) -> Vec<DocumentId> {
+        let assigned = self
+            .library
+            .library_item_collections
+            .iter()
+            .map(|relation| relation.item_id)
+            .collect::<HashSet<_>>();
+        self.library
+            .library_items
+            .iter()
+            .filter(|item| match collection_id {
+                Some(collection_id) => {
+                    self.library
+                        .library_item_collections
+                        .iter()
+                        .any(|relation| {
+                            relation.item_id == item.id && relation.collection_id == collection_id
+                        })
+                }
+                None => !assigned.contains(&item.id),
+            })
+            .map(|item| item.id)
+            .collect()
+    }
+
+    pub fn collection_ancestors(&self, id: LibraryCollectionId) -> Vec<&LibraryCollection> {
+        let mut path = Vec::new();
+        let mut cursor = Some(id);
+        let mut visited = HashSet::new();
+        while let Some(collection_id) = cursor {
+            if !visited.insert(collection_id) {
+                break;
+            }
+            let Some(collection) = self.library_collection(collection_id) else {
+                break;
+            };
+            path.push(collection);
+            cursor = collection.parent_id;
+        }
+        path.reverse();
+        path
+    }
+
+    pub fn collection_path_label(&self, id: LibraryCollectionId) -> String {
+        self.collection_ancestors(id)
+            .into_iter()
+            .map(|collection| collection.name.as_str())
+            .collect::<Vec<_>>()
+            .join("/")
     }
 
     pub fn library_item(&self, id: DocumentId) -> Option<&LibraryItem> {
@@ -827,6 +1095,234 @@ impl LibraryStore {
         })
     }
 
+    pub fn create_library_collection(
+        &mut self,
+        parent_id: Option<LibraryCollectionId>,
+        name: &str,
+    ) -> Result<LibraryCollectionId> {
+        let name = clean_text(name);
+        let normalized_name = normalize_collection_name(&name);
+        if normalized_name.is_empty() {
+            return Err(anyhow!("folder name cannot be empty"));
+        }
+        if parent_id.is_some_and(|id| self.library_collection(id).is_none()) {
+            return Err(anyhow!("parent folder does not exist"));
+        }
+        if self.library.library_collections.iter().any(|collection| {
+            collection.parent_id == parent_id && collection.normalized_name == normalized_name
+        }) {
+            return Err(anyhow!("a folder named {name:?} already exists here"));
+        }
+        self.persist_catalog_change(|library| {
+            let id = LibraryCollectionId(library.next_library_collection_id.max(1));
+            library.next_library_collection_id = id.0.saturating_add(1);
+            let now = current_timestamp();
+            library.library_collections.push(LibraryCollection {
+                id,
+                parent_id,
+                name,
+                normalized_name,
+                created: now,
+                updated: now,
+            });
+            Ok(id)
+        })
+    }
+
+    pub fn rename_library_collection(&mut self, id: LibraryCollectionId, name: &str) -> Result<()> {
+        let name = clean_text(name);
+        let normalized_name = normalize_collection_name(&name);
+        if normalized_name.is_empty() {
+            return Err(anyhow!("folder name cannot be empty"));
+        }
+        let parent_id = self
+            .library_collection(id)
+            .ok_or_else(|| anyhow!("folder {} does not exist", id.0))?
+            .parent_id;
+        if self.library.library_collections.iter().any(|collection| {
+            collection.id != id
+                && collection.parent_id == parent_id
+                && collection.normalized_name == normalized_name
+        }) {
+            return Err(anyhow!("a folder named {name:?} already exists here"));
+        }
+        self.persist_catalog_change(|library| {
+            let collection = library
+                .library_collections
+                .iter_mut()
+                .find(|collection| collection.id == id)
+                .ok_or_else(|| anyhow!("folder {} does not exist", id.0))?;
+            collection.name = name;
+            collection.normalized_name = normalized_name;
+            collection.updated = current_timestamp();
+            Ok(())
+        })
+    }
+
+    pub fn move_library_collection(
+        &mut self,
+        id: LibraryCollectionId,
+        parent_id: Option<LibraryCollectionId>,
+    ) -> Result<()> {
+        let collection = self
+            .library_collection(id)
+            .ok_or_else(|| anyhow!("folder {} does not exist", id.0))?;
+        if parent_id == Some(id) {
+            return Err(anyhow!("a folder cannot contain itself"));
+        }
+        if parent_id.is_some_and(|parent_id| self.library_collection(parent_id).is_none()) {
+            return Err(anyhow!("parent folder does not exist"));
+        }
+        let mut cursor = parent_id;
+        let mut visited = HashSet::new();
+        while let Some(candidate) = cursor {
+            if candidate == id {
+                return Err(anyhow!("a folder cannot be moved into its descendant"));
+            }
+            if !visited.insert(candidate) {
+                return Err(anyhow!("folder hierarchy contains a cycle"));
+            }
+            cursor = self
+                .library_collection(candidate)
+                .and_then(|collection| collection.parent_id);
+        }
+        if self.library.library_collections.iter().any(|candidate| {
+            candidate.id != id
+                && candidate.parent_id == parent_id
+                && candidate.normalized_name == collection.normalized_name
+        }) {
+            return Err(anyhow!(
+                "a folder named {:?} already exists there",
+                collection.name
+            ));
+        }
+        if collection.parent_id == parent_id {
+            return Ok(());
+        }
+        self.persist_catalog_change(|library| {
+            let collection = library
+                .library_collections
+                .iter_mut()
+                .find(|collection| collection.id == id)
+                .ok_or_else(|| anyhow!("folder {} does not exist", id.0))?;
+            collection.parent_id = parent_id;
+            collection.updated = current_timestamp();
+            Ok(())
+        })
+    }
+
+    pub fn delete_library_collection(&mut self, id: LibraryCollectionId) -> Result<usize> {
+        if self.library_collection(id).is_none() {
+            return Ok(0);
+        }
+        self.persist_catalog_change(|library| {
+            let mut removed = HashSet::from([id]);
+            loop {
+                let before = removed.len();
+                for collection in &library.library_collections {
+                    if collection
+                        .parent_id
+                        .is_some_and(|parent_id| removed.contains(&parent_id))
+                    {
+                        removed.insert(collection.id);
+                    }
+                }
+                if removed.len() == before {
+                    break;
+                }
+            }
+            library
+                .library_collections
+                .retain(|collection| !removed.contains(&collection.id));
+            library
+                .library_item_collections
+                .retain(|relation| !removed.contains(&relation.collection_id));
+            Ok(removed.len())
+        })
+    }
+
+    pub fn add_items_to_collection(
+        &mut self,
+        ids: &[DocumentId],
+        collection_id: LibraryCollectionId,
+    ) -> Result<usize> {
+        if self.library_collection(collection_id).is_none() {
+            return Err(anyhow!("folder {} does not exist", collection_id.0));
+        }
+        let ids = ids.iter().copied().collect::<HashSet<_>>();
+        self.persist_catalog_change(|library| {
+            let valid_ids = library
+                .library_items
+                .iter()
+                .filter(|item| ids.contains(&item.id))
+                .map(|item| item.id)
+                .collect::<Vec<_>>();
+            let mut changed = 0;
+            for item_id in valid_ids {
+                if !library.library_item_collections.iter().any(|relation| {
+                    relation.item_id == item_id && relation.collection_id == collection_id
+                }) {
+                    library
+                        .library_item_collections
+                        .push(LibraryItemCollection {
+                            item_id,
+                            collection_id,
+                        });
+                    changed += 1;
+                }
+            }
+            Ok(changed)
+        })
+    }
+
+    pub fn remove_items_from_collection(
+        &mut self,
+        ids: &[DocumentId],
+        collection_id: LibraryCollectionId,
+    ) -> Result<usize> {
+        let ids = ids.iter().copied().collect::<HashSet<_>>();
+        self.persist_catalog_change(|library| {
+            let before = library.library_item_collections.len();
+            library.library_item_collections.retain(|relation| {
+                relation.collection_id != collection_id || !ids.contains(&relation.item_id)
+            });
+            Ok(before - library.library_item_collections.len())
+        })
+    }
+
+    pub fn set_item_collections(
+        &mut self,
+        id: DocumentId,
+        collection_ids: &[LibraryCollectionId],
+    ) -> Result<()> {
+        if self.library_item(id).is_none() {
+            return Err(anyhow!("library item {} does not exist", id.0));
+        }
+        let collection_ids = collection_ids.iter().copied().collect::<HashSet<_>>();
+        if collection_ids
+            .iter()
+            .any(|id| self.library_collection(*id).is_none())
+        {
+            return Err(anyhow!("one or more folders do not exist"));
+        }
+        self.persist_catalog_change(|library| {
+            library
+                .library_item_collections
+                .retain(|relation| relation.item_id != id);
+            library
+                .library_item_collections
+                .extend(
+                    collection_ids
+                        .into_iter()
+                        .map(|collection_id| LibraryItemCollection {
+                            item_id: id,
+                            collection_id,
+                        }),
+                );
+            Ok(())
+        })
+    }
+
     pub fn save_library_view(
         &mut self,
         name: &str,
@@ -911,6 +1407,9 @@ impl LibraryStore {
                 .retain(|attachment| retained.contains(&attachment.item_id));
             library
                 .library_item_tags
+                .retain(|relation| retained.contains(&relation.item_id));
+            library
+                .library_item_collections
                 .retain(|relation| retained.contains(&relation.item_id));
             Ok(before - library.library_items.len())
         })

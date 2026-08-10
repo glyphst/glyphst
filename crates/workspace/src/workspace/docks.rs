@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, Context, Pixels, Task, Window, deferred, div, prelude::*, px};
 use gpui_component::{
-    ActiveTheme as _, Selectable as _, Sizable as _, ThemeColor,
+    ActiveTheme as _, Sizable as _, ThemeColor,
     button::{Button, ButtonVariants as _},
     status_bar::StatusBar,
 };
@@ -21,8 +21,12 @@ use glyphst_ui::{
     style::{SURFACE_GAP, SURFACE_INSET},
 };
 
+use crate::navigation_rail::{
+    SLIM_NAVIGATION_RAIL_WIDTH, slim_navigation_button, slim_navigation_rail,
+};
+
 const DOCK_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
-const TOOL_RAIL_WIDTH: f32 = 44.0;
+const TOOL_RAIL_WIDTH: f32 = SLIM_NAVIGATION_RAIL_WIDTH;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkspaceDockPosition {
@@ -612,15 +616,7 @@ impl Workspace {
                       icon: IconName,
                       sidebar: DocumentSidebar,
                       tooltip: String| {
-            Button::new(id)
-                .xsmall()
-                .compact()
-                .ghost()
-                .selected(self.docks.left_sidebar == Some(sidebar))
-                .icon(icon)
-                .w(px(32.0))
-                .h(px(32.0))
-                .tooltip(tooltip)
+            slim_navigation_button(id, icon, self.docks.left_sidebar == Some(sidebar), tooltip)
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     match sidebar {
@@ -633,20 +629,7 @@ impl Workspace {
                 })
         };
 
-        div()
-            .id("workspace-document-tool-rail")
-            .debug_selector(|| "workspace-document-tool-rail".to_string())
-            .h_full()
-            .w(px(TOOL_RAIL_WIDTH))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_1()
-            .py_2()
-            .border_r(px(1.0))
-            .border_color(theme.sidebar_border)
-            .bg(theme.sidebar)
+        slim_navigation_rail("workspace-document-tool-rail", theme)
             .when(supports(DocumentSidebar::Thumbnails), |this| {
                 this.child(button(
                     "tool-rail-thumbnails",

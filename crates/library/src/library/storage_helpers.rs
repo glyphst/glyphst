@@ -127,6 +127,12 @@ pub(super) fn ensure_tables(database: &Database) -> Result<()> {
     {
         write_txn.open_table(LIBRARY_SAVED_VIEWS_V1_TABLE)?;
     }
+    {
+        write_txn.open_table(LIBRARY_COLLECTIONS_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_ITEM_COLLECTIONS_V1_TABLE)?;
+    }
     write_txn.commit()?;
     Ok(())
 }
@@ -279,6 +285,39 @@ fn load_catalog(read_txn: &redb::ReadTransaction, library: &mut Library) -> Resu
             {
                 Ok(view) => library.library_saved_views.push(view),
                 Err(error) => eprintln!("failed to decode library saved view: {error:#}"),
+            }
+        }
+    }
+    {
+        let table = read_txn.open_table(LIBRARY_COLLECTIONS_V1_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredLibraryCollectionV1>(value.value())
+                .and_then(StoredLibraryCollectionV1::into_domain)
+            {
+                Ok(collection) => library.library_collections.push(collection),
+                Err(error) => eprintln!("failed to decode library folder: {error:#}"),
+            }
+        }
+    }
+    {
+        let table = read_txn.open_table(LIBRARY_ITEM_COLLECTIONS_V1_TABLE)?;
+        for entry in table.iter()? {
+            let (item_id, value) = entry?;
+            match decode::<StoredLibraryItemCollectionsV1>(value.value())
+                .and_then(StoredLibraryItemCollectionsV1::into_domain)
+            {
+                Ok(collection_ids) => {
+                    library
+                        .library_item_collections
+                        .extend(collection_ids.into_iter().map(|collection_id| {
+                            LibraryItemCollection {
+                                item_id: DocumentId(item_id.value()),
+                                collection_id,
+                            }
+                        }));
+                }
+                Err(error) => eprintln!("failed to decode library folder membership: {error:#}"),
             }
         }
     }

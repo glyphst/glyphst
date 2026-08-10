@@ -2176,6 +2176,90 @@ fn catalog_persists_items_tags_saved_views_and_trash() {
 }
 
 #[test]
+fn catalog_persists_nested_folders_and_safe_multi_membership() {
+    let database_path = temp_library_path("catalog-folders");
+    let first_path = database_path.with_extension("first.pdf");
+    let second_path = database_path.with_extension("second.pdf");
+    fs::write(&first_path, b"%PDF-1.4\nfirst").unwrap();
+    fs::write(&second_path, b"%PDF-1.4\nsecond").unwrap();
+
+    let (first_id, second_id, papers_id, ml_id, books_id) = {
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let LibraryAddOutcome::Added(first_id) = store
+            .add_linked_item(&first_path, LibraryItemMetadata::for_path(&first_path))
+            .unwrap()
+        else {
+            panic!("expected first item to be added");
+        };
+        let LibraryAddOutcome::Added(second_id) = store
+            .add_linked_item(&second_path, LibraryItemMetadata::for_path(&second_path))
+            .unwrap()
+        else {
+            panic!("expected second item to be added");
+        };
+        let papers_id = store.create_library_collection(None, " Papers ").unwrap();
+        let ml_id = store
+            .create_library_collection(Some(papers_id), "Machine Learning")
+            .unwrap();
+        let books_id = store.create_library_collection(None, "Books").unwrap();
+        assert!(store.create_library_collection(None, "papers").is_err());
+        assert!(
+            store
+                .move_library_collection(papers_id, Some(ml_id))
+                .is_err()
+        );
+        assert_eq!(
+            store.add_items_to_collection(&[first_id], ml_id).unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .add_items_to_collection(&[first_id], books_id)
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.direct_collection_items(Some(ml_id)), vec![first_id]);
+        assert_eq!(store.direct_collection_items(None), vec![second_id]);
+        assert_eq!(
+            store.collection_path_label(ml_id),
+            "Papers/Machine Learning"
+        );
+        (first_id, second_id, papers_id, ml_id, books_id)
+    };
+
+    {
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        assert_eq!(store.library_collections().len(), 3);
+        assert_eq!(
+            store
+                .collections_for_item(first_id)
+                .into_iter()
+                .map(|collection| collection.id)
+                .collect::<Vec<_>>(),
+            vec![books_id, ml_id]
+        );
+        assert_eq!(store.delete_library_collection(papers_id).unwrap(), 2);
+        assert!(store.library_collection(papers_id).is_none());
+        assert!(store.library_collection(ml_id).is_none());
+        assert_eq!(
+            store
+                .collections_for_item(first_id)
+                .into_iter()
+                .map(|collection| collection.id)
+                .collect::<Vec<_>>(),
+            vec![books_id]
+        );
+        assert_eq!(store.direct_collection_items(None), vec![second_id]);
+        assert!(first_path.exists());
+        assert!(second_path.exists());
+    }
+
+    let _ = fs::remove_file(first_path);
+    let _ = fs::remove_file(second_path);
+    let _ = fs::remove_file(database_path);
+}
+
+#[test]
 fn relinking_catalog_item_moves_path_backed_reader_data_atomically() {
     let database_path = temp_library_path("catalog-relink");
     let old_path = database_path.with_extension("old.pdf");
