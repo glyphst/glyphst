@@ -206,6 +206,64 @@ fn message_scrollbar_host_preserves_item_targeting() {
 }
 
 #[gpui::test]
+fn chat_and_quick_ask_messages_enable_embedded_markdown(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        install_test_settings(cx);
+        cx.set_global(LibraryStore::memory());
+    });
+    let cx = cx.add_empty_window();
+
+    cx.update(|window, cx| {
+        let panel = cx.new(|cx| {
+            AiPanel::new(
+                cx.focus_handle(),
+                EmptyAiContextProvider,
+                PathBuf::from("/tmp/markdown-features.pdf"),
+                AiPageState::default(),
+                AI_PANEL_WIDTH,
+                window,
+                cx,
+            )
+        });
+        panel.update(cx, |panel, cx| {
+            panel.push_message(ChatMessage::user_text("$x$".to_string()), cx);
+            panel.push_message(
+                ChatMessage::assistant("```mermaid\ngraph TD\nA --> B\n```".to_string()),
+                cx,
+            );
+        });
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.markdown_views.len(), 2);
+            for markdown in &panel.markdown_views {
+                assert_eq!(
+                    markdown.read(cx).features(),
+                    MarkdownFeatures::embedded_content()
+                );
+            }
+        });
+
+        let quick_ask = cx.new(|cx| {
+            AiPanel::new_quick_ask(
+                cx.focus_handle(),
+                EmptyAiContextProvider,
+                PathBuf::from("/tmp/quick-ask-markdown-features.pdf"),
+                AiPageState::default(),
+                AI_PANEL_WIDTH,
+                window,
+                cx,
+            )
+        });
+        quick_ask.update(cx, |panel, cx| {
+            panel.push_message(ChatMessage::assistant("$$y$$".to_string()), cx);
+        });
+        assert_eq!(
+            quick_ask.read(cx).markdown_views[0].read(cx).features(),
+            MarkdownFeatures::embedded_content()
+        );
+    });
+}
+
+#[gpui::test]
 fn clicking_outside_an_edited_user_message_cancels_editing(cx: &mut TestAppContext) {
     cx.update(|cx| {
         install_test_settings(cx);
@@ -230,9 +288,13 @@ fn clicking_outside_an_edited_user_message_cancels_editing(cx: &mut TestAppConte
         });
         panel.update(cx, |panel, cx| {
             let message = ChatMessage::user_text("Edit me".to_string());
-            panel
-                .markdown_views
-                .push(cx.new(|cx| Markdown::new(message.display_text().into(), cx)));
+            panel.markdown_views.push(cx.new(|cx| {
+                Markdown::new_with_features(
+                    message.display_text().into(),
+                    MarkdownFeatures::embedded_content(),
+                    cx,
+                )
+            }));
             panel.messages.push(message);
             panel.start_editing_message(0, window, cx);
         });

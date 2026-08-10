@@ -162,11 +162,12 @@ impl AiPanel {
         self.regenerate_from_user(user_index, window, cx);
     }
 
-    fn push_message(&mut self, message: ChatMessage, cx: &mut Context<Self>) {
+    pub(super) fn push_message(&mut self, message: ChatMessage, cx: &mut Context<Self>) {
         let source = message.display_text();
         self.messages.push(message);
-        self.markdown_views
-            .push(cx.new(|cx| Markdown::new(source.into(), cx)));
+        self.markdown_views.push(cx.new(|cx| {
+            Markdown::new_with_features(source.into(), MarkdownFeatures::embedded_content(), cx)
+        }));
     }
 
     fn truncate_messages(&mut self, len: usize) {

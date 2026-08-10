@@ -28,7 +28,9 @@ use glyphst_settings::{
 use glyphst_ui::{
     activity::{ActivityCenter, ActivityNoticeEntry, ActivityNoticeLevel},
     icons::{Icon, IconName, toolbar_icon_button},
-    markdown::{Markdown, MarkdownContextMenuRequest, MarkdownElement, MarkdownStyle},
+    markdown::{
+        Markdown, MarkdownContextMenuRequest, MarkdownElement, MarkdownFeatures, MarkdownStyle,
+    },
     picker::fuzzy_match,
     scrollbar::{ScrollbarHandle, WithScrollbar as _},
 };

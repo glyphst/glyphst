@@ -12,10 +12,31 @@ use gpui_component::{
     StyledExt as _, ThemeColor,
     clipboard::Clipboard,
     highlighter::HighlightTheme,
-    text::{TextView, TextViewContextMenuRequest, TextViewState, TextViewStyle},
+    text::{
+        MarkdownExtensions, TextView, TextViewContextMenuRequest, TextViewState, TextViewStyle,
+    },
 };
 
 use glyphst_settings::localize::tr;
+
+mod embedded;
+
+/// Optional embedded Markdown renderers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MarkdownFeatures {
+    pub mermaid: bool,
+    pub math: bool,
+}
+
+impl MarkdownFeatures {
+    /// Enable the embedded content supported in AI messages.
+    pub const fn embedded_content() -> Self {
+        Self {
+            mermaid: true,
+            math: true,
+        }
+    }
+}
 
 /// Glyphst's compatibility name for gpui-component's context-menu payload.
 ///
@@ -70,16 +91,38 @@ type ContextMenuCallback = Rc<dyn Fn(MarkdownContextMenuRequest, &mut Window, &m
 pub struct Markdown {
     source: SharedString,
     text_view: Entity<TextViewState>,
+    features: MarkdownFeatures,
+    extensions: MarkdownExtensions,
+    embedded: embedded::EmbeddedMarkdown,
 }
 
 impl Markdown {
     pub fn new(source: SharedString, cx: &mut Context<Self>) -> Self {
+        Self::new_with_features(source, MarkdownFeatures::default(), cx)
+    }
+
+    pub fn new_with_features(
+        source: SharedString,
+        features: MarkdownFeatures,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let text_view = cx.new(|cx| TextViewState::markdown(source.as_ref(), cx));
-        Self { source, text_view }
+        let extensions = embedded::extensions(features, cx.weak_entity());
+        Self {
+            source,
+            text_view,
+            features,
+            extensions,
+            embedded: embedded::EmbeddedMarkdown::default(),
+        }
     }
 
     pub fn source(&self) -> &SharedString {
         &self.source
+    }
+
+    pub fn features(&self) -> MarkdownFeatures {
+        self.features
     }
 
     pub fn set_source(&mut self, source: SharedString, cx: &mut Context<Self>) {
@@ -90,6 +133,7 @@ impl Markdown {
         self.text_view
             .update(cx, |state, cx| state.set_text(source.as_ref(), cx));
         self.source = source;
+        self.embedded.source_changed();
         cx.notify();
     }
 
@@ -131,7 +175,8 @@ impl RenderOnce for MarkdownElement {
         let text_view_state = self.markdown.read(cx).text_view.clone();
         let mut text_view = TextView::new(&text_view_state)
             .selectable(true)
-            .style(self.style.text_view_style);
+            .style(self.style.text_view_style)
+            .markdown_extensions(self.markdown.read(cx).extensions.clone());
 
         if self.style.code_block_actions {
             let tooltip: SharedString = tr("markdown-copy-code").into();
@@ -192,9 +237,28 @@ mod tests {
         let markdown = cx.new(|cx| Markdown::new("before".into(), cx));
 
         markdown.update(cx, |markdown, cx| {
+            assert_eq!(markdown.features(), MarkdownFeatures::default());
             markdown.set_source("after".into(), cx);
             assert_eq!(markdown.source().as_ref(), "after");
             assert!(markdown.selected_text(cx).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn embedded_content_preset_enables_math_and_mermaid(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let markdown = cx.new(|cx| {
+            Markdown::new_with_features("$x$".into(), MarkdownFeatures::embedded_content(), cx)
+        });
+
+        markdown.read_with(cx, |markdown, _| {
+            assert_eq!(
+                markdown.features(),
+                MarkdownFeatures {
+                    mermaid: true,
+                    math: true,
+                }
+            );
         });
     }
 }

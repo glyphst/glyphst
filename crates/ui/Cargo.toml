@@ -7,10 +7,15 @@ edition.workspace = true
 anyhow.workspace = true
 glyphst-actions = { path = "../actions" }
 glyphst-core = { path = "../core" }
+glyphst-mermaid-render.workspace = true
 glyphst-settings = { path = "../settings" }
 gpui.workspace = true
 gpui_component.workspace = true
 gpui_component_assets.workspace = true
+ratex-layout.workspace = true
+ratex-parser.workspace = true
+ratex-svg.workspace = true
+ratex-types.workspace = true
 rust-embed.workspace = true
 smallvec.workspace = true
 

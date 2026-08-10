@@ -217,7 +217,13 @@ impl AiPanel {
             .iter()
             .map(|message| {
                 let source = message.display_text();
-                cx.new(|cx| Markdown::new(source.into(), cx))
+                cx.new(|cx| {
+                    Markdown::new_with_features(
+                        source.into(),
+                        MarkdownFeatures::embedded_content(),
+                        cx,
+                    )
+                })
             })
             .collect();
         self.invalidate_mention_preview();
