@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use super::{Markdown, MarkdownFeatures};
 use glyphst_mermaid_render::{AccentColor, MermaidTheme};
 use gpui::{
     AnyElement, App, Context, Entity, Hsla, ImageSource, IntoElement, ObjectFit, RenderImage, Rgba,
@@ -16,43 +17,14 @@ use gpui_component::{
     text::{MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextViewState, markdown_ast},
     v_flex,
 };
-use ratex_layout::{LayoutOptions, layout, to_display_list};
-use ratex_svg::{SvgOptions, render_to_svg};
-use ratex_types::{color::Color, math_style::MathStyle};
 
-use super::{Markdown, MarkdownFeatures};
-
-const MATH_NODE_NAME: &str = "glyphst-math";
 const MERMAID_NODE_NAME: &str = "glyphst-mermaid";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum MathMode {
-    Inline,
-    Display,
-}
-
-#[derive(Clone, Debug)]
-struct MathNode {
-    contents: SharedString,
-    source: SharedString,
-    mode: MathMode,
-    source_offset: usize,
-}
 
 #[derive(Clone, Debug)]
 struct MermaidNode {
     contents: SharedString,
     scale: u32,
     source_offset: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct MathKey {
-    contents: SharedString,
-    mode: MathMode,
-    font_size: u32,
-    font_family: SharedString,
-    color: [u8; 4],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -65,13 +37,11 @@ struct MermaidKey {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum RenderKey {
-    Math(MathKey),
     Mermaid(MermaidKey),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum RenderKind {
-    Math,
     Mermaid,
 }
 
@@ -193,19 +163,7 @@ pub(super) fn extensions(
     let mut extensions = MarkdownExtensions::default();
 
     if features.math {
-        let inline_markdown = markdown.clone();
-        let display_markdown = markdown.clone();
-        extensions = extensions
-            .math()
-            .inline_parser(parse_inline_math)
-            .inline_renderer(MATH_NODE_NAME, move |node, text_style, window, cx| {
-                render_math_node(inline_markdown.clone(), node, text_style, window, cx)
-            })
-            .block_parser(parse_display_math)
-            .block_renderer(MATH_NODE_NAME, move |node, window, cx| {
-                let text_style = window.text_style();
-                render_math_node(display_markdown.clone(), node, &text_style, window, cx)
-            });
+        extensions = super::katex::add_extensions(extensions, markdown.clone());
     }
 
     if features.mermaid {
@@ -222,163 +180,6 @@ pub(super) fn extensions(
 
 fn node_offset(node: &markdown_ast::Node, cx: &MarkdownParseContext<'_>) -> usize {
     cx.offset() + node.position().map_or(0, |position| position.start.offset)
-}
-
-fn parse_inline_math(
-    node: &markdown_ast::Node,
-    cx: &MarkdownParseContext<'_>,
-) -> Option<MarkdownNode> {
-    let markdown_ast::Node::InlineMath(math) = node else {
-        return None;
-    };
-    let source = cx
-        .node_source(node)
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("${}$", math.value));
-    Some(
-        MarkdownNode::new(
-            MATH_NODE_NAME,
-            MathNode {
-                contents: math.value.clone().into(),
-                source: source.clone().into(),
-                mode: MathMode::Inline,
-                source_offset: node_offset(node, cx),
-            },
-        )
-        .text(math.value.clone())
-        .markdown(source),
-    )
-}
-
-fn parse_display_math(
-    node: &markdown_ast::Node,
-    cx: &MarkdownParseContext<'_>,
-) -> Option<MarkdownNode> {
-    let markdown_ast::Node::Math(math) = node else {
-        return None;
-    };
-    let source = cx
-        .node_source(node)
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("$$\n{}\n$$", math.value));
-    Some(
-        MarkdownNode::new(
-            MATH_NODE_NAME,
-            MathNode {
-                contents: math.value.clone().into(),
-                source: source.clone().into(),
-                mode: MathMode::Display,
-                source_offset: node_offset(node, cx),
-            },
-        )
-        .text(math.value.clone())
-        .markdown(source),
-    )
-}
-
-fn render_math_node(
-    markdown: WeakEntity<Markdown>,
-    node: &MarkdownNode,
-    text_style: &TextStyle,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    let Some(math) = node.data::<MathNode>() else {
-        return StyledText::new(node.as_text().to_string()).into_any_element();
-    };
-    let base_font_size = f32::from(text_style.font_size.to_pixels(window.rem_size()));
-    let effective_font_size = match math.mode {
-        MathMode::Inline => base_font_size * 0.83,
-        MathMode::Display => base_font_size,
-    };
-    let key = MathKey {
-        contents: math.contents.clone(),
-        mode: math.mode,
-        font_size: (effective_font_size * 100.0).round().max(1.0) as u32,
-        font_family: text_style.font_family.clone(),
-        color: color_bytes(text_style.color),
-    };
-    let render_key = RenderKey::Math(key.clone());
-    let occurrence = RenderOccurrence {
-        kind: RenderKind::Math,
-        source_offset: math.source_offset,
-    };
-    let svg_renderer = cx.svg_renderer();
-    let text_view = markdown
-        .upgrade()
-        .map(|markdown| markdown.read(cx).text_view.clone());
-    let snapshot = text_view
-        .and_then(|text_view| {
-            markdown
-                .update(cx, |markdown, cx| {
-                    markdown.embedded.ensure_rendered(
-                        render_key,
-                        occurrence,
-                        text_view,
-                        move || render_math_image(&key, svg_renderer),
-                        cx,
-                    )
-                })
-                .ok()
-        })
-        .unwrap_or(RenderSnapshot::Source);
-
-    let content = match snapshot {
-        RenderSnapshot::Image(image) => img(ImageSource::Render(image))
-            .object_fit(ObjectFit::Contain)
-            .flex_none()
-            .into_any_element(),
-        RenderSnapshot::Source => StyledText::new(math.source.clone()).into_any_element(),
-    };
-
-    match math.mode {
-        MathMode::Inline => content,
-        MathMode::Display => div()
-            .flex()
-            .w_full()
-            .items_center()
-            .justify_center()
-            .py_2()
-            .child(content)
-            .into_any_element(),
-    }
-}
-
-fn render_math_image(
-    key: &MathKey,
-    svg_renderer: gpui::SvgRenderer,
-) -> Result<Arc<RenderImage>, SharedString> {
-    let svg = render_math_svg(key)?;
-    svg_renderer
-        .render_single_frame(svg.as_bytes(), 1.0)
-        .map_err(|error| SharedString::from(format!("failed to render math SVG: {error}")))
-}
-
-fn render_math_svg(key: &MathKey) -> Result<String, SharedString> {
-    let ast = ratex_parser::parse(key.contents.as_ref())
-        .map_err(|error| SharedString::from(format!("failed to parse math: {error}")))?;
-    let style = match key.mode {
-        MathMode::Inline => MathStyle::Text,
-        MathMode::Display => MathStyle::Display,
-    };
-    let options = LayoutOptions::default()
-        .with_style(style)
-        .with_color(ratex_color(key.color));
-    let layout_box = layout(&ast, &options);
-    let display_list = to_display_list(&layout_box);
-    Ok(render_to_svg(
-        &display_list,
-        &SvgOptions {
-            font_size: key.font_size as f64 / 100.0,
-            padding: match key.mode {
-                MathMode::Inline => 0.5,
-                MathMode::Display => 3.0,
-            },
-            stroke_width: 1.0,
-            embed_glyphs: true,
-            ..SvgOptions::default()
-        },
-    ))
 }
 
 fn parse_mermaid(node: &markdown_ast::Node, cx: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
@@ -669,15 +470,6 @@ fn color_bytes(color: Hsla) -> [u8; 4] {
     ]
 }
 
-fn ratex_color(color: [u8; 4]) -> Color {
-    Color::new(
-        color[0] as f32 / 255.0,
-        color[1] as f32 / 255.0,
-        color[2] as f32 / 255.0,
-        color[3] as f32 / 255.0,
-    )
-}
-
 fn mermaid_theme_key(colors: ThemeColor) -> [[u8; 4]; 16] {
     [
         color_bytes(colors.background),
@@ -777,21 +569,5 @@ mod tests {
         assert!(!is_closed_fence("```mermaid\ngraph TD"));
         assert!(is_supported_mermaid("flowchart TD\nA --> B"));
         assert!(!is_supported_mermaid("packet-beta\n0-7: Header"));
-    }
-
-    #[test]
-    fn ratex_renders_inline_and_display_svg() {
-        for mode in [MathMode::Inline, MathMode::Display] {
-            let svg = render_math_svg(&MathKey {
-                contents: r"\frac{x^2}{y_1}".into(),
-                mode,
-                font_size: 1_400,
-                font_family: "Inter".into(),
-                color: [32, 48, 64, 255],
-            })
-            .expect("math should render");
-            assert!(svg.contains("<svg"));
-            assert!(svg.contains("<path"));
-        }
     }
 }

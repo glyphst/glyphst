@@ -20,6 +20,7 @@ use gpui_component::{
 use glyphst_settings::localize::tr;
 
 mod embedded;
+mod katex;
 
 /// Optional embedded Markdown renderers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -94,6 +95,7 @@ pub struct Markdown {
     features: MarkdownFeatures,
     extensions: MarkdownExtensions,
     embedded: embedded::EmbeddedMarkdown,
+    katex: katex::KatexState,
 }
 
 impl Markdown {
@@ -108,12 +110,17 @@ impl Markdown {
     ) -> Self {
         let text_view = cx.new(|cx| TextViewState::markdown(source.as_ref(), cx));
         let extensions = embedded::extensions(features, cx.weak_entity());
+        let mut katex = katex::KatexState::default();
+        if features.math {
+            katex.update_source(source.as_ref());
+        }
         Self {
             source,
             text_view,
             features,
             extensions,
             embedded: embedded::EmbeddedMarkdown::default(),
+            katex,
         }
     }
 
@@ -132,6 +139,9 @@ impl Markdown {
 
         self.text_view
             .update(cx, |state, cx| state.set_text(source.as_ref(), cx));
+        if self.features.math {
+            self.katex.update_source(source.as_ref());
+        }
         self.source = source;
         self.embedded.source_changed();
         cx.notify();
@@ -229,7 +239,8 @@ fn base_text_style_refinement(mut container: StyleRefinement, base: TextStyle) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
+    use gpui::{Context, Render, TestAppContext, VisualTestContext, Window, px};
+    use gpui_component::ActiveTheme as _;
 
     #[gpui::test]
     fn source_updates_component_text_view(cx: &mut TestAppContext) {
@@ -260,5 +271,75 @@ mod tests {
                 }
             );
         });
+    }
+
+    #[gpui::test]
+    fn inline_math_is_contained_by_its_narrow_markdown_layout(cx: &mut TestAppContext) {
+        const SOURCE: &str = r#"This sentence uses `$` delimiters to show math inline: $\sqrt{3x-1}+(1+x)^2$ after."#;
+
+        struct MathLayoutRoot {
+            markdown: Entity<Markdown>,
+        }
+
+        impl Render for MathLayoutRoot {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let style = MarkdownStyle::from_theme(cx.theme().colors, window.text_style());
+                div()
+                    .w(px(390.))
+                    .child(
+                        div()
+                            .debug_selector(|| "math-layout-body".into())
+                            .child(MarkdownElement::new(self.markdown.clone(), style)),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "math-layout-footer".into())
+                            .h(px(1.)),
+                    )
+            }
+        }
+
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|cx| MathLayoutRoot {
+                markdown: cx.new(|cx| {
+                    Markdown::new_with_features(
+                        SOURCE.into(),
+                        MarkdownFeatures {
+                            math: true,
+                            mermaid: false,
+                        },
+                        cx,
+                    )
+                }),
+            });
+            gpui_component::Root::new(content, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        // The first draw starts the asynchronous RaTeX render; the second
+        // verifies layout using the resulting intrinsic image dimensions.
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let formula = cx
+            .debug_bounds("markdown-math")
+            .expect("rendered inline formula");
+        let body = cx.debug_bounds("math-layout-body").unwrap();
+        let footer = cx.debug_bounds("math-layout-footer").unwrap();
+        assert!(
+            formula.bottom() <= body.bottom(),
+            "formula escaped the Markdown body's measured height: formula={formula:?}, body={body:?}"
+        );
+        assert!(
+            formula.bottom() <= footer.top(),
+            "formula overlapped content after the Markdown message: formula={formula:?}, footer={footer:?}"
+        );
     }
 }

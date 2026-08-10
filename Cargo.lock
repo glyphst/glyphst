@@ -3238,6 +3238,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "markdown",
  "ratex-layout",
  "ratex-parser",
  "ratex-svg",

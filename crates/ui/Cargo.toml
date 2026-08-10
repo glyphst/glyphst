@@ -12,6 +12,7 @@ glyphst-settings = { path = "../settings" }
 gpui.workspace = true
 gpui_component.workspace = true
 gpui_component_assets.workspace = true
+markdown.workspace = true
 ratex-layout.workspace = true
 ratex-parser.workspace = true
 ratex-svg.workspace = true

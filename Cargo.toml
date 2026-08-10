@@ -53,6 +53,7 @@ i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system
 i18n-embed-fl = "0.10"
 kdl = "6"
 lsp-types = { version = "0.97", features = ["proposed"] }
+markdown = "1.0"
 mupdf = "0.7"
 redb = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "blocking", "multipart"] }
