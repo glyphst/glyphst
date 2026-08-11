@@ -77,12 +77,15 @@ impl WorkspaceDockState {
     pub(super) fn snapshot(
         &self,
         workspace_width: f32,
-        docks_visible: bool,
+        document_docks_visible: bool,
+        ai_panel_visible: bool,
         tool_rail_visible: bool,
     ) -> DocumentDockSnapshot {
         let mut widths = self.preferred_widths;
-        let left_sidebar = docks_visible.then_some(self.left_sidebar).flatten();
-        let ai_panel_open = docks_visible && self.ai_panel_open;
+        let left_sidebar = document_docks_visible
+            .then_some(self.left_sidebar)
+            .flatten();
+        let ai_panel_open = ai_panel_visible && self.ai_panel_open;
         let left_preferred = left_sidebar.map(|sidebar| sidebar.width(self.preferred_widths));
         let right_preferred = ai_panel_open.then_some(self.preferred_widths.ai);
         let tool_rail_width = if tool_rail_visible {
@@ -418,25 +421,24 @@ impl Workspace {
     }
 
     pub(super) fn toggle_ai_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.surface_mode != WorkspaceSurfaceMode::Panes {
-            return;
-        }
         if self.docks.ai_panel_open {
             self.close_ai_dock(cx);
-            self.focus_active_pane(window, cx);
+            if self.surface_mode == WorkspaceSurfaceMode::Home {
+                self.home_view.read(cx).focus_handle().focus(window, cx);
+            } else {
+                self.focus_active_pane(window, cx);
+            }
             return;
         }
 
         self.docks.ai_panel_open = true;
         let snapshot = self
             .docks
-            .snapshot(window.bounds().size.width.as_f32(), true, true);
-        if let Some((_, document_view)) = self.dock_document_target(cx) {
-            document_view.update(cx, |document_view, cx| {
-                document_view.set_dock_snapshot(snapshot, cx);
-                document_view.ensure_ai_panel(snapshot.widths.ai, true, window, cx);
-            });
-        }
+            .snapshot(window.bounds().size.width.as_f32(), false, true, false);
+        self.ai_panel.update(cx, |panel, cx| {
+            panel.set_width(snapshot.widths.ai);
+            panel.focus_handle(cx).focus(window, cx);
+        });
         cx.notify();
     }
 
@@ -444,11 +446,8 @@ impl Workspace {
         if !self.docks.ai_panel_open {
             return;
         }
-        for document_view in self.all_document_views(cx) {
-            document_view.update(cx, |document_view, cx| {
-                document_view.save_ai_panel_session(cx);
-            });
-        }
+        self.ai_panel
+            .update(cx, |panel, cx| panel.save_current_session(cx));
         self.docks.ai_panel_open = false;
         cx.notify();
     }
@@ -657,6 +656,81 @@ impl Workspace {
             .into_any_element()
     }
 
+    pub(super) fn render_home_body(
+        &mut self,
+        theme: ThemeColor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let snapshot = self
+            .docks
+            .snapshot(window.bounds().size.width.as_f32(), false, true, false);
+        let now = Instant::now();
+        let (_, right_render_width, animating) =
+            self.docks.update_motion(snapshot, now, cx.reduce_motion());
+        if animating {
+            window.request_animation_frame();
+        }
+
+        let ai_card = self.docks.render_ai_panel.then(|| {
+            let content_width = snapshot.widths.ai.max(SIDEBAR_MIN_WIDTH);
+            self.ai_panel
+                .update(cx, |panel, _| panel.set_width(snapshot.widths.ai));
+            div()
+                .id("workspace-home-ai-dock")
+                .relative()
+                .h_full()
+                .w(px(right_render_width))
+                .flex_none()
+                .overflow_hidden()
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .h_full()
+                        .w(px(content_width))
+                        .flex_none()
+                        .overflow_hidden()
+                        .rounded(cx.theme().radius)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.background)
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_hidden()
+                                .child(self.ai_panel.clone()),
+                        ),
+                )
+                .when(snapshot.ai_panel_open, |this| {
+                    this.child(Self::render_dock_resize_handle(
+                        WorkspaceDockPosition::Right,
+                        cx,
+                    ))
+                })
+        });
+
+        div()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .pr(px(SURFACE_INSET))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(self.home_view.clone()),
+            )
+            .children(ai_card)
+            .into_any_element()
+    }
+
     pub(super) fn render_body(
         &mut self,
         theme: ThemeColor,
@@ -675,11 +749,12 @@ impl Workspace {
             .dock_document_target(cx)
             .map(|(_, document_view)| document_view);
         let loading = self.active_pane.read(cx).active_tab_is_loading();
-        let docks_visible = dock_document_view.is_some();
+        let document_docks_visible = dock_document_view.is_some();
         let tool_rail_visible = dock_document_view.is_some();
         let mut snapshot = self.docks.snapshot(
             window.bounds().size.width.as_f32(),
-            docks_visible,
+            document_docks_visible,
+            true,
             tool_rail_visible,
         );
         let now = Instant::now();
@@ -746,18 +821,13 @@ impl Workspace {
 
         let ai_card = if self.docks.render_ai_panel {
             let content_width = snapshot.widths.ai.max(SIDEBAR_MIN_WIDTH);
-            let owner_label = dock_document_view
-                .as_ref()
-                .map(|document_view| self.render_dock_document_label(document_view, theme, cx));
-            let content = dock_document_view
-                .as_ref()
-                .map(|document_view| {
-                    let panel = document_view.update(cx, |document_view, cx| {
-                        document_view.ensure_ai_panel(snapshot.widths.ai, false, window, cx)
-                    });
-                    div().size_full().min_w_0().child(panel).into_any_element()
-                })
-                .unwrap_or_else(|| Self::render_dock_placeholder(None, loading, true, theme));
+            self.ai_panel
+                .update(cx, |panel, _| panel.set_width(snapshot.widths.ai));
+            let content = div()
+                .size_full()
+                .min_w_0()
+                .child(self.ai_panel.clone())
+                .into_any_element();
             Some(
                 div()
                     .id("workspace-ai-dock")
@@ -781,7 +851,6 @@ impl Workspace {
                             .bg(theme.background)
                             .flex()
                             .flex_col()
-                            .children(owner_label)
                             .child(div().flex_1().min_h_0().overflow_hidden().child(content)),
                     )
                     .when(snapshot.ai_panel_open, |this| {

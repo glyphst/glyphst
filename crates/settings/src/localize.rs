@@ -51,6 +51,17 @@ pub fn select_language(language: AppLanguage) {
     }
 }
 
+/// The translation service language code corresponding to the currently
+/// selected UI locale. Unsupported UI locales use the English fallback.
+pub fn ui_translation_language_code() -> &'static str {
+    let language = LANGUAGE_LOADER.current_language().to_string();
+    if language.eq_ignore_ascii_case("zh") || language.to_ascii_lowercase().starts_with("zh-") {
+        "zh-hans"
+    } else {
+        "en"
+    }
+}
+
 fn explicit_language(language: &str) -> Vec<LanguageIdentifier> {
     match language.parse() {
         Ok(language) => vec![language],

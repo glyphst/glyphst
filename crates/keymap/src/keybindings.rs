@@ -1362,7 +1362,7 @@ fn command_specs() -> &'static [CommandSpec] {
                 spec::<OpenQuickAsk>(
                     "open-quick-ask",
                     "Open Quick Ask",
-                    KeyBindingCategory::DocumentView,
+                    KeyBindingCategory::Workspace,
                     &["tab"],
                     &["tab"],
                     &["quick-ask"],

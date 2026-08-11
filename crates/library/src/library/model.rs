@@ -96,7 +96,6 @@ impl Library {
         });
 
         self.ai_sessions.retain_mut(|session| {
-            session.path = normalize_path(&session.path);
             session.title = session.title.trim().to_string();
             if session.title.is_empty() {
                 session.title = "New Chat".to_string();
@@ -105,8 +104,7 @@ impl Library {
             session.queued_messages.retain_mut(|message| {
                 message.role == AiSessionRole::User && sanitize_ai_session_message(message)
             });
-            !session.path.as_os_str().is_empty()
-                && session.id > 0
+            session.id > 0
                 && !session.messages.is_empty()
                 && session.created > 0
                 && session.updated > 0
@@ -173,6 +171,16 @@ fn sanitize_ai_session_message(message: &mut AiSessionMessage) -> bool {
         .map(|content| content.trim().to_string())
         .filter(|content| !content.is_empty() && *content != message.content);
     message.images.retain(sane_ai_image);
+    message.document_path = message
+        .document_path
+        .take()
+        .map(|path| normalize_path(&path))
+        .filter(|path| !path.as_os_str().is_empty());
+    message.document_label = message
+        .document_label
+        .take()
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty());
     message.agent_parts.retain_mut(|part| match part {
         AiSessionAgentPart::AssistantText(text) => {
             *text = text.trim().to_string();

@@ -163,6 +163,9 @@ pub(super) fn ensure_tables(database: &Database) -> Result<()> {
         write_txn.open_table(AI_SESSIONS_V5_TABLE)?;
     }
     {
+        write_txn.open_table(AI_SESSIONS_V6_TABLE)?;
+    }
+    {
         write_txn.open_table(LIBRARY_ITEMS_V1_TABLE)?;
     }
     {
@@ -246,6 +249,7 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
         has_ai_sessions_v3,
         has_ai_sessions_v4,
         has_ai_sessions_v5,
+        has_ai_sessions_v6,
     ) = {
         let read_txn = database.begin_read()?;
         let table = read_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
@@ -257,37 +261,17 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
             table.get(AI_SESSIONS_V3_MIGRATION_KEY)?.is_some(),
             table.get(AI_SESSIONS_V4_MIGRATION_KEY)?.is_some(),
             table.get(AI_SESSIONS_V5_MIGRATION_KEY)?.is_some(),
+            table.get(AI_SESSIONS_V6_MIGRATION_KEY)?.is_some(),
         )
     };
 
     let read_txn = database.begin_read()?;
     if has_v2_storage {
-        load_storage_v2(
-            &read_txn,
-            &mut library,
-            has_ai_sessions_v2,
-            has_ai_sessions_v3,
-            has_ai_sessions_v4,
-            has_ai_sessions_v5,
-        )?;
+        load_storage_v2(&read_txn, &mut library, has_ai_sessions_v6)?;
     } else if has_v1_storage {
-        load_storage_v1(
-            &read_txn,
-            &mut library,
-            has_ai_sessions_v2,
-            has_ai_sessions_v3,
-            has_ai_sessions_v4,
-            has_ai_sessions_v5,
-        )?;
+        load_storage_v1(&read_txn, &mut library, has_ai_sessions_v6)?;
     } else {
-        load_legacy_storage(
-            &read_txn,
-            &mut library,
-            has_ai_sessions_v2,
-            has_ai_sessions_v3,
-            has_ai_sessions_v4,
-            has_ai_sessions_v5,
-        )?;
+        load_legacy_storage(&read_txn, &mut library, has_ai_sessions_v6)?;
     }
     load_document_preferences(
         &read_txn,
@@ -320,6 +304,11 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
     }
     if !has_ai_sessions_v5 {
         migrate_ai_sessions_v5(database, &library)?;
+    }
+    if !has_ai_sessions_v6 {
+        // V6 deliberately starts a fresh, global conversation store. Older
+        // per-document rows remain available for downgrade but are not copied.
+        migrate_ai_sessions_v6(database)?;
     }
     Ok(library)
 }
@@ -426,10 +415,7 @@ fn load_catalog(
 fn load_storage_v2(
     read_txn: &redb::ReadTransaction,
     library: &mut Library,
-    has_ai_sessions_v2: bool,
-    has_ai_sessions_v3: bool,
-    has_ai_sessions_v4: bool,
-    has_ai_sessions_v5: bool,
+    has_ai_sessions_v6: bool,
 ) -> Result<()> {
     {
         let table = read_txn.open_table(HISTORY_V2_TABLE)?;
@@ -488,14 +474,7 @@ fn load_storage_v2(
             }
         }
     }
-    load_ai_sessions(
-        read_txn,
-        library,
-        has_ai_sessions_v2,
-        has_ai_sessions_v3,
-        has_ai_sessions_v4,
-        has_ai_sessions_v5,
-    )?;
+    load_ai_sessions(read_txn, library, has_ai_sessions_v6)?;
     load_shared_v1_storage(read_txn, library)?;
     Ok(())
 }
@@ -503,10 +482,7 @@ fn load_storage_v2(
 fn load_storage_v1(
     read_txn: &redb::ReadTransaction,
     library: &mut Library,
-    has_ai_sessions_v2: bool,
-    has_ai_sessions_v3: bool,
-    has_ai_sessions_v4: bool,
-    has_ai_sessions_v5: bool,
+    has_ai_sessions_v6: bool,
 ) -> Result<()> {
     {
         let table = read_txn.open_table(HISTORY_V1_TABLE)?;
@@ -569,14 +545,7 @@ fn load_storage_v1(
         }
     }
 
-    load_ai_sessions(
-        read_txn,
-        library,
-        has_ai_sessions_v2,
-        has_ai_sessions_v3,
-        has_ai_sessions_v4,
-        has_ai_sessions_v5,
-    )?;
+    load_ai_sessions(read_txn, library, has_ai_sessions_v6)?;
     load_shared_v1_storage(read_txn, library)?;
     Ok(())
 }
@@ -684,80 +653,17 @@ fn load_shared_v1_storage(read_txn: &redb::ReadTransaction, library: &mut Librar
 fn load_ai_sessions(
     read_txn: &redb::ReadTransaction,
     library: &mut Library,
-    has_ai_sessions_v2: bool,
-    has_ai_sessions_v3: bool,
-    has_ai_sessions_v4: bool,
-    has_ai_sessions_v5: bool,
+    has_ai_sessions_v6: bool,
 ) -> Result<()> {
-    if has_ai_sessions_v5 {
-        let table = read_txn.open_table(AI_SESSIONS_V5_TABLE)?;
-        for entry in table.iter()? {
-            let (_, value) = entry?;
-            match decode::<StoredAiSessionV5>(value.value())
-                .and_then(StoredAiSessionV5::into_domain)
-            {
-                Ok(mut entry) => {
-                    entry.path = normalize_path(&entry.path);
-                    library.ai_sessions.push(entry);
-                }
-                Err(error) => eprintln!("failed to decode AI session: {error:#}"),
-            }
-        }
-    } else if has_ai_sessions_v4 {
-        let table = read_txn.open_table(AI_SESSIONS_V4_TABLE)?;
-        for entry in table.iter()? {
-            let (_, value) = entry?;
-            match decode::<StoredAiSessionV4>(value.value())
-                .and_then(StoredAiSessionV4::into_domain)
-            {
-                Ok(mut entry) => {
-                    entry.path = normalize_path(&entry.path);
-                    library.ai_sessions.push(entry);
-                }
-                Err(error) => eprintln!("failed to decode AI session: {error:#}"),
-            }
-        }
-    } else if has_ai_sessions_v3 {
-        let table = read_txn.open_table(AI_SESSIONS_V3_TABLE)?;
-        for entry in table.iter()? {
-            let (_, value) = entry?;
-            match decode::<StoredAiSessionV3>(value.value())
-                .and_then(StoredAiSessionV3::into_domain)
-            {
-                Ok(mut entry) => {
-                    entry.path = normalize_path(&entry.path);
-                    library.ai_sessions.push(entry);
-                }
-                Err(error) => eprintln!("failed to decode AI session: {error:#}"),
-            }
-        }
-    } else if has_ai_sessions_v2 {
-        let table = read_txn.open_table(AI_SESSIONS_V2_TABLE)?;
-        for entry in table.iter()? {
-            let (_, value) = entry?;
-            match decode::<StoredAiSessionV2>(value.value())
-                .and_then(StoredAiSessionV2::into_domain)
-            {
-                Ok(mut entry) => {
-                    entry.path = normalize_path(&entry.path);
-                    library.ai_sessions.push(entry);
-                }
-                Err(error) => eprintln!("failed to decode AI session: {error:#}"),
-            }
-        }
-    } else {
-        let table = read_txn.open_table(AI_SESSIONS_V1_TABLE)?;
-        for entry in table.iter()? {
-            let (_, value) = entry?;
-            match decode::<StoredAiSessionV1>(value.value())
-                .and_then(StoredAiSessionV1::into_domain)
-            {
-                Ok(mut entry) => {
-                    entry.path = normalize_path(&entry.path);
-                    library.ai_sessions.push(entry);
-                }
-                Err(error) => eprintln!("failed to decode AI session: {error:#}"),
-            }
+    if !has_ai_sessions_v6 {
+        return Ok(());
+    }
+    let table = read_txn.open_table(AI_SESSIONS_V6_TABLE)?;
+    for entry in table.iter()? {
+        let (_, value) = entry?;
+        match decode::<StoredAiSessionV6>(value.value()).and_then(StoredAiSessionV6::into_domain) {
+            Ok(entry) => library.ai_sessions.push(entry),
+            Err(error) => eprintln!("failed to decode global AI session: {error:#}"),
         }
     }
     Ok(())
@@ -766,10 +672,7 @@ fn load_ai_sessions(
 fn load_legacy_storage(
     read_txn: &redb::ReadTransaction,
     library: &mut Library,
-    has_ai_sessions_v2: bool,
-    has_ai_sessions_v3: bool,
-    has_ai_sessions_v4: bool,
-    has_ai_sessions_v5: bool,
+    has_ai_sessions_v6: bool,
 ) -> Result<()> {
     {
         let table = read_txn.open_table(HISTORY_TABLE)?;
@@ -831,29 +734,7 @@ fn load_legacy_storage(
         }
     }
 
-    if has_ai_sessions_v2 || has_ai_sessions_v3 || has_ai_sessions_v4 || has_ai_sessions_v5 {
-        load_ai_sessions(
-            read_txn,
-            library,
-            has_ai_sessions_v2,
-            has_ai_sessions_v3,
-            has_ai_sessions_v4,
-            has_ai_sessions_v5,
-        )?;
-    } else {
-        let table = read_txn.open_table(AI_SESSIONS_TABLE)?;
-        for entry in table.iter()? {
-            let (_, value) = entry?;
-            match decode::<LegacyAiSession>(value.value()) {
-                Ok(entry) => {
-                    let mut entry = entry.into_domain();
-                    entry.path = normalize_path(&entry.path);
-                    library.ai_sessions.push(entry);
-                }
-                Err(error) => eprintln!("failed to decode AI session: {error:#}"),
-            }
-        }
-    }
+    load_ai_sessions(read_txn, library, has_ai_sessions_v6)?;
 
     {
         let table = read_txn.open_table(UI_STATE_TABLE)?;
@@ -1129,6 +1010,30 @@ fn migrate_ai_sessions_v5(database: &Database, library: &Library) -> Result<()> 
         migrations.insert(
             AI_SESSIONS_V5_MIGRATION_KEY,
             [AI_SESSIONS_V5_VERSION].as_slice(),
+        )?;
+    }
+    write_txn.commit()?;
+    Ok(())
+}
+
+fn migrate_ai_sessions_v6(database: &Database) -> Result<()> {
+    let write_txn = database.begin_write()?;
+    {
+        let migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        if migrations.get(AI_SESSIONS_V6_MIGRATION_KEY)?.is_some() {
+            return Ok(());
+        }
+    }
+    // Opening the table is intentional: V6 is a compatibility boundary and
+    // starts empty instead of importing document-bound V1–V5 conversations.
+    {
+        write_txn.open_table(AI_SESSIONS_V6_TABLE)?;
+    }
+    {
+        let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        migrations.insert(
+            AI_SESSIONS_V6_MIGRATION_KEY,
+            [AI_SESSIONS_V6_VERSION].as_slice(),
         )?;
     }
     write_txn.commit()?;

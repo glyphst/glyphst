@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use crate::ai_panel::{AI_PANEL_WIDTH, AiPanel, AiPanelEvent};
+use crate::ai_panel::AI_PANEL_WIDTH;
 use crate::bookmarks::{
     BookmarkPalette, BookmarkPaletteDelegate, BookmarkPrompt, BookmarkPromptDelegate,
 };
@@ -1180,7 +1180,6 @@ pub enum DocumentViewEvent {
         position: Option<DocumentPosition>,
     },
     OpenSettings,
-    AiPanelDismissed,
     SidebarNavigationRequested,
     SynchronizedScroll(SynchronizedScrollDelta),
     /// A canonical content-region id emitted only by the active translated
@@ -1514,9 +1513,6 @@ pub struct DocumentView {
     target_scroll_x_doc: f32,
     target_scroll_y_doc: f32,
     document_scroll: ManualScrollHandle,
-    ai_panel: Option<Entity<AiPanel>>,
-    quick_ask: Option<Entity<AiPanel>>,
-    quick_ask_visible: bool,
     search_bar: Option<Entity<SearchBar>>,
     toc_palette: Option<Entity<TocPalette>>,
     notes_palette: Option<Entity<NotesPalette>>,
@@ -1586,8 +1582,16 @@ pub struct DocumentView {
 }
 
 #[derive(Clone)]
-struct DocumentViewAiContextProvider {
+pub struct DocumentViewAiContextProvider {
     document_view: gpui::WeakEntity<DocumentView>,
+}
+
+impl DocumentViewAiContextProvider {
+    pub fn new(document_view: &Entity<DocumentView>) -> Self {
+        Self {
+            document_view: document_view.downgrade(),
+        }
+    }
 }
 
 struct DocumentAgentTools {
@@ -1664,6 +1668,17 @@ impl AiContextProvider for DocumentViewAiContextProvider {
     fn page_state(&self, cx: &gpui::App) -> Option<AiPageState> {
         self.document_view
             .read_with(cx, |document_view, _| document_view.ai_page_state())
+            .ok()
+    }
+
+    fn document_scope(&self, cx: &gpui::App) -> Option<glyphst_ai::ai_chat::DocumentContextScope> {
+        self.document_view
+            .read_with(cx, |document_view, _| {
+                glyphst_ai::ai_chat::DocumentContextScope {
+                    path: document_view.path.clone(),
+                    label: document_view.file_name.to_string(),
+                }
+            })
             .ok()
     }
 

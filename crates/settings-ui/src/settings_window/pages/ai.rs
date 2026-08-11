@@ -1,8 +1,8 @@
 use super::super::SettingsWindow;
 use glyphst_ai::chatgpt_subscription::ChatGptSubscription;
 use glyphst_settings::{
-    AiApiStyle, AiProvider, AiThinkingLevel, PageImageQuality, PageTextFormat, Settings,
-    SettingsStore,
+    AiApiStyle, AiProvider, AiThinkingLevel, PageImageQuality, PageTextFormat, QuickAskPosition,
+    Settings, SettingsStore,
 };
 use glyphst_ui::icons::{Icon, IconName};
 use gpui::{
@@ -867,6 +867,37 @@ impl SettingsWindow {
             .default_value(defaults.ai.quick_ask.transparency as f64),
         );
 
+        let quick_position = SettingItem::new(
+            crate::fl!("settings-quick-ask-position"),
+            SettingField::dropdown(
+                QuickAskPosition::ALL
+                    .into_iter()
+                    .map(|position| Self::setting_option(position.as_str(), position.label()))
+                    .collect(),
+                |cx: &App| {
+                    cx.global::<SettingsStore>()
+                        .settings
+                        .ai
+                        .quick_ask
+                        .position
+                        .as_str()
+                        .into()
+                },
+                {
+                    let view = view.clone();
+                    move |value: SharedString, cx: &mut App| {
+                        let Some(position) = QuickAskPosition::from_str(&value) else {
+                            return;
+                        };
+                        Self::update_settings(&view, cx, move |settings| {
+                            settings.ai.quick_ask.position = position;
+                        });
+                    }
+                },
+            )
+            .default_value(defaults.ai.quick_ask.position.as_str()),
+        );
+
         let quick_text_size = SettingItem::new(
             "Text size",
             SettingField::number_input(
@@ -897,7 +928,7 @@ impl SettingsWindow {
                 .items([text_format, image_quality, page_image_limit]),
             SettingGroup::new()
                 .title(crate::fl!("settings-quick-ai-chat"))
-                .items([quick_transparency, quick_text_size]),
+                .items([quick_position, quick_transparency, quick_text_size]),
         ])
     }
 

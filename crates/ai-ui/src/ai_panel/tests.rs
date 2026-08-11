@@ -218,7 +218,6 @@ fn chat_and_quick_ask_messages_enable_embedded_markdown(cx: &mut TestAppContext)
             AiPanel::new(
                 cx.focus_handle(),
                 EmptyAiContextProvider,
-                PathBuf::from("/tmp/markdown-features.pdf"),
                 AiPageState::default(),
                 AI_PANEL_WIDTH,
                 window,
@@ -246,7 +245,6 @@ fn chat_and_quick_ask_messages_enable_embedded_markdown(cx: &mut TestAppContext)
             AiPanel::new_quick_ask(
                 cx.focus_handle(),
                 EmptyAiContextProvider,
-                PathBuf::from("/tmp/quick-ask-markdown-features.pdf"),
                 AiPageState::default(),
                 AI_PANEL_WIDTH,
                 window,
@@ -264,6 +262,51 @@ fn chat_and_quick_ask_messages_enable_embedded_markdown(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn preparing_quick_ask_for_show_preserves_its_content(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        install_test_settings(cx);
+        cx.set_global(LibraryStore::memory());
+    });
+    let cx = cx.add_empty_window();
+
+    cx.update(|window, cx| {
+        let quick_ask = cx.new(|cx| {
+            AiPanel::new_quick_ask(
+                cx.focus_handle(),
+                EmptyAiContextProvider,
+                AiPageState::default(),
+                AI_PANEL_WIDTH,
+                window,
+                cx,
+            )
+        });
+        quick_ask.update(cx, |panel, cx| {
+            panel.content = "preserved draft".into();
+            panel.push_message(ChatMessage::assistant("preserved answer".to_string()), cx);
+            panel.prepare_for_show(
+                cx.focus_handle(),
+                AiPageState {
+                    current_page: 4,
+                    page_count: 12,
+                },
+                512.0,
+                cx,
+            );
+        });
+
+        quick_ask.read_with(cx, |panel, _| {
+            assert_eq!(panel.content.as_ref(), "preserved draft");
+            assert_eq!(panel.messages.len(), 1);
+            assert_eq!(panel.messages[0].display_text(), "preserved answer");
+            assert_eq!(panel.markdown_views.len(), 1);
+            assert_eq!(panel.current_page, 4);
+            assert_eq!(panel.page_count, 12);
+            assert_eq!(panel.width, 512.0);
+        });
+    });
+}
+
+#[gpui::test]
 fn clicking_outside_an_edited_user_message_cancels_editing(cx: &mut TestAppContext) {
     cx.update(|cx| {
         install_test_settings(cx);
@@ -276,7 +319,6 @@ fn clicking_outside_an_edited_user_message_cancels_editing(cx: &mut TestAppConte
             AiPanel::new(
                 previous_focus_handle,
                 EmptyAiContextProvider,
-                PathBuf::from("/tmp/editing-test.pdf"),
                 AiPageState {
                     page_count: 1,
                     current_page: 1,
@@ -330,7 +372,6 @@ fn attachment_button_opens_attachment_actions(cx: &mut TestAppContext) {
             AiPanel::new(
                 cx.focus_handle(),
                 EmptyAiContextProvider,
-                PathBuf::from("/tmp/attachment-menu-test.pdf"),
                 AiPageState::default(),
                 AI_PANEL_WIDTH,
                 window,
@@ -368,7 +409,6 @@ fn pasting_an_image_attaches_it_to_the_focused_composer(cx: &mut TestAppContext)
             AiPanel::new(
                 cx.focus_handle(),
                 EmptyAiContextProvider,
-                PathBuf::from("/tmp/image-paste-test.pdf"),
                 AiPageState::default(),
                 AI_PANEL_WIDTH,
                 window,
@@ -433,7 +473,6 @@ fn assistant_text_is_laid_out_after_its_tool_card(cx: &mut TestAppContext) {
             AiPanel::new(
                 cx.focus_handle(),
                 EmptyAiContextProvider,
-                PathBuf::from("/tmp/tool-order-test.pdf"),
                 AiPageState::default(),
                 AI_PANEL_WIDTH,
                 window,
@@ -503,7 +542,6 @@ fn tool_events_follow_output_without_overriding_manual_scroll(cx: &mut TestAppCo
             AiPanel::new(
                 cx.focus_handle(),
                 EmptyAiContextProvider,
-                PathBuf::from("/tmp/tool-scroll-test.pdf"),
                 AiPageState::default(),
                 AI_PANEL_WIDTH,
                 window,
@@ -1430,6 +1468,31 @@ fn persisted_occurrences_preserve_region_geometry() {
             .region_reference,
         Some(reference)
     );
+}
+
+#[test]
+fn persisted_messages_keep_their_document_scope() {
+    let scope = DocumentContextScope {
+        path: PathBuf::from("/tmp/source-document.pdf"),
+        label: "source-document.pdf".to_string(),
+    };
+    let message = ChatMessage::user(
+        "Compare this page".to_string(),
+        String::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .with_document_scope(Some(scope.clone()));
+
+    let mut persisted = persisted_session_messages(&[message], None);
+    assert_eq!(persisted[0].document_path.as_ref(), Some(&scope.path));
+    assert_eq!(
+        persisted[0].document_label.as_deref(),
+        Some(scope.label.as_str())
+    );
+
+    let restored = chat_message_from_session(persisted.remove(0), &LibraryStore::memory());
+    assert_eq!(restored.document_scope(), Some(&scope));
 }
 
 #[test]

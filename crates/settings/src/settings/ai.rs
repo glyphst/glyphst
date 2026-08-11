@@ -925,8 +925,60 @@ impl ResolvedAiConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum QuickAskPosition {
+    Top,
+    #[default]
+    Bottom,
+    Left,
+    Right,
+    Center,
+}
+
+impl QuickAskPosition {
+    pub const ALL: [Self; 5] = [
+        Self::Top,
+        Self::Bottom,
+        Self::Left,
+        Self::Right,
+        Self::Center,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Center => "center",
+        }
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            Self::Top => crate::fl!("quick-ask-position-top"),
+            Self::Bottom => crate::fl!("quick-ask-position-bottom"),
+            Self::Left => crate::fl!("quick-ask-position-left"),
+            Self::Right => crate::fl!("quick-ask-position-right"),
+            Self::Center => crate::fl!("quick-ask-position-center"),
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "top" => Some(Self::Top),
+            "bottom" => Some(Self::Bottom),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            "center" => Some(Self::Center),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QuickAskSettings {
+    pub position: QuickAskPosition,
     pub transparency: f32,
     pub text_size: f32,
 }
@@ -934,6 +986,7 @@ pub struct QuickAskSettings {
 impl Default for QuickAskSettings {
     fn default() -> Self {
         Self {
+            position: QuickAskPosition::Bottom,
             transparency: DEFAULT_QUICK_ASK_TRANSPARENCY,
             text_size: DEFAULT_QUICK_ASK_TEXT_SIZE,
         }

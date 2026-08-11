@@ -2,14 +2,8 @@ use super::storage_helpers::{ensure_managed_library_directories, restrict_librar
 use super::*;
 
 impl LibraryStore {
-    pub fn ai_sessions_for(&self, path: &Path) -> Vec<AiSession> {
-        let path = normalize_path(path);
-        self.library
-            .ai_sessions
-            .iter()
-            .filter(|session| session.path == path)
-            .cloned()
-            .collect()
+    pub fn ai_sessions(&self) -> Vec<AiSession> {
+        self.library.ai_sessions.clone()
     }
 
     pub fn next_ai_session_id(&mut self) -> u64 {
@@ -18,7 +12,6 @@ impl LibraryStore {
         id
     }
     pub fn save_ai_session(&mut self, mut session: AiSession) -> Result<()> {
-        session.path = normalize_path(&session.path);
         session.title = session.title.trim().to_string();
         if session.title.is_empty() {
             session.title = "New Chat".to_string();

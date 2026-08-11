@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::Result;
+use glyphst_ai_ui::{AiContextProvider as _, AiPanel, AiPanelEvent};
 use glyphst_translation_ui::service::LanguageCode;
 use glyphst_translation_ui::{
     DocumentTranslationJobEvent, DocumentTranslationJobId, DocumentTranslationJobManager,
@@ -26,6 +27,7 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, ThemeColor, WindowExt as _, menu::PopupMenu};
 
+mod ai;
 mod chrome;
 mod docks;
 
@@ -41,9 +43,9 @@ use crate::{
     document_browser::{DocumentBrowser, DocumentBrowserEvent},
     document_view::{
         CloseTab, DocumentSidebar, DocumentView, DocumentViewEvent, DuplicateTab, OpenFile,
-        OpenKeybindings, OpenNewTab, OpenSettings, OpenWithSystemPicker, ToggleAiPanel,
-        ToggleCommandPalette, ToggleHome, ToggleNotes, ToggleThumbnailSidebar, ToggleToc,
-        ToggleTransparency, TranslationViewportAnchor,
+        OpenKeybindings, OpenNewTab, OpenQuickAsk, OpenSettings, OpenWithSystemPicker,
+        ToggleAiPanel, ToggleCommandPalette, ToggleHome, ToggleNotes, ToggleThumbnailSidebar,
+        ToggleToc, ToggleTransparency, TranslationViewportAnchor,
     },
     library::{
         DocumentPosition, ReaderSidebar, ReaderSynchronizedGroup, ReaderTranslationSession,
@@ -66,6 +68,7 @@ use crate::{
     theme_selector::{ThemeSelector, ThemeSelectorDelegate},
 };
 
+use ai::WorkspaceAiContextProvider;
 use chrome::{WorkspaceMenu, WorkspaceTitleBar, build_popup_menu};
 use docks::WorkspaceDockState;
 
@@ -107,6 +110,10 @@ pub struct Workspace {
     synchronized_connection: Option<SynchronizedConnection>,
     fading_synchronized_connection: Option<FadingSynchronizedConnection>,
     document_context_mru: Vec<EntityId>,
+    ai_panel: Entity<AiPanel>,
+    quick_ask: Option<Entity<AiPanel>>,
+    quick_ask_visible: bool,
+    quick_ask_previous_focus: Option<FocusHandle>,
     docks: WorkspaceDockState,
     transparency_enabled: bool,
     window_settings: WindowSettings,
@@ -358,6 +365,24 @@ impl Workspace {
         let home_focus_handle = cx.focus_handle();
         let home_view = cx.new(|cx| NewTab::new_home(home_focus_handle, window, cx));
         let docks = WorkspaceDockState::new(cx);
+        let ai_context_provider = WorkspaceAiContextProvider::new(cx.weak_entity());
+        let initial_ai_page_state = pane
+            .read(cx)
+            .active_document_view()
+            .and_then(|document| {
+                crate::document_view::DocumentViewAiContextProvider::new(&document).page_state(cx)
+            })
+            .unwrap_or_default();
+        let ai_panel = cx.new(|cx| {
+            AiPanel::new(
+                focus_handle.clone(),
+                ai_context_provider.clone(),
+                initial_ai_page_state,
+                docks.preferred_widths.ai,
+                window,
+                cx,
+            )
+        });
         let window_settings = cx.global::<SettingsStore>().settings.window;
         let transparency_enabled = window_settings.transparency_enabled_by_default();
         apply_window_background(window, window_settings, transparency_enabled);
@@ -392,6 +417,10 @@ impl Workspace {
             synchronized_connection: None,
             fading_synchronized_connection: None,
             document_context_mru: Vec::new(),
+            ai_panel: ai_panel.clone(),
+            quick_ask: None,
+            quick_ask_visible: false,
+            quick_ask_previous_focus: None,
             docks,
             transparency_enabled,
             window_settings,
@@ -409,6 +438,16 @@ impl Workspace {
                         eprintln!("failed to open Home document: {error:#}");
                     }
                 }
+            },
+        )
+        .detach();
+
+        cx.subscribe_in(
+            &ai_panel,
+            window,
+            |this, _, event: &AiPanelEvent, _, cx| match event {
+                AiPanelEvent::Dismissed => this.close_ai_dock(cx),
+                AiPanelEvent::Changed => {}
             },
         )
         .detach();
@@ -595,6 +634,8 @@ impl Workspace {
         })
         .detach();
         cx.on_release(|this, cx| {
+            this.ai_panel
+                .update(cx, |panel, cx| panel.save_current_session(cx));
             for pane in this.pane_group.panes() {
                 pane.update(cx, |pane, cx| pane.flush_all_tabs(cx));
             }
@@ -935,14 +976,6 @@ impl Workspace {
                     }
                 }
                 PaneEvent::OpenSettings => this.open_settings_window(cx),
-                PaneEvent::AiPanelDismissed(document_view_id) => {
-                    let dock_document_id = this
-                        .dock_document_target(cx)
-                        .map(|(_, document_view)| document_view.entity_id());
-                    if dock_document_id == Some(*document_view_id) {
-                        this.close_ai_dock(cx);
-                    }
-                }
                 PaneEvent::DocumentSidebarNavigation(document_view_id) => {
                     if pane_for_events.update(cx, |pane, cx| {
                         pane.activate_tab_by_id(*document_view_id, true, window, cx)
@@ -1142,10 +1175,7 @@ impl Workspace {
     ) -> Option<(Entity<Pane>, Entity<DocumentView>)> {
         self.pane_group.panes().into_iter().find_map(|pane| {
             let document_view = pane.read(cx).active_document_view()?;
-            if document_view.entity_id() != tab_id {
-                return None;
-            }
-            Some((pane, document_view))
+            (document_view.entity_id() == tab_id).then_some((pane, document_view))
         })
     }
 
@@ -4140,7 +4170,7 @@ impl Render for Workspace {
             .then(|| self.render_synchronized_connection(theme, window, cx))
             .flatten();
         let body = if self.surface_mode == WorkspaceSurfaceMode::Home {
-            self.home_view.clone().into_any_element()
+            self.render_home_body(theme, window, cx)
         } else {
             self.render_body(theme, dim_inactive_panes, window, cx)
         };
@@ -4226,6 +4256,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &ToggleAiPanel, window, cx| {
                 this.toggle_ai_dock(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenQuickAsk, window, cx| {
+                this.toggle_quick_ask(window, cx);
             }))
             .on_action(cx.listener(|this, _: &SplitLeft, window, cx| {
                 this.split_active_pane(SplitDirection::Left, window, cx);
@@ -4327,6 +4360,11 @@ impl Render for Workspace {
                     .child(body),
             )
             .children(synchronized_connection)
+            .when(self.quick_ask_visible, |this| {
+                this.when_some(self.quick_ask.clone(), |this, quick_ask| {
+                    this.child(self.render_quick_ask_overlay(quick_ask, window, cx))
+                })
+            })
             .when_some(self.command_palette.clone(), |this, palette| {
                 this.child(Self::render_top_aligned_overlay(
                     palette,
@@ -4364,6 +4402,11 @@ mod tests {
         time::{Duration, Instant, SystemTime},
     };
 
+    use glyphst_ai::{
+        agent::{AgentCancellationToken, AgentToolCall, AgentToolResultPart},
+        ai_chat::DocumentContextScope,
+    };
+    use glyphst_ai_ui::AiContextProvider as _;
     use glyphst_translation_ui::DocumentTranslationOpenMode;
     use gpui::{
         AppContext as _, EntityId, Modifiers, MouseButton, MouseUpEvent, TestAppContext, bounds,
@@ -4375,8 +4418,8 @@ mod tests {
         PaneEvent, SplitDirection, SynchronizedConnectionAnchor, SynchronizedConnectionAnchorEdge,
         SynchronizedConnectionCurve, SynchronizedConnectionGroup,
         SynchronizedConnectionInvalidReason, SynchronizedConnectionTabState, Workspace,
-        WorkspaceCallbacks, WorkspaceMenu, WorkspaceSurfaceMode, WorkspaceWindowHandle,
-        WorkspaceWindowRequest, live_translation_pair_is_active,
+        WorkspaceAiContextProvider, WorkspaceCallbacks, WorkspaceMenu, WorkspaceSurfaceMode,
+        WorkspaceWindowHandle, WorkspaceWindowRequest, live_translation_pair_is_active,
     };
     use crate::{
         document_view::{
@@ -4621,6 +4664,336 @@ mod tests {
         assert!(cx.debug_bounds("home-navigation-rail").is_some());
         assert!(cx.debug_bounds("workspace-home").is_some());
         assert!(cx.debug_bounds("workspace-pane-column").is_none());
+    }
+
+    #[gpui::test]
+    fn tab_toggles_quick_ask_without_reentering_or_replacing_it(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::keybindings::capture_framework_bindings(cx);
+            crate::keybindings::apply(cx, glyphst_settings::KeymapPreset::Modern, &[]);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_handle.focus(window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("tab");
+        let first_quick_ask = workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.quick_ask_visible);
+            workspace.quick_ask.as_ref().unwrap().entity_id()
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("tab");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.quick_ask_visible);
+            assert_eq!(
+                workspace.quick_ask.as_ref().unwrap().entity_id(),
+                first_quick_ask
+            );
+        });
+        cx.update(|window, cx| {
+            assert!(workspace.read(cx).focus_handle.is_focused(window));
+            _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("tab");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.quick_ask_visible);
+            assert_eq!(
+                workspace.quick_ask.as_ref().unwrap().entity_id(),
+                first_quick_ask
+            );
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("escape");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.quick_ask_visible);
+            assert!(workspace.quick_ask.is_none());
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("tab");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.quick_ask_visible);
+            assert_ne!(
+                workspace.quick_ask.as_ref().unwrap().entity_id(),
+                first_quick_ask
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn quick_ask_positions_use_the_expected_workspace_bounds(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::keybindings::capture_framework_bindings(cx);
+            crate::keybindings::apply(cx, glyphst_settings::KeymapPreset::Modern, &[]);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.simulate_resize(size(px(900.0), px(640.0)));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_handle.focus(window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("tab");
+
+        for (position, expected_top, expected_bottom) in [
+            (glyphst_settings::QuickAskPosition::Top, Some(px(0.0)), None),
+            (
+                glyphst_settings::QuickAskPosition::Bottom,
+                None,
+                Some(px(640.0)),
+            ),
+        ] {
+            workspace.update_in(cx, |_, _, cx| {
+                cx.global_mut::<SettingsStore>()
+                    .settings
+                    .ai
+                    .quick_ask
+                    .position = position;
+                cx.notify();
+            });
+            cx.update(|window, cx| {
+                _ = window.draw(cx);
+            });
+
+            let bounds = cx
+                .debug_bounds("workspace-quick-ask-panel")
+                .expect("Quick Ask panel bounds");
+            assert_eq!(bounds.left(), px(0.0));
+            assert_eq!(bounds.size.width, px(900.0));
+            if let Some(expected_top) = expected_top {
+                assert_eq!(bounds.top(), expected_top);
+            }
+            if let Some(expected_bottom) = expected_bottom {
+                assert_eq!(bounds.bottom(), expected_bottom);
+            }
+        }
+
+        for (position, expected_left, expected_right) in [
+            (
+                glyphst_settings::QuickAskPosition::Left,
+                Some(px(0.0)),
+                None,
+            ),
+            (
+                glyphst_settings::QuickAskPosition::Right,
+                None,
+                Some(px(900.0)),
+            ),
+        ] {
+            workspace.update_in(cx, |_, _, cx| {
+                cx.global_mut::<SettingsStore>()
+                    .settings
+                    .ai
+                    .quick_ask
+                    .position = position;
+                cx.notify();
+            });
+            cx.update(|window, cx| {
+                _ = window.draw(cx);
+            });
+
+            let bounds = cx
+                .debug_bounds("workspace-quick-ask-panel")
+                .expect("Quick Ask panel bounds");
+            assert_eq!(bounds.top(), px(0.0));
+            assert_eq!(bounds.size, size(px(360.0), px(640.0)));
+            if let Some(expected_left) = expected_left {
+                assert_eq!(bounds.left(), expected_left);
+            }
+            if let Some(expected_right) = expected_right {
+                assert_eq!(bounds.right(), expected_right);
+            }
+        }
+
+        workspace.update_in(cx, |_, _, cx| {
+            cx.global_mut::<SettingsStore>()
+                .settings
+                .ai
+                .quick_ask
+                .position = glyphst_settings::QuickAskPosition::Center;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let bounds = cx
+            .debug_bounds("workspace-quick-ask-panel")
+            .expect("Quick Ask panel bounds");
+        assert_eq!(bounds.size.width, px(640.0));
+        assert_eq!(bounds.center().x, px(450.0));
+        assert_eq!(bounds.center().y, px(320.0));
+    }
+
+    #[gpui::test]
+    fn workspace_ai_snapshot_prefers_document_focus_mru_over_active_pane(cx: &mut TestAppContext) {
+        let left_path = temporary_pdf_path("ai-context-left");
+        let right_path = temporary_pdf_path("ai-context-right");
+        write_minimal_pdf(&left_path);
+        write_minimal_pdf(&right_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = left_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (left_pane, right_pane) = workspace.update_in(cx, |workspace, window, cx| {
+            let panes = workspace.pane_group.panes();
+            let left_pane = panes[0].clone();
+            let right_pane = panes[1].clone();
+            workspace.active_pane = right_pane.clone();
+            right_pane
+                .update(cx, |pane, cx| {
+                    pane.focus_or_open_document(right_path.clone(), None, false, window, cx)
+                })
+                .unwrap();
+            (left_pane, right_pane)
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, _, cx| {
+            workspace.record_document_context(&right_pane, cx);
+            workspace.active_pane = left_pane.clone();
+            let snapshot = workspace.ai_context_snapshot(cx);
+            assert_eq!(
+                snapshot
+                    .current_document
+                    .as_ref()
+                    .map(|document| document.read(cx).path().to_path_buf()),
+                Some(right_path.clone())
+            );
+            assert_eq!(
+                snapshot
+                    .open_documents
+                    .first()
+                    .map(|document| document.read(cx).path().to_path_buf()),
+                Some(right_path.clone())
+            );
+        });
+
+        let provider = WorkspaceAiContextProvider::new(workspace.downgrade());
+        let (scope, documents) = cx.update(|_, cx| {
+            let scope = provider.document_scope(cx).expect("current document scope");
+            let tools = provider.agent_tools(cx).expect("workspace document tools");
+            let result = tools.execute(
+                &AgentToolCall {
+                    id: "list-current".to_string(),
+                    name: "list_open_documents".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                &AgentCancellationToken::default(),
+            );
+            let documents = result
+                .content
+                .into_iter()
+                .find_map(|part| match part {
+                    AgentToolResultPart::Text(text) => Some(text),
+                    AgentToolResultPart::Image(_) => None,
+                })
+                .expect("document list text");
+            (scope, documents)
+        });
+        assert_eq!(
+            scope,
+            DocumentContextScope {
+                path: right_path.clone(),
+                label: right_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+            }
+        );
+        let current_line = documents
+            .lines()
+            .find(|line| line.contains("current context"))
+            .expect("one current-context document");
+        assert!(current_line.contains(right_path.file_name().unwrap().to_str().unwrap()));
+        assert_eq!(
+            documents
+                .lines()
+                .filter(|line| line.contains("current context"))
+                .count(),
+            1
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_tab_in_pane_now(&right_pane, None, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace
+                    .ai_context_snapshot(cx)
+                    .current_document
+                    .map(|document| document.read(cx).path().to_path_buf()),
+                Some(left_path.clone())
+            );
+        });
+
+        fs::remove_file(left_path).unwrap();
+        fs::remove_file(right_path).unwrap();
     }
 
     #[gpui::test]
@@ -6056,7 +6429,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dock_requests_are_preserved_while_documentless_tabs_suspend_them(cx: &mut TestAppContext) {
+    fn documentless_tabs_suspend_document_docks_but_keep_global_ai(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
@@ -6090,7 +6463,47 @@ mod tests {
             assert!(workspace.docks.ai_panel_open);
         });
         assert!(cx.debug_bounds("workspace-left-dock").is_none());
-        assert!(cx.debug_bounds("workspace-ai-dock").is_none());
+        assert!(cx.debug_bounds("workspace-ai-dock").is_some());
+    }
+
+    #[gpui::test]
+    fn global_ai_dock_omits_the_focused_document_label(cx: &mut TestAppContext) {
+        let document_path = temporary_pdf_path("ai-dock-without-document-label");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.ai_context_document(cx).is_some());
+            workspace.toggle_ai_dock(window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("workspace-ai-dock").is_some());
+        assert!(cx.debug_bounds("workspace-dock-document-context").is_none());
+
+        fs::remove_file(document_path).unwrap();
     }
 
     #[gpui::test]
@@ -6774,9 +7187,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn single_pane_new_tab_suspends_document_docks_until_document_is_visible(
-        cx: &mut TestAppContext,
-    ) {
+    fn single_pane_new_tab_suspends_document_sidebar_but_keeps_global_ai(cx: &mut TestAppContext) {
         let document_path = temporary_pdf_path("new-tab-sticky-docks");
         write_minimal_pdf(&document_path);
         cx.update(|cx| {
@@ -6824,7 +7235,7 @@ mod tests {
             assert!(workspace.docks.ai_panel_open);
         });
         assert!(cx.debug_bounds("workspace-left-dock").is_none());
-        assert!(cx.debug_bounds("workspace-ai-dock").is_none());
+        assert!(cx.debug_bounds("workspace-ai-dock").is_some());
         assert!(cx.debug_bounds("toc-sidebar-content").is_none());
 
         workspace.update_in(cx, |workspace, window, cx| {

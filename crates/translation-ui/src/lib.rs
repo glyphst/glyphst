@@ -16,7 +16,9 @@ use glyphst_pdf_translation_app::{
     PdfTranslationSessionUpdate, PdfTranslationStage, PdfTranslationWarning, TranslatedUnit,
     TranslationFailureDiagnostic, TranslationFailurePhase, TranslationRunProgress,
 };
-use glyphst_settings::{DocumentTranslationMode, Settings, SettingsStore};
+use glyphst_settings::{
+    DocumentTranslationMode, Settings, SettingsStore, TranslationTargetLanguage,
+};
 use glyphst_translation::{LanguageCode, TARGET_LANGUAGES};
 use glyphst_ui::activity::{
     ActivityCenter, ActivityNoticeEntry, ActivityNoticeId, ActivityNoticeLevel,
@@ -1113,9 +1115,10 @@ impl DocumentTranslationJobManager {
                 .map(glyphst_translation::LanguageCode::new)
                 .transpose()
                 .map_err(|error| format!("Invalid source language: {error}"))?;
-            let target =
-                glyphst_translation::LanguageCode::new(&settings.translation.target_language)
-                    .map_err(|error| format!("Invalid target language: {error}"))?;
+            let target = glyphst_translation::LanguageCode::new(
+                settings.translation.resolved_target_language(),
+            )
+            .map_err(|error| format!("Invalid target language: {error}"))?;
             Ok::<_, String>((source, target))
         });
         let mut invalid_languages = false;
@@ -2003,7 +2006,8 @@ impl DocumentTranslationJobManager {
         };
         if let Some(target_language) = target_language {
             session.snapshot.request.target_language = target_language.clone();
-            session.settings.translation.target_language = target_language.as_str().to_string();
+            session.settings.translation.target_language =
+                TranslationTargetLanguage::Explicit(target_language.as_str().to_string());
         }
         session.cancellation = CancellationToken::new();
         session.task = None;
@@ -3662,7 +3666,8 @@ mod tests {
         cx.update(|cx| {
             let mut settings = SettingsStore::memory();
             settings.settings.translation.source_language = Some("fr".to_string());
-            settings.settings.translation.target_language = "de".to_string();
+            settings.settings.translation.target_language =
+                glyphst_settings::TranslationTargetLanguage::Explicit("de".to_string());
             cx.set_global(settings);
         });
         let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));

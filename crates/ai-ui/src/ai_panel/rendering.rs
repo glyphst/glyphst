@@ -21,6 +21,8 @@ fn humanize_tool_name(name: &str) -> String {
 
 fn tool_card_label(card: &AgentToolCard) -> String {
     let base = match card.name.as_str() {
+        "list_open_documents" => tr("ai-tool-list-open-documents"),
+        "search_documents" => tr("ai-tool-search-documents"),
         "search_document" => tr("ai-tool-search-document"),
         "read_document" => tr("ai-tool-read-document"),
         "render_document_pages" => tr("ai-tool-render-document-pages"),
@@ -594,6 +596,10 @@ impl AiPanel {
             window.viewport_size().width.as_f32(),
             window.viewport_size().height.as_f32(),
         );
+        let side_position = matches!(
+            quick_ask.position,
+            glyphst_settings::QuickAskPosition::Left | glyphst_settings::QuickAskPosition::Right
+        );
 
         div()
             .key_context("QuickAsk")
@@ -602,7 +608,24 @@ impl AiPanel {
             .flex()
             .flex_col()
             .w_full()
-            .border_t(px(1.0))
+            .when(side_position, |this| this.h_full())
+            .when(
+                quick_ask.position == glyphst_settings::QuickAskPosition::Top,
+                |this| this.border_b(px(1.0)),
+            )
+            .when(
+                quick_ask.position == glyphst_settings::QuickAskPosition::Bottom,
+                |this| this.border_t(px(1.0)),
+            )
+            .when(
+                matches!(
+                    quick_ask.position,
+                    glyphst_settings::QuickAskPosition::Left
+                        | glyphst_settings::QuickAskPosition::Right
+                        | glyphst_settings::QuickAskPosition::Center
+                ),
+                |this| this.border_1().rounded(cx.theme().radius),
+            )
             .border_color(theme.border)
             .bg(theme
                 .popover
@@ -700,6 +723,7 @@ impl AiPanel {
                 this.child(
                     div()
                         .relative()
+                        .when(side_position, |this| this.flex_1().min_h_0())
                         .group("quick-ask-answer")
                         .border_t(px(1.0))
                         .border_color(theme.input)
@@ -707,7 +731,8 @@ impl AiPanel {
                             div()
                                 .id("quick-ask-answer")
                                 .track_scroll(&self.scroll_handle)
-                                .max_h(px(320.0))
+                                .when(side_position, |this| this.h_full().min_h_0())
+                                .when(!side_position, |this| this.max_h(px(320.0)))
                                 .p_3()
                                 .flex()
                                 .flex_col()

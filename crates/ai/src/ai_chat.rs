@@ -1,4 +1,4 @@
-use std::{collections::HashSet, io::Read as _, ops::Range, sync::Arc};
+use std::{collections::HashSet, io::Read as _, ops::Range, path::PathBuf, sync::Arc};
 
 use anyhow::{Context as _, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -146,6 +146,15 @@ pub struct MentionOccurrence {
     pub selected_pages_reference: Option<SelectedPagesReference>,
 }
 
+/// Internal identity for the document that supplied a turn's implicit context
+/// and mentions. The path is never exposed to a model; UI/tool layers replace
+/// it with an opaque per-run document id and the display label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentContextScope {
+    pub path: PathBuf,
+    pub label: String,
+}
+
 impl MentionOccurrence {
     pub fn new(range: Range<usize>, reference: MentionReference) -> Self {
         Self {
@@ -193,6 +202,7 @@ pub struct ChatMessage {
     request_prompt: Option<String>,
     request_content: Option<String>,
     agent_trace: Vec<AgentMessage>,
+    document_scope: Option<DocumentContextScope>,
 }
 
 impl ChatMessage {
@@ -214,6 +224,7 @@ impl ChatMessage {
             request_prompt,
             request_content: None,
             agent_trace: Vec::new(),
+            document_scope: None,
         }
     }
 
@@ -227,6 +238,7 @@ impl ChatMessage {
             request_prompt: None,
             request_content: None,
             agent_trace: Vec::new(),
+            document_scope: None,
         }
     }
 
@@ -240,6 +252,7 @@ impl ChatMessage {
             request_prompt: None,
             request_content: None,
             agent_trace: Vec::new(),
+            document_scope: None,
         }
     }
 
@@ -256,6 +269,7 @@ impl ChatMessage {
             request_prompt: None,
             request_content,
             agent_trace: Vec::new(),
+            document_scope: None,
         }
     }
 
@@ -420,6 +434,15 @@ impl ChatMessage {
         self
     }
 
+    pub fn with_document_scope(mut self, scope: Option<DocumentContextScope>) -> Self {
+        self.document_scope = scope;
+        self
+    }
+
+    pub fn document_scope(&self) -> Option<&DocumentContextScope> {
+        self.document_scope.as_ref()
+    }
+
     pub fn has_resolved_region_reference(&self, reference: &RegionImageReference) -> bool {
         self.parts.iter().any(|part| match part {
             ContentPart::Image(image) => {
@@ -495,6 +518,7 @@ impl ChatMessage {
             request_prompt: None,
             request_content: None,
             agent_trace: Vec::new(),
+            document_scope: self.document_scope.clone(),
         }
     }
 

@@ -22,9 +22,9 @@ use glyphst_ai::agent::{
 };
 use glyphst_ai::ai_chat::{
     AiStreamEvent, ChatMessage, ContextBlock, DEFAULT_SESSION_TITLE, DocumentContext,
-    MAX_PAGE_IMAGE_BYTES, MentionKind, MentionOccurrence, MentionReference, Role,
-    TITLE_GENERATION_PROMPT, find_mention_references, session_title_for_prompt, stream_completion,
-    thinking_level_description, title_from_response,
+    DocumentContextScope, MAX_PAGE_IMAGE_BYTES, MentionKind, MentionOccurrence, MentionReference,
+    Role, TITLE_GENERATION_PROMPT, find_mention_references, session_title_for_prompt,
+    stream_completion, thinking_level_description, title_from_response,
 };
 use glyphst_core::{RegionImageReference, SelectedPagesReference};
 use glyphst_library::{
@@ -389,7 +389,6 @@ pub struct AiPanel {
     generation_failure: Option<GenerationFailure>,
     pending_title_task: Option<Task<()>>,
     context_provider: Box<dyn AiContextProvider>,
-    document_path: PathBuf,
     current_page: usize,
     page_count: usize,
     session_id: u64,
@@ -428,7 +427,6 @@ fn loading_dot_opacity(delta: f32, phase: f32) -> f32 {
 struct AiPanelInit {
     previous_focus_handle: FocusHandle,
     context_provider: Box<dyn AiContextProvider>,
-    document_path: PathBuf,
     page_state: AiPageState,
     width: f32,
     mode: AiPanelMode,
@@ -449,19 +447,17 @@ impl AiPanel {
     pub fn new(
         previous_focus_handle: FocusHandle,
         context_provider: impl AiContextProvider,
-        document_path: PathBuf,
         page_state: AiPageState,
         width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let session_id = cx.global_mut::<LibraryStore>().next_ai_session_id();
-        let sessions = cx.global::<LibraryStore>().ai_sessions_for(&document_path);
+        let sessions = cx.global::<LibraryStore>().ai_sessions();
         Self::new_with_mode(
             AiPanelInit {
                 previous_focus_handle,
                 context_provider: Box::new(context_provider),
-                document_path,
                 page_state,
                 width,
                 mode: AiPanelMode::Sidebar,
@@ -476,7 +472,6 @@ impl AiPanel {
     pub fn new_quick_ask(
         previous_focus_handle: FocusHandle,
         context_provider: impl AiContextProvider,
-        document_path: PathBuf,
         page_state: AiPageState,
         width: f32,
         window: &mut Window,
@@ -486,7 +481,6 @@ impl AiPanel {
             AiPanelInit {
                 previous_focus_handle,
                 context_provider: Box::new(context_provider),
-                document_path,
                 page_state,
                 width,
                 mode: AiPanelMode::QuickAsk,
@@ -571,7 +565,6 @@ impl AiPanel {
             generation_failure: None,
             pending_title_task: None,
             context_provider: init.context_provider,
-            document_path: init.document_path,
             current_page: init.page_state.current_page,
             page_count: init.page_state.page_count,
             session_id: init.session_id,
@@ -608,6 +601,21 @@ impl AiPanel {
             self.invalidate_mention_preview();
         }
         self.width = width;
+    }
+
+    pub fn prepare_for_show(
+        &mut self,
+        previous_focus_handle: FocusHandle,
+        page_state: AiPageState,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.previous_focus_handle = previous_focus_handle;
+        self.current_page = page_state.current_page;
+        self.page_count = page_state.page_count;
+        self.set_width(width);
+        self.invalidate_mention_preview();
+        cx.notify();
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {

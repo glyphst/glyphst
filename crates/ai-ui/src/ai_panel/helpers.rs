@@ -1012,6 +1012,8 @@ pub(super) fn persisted_session_messages(
                     .collect(),
                 images: Vec::new(),
                 agent_parts: Vec::new(),
+                document_path: message.document_scope().map(|scope| scope.path.clone()),
+                document_label: message.document_scope().map(|scope| scope.label.clone()),
             }
         })
         .collect()
@@ -1123,6 +1125,8 @@ pub(super) fn persisted_session_messages_with_assets(
                     .collect(),
                 images,
                 agent_parts,
+                document_path: message.document_scope().map(|scope| scope.path.clone()),
+                document_label: message.document_scope().map(|scope| scope.label.clone()),
             })
         })
         .collect()
@@ -1161,10 +1165,17 @@ pub(super) fn chat_message_from_session(
         .iter()
         .filter_map(library_occurrence_to_ai)
         .collect();
+    let document_scope = message.document_path.map(|path| DocumentContextScope {
+        path,
+        label: message
+            .document_label
+            .unwrap_or_else(|| "Document".to_string()),
+    });
     let mut chat = ChatMessage::from_persisted(role, message.content, message.request_content)
         .with_references(references)
         .with_region_references(region_references)
-        .with_mention_occurrences(occurrences);
+        .with_mention_occurrences(occurrences)
+        .with_document_scope(document_scope);
     for image in &message.images {
         match library.load_ai_image(image) {
             Ok(bytes) => chat.attach_user_image(

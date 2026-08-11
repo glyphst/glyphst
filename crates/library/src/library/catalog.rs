@@ -820,8 +820,14 @@ fn migrate_document_path_in_library(library: &mut Library, old_path: &Path, new_
         }
     }
     for session in &mut library.ai_sessions {
-        if session.path == old_path {
-            session.path = new_path.to_path_buf();
+        for message in session
+            .messages
+            .iter_mut()
+            .chain(session.queued_messages.iter_mut())
+        {
+            if message.document_path.as_deref() == Some(old_path) {
+                message.document_path = Some(new_path.to_path_buf());
+            }
         }
     }
     for preferences in &mut library.document_preferences {
@@ -2311,8 +2317,14 @@ impl LibraryStore {
             }
         }
         for session in &mut self.library.ai_sessions {
-            if session.path == old_path {
-                session.path = new_path.clone();
+            for message in session
+                .messages
+                .iter_mut()
+                .chain(session.queued_messages.iter_mut())
+            {
+                if message.document_path.as_deref() == Some(old_path.as_path()) {
+                    message.document_path = Some(new_path.clone());
+                }
             }
         }
         for preferences in &mut self.library.document_preferences {

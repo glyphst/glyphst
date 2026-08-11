@@ -6,7 +6,7 @@ pub mod ai_panel;
 
 use anyhow::Result;
 use glyphst_ai::agent::AgentToolExecutor;
-use glyphst_ai::ai_chat::{ContextBlock, ImageContext, MentionReference};
+use glyphst_ai::ai_chat::{ContextBlock, DocumentContextScope, ImageContext, MentionReference};
 use glyphst_core::{RegionImageReference, SelectedPagesReference};
 
 pub use ai_panel::{AI_PANEL_WIDTH, AiPanel, AiPanelEvent};
@@ -47,6 +47,27 @@ pub trait AiContextProvider: 'static {
 
     fn page_state(&self, cx: &App) -> Option<AiPageState>;
 
+    fn page_state_for_scope(
+        &self,
+        _scope: Option<&DocumentContextScope>,
+        cx: &App,
+    ) -> Option<AiPageState> {
+        self.page_state(cx)
+    }
+
+    fn document_scope(&self, _cx: &App) -> Option<DocumentContextScope> {
+        None
+    }
+
+    fn context_for_scope(
+        &self,
+        _scope: Option<&DocumentContextScope>,
+        include_document_text: bool,
+        cx: &App,
+    ) -> Option<AiContext> {
+        self.context(include_document_text, cx)
+    }
+
     fn resolve_page_references(
         &self,
         references: Vec<MentionReference>,
@@ -58,6 +79,24 @@ pub trait AiContextProvider: 'static {
         references: Vec<RegionImageReference>,
         cx: &App,
     ) -> Task<Result<Vec<ResolvedRegionContext>>>;
+
+    fn resolve_page_references_for_scope(
+        &self,
+        _scope: Option<&DocumentContextScope>,
+        references: Vec<MentionReference>,
+        cx: &App,
+    ) -> Task<Result<Vec<ResolvedPageContext>>> {
+        self.resolve_page_references(references, cx)
+    }
+
+    fn resolve_region_references_for_scope(
+        &self,
+        _scope: Option<&DocumentContextScope>,
+        references: Vec<RegionImageReference>,
+        cx: &App,
+    ) -> Task<Result<Vec<ResolvedRegionContext>>> {
+        self.resolve_region_references(references, cx)
+    }
 
     /// Returns a read-only executor backed by a stable document snapshot.
     /// Providers without a document can leave agent tools unavailable.

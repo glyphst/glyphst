@@ -556,7 +556,7 @@ fn stream_provider_turn(
     let mut system = system_prompt(document, settings.thinking_level, native_thinking);
     if !tools.is_empty() {
         system.push_str(
-            "\n\nYou have read-only tools for the open document. Use search_document to locate relevant passages, read_document to inspect the exact text, and render_document_pages only when PDF layout or visual content matters. Prefer text tools first, cite 1-based PDF page numbers returned by tools, and do not claim tool results you did not receive.",
+            "\n\nYou have read-only tools for the documents open in this workspace window. Call list_open_documents when document identity is unclear, use search_documents to locate relevant passages across documents, read_document to inspect exact text, and render_document_pages only when PDF layout or visual content matters. Document ids are opaque and valid only for this run. Prefer text tools first, identify the document when citing 1-based PDF page numbers, and do not claim tool results you did not receive.",
         );
     }
     let body = match settings.api_style {

@@ -124,9 +124,6 @@ impl DocumentView {
             self.thumbnail_sidebar_render_keys.clear();
             self.update_render_cache_protection(cx);
         }
-        if let Some(panel) = &self.ai_panel {
-            panel.update(cx, |panel, _| panel.set_width(snapshot.widths.ai));
-        }
     }
 
     pub fn supports_sidebar(&self, sidebar: DocumentSidebar) -> bool {

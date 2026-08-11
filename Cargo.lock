@@ -3255,6 +3255,8 @@ dependencies = [
  "chrono",
  "dirs",
  "glyphst-actions",
+ "glyphst-ai",
+ "glyphst-ai-ui",
  "glyphst-core",
  "glyphst-document-ui",
  "glyphst-keymap",
@@ -3268,6 +3270,7 @@ dependencies = [
  "gpui-component",
  "image",
  "mupdf",
+ "serde_json",
  "smallvec",
 ]
 

@@ -19,7 +19,12 @@ impl AiPanel {
         let include_document_text = references
             .iter()
             .any(|reference| reference.kind == MentionKind::DocumentText);
-        let context = self.context_provider.context(include_document_text, cx);
+        let document_scope = self.context_provider.document_scope(cx);
+        let context = self.context_provider.context_for_scope(
+            document_scope.as_ref(),
+            include_document_text,
+            cx,
+        );
         let contexts = context_blocks_for_composer_mentions(&submitted_mentions, context.as_ref());
         let document = self.document_context_from(context);
         let mention_occurrences = submitted_mentions
@@ -40,7 +45,8 @@ impl AiPanel {
         let mut user_message =
             ChatMessage::user(display_prompt.clone(), request_prompt, contexts, references)
                 .with_region_references(region_references)
-                .with_mention_occurrences(mention_occurrences);
+                .with_mention_occurrences(mention_occurrences)
+                .with_document_scope(document_scope);
         for image in &self.composer_images {
             user_message.attach_user_image(image.clone());
         }
@@ -148,8 +154,9 @@ impl AiPanel {
             self.session_title =
                 session_title_for_prompt(&self.messages[message_index].display_text());
         }
+        let document_scope = self.messages[message_index].document_scope().cloned();
         self.push_message(ChatMessage::assistant(String::new()), cx);
-        let document = self.document_context(cx);
+        let document = self.document_context_for_scope(document_scope.as_ref(), cx);
         self.start_generation(document, cx);
     }
 
@@ -264,49 +271,96 @@ impl AiPanel {
         self.agent_cancellation = Some(cancellation.clone());
         self.tool_cards.remove(&assistant_index);
         let mut request_messages = self.messages[..assistant_index].to_vec();
-        let page_references = unresolved_page_references(&request_messages, self.page_count);
-        let region_references = unresolved_region_references(&request_messages);
-        let page_resolve_task = self
-            .context_provider
-            .resolve_page_references(page_references, cx);
-        let region_resolve_task = self
-            .context_provider
-            .resolve_region_references(region_references, cx);
+        let resolution_tasks = request_messages
+            .iter()
+            .enumerate()
+            .map(|(message_index, message)| {
+                let scope = message.document_scope().cloned();
+                let page_count = self
+                    .context_provider
+                    .page_state_for_scope(scope.as_ref(), cx)
+                    .map_or(0, |state| state.page_count);
+                let page_references =
+                    unresolved_page_references(std::slice::from_ref(message), page_count);
+                let region_references = unresolved_region_references(std::slice::from_ref(message));
+                let page_task = self.context_provider.resolve_page_references_for_scope(
+                    scope.as_ref(),
+                    page_references,
+                    cx,
+                );
+                let region_task = self.context_provider.resolve_region_references_for_scope(
+                    scope.as_ref(),
+                    region_references,
+                    cx,
+                );
+                (message_index, page_task, region_task)
+            })
+            .collect::<Vec<_>>();
 
         self.pending_stream = Some(cx.spawn(async move |this, cx| {
-            let resolved_pages = match page_resolve_task.await {
-                Ok(resolved) => resolved,
-                Err(error) => {
+            for (message_index, page_task, region_task) in resolution_tasks {
+                let resolved_pages = match page_task.await {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.apply_generation_event(
+                                target,
+                                GenerationEvent::Error(format!("{error:#}")),
+                                cx,
+                            );
+                            cx.notify();
+                        });
+                        return;
+                    }
+                };
+                let resolved_regions = match region_task.await {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.apply_generation_event(
+                                target,
+                                GenerationEvent::Error(format!("{error:#}")),
+                                cx,
+                            );
+                            cx.notify();
+                        });
+                        return;
+                    }
+                };
+                let message = std::slice::from_mut(&mut request_messages[message_index]);
+                if let Err(error) =
+                    validate_resolved_image_contexts(message, &resolved_pages, &resolved_regions)
+                {
                     let _ = this.update(cx, |this, cx| {
                         this.apply_generation_event(
                             target,
-                            GenerationEvent::Error(format!("{error:#}")),
+                            GenerationEvent::Error(error.to_string()),
                             cx,
                         );
                         cx.notify();
                     });
                     return;
                 }
-            };
-            let resolved_regions = match region_resolve_task.await {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.apply_generation_event(
-                            target,
-                            GenerationEvent::Error(format!("{error:#}")),
-                            cx,
-                        );
+                hydrate_page_contexts(message, &resolved_pages);
+                hydrate_region_contexts(message, &resolved_regions);
+                if this
+                    .update(cx, |this, cx| {
+                        if this.active_generation != Some(target)
+                            || message_index >= this.messages.len()
+                        {
+                            return;
+                        }
+                        let message = std::slice::from_mut(&mut this.messages[message_index]);
+                        hydrate_page_contexts(message, &resolved_pages);
+                        hydrate_region_contexts(message, &resolved_regions);
                         cx.notify();
-                    });
+                    })
+                    .is_err()
+                {
                     return;
                 }
-            };
-            if let Err(error) = validate_resolved_image_contexts(
-                &request_messages,
-                &resolved_pages,
-                &resolved_regions,
-            ) {
+            }
+            if let Err(error) = validate_resolved_image_contexts(&request_messages, &[], &[]) {
                 let _ = this.update(cx, |this, cx| {
                     this.apply_generation_event(
                         target,
@@ -315,21 +369,6 @@ impl AiPanel {
                     );
                     cx.notify();
                 });
-                return;
-            }
-            hydrate_page_contexts(&mut request_messages, &resolved_pages);
-            hydrate_region_contexts(&mut request_messages, &resolved_regions);
-            if this
-                .update(cx, |this, cx| {
-                    if this.active_generation != Some(target) {
-                        return;
-                    }
-                    hydrate_page_contexts(&mut this.messages, &resolved_pages);
-                    hydrate_region_contexts(&mut this.messages, &resolved_regions);
-                    cx.notify();
-                })
-                .is_err()
-            {
                 return;
             }
 
@@ -647,12 +686,13 @@ impl AiPanel {
             return false;
         }
         let user_message = self.queued_messages.remove(0);
+        let document_scope = user_message.document_scope().cloned();
         self.push_message(user_message, cx);
         self.push_message(ChatMessage::assistant(String::new()), cx);
         if self.mode == AiPanelMode::Sidebar {
             self.save_current_session(cx);
         }
-        let document = self.document_context(cx);
+        let document = self.document_context_for_scope(document_scope.as_ref(), cx);
         self.start_generation(document, cx);
         true
     }
@@ -830,16 +870,20 @@ impl AiPanel {
         }));
     }
     pub(super) fn document_context(&self, cx: &mut Context<Self>) -> DocumentContext {
-        self.document_context_from(self.context_provider.context(false, cx))
+        self.document_context_for_scope(None, cx)
+    }
+
+    fn document_context_for_scope(
+        &self,
+        scope: Option<&DocumentContextScope>,
+        cx: &mut Context<Self>,
+    ) -> DocumentContext {
+        self.document_context_from(self.context_provider.context_for_scope(scope, false, cx))
     }
 
     fn document_context_from(&self, context: Option<AiContext>) -> DocumentContext {
         let mut document = DocumentContext {
-            file_name: self
-                .document_path
-                .file_name()
-                .and_then(|file_name| file_name.to_str())
-                .map(str::to_string),
+            file_name: None,
             format: None,
             location_label: None,
             page_count: 0,

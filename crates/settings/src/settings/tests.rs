@@ -972,6 +972,7 @@ fn parses_and_exports_quick_ask_settings() {
         r##"
 ai {
     quick_ask {
+        position "left"
         transparency 0.35
         text_size 18
     }
@@ -980,9 +981,20 @@ ai {
     )
     .unwrap();
 
+    assert_eq!(settings.ai.quick_ask.position, QuickAskPosition::Left);
     assert_eq!(settings.ai.quick_ask.transparency, 0.35);
     assert_eq!(settings.ai.quick_ask.text_size, 18.0);
     assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+}
+
+#[test]
+fn translation_target_defaults_to_the_ui_language() {
+    let settings = parse_settings("").unwrap();
+    assert_eq!(
+        settings.translation.target_language,
+        TranslationTargetLanguage::UiLanguage
+    );
+    assert_eq!(settings.translation.target_language.as_str(), "ui");
 }
 
 #[test]
@@ -1018,7 +1030,10 @@ translation {
         settings.translation.active_provider,
         TranslationProvider::Microsoft
     );
-    assert_eq!(settings.translation.target_language, "zh-hans");
+    assert_eq!(
+        settings.translation.target_language,
+        TranslationTargetLanguage::Explicit("zh-hans".to_string())
+    );
     assert_eq!(
         settings.translation.document_mode,
         DocumentTranslationMode::Background

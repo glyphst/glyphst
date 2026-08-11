@@ -121,9 +121,7 @@ impl AiPanel {
         };
         let session = AiSession {
             id: self.session_id,
-            path: self.document_path.clone(),
             title: self.session_title.clone(),
-            page: self.current_page,
             messages,
             queued_messages,
             created: self.session_created,
@@ -137,9 +135,7 @@ impl AiPanel {
     }
 
     fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
-        self.sessions = cx
-            .global::<LibraryStore>()
-            .ai_sessions_for(&self.document_path);
+        self.sessions = cx.global::<LibraryStore>().ai_sessions();
     }
 
     pub(super) fn show_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -213,7 +209,6 @@ impl AiPanel {
         self.session_title = session.title;
         self.session_created = session.created;
         self.session_updated = session.updated;
-        self.current_page = session.page;
         self.tool_cards.clear();
         self.expanded_tool_cards.clear();
         let library = cx.global::<LibraryStore>();
@@ -318,7 +313,7 @@ impl AiPanel {
             let active = session.id == current_session_id;
             let session_id = session.id;
             let title = session.title.clone();
-            let meta = format!("p. {} · {} messages", session.page, session.messages.len());
+            let meta = format!("{} messages", session.messages.len());
             list = list.child(
                 div()
                     .id(format!("ai-session-{session_id}"))

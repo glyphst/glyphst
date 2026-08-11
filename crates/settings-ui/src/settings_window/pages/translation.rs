@@ -1,7 +1,7 @@
 use super::super::SettingsWindow;
 use glyphst_settings::{
     DocumentTranslationMode, ModelRef, PdfContentReviewMode, Settings, SettingsStore,
-    TranslationBoxCorner, TranslationProvider,
+    TranslationBoxCorner, TranslationProvider, TranslationTargetLanguage,
 };
 use glyphst_translation_ui::target_language_options;
 use gpui::{App, Context, SharedString};
@@ -168,17 +168,23 @@ impl SettingsWindow {
         let view = cx.entity();
         let defaults = Settings::default();
 
-        let target_options = target_language_options(
-            &cx.global::<SettingsStore>()
-                .settings
-                .translation
-                .target_language,
-        )
-        .into_iter()
-        .map(|item| Self::setting_option(item.value, item.label))
-        .collect();
+        let translation = &cx.global::<SettingsStore>().settings.translation;
+        let selected_target = translation.target_language.as_str().to_string();
+        let mut target_options = vec![Self::setting_option(
+            TranslationTargetLanguage::UI_LANGUAGE_VALUE,
+            crate::fl!(
+                "settings-translation-target-ui",
+                language = translation.resolved_target_language()
+            ),
+        )];
+        target_options.extend(
+            target_language_options(&selected_target)
+                .into_iter()
+                .filter(|item| item.value != TranslationTargetLanguage::UI_LANGUAGE_VALUE)
+                .map(|item| Self::setting_option(item.value, item.label)),
+        );
         let target_language = SettingItem::new(
-            "Target language",
+            crate::fl!("settings-translation-target"),
             SettingField::scrollable_dropdown(
                 target_options,
                 |cx: &App| {
@@ -186,19 +192,21 @@ impl SettingsWindow {
                         .settings
                         .translation
                         .target_language
-                        .clone()
+                        .as_str()
+                        .to_string()
                         .into()
                 },
                 {
                     let view = view.clone();
                     move |value: SharedString, cx: &mut App| {
                         Self::update_settings(&view, cx, move |settings| {
-                            settings.translation.target_language = value.to_string();
+                            settings.translation.target_language =
+                                TranslationTargetLanguage::parse(&value);
                         });
                     }
                 },
             )
-            .default_value(defaults.translation.target_language.clone()),
+            .default_value(defaults.translation.target_language.as_str()),
         );
 
         let document_mode = SettingItem::new(

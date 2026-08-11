@@ -273,7 +273,7 @@ pub struct TranslationSettings {
     pub providers: BTreeMap<TranslationProvider, TranslationProviderConfig>,
     pub active_provider: TranslationProvider,
     pub source_language: Option<String>,
-    pub target_language: String,
+    pub target_language: TranslationTargetLanguage,
     pub document_mode: DocumentTranslationMode,
     pub pinned: PinnedTranslationSettings,
     pub content_review: PdfContentReviewSettings,
@@ -285,7 +285,7 @@ impl Default for TranslationSettings {
             providers: BTreeMap::new(),
             active_provider: TranslationProvider::Ai,
             source_language: None,
-            target_language: DEFAULT_TRANSLATION_TARGET_LANGUAGE.to_string(),
+            target_language: TranslationTargetLanguage::UiLanguage,
             document_mode: DocumentTranslationMode::Auto,
             pinned: PinnedTranslationSettings::default(),
             content_review: PdfContentReviewSettings::default(),
@@ -300,11 +300,7 @@ impl TranslationSettings {
             .take()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"));
-        self.target_language = self.target_language.trim().to_string();
-        if self.target_language.is_empty() {
-            self.target_language = DEFAULT_TRANSLATION_TARGET_LANGUAGE.to_string();
-        }
-        self.target_language.make_ascii_lowercase();
+        self.target_language.sanitize();
         self.pinned.sanitize();
         self.content_review.sanitize();
 
@@ -317,10 +313,52 @@ impl TranslationSettings {
         self.providers.get(&provider).cloned().unwrap_or_default()
     }
 
+    /// Resolve the configured target at request time so inherited targets follow
+    /// changes to the application's language without rewriting the setting.
+    pub fn resolved_target_language(&self) -> String {
+        match &self.target_language {
+            TranslationTargetLanguage::UiLanguage => {
+                crate::localize::ui_translation_language_code().to_string()
+            }
+            TranslationTargetLanguage::Explicit(language) => language.clone(),
+        }
+    }
+
     pub fn provider_config_mut(
         &mut self,
         provider: TranslationProvider,
     ) -> &mut TranslationProviderConfig {
         self.providers.entry(provider).or_default()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum TranslationTargetLanguage {
+    #[default]
+    UiLanguage,
+    Explicit(String),
+}
+
+impl TranslationTargetLanguage {
+    pub const UI_LANGUAGE_VALUE: &'static str = "ui";
+
+    pub fn parse(value: &str) -> Self {
+        let value = value.trim();
+        if value.is_empty() || value.eq_ignore_ascii_case(Self::UI_LANGUAGE_VALUE) {
+            Self::UiLanguage
+        } else {
+            Self::Explicit(value.to_ascii_lowercase())
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::UiLanguage => Self::UI_LANGUAGE_VALUE,
+            Self::Explicit(language) => language,
+        }
+    }
+
+    fn sanitize(&mut self) {
+        *self = Self::parse(self.as_str());
     }
 }

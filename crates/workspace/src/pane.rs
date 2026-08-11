@@ -265,7 +265,6 @@ pub(crate) enum PaneEvent {
         document_tab_id: Option<EntityId>,
     },
     OpenSettings,
-    AiPanelDismissed(EntityId),
     DocumentSidebarNavigation(EntityId),
     TabDrop {
         dragged_tab: Box<DraggedTab>,
@@ -535,8 +534,7 @@ impl Pane {
                 cx.global::<SettingsStore>()
                     .settings
                     .translation
-                    .target_language
-                    .clone()
+                    .resolved_target_language()
             });
         let epub_preferences = cx
             .global::<LibraryStore>()
@@ -683,8 +681,7 @@ impl Pane {
                 cx.global::<SettingsStore>()
                     .settings
                     .translation
-                    .target_language
-                    .clone()
+                    .resolved_target_language()
             });
         let epub_preferences = cx
             .global::<LibraryStore>()
@@ -751,8 +748,7 @@ impl Pane {
                 cx.global::<SettingsStore>()
                     .settings
                     .translation
-                    .target_language
-                    .clone()
+                    .resolved_target_language()
             });
         let epub_preferences = cx
             .global::<LibraryStore>()
@@ -1102,8 +1098,7 @@ impl Pane {
                 cx.global::<SettingsStore>()
                     .settings
                     .translation
-                    .target_language
-                    .clone()
+                    .resolved_target_language()
             });
         let epub_preferences = cx
             .global::<LibraryStore>()
@@ -1586,9 +1581,6 @@ impl Pane {
                         });
                     }
                     DocumentViewEvent::OpenSettings => cx.emit(PaneEvent::OpenSettings),
-                    DocumentViewEvent::AiPanelDismissed => {
-                        cx.emit(PaneEvent::AiPanelDismissed(document_view_id))
-                    }
                     DocumentViewEvent::SidebarNavigationRequested => {
                         cx.emit(PaneEvent::DocumentSidebarNavigation(document_view_id))
                     }

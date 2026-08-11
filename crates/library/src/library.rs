@@ -68,6 +68,10 @@ const AI_SESSIONS_V4_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("
 const AI_SESSIONS_V5_MIGRATION_KEY: &str = "ai_sessions_v5";
 const AI_SESSIONS_V5_VERSION: u8 = 5;
 const AI_SESSIONS_V5_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v5");
+const AI_SESSIONS_V6_MIGRATION_KEY: &str = "ai_sessions_v6_global";
+const AI_SESSIONS_V6_VERSION: u8 = 6;
+const AI_SESSIONS_V6_TABLE: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("ai_sessions_v6_global");
 const SIDEBAR_WIDTHS_KEY: &str = "sidebar_widths";
 const DOCUMENT_BROWSER_SIZE_KEY: &str = "document_browser_size";
 const HOME_PREFERENCES_KEY: &str = "home_preferences";
@@ -244,6 +248,7 @@ impl LegacyNote {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LegacyAiSession {
     id: u64,
@@ -255,13 +260,12 @@ struct LegacyAiSession {
     updated: u64,
 }
 
+#[allow(dead_code)]
 impl LegacyAiSession {
     fn into_domain(self) -> AiSession {
         AiSession {
             id: self.id,
-            path: self.path,
             title: self.title,
-            page: self.page,
             messages: self
                 .messages
                 .into_iter()
@@ -443,9 +447,9 @@ impl From<&AiSession> for StoredAiSessionV1 {
         Self {
             version: STORAGE_SCHEMA_VERSION,
             id: session.id,
-            path: StoredPathV1::from_path(&session.path),
+            path: StoredPathV1::from_path(Path::new("")),
             title: session.title.clone(),
-            page: session.page,
+            page: 0,
             messages: session
                 .messages
                 .iter()
@@ -458,13 +462,12 @@ impl From<&AiSession> for StoredAiSessionV1 {
 }
 
 impl StoredAiSessionV1 {
+    #[allow(dead_code)]
     fn into_domain(self) -> Result<AiSession> {
         require_storage_version(self.version, STORAGE_SCHEMA_VERSION)?;
         Ok(AiSession {
             id: self.id,
-            path: self.path.into_path()?,
             title: self.title,
-            page: self.page,
             messages: self
                 .messages
                 .into_iter()
@@ -504,6 +507,8 @@ impl From<StoredAiSessionMessageV1> for AiSessionMessage {
             occurrences: Vec::new(),
             images: Vec::new(),
             agent_parts: Vec::new(),
+            document_path: None,
+            document_label: None,
         }
     }
 }
@@ -537,6 +542,8 @@ impl From<StoredAiSessionMessageV2> for AiSessionMessage {
             occurrences: Vec::new(),
             images: Vec::new(),
             agent_parts: Vec::new(),
+            document_path: None,
+            document_label: None,
         }
     }
 }
@@ -558,9 +565,9 @@ impl From<&AiSession> for StoredAiSessionV2 {
         Self {
             version: STORAGE_V2_VERSION,
             id: session.id,
-            path: StoredPathV1::from_path(&session.path),
+            path: StoredPathV1::from_path(Path::new("")),
             title: session.title.clone(),
-            page: session.page,
+            page: 0,
             messages: session
                 .messages
                 .iter()
@@ -573,13 +580,12 @@ impl From<&AiSession> for StoredAiSessionV2 {
 }
 
 impl StoredAiSessionV2 {
+    #[allow(dead_code)]
     fn into_domain(self) -> Result<AiSession> {
         require_storage_version(self.version, STORAGE_V2_VERSION)?;
         Ok(AiSession {
             id: self.id,
-            path: self.path.into_path()?,
             title: self.title,
-            page: self.page,
             messages: self
                 .messages
                 .into_iter()
@@ -623,6 +629,8 @@ impl From<StoredAiSessionMessageV3> for AiSessionMessage {
             occurrences: message.occurrences,
             images: Vec::new(),
             agent_parts: Vec::new(),
+            document_path: None,
+            document_label: None,
         }
     }
 }
@@ -644,9 +652,9 @@ impl From<&AiSession> for StoredAiSessionV3 {
         Self {
             version: AI_SESSIONS_V3_VERSION,
             id: session.id,
-            path: StoredPathV1::from_path(&session.path),
+            path: StoredPathV1::from_path(Path::new("")),
             title: session.title.clone(),
-            page: session.page,
+            page: 0,
             messages: session
                 .messages
                 .iter()
@@ -659,13 +667,12 @@ impl From<&AiSession> for StoredAiSessionV3 {
 }
 
 impl StoredAiSessionV3 {
+    #[allow(dead_code)]
     fn into_domain(self) -> Result<AiSession> {
         require_storage_version(self.version, AI_SESSIONS_V3_VERSION)?;
         Ok(AiSession {
             id: self.id,
-            path: self.path.into_path()?,
             title: self.title,
-            page: self.page,
             messages: self
                 .messages
                 .into_iter()
@@ -695,9 +702,9 @@ impl From<&AiSession> for StoredAiSessionV4 {
         Self {
             version: AI_SESSIONS_V4_VERSION,
             id: session.id,
-            path: StoredPathV1::from_path(&session.path),
+            path: StoredPathV1::from_path(Path::new("")),
             title: session.title.clone(),
-            page: session.page,
+            page: 0,
             messages: session
                 .messages
                 .iter()
@@ -710,13 +717,12 @@ impl From<&AiSession> for StoredAiSessionV4 {
 }
 
 impl StoredAiSessionV4 {
+    #[allow(dead_code)]
     fn into_domain(self) -> Result<AiSession> {
         require_storage_version(self.version, AI_SESSIONS_V4_VERSION)?;
         Ok(AiSession {
             id: self.id,
-            path: self.path.into_path()?,
             title: self.title,
-            page: self.page,
             messages: self
                 .messages
                 .into_iter()
@@ -764,6 +770,8 @@ impl From<StoredAiSessionMessageV5> for AiSessionMessage {
             occurrences: message.occurrences,
             images: message.images,
             agent_parts: message.agent_parts,
+            document_path: None,
+            document_label: None,
         }
     }
 }
@@ -786,9 +794,9 @@ impl From<&AiSession> for StoredAiSessionV5 {
         Self {
             version: AI_SESSIONS_V5_VERSION,
             id: session.id,
-            path: StoredPathV1::from_path(&session.path),
+            path: StoredPathV1::from_path(Path::new("")),
             title: session.title.clone(),
-            page: session.page,
+            page: 0,
             messages: session
                 .messages
                 .iter()
@@ -806,13 +814,12 @@ impl From<&AiSession> for StoredAiSessionV5 {
 }
 
 impl StoredAiSessionV5 {
+    #[allow(dead_code)]
     fn into_domain(self) -> Result<AiSession> {
         require_storage_version(self.version, AI_SESSIONS_V5_VERSION)?;
         Ok(AiSession {
             id: self.id,
-            path: self.path.into_path()?,
             title: self.title,
-            page: self.page,
             messages: self
                 .messages
                 .into_iter()
@@ -823,6 +830,112 @@ impl StoredAiSessionV5 {
                 .into_iter()
                 .map(AiSessionMessage::from)
                 .collect(),
+            created: self.created,
+            updated: self.updated,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredAiSessionMessageV6 {
+    role: AiSessionRole,
+    content: String,
+    request_content: Option<String>,
+    references: Vec<AiMentionReference>,
+    occurrences: Vec<AiMentionOccurrence>,
+    images: Vec<AiSessionImage>,
+    agent_parts: Vec<AiSessionAgentPart>,
+    document_path: Option<StoredPathV1>,
+    document_label: Option<String>,
+}
+
+impl From<&AiSessionMessage> for StoredAiSessionMessageV6 {
+    fn from(message: &AiSessionMessage) -> Self {
+        Self {
+            role: message.role,
+            content: message.content.clone(),
+            request_content: message.request_content.clone(),
+            references: message.references.clone(),
+            occurrences: message.occurrences.clone(),
+            images: message.images.clone(),
+            agent_parts: message.agent_parts.clone(),
+            document_path: message
+                .document_path
+                .as_deref()
+                .map(StoredPathV1::from_path),
+            document_label: message.document_label.clone(),
+        }
+    }
+}
+
+impl StoredAiSessionMessageV6 {
+    fn into_domain(self) -> Result<AiSessionMessage> {
+        Ok(AiSessionMessage {
+            role: self.role,
+            content: self.content,
+            request_content: self.request_content,
+            references: self.references,
+            occurrences: self.occurrences,
+            images: self.images,
+            agent_parts: self.agent_parts,
+            document_path: self
+                .document_path
+                .map(StoredPathV1::into_path)
+                .transpose()?,
+            document_label: self.document_label,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredAiSessionV6 {
+    version: u8,
+    id: u64,
+    title: String,
+    messages: Vec<StoredAiSessionMessageV6>,
+    queued_messages: Vec<StoredAiSessionMessageV6>,
+    created: u64,
+    updated: u64,
+}
+
+impl From<&AiSession> for StoredAiSessionV6 {
+    fn from(session: &AiSession) -> Self {
+        Self {
+            version: AI_SESSIONS_V6_VERSION,
+            id: session.id,
+            title: session.title.clone(),
+            messages: session
+                .messages
+                .iter()
+                .map(StoredAiSessionMessageV6::from)
+                .collect(),
+            queued_messages: session
+                .queued_messages
+                .iter()
+                .map(StoredAiSessionMessageV6::from)
+                .collect(),
+            created: session.created,
+            updated: session.updated,
+        }
+    }
+}
+
+impl StoredAiSessionV6 {
+    fn into_domain(self) -> Result<AiSession> {
+        require_storage_version(self.version, AI_SESSIONS_V6_VERSION)?;
+        Ok(AiSession {
+            id: self.id,
+            title: self.title,
+            messages: self
+                .messages
+                .into_iter()
+                .map(StoredAiSessionMessageV6::into_domain)
+                .collect::<Result<_>>()?,
+            queued_messages: self
+                .queued_messages
+                .into_iter()
+                .map(StoredAiSessionMessageV6::into_domain)
+                .collect::<Result<_>>()?,
             created: self.created,
             updated: self.updated,
         })
@@ -2099,6 +2212,10 @@ pub struct AiSessionMessage {
     pub occurrences: Vec<AiMentionOccurrence>,
     pub images: Vec<AiSessionImage>,
     pub agent_parts: Vec<AiSessionAgentPart>,
+    /// Normalized internal source used to resolve document-scoped mentions.
+    /// It is never included in prompts or tool output.
+    pub document_path: Option<PathBuf>,
+    pub document_label: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2154,9 +2271,7 @@ pub enum AiSessionAgentPart {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AiSession {
     pub id: u64,
-    pub path: PathBuf,
     pub title: String,
-    pub page: usize,
     pub messages: Vec<AiSessionMessage>,
     pub queued_messages: Vec<AiSessionMessage>,
     pub created: u64,

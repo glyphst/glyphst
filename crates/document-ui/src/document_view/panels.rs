@@ -2,7 +2,6 @@ use super::*;
 
 impl DocumentView {
     pub(super) fn close_all_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_quick_ask(window, cx);
         self.close_search_bar(window, cx);
         self.close_toc_palette(window, cx);
         self.close_notes_palette(window, cx);
@@ -11,63 +10,6 @@ impl DocumentView {
         self.close_bookmark_prompt(window, cx);
         self.close_go_to_page_prompt(window, cx);
         self.close_epub_style_panel(cx);
-    }
-
-    pub(super) fn toggle_quick_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(quick_ask) = self.quick_ask.clone() {
-            self.quick_ask_visible = !self.quick_ask_visible;
-            if self.quick_ask_visible {
-                quick_ask.focus_handle(cx).focus(window, cx);
-            } else {
-                self.focus_handle.focus(window, cx);
-            }
-            cx.notify();
-            return;
-        }
-
-        self.close_all_overlays(window, cx);
-
-        let previous_focus_handle = self.focus_handle.clone();
-        let document_path = self.path.clone();
-        let page_state = self.ai_page_state();
-        let context_provider = DocumentViewAiContextProvider {
-            document_view: cx.entity().downgrade(),
-        };
-        let width = self.viewport_width.max(320.0);
-        let quick_ask = cx.new(|cx| {
-            AiPanel::new_quick_ask(
-                previous_focus_handle.clone(),
-                context_provider.clone(),
-                document_path.clone(),
-                page_state,
-                width,
-                window,
-                cx,
-            )
-        });
-
-        cx.subscribe_in(
-            &quick_ask,
-            window,
-            |this, _, event: &AiPanelEvent, window, cx| match event {
-                AiPanelEvent::Dismissed => this.close_quick_ask(window, cx),
-                AiPanelEvent::Changed => {}
-            },
-        )
-        .detach();
-
-        quick_ask.focus_handle(cx).focus(window, cx);
-        self.quick_ask = Some(quick_ask);
-        self.quick_ask_visible = true;
-        cx.notify();
-    }
-
-    fn close_quick_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.quick_ask_visible = false;
-        if self.quick_ask.take().is_some() {
-            self.focus_handle.focus(window, cx);
-            cx.notify();
-        }
     }
 
     pub(super) fn toggle_presentation_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -98,66 +40,6 @@ impl DocumentView {
         self.focus_handle.focus(window, cx);
         self.schedule_position_save(cx);
         cx.notify();
-    }
-
-    pub fn ensure_ai_panel(
-        &mut self,
-        width: f32,
-        focus: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<AiPanel> {
-        if focus {
-            self.close_all_overlays(window, cx);
-        }
-        if let Some(panel) = self.ai_panel.clone() {
-            panel.update(cx, |panel, _| panel.set_width(width));
-            if focus {
-                panel.focus_handle(cx).focus(window, cx);
-            }
-            return panel;
-        }
-
-        let previous_focus_handle = self.focus_handle.clone();
-        let document_path = self.path.clone();
-        let page_state = self.ai_page_state();
-        let context_provider = DocumentViewAiContextProvider {
-            document_view: cx.entity().downgrade(),
-        };
-        let panel = cx.new(|cx| {
-            AiPanel::new(
-                previous_focus_handle.clone(),
-                context_provider.clone(),
-                document_path.clone(),
-                page_state,
-                width,
-                window,
-                cx,
-            )
-        });
-
-        cx.subscribe_in(
-            &panel,
-            window,
-            |_, _, event: &AiPanelEvent, _, cx| match event {
-                AiPanelEvent::Dismissed => cx.emit(DocumentViewEvent::AiPanelDismissed),
-                AiPanelEvent::Changed => {}
-            },
-        )
-        .detach();
-
-        if focus {
-            panel.focus_handle(cx).focus(window, cx);
-        }
-        self.ai_panel = Some(panel);
-        cx.notify();
-        self.ai_panel.clone().unwrap()
-    }
-
-    pub fn save_ai_panel_session(&mut self, cx: &mut Context<Self>) {
-        if let Some(panel) = &self.ai_panel {
-            panel.update(cx, |panel, cx| panel.save_current_session(cx));
-        }
     }
 
     pub(super) fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {

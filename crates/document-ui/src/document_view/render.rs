@@ -2,6 +2,7 @@ use super::*;
 
 impl Render for DocumentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_inherited_target_language(window, cx);
         let view = cx.entity();
         let prepaint_view = view.clone();
         let theme = cx.global::<SettingsStore>().resolved_theme;
@@ -239,9 +240,6 @@ impl Render for DocumentView {
             }))
             .on_action(cx.listener(|this, _: &Search, window, cx| {
                 this.toggle_search(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &OpenQuickAsk, window, cx| {
-                this.toggle_quick_ask(window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenGoToPage, window, cx| {
                 this.toggle_go_to_page_prompt(window, cx);
@@ -809,19 +807,6 @@ impl Render for DocumentView {
                         .right(px(16.0))
                         .child(search_bar),
                 )
-            })
-            .when(self.quick_ask_visible, |this| {
-                this.when_some(self.quick_ask.clone(), |this, quick_ask| {
-                    this.child(
-                        div()
-                            .absolute()
-                            .left(px(0.0))
-                            .right(px(0.0))
-                            .bottom_0()
-                            .flex()
-                            .child(quick_ask),
-                    )
-                })
             })
             .when_some(self.toc_palette.clone(), |this, palette| {
                 this.child(Self::render_centered_overlay(

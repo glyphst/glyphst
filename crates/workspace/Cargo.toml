@@ -8,6 +8,8 @@ anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 glyphst-actions = { path = "../actions" }
+glyphst-ai = { path = "../ai" }
+glyphst-ai-ui = { path = "../ai-ui" }
 glyphst-core = { path = "../core" }
 glyphst-keymap = { path = "../keymap" }
 glyphst-library = { path = "../library" }
@@ -22,6 +24,7 @@ gpui_component.workspace = true
 image.workspace = true
 mupdf.workspace = true
 smallvec.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

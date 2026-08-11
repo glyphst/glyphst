@@ -184,9 +184,7 @@ fn persists_history_bookmarks_and_highlights() {
         store
             .save_ai_session(AiSession {
                 id: ai_session_id,
-                path: document_path.to_path_buf(),
                 title: "Explain section".to_string(),
-                page: 4,
                 messages: vec![
                     AiSessionMessage {
                         role: AiSessionRole::User,
@@ -195,6 +193,8 @@ fn persists_history_bookmarks_and_highlights() {
                         references: Vec::new(),
                         occurrences: Vec::new(),
                         images: Vec::new(),
+                        document_path: None,
+                        document_label: None,
                         agent_parts: Vec::new(),
                     },
                     AiSessionMessage {
@@ -204,6 +204,8 @@ fn persists_history_bookmarks_and_highlights() {
                         references: Vec::new(),
                         occurrences: Vec::new(),
                         images: Vec::new(),
+                        document_path: None,
+                        document_label: None,
                         agent_parts: Vec::new(),
                     },
                 ],
@@ -229,7 +231,7 @@ fn persists_history_bookmarks_and_highlights() {
         assert_eq!(notes[0].color, HighlightColor::Green);
         assert_eq!(notes[0].rects, vec![highlight_rect]);
         assert_eq!(notes[0].body, "updated note");
-        let ai_sessions = store.ai_sessions_for(document_path);
+        let ai_sessions = store.ai_sessions();
         assert_eq!(ai_sessions.len(), 1);
         assert_eq!(ai_sessions[0].id, ai_session_id);
         assert_eq!(ai_sessions[0].title, "Explain section");
@@ -707,7 +709,7 @@ fn edit_history_is_bounded_and_not_persisted() {
 }
 
 #[test]
-fn loads_v1_ai_sessions_and_migrates_them_without_references() {
+fn starts_global_ai_sessions_fresh_without_removing_v1_rows() {
     let database_path = temp_library_path("ai-session-v1-compatibility");
     let document_path = PathBuf::from("/tmp/v1-session.pdf");
     let stored_session = StoredAiSessionV1 {
@@ -755,12 +757,7 @@ fn loads_v1_ai_sessions_and_migrates_them_without_references() {
 
     {
         let store = LibraryStore::open(database_path.clone()).unwrap();
-        let sessions = store.ai_sessions_for(&document_path);
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].id, stored_session.id);
-        assert_eq!(sessions[0].messages.len(), 1);
-        assert!(sessions[0].messages[0].references.is_empty());
-        assert!(sessions[0].messages[0].occurrences.is_empty());
+        assert!(store.ai_sessions().is_empty());
     }
 
     {
@@ -770,31 +767,7 @@ fn loads_v1_ai_sessions_and_migrates_them_without_references() {
             read_txn
                 .open_table(STORAGE_MIGRATIONS_TABLE)
                 .unwrap()
-                .get(AI_SESSIONS_V2_MIGRATION_KEY)
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            read_txn
-                .open_table(STORAGE_MIGRATIONS_TABLE)
-                .unwrap()
-                .get(AI_SESSIONS_V5_MIGRATION_KEY)
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            read_txn
-                .open_table(STORAGE_MIGRATIONS_TABLE)
-                .unwrap()
-                .get(AI_SESSIONS_V3_MIGRATION_KEY)
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            read_txn
-                .open_table(STORAGE_MIGRATIONS_TABLE)
-                .unwrap()
-                .get(AI_SESSIONS_V4_MIGRATION_KEY)
+                .get(AI_SESSIONS_V6_MIGRATION_KEY)
                 .unwrap()
                 .is_some()
         );
@@ -811,66 +784,26 @@ fn loads_v1_ai_sessions_and_migrates_them_without_references() {
                 .len(),
             1
         );
-        let v2_value = read_txn
-            .open_table(AI_SESSIONS_V2_TABLE)
-            .unwrap()
-            .get(stored_session.id)
-            .unwrap()
-            .unwrap();
         assert!(
-            decode::<StoredAiSessionV2>(v2_value.value())
+            read_txn
+                .open_table(AI_SESSIONS_V6_TABLE)
                 .unwrap()
-                .messages[0]
-                .references
-                .is_empty()
-        );
-        let v3_value = read_txn
-            .open_table(AI_SESSIONS_V3_TABLE)
-            .unwrap()
-            .get(stored_session.id)
-            .unwrap()
-            .unwrap();
-        assert!(
-            decode::<StoredAiSessionV3>(v3_value.value())
+                .get(stored_session.id)
                 .unwrap()
-                .messages[0]
-                .occurrences
-                .is_empty()
+                .is_none()
         );
-        let v4_value = read_txn
-            .open_table(AI_SESSIONS_V4_TABLE)
-            .unwrap()
-            .get(stored_session.id)
-            .unwrap()
-            .unwrap();
-        assert!(
-            decode::<StoredAiSessionV4>(v4_value.value())
-                .unwrap()
-                .messages[0]
-                .occurrences
-                .is_empty()
-        );
-        let v5_value = read_txn
-            .open_table(AI_SESSIONS_V5_TABLE)
-            .unwrap()
-            .get(stored_session.id)
-            .unwrap()
-            .unwrap();
-        let v5 = decode::<StoredAiSessionV5>(v5_value.value()).unwrap();
-        assert!(v5.messages[0].occurrences.is_empty());
-        assert!(v5.messages[0].images.is_empty());
     }
 
     {
         let store = LibraryStore::open(database_path.clone()).unwrap();
-        assert_eq!(store.ai_sessions_for(&document_path).len(), 1);
+        assert!(store.ai_sessions().is_empty());
     }
 
     let _ = fs::remove_file(database_path);
 }
 
 #[test]
-fn loads_genuinely_v2_encoded_ai_session_after_domain_occurrences_are_added() {
+fn starts_global_ai_sessions_fresh_without_removing_v2_rows() {
     #[derive(Serialize)]
     struct HistoricalAiSessionMessageV2 {
         role: AiSessionRole,
@@ -945,13 +878,7 @@ fn loads_genuinely_v2_encoded_ai_session_after_domain_occurrences_are_added() {
 
     {
         let store = LibraryStore::open(database_path.clone()).unwrap();
-        let sessions = store.ai_sessions_for(&document_path);
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(
-            sessions[0].messages[0].references,
-            vec![AiMentionReference::Selection, AiMentionReference::Selection]
-        );
-        assert!(sessions[0].messages[0].occurrences.is_empty());
+        assert!(store.ai_sessions().is_empty());
     }
 
     {
@@ -961,19 +888,18 @@ fn loads_genuinely_v2_encoded_ai_session_after_domain_occurrences_are_added() {
             read_txn
                 .open_table(STORAGE_MIGRATIONS_TABLE)
                 .unwrap()
-                .get(AI_SESSIONS_V3_MIGRATION_KEY)
+                .get(AI_SESSIONS_V6_MIGRATION_KEY)
                 .unwrap()
                 .is_some()
         );
-        let v3_value = read_txn
-            .open_table(AI_SESSIONS_V3_TABLE)
+        let v2_value = read_txn
+            .open_table(AI_SESSIONS_V2_TABLE)
             .unwrap()
             .get(stored_session.id)
             .unwrap()
             .unwrap();
-        let migrated = decode::<StoredAiSessionV3>(v3_value.value()).unwrap();
-        assert_eq!(migrated.messages[0].references.len(), 2);
-        assert!(migrated.messages[0].occurrences.is_empty());
+        let preserved = decode::<StoredAiSessionV2>(v2_value.value()).unwrap();
+        assert_eq!(preserved.messages[0].references.len(), 2);
     }
 
     let _ = fs::remove_file(database_path);
@@ -1006,9 +932,7 @@ fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
         store
             .save_ai_session(AiSession {
                 id: session_id,
-                path: document_path.clone(),
                 title: "Referenced context".to_string(),
-                page: 5,
                 messages: vec![AiSessionMessage {
                     role: AiSessionRole::User,
                     content: "Compare the references".to_string(),
@@ -1016,6 +940,8 @@ fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
                     references: references.clone(),
                     occurrences: Vec::new(),
                     images: Vec::new(),
+                    document_path: Some(document_path.clone()),
+                    document_label: Some("v3-session.pdf".to_string()),
                     agent_parts: Vec::new(),
                 }],
                 queued_messages: Vec::new(),
@@ -1027,9 +953,17 @@ fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
 
     {
         let store = LibraryStore::open(database_path.clone()).unwrap();
-        let sessions = store.ai_sessions_for(&document_path);
+        let sessions = store.ai_sessions();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].messages[0].references, references);
+        assert_eq!(
+            sessions[0].messages[0].document_path.as_ref(),
+            Some(&document_path)
+        );
+        assert_eq!(
+            sessions[0].messages[0].document_label.as_deref(),
+            Some("v3-session.pdf")
+        );
     }
 
     let _ = fs::remove_file(database_path);
@@ -1038,7 +972,6 @@ fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
 #[test]
 fn round_trips_v3_occurrences_with_duplicate_references() {
     let database_path = temp_library_path("ai-session-v3-duplicate-occurrences");
-    let document_path = PathBuf::from("/tmp/v3-duplicate-occurrences.pdf");
     let reference = AiMentionReference::Selection;
     let occurrences = vec![
         AiMentionOccurrence {
@@ -1059,9 +992,7 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
         store
             .save_ai_session(AiSession {
                 id: session_id,
-                path: document_path.clone(),
                 title: "Duplicate mentions".to_string(),
-                page: 1,
                 messages: vec![AiSessionMessage {
                     role: AiSessionRole::User,
                     content: "@selection and @selection".to_string(),
@@ -1069,6 +1000,8 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
                     references: vec![reference.clone(), reference],
                     occurrences: occurrences.clone(),
                     images: Vec::new(),
+                    document_path: None,
+                    document_label: None,
                     agent_parts: Vec::new(),
                 }],
                 queued_messages: Vec::new(),
@@ -1080,7 +1013,7 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
 
     {
         let store = LibraryStore::open(database_path.clone()).unwrap();
-        let sessions = store.ai_sessions_for(&document_path);
+        let sessions = store.ai_sessions();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].messages[0].occurrences, occurrences);
         assert_eq!(sessions[0].messages[0].references.len(), 2);
@@ -1090,9 +1023,8 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
 }
 
 #[test]
-fn round_trips_v5_selected_page_snapshots() {
-    let database_path = temp_library_path("ai-session-v5-selected-pages");
-    let document_path = PathBuf::from("/tmp/v5-selected-pages.pdf");
+fn round_trips_v6_selected_page_snapshots() {
+    let database_path = temp_library_path("ai-session-v6-selected-pages");
     let occurrences = vec![
         AiMentionOccurrence {
             start: 0,
@@ -1114,9 +1046,7 @@ fn round_trips_v5_selected_page_snapshots() {
         store
             .save_ai_session(AiSession {
                 id: session_id,
-                path: document_path.clone(),
                 title: "Selected pages".to_string(),
-                page: 1,
                 messages: vec![AiSessionMessage {
                     role: AiSessionRole::User,
                     content: "@selected-pages-text and @selected-pages-image".to_string(),
@@ -1124,6 +1054,8 @@ fn round_trips_v5_selected_page_snapshots() {
                     references: Vec::new(),
                     occurrences: occurrences.clone(),
                     images: Vec::new(),
+                    document_path: None,
+                    document_label: None,
                     agent_parts: Vec::new(),
                 }],
                 queued_messages: Vec::new(),
@@ -1136,7 +1068,7 @@ fn round_trips_v5_selected_page_snapshots() {
 
     {
         let store = LibraryStore::open(database_path.clone()).unwrap();
-        let sessions = store.ai_sessions_for(&document_path);
+        let sessions = store.ai_sessions();
         assert_eq!(sessions[0].messages[0].occurrences, occurrences);
     }
 
@@ -1144,13 +1076,13 @@ fn round_trips_v5_selected_page_snapshots() {
         let database = Database::open(&database_path).unwrap();
         let read_txn = database.begin_read().unwrap();
         let stored = read_txn
-            .open_table(AI_SESSIONS_V5_TABLE)
+            .open_table(AI_SESSIONS_V6_TABLE)
             .unwrap()
             .get(session_id)
             .unwrap()
             .unwrap();
-        let stored = decode::<StoredAiSessionV5>(stored.value()).unwrap();
-        assert_eq!(stored.version, AI_SESSIONS_V5_VERSION);
+        let stored = decode::<StoredAiSessionV6>(stored.value()).unwrap();
+        assert_eq!(stored.version, AI_SESSIONS_V6_VERSION);
         assert_eq!(stored.messages[0].occurrences, occurrences);
     }
 
@@ -1158,10 +1090,9 @@ fn round_trips_v5_selected_page_snapshots() {
 }
 
 #[test]
-fn v5_round_trips_managed_images_agent_trace_and_queue() {
-    let database_path = temp_library_path("ai-session-v5-images");
+fn v6_round_trips_managed_images_agent_trace_and_queue() {
+    let database_path = temp_library_path("ai-session-v6-images");
     let managed_root = database_path.with_extension("managed-library");
-    let document_path = PathBuf::from("/tmp/v5-images.pdf");
     let bytes = b"test-png-payload".to_vec();
     let session_id;
     let image;
@@ -1175,9 +1106,7 @@ fn v5_round_trips_managed_images_agent_trace_and_queue() {
         store
             .save_ai_session(AiSession {
                 id: session_id,
-                path: document_path.clone(),
                 title: "Image trace".to_string(),
-                page: 2,
                 messages: vec![
                     AiSessionMessage {
                         role: AiSessionRole::User,
@@ -1186,6 +1115,8 @@ fn v5_round_trips_managed_images_agent_trace_and_queue() {
                         references: Vec::new(),
                         occurrences: Vec::new(),
                         images: vec![image.clone()],
+                        document_path: None,
+                        document_label: None,
                         agent_parts: Vec::new(),
                     },
                     AiSessionMessage {
@@ -1195,6 +1126,8 @@ fn v5_round_trips_managed_images_agent_trace_and_queue() {
                         references: Vec::new(),
                         occurrences: Vec::new(),
                         images: Vec::new(),
+                        document_path: None,
+                        document_label: None,
                         agent_parts: vec![
                             AiSessionAgentPart::ToolCall {
                                 id: "call-1".to_string(),
@@ -1219,6 +1152,8 @@ fn v5_round_trips_managed_images_agent_trace_and_queue() {
                     references: Vec::new(),
                     occurrences: Vec::new(),
                     images: vec![image.clone()],
+                    document_path: None,
+                    document_label: None,
                     agent_parts: Vec::new(),
                 }],
                 created: 50,
@@ -1233,7 +1168,7 @@ fn v5_round_trips_managed_images_agent_trace_and_queue() {
     assert!(asset_path.is_file());
     {
         let store = LibraryStore::open(database_path.clone()).unwrap();
-        let sessions = store.ai_sessions_for(&document_path);
+        let sessions = store.ai_sessions();
         let session = &sessions[0];
         assert_eq!(session.queued_messages.len(), 1);
         assert_eq!(session.messages[0].images, vec![image.clone()]);
@@ -1249,9 +1184,7 @@ fn v5_round_trips_managed_images_agent_trace_and_queue() {
         store
             .save_ai_session(AiSession {
                 id: session_id,
-                path: document_path,
                 title: "Image trace".to_string(),
-                page: 2,
                 messages: vec![AiSessionMessage {
                     role: AiSessionRole::User,
                     content: "No image now".to_string(),
@@ -1259,6 +1192,8 @@ fn v5_round_trips_managed_images_agent_trace_and_queue() {
                     references: Vec::new(),
                     occurrences: Vec::new(),
                     images: Vec::new(),
+                    document_path: None,
+                    document_label: None,
                     agent_parts: Vec::new(),
                 }],
                 queued_messages: Vec::new(),
@@ -1276,7 +1211,6 @@ fn v5_round_trips_managed_images_agent_trace_and_queue() {
 #[test]
 fn round_trips_v3_region_occurrence_geometry() {
     let database_path = temp_library_path("ai-session-v3-region-geometry");
-    let document_path = PathBuf::from("/tmp/v3-region-geometry.pdf");
     let region_reference = RegionImageReference::new([
         glyphst_core::PageRegion {
             page: glyphst_core::PageIndex(2),
@@ -1307,9 +1241,7 @@ fn round_trips_v3_region_occurrence_geometry() {
         store
             .save_ai_session(AiSession {
                 id: session_id,
-                path: document_path.clone(),
                 title: "Region geometry".to_string(),
-                page: 3,
                 messages: vec![AiSessionMessage {
                     role: AiSessionRole::User,
                     content: "Describe @region-image".to_string(),
@@ -1319,6 +1251,8 @@ fn round_trips_v3_region_occurrence_geometry() {
                     }],
                     occurrences: vec![occurrence.clone()],
                     images: Vec::new(),
+                    document_path: None,
+                    document_label: None,
                     agent_parts: Vec::new(),
                 }],
                 queued_messages: Vec::new(),
@@ -1330,7 +1264,7 @@ fn round_trips_v3_region_occurrence_geometry() {
 
     {
         let store = LibraryStore::open(database_path.clone()).unwrap();
-        let sessions = store.ai_sessions_for(&document_path);
+        let sessions = store.ai_sessions();
         assert_eq!(
             sessions[0].messages[0].occurrences,
             vec![occurrence.clone()]
@@ -2226,9 +2160,7 @@ fn persists_non_utf8_paths_for_all_path_records() {
         store
             .save_ai_session(AiSession {
                 id: session_id,
-                path: document_path.clone(),
                 title: "session".to_string(),
-                page: 1,
                 messages: vec![AiSessionMessage {
                     role: AiSessionRole::User,
                     content: "message".to_string(),
@@ -2236,6 +2168,8 @@ fn persists_non_utf8_paths_for_all_path_records() {
                     references: Vec::new(),
                     occurrences: Vec::new(),
                     images: Vec::new(),
+                    document_path: Some(document_path.clone()),
+                    document_label: Some("normalized.pdf".to_string()),
                     agent_parts: Vec::new(),
                 }],
                 queued_messages: Vec::new(),
@@ -2252,7 +2186,10 @@ fn persists_non_utf8_paths_for_all_path_records() {
         assert_eq!(store.bookmarks()[0].path, normalized);
         assert_eq!(store.highlights_for(&document_path)[0].path, normalized);
         assert_eq!(store.notes_for(&document_path)[0].path, normalized);
-        assert_eq!(store.ai_sessions_for(&document_path)[0].path, normalized);
+        assert_eq!(
+            store.ai_sessions()[0].messages[0].document_path.as_ref(),
+            Some(&normalized)
+        );
     }
 
     let _ = fs::remove_file(database_path);

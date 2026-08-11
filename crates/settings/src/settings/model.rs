@@ -238,6 +238,13 @@ impl Settings {
             }
 
             if let Some(quick_ask) = ai.get("quick_ask").and_then(KdlNode::children) {
+                if let Some(value) = quick_ask
+                    .get_arg("position")
+                    .and_then(KdlValue::as_string)
+                    .and_then(QuickAskPosition::from_str)
+                {
+                    settings.ai.quick_ask.position = value;
+                }
                 if let Some(value) = quick_ask.get_arg("transparency").and_then(value_to_f32) {
                     settings.ai.quick_ask.transparency = value;
                 }
@@ -369,7 +376,7 @@ impl Settings {
                 .get_arg("target_language")
                 .and_then(KdlValue::as_string)
             {
-                settings.translation.target_language = value.to_string();
+                settings.translation.target_language = TranslationTargetLanguage::parse(value);
             }
             if let Some(value) = translation
                 .get_arg("document_mode")
@@ -676,6 +683,11 @@ impl Settings {
                 let quick_ask_children = quick_ask.ensure_children();
                 push_value_node(
                     quick_ask_children,
+                    "position",
+                    self.ai.quick_ask.position.as_str(),
+                );
+                push_value_node(
+                    quick_ask_children,
                     "transparency",
                     self.ai.quick_ask.transparency as f64,
                 );
@@ -723,7 +735,7 @@ impl Settings {
             push_value_node(
                 translation_children,
                 "target_language",
-                self.translation.target_language.clone(),
+                self.translation.target_language.as_str(),
             );
             push_value_node(
                 translation_children,

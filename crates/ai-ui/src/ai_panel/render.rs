@@ -403,22 +403,12 @@ impl Render for AiPanel {
                     .text_size(ui_rems(12.0))
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
+                            .flex_1()
                             .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(ui_rems(10.0))
-                                    .text_color(theme.muted_foreground)
-                                    .child(tr("ai-title")),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(ui_rems(13.0))
-                                    .text_color(theme.foreground)
-                                    .child(session_title),
-                            ),
+                            .truncate()
+                            .text_size(ui_rems(13.0))
+                            .text_color(theme.foreground)
+                            .child(session_title),
                     )
                     .child(
                         div()

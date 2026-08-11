@@ -1,5 +1,46 @@
 use super::*;
 
+impl DocumentView {
+    pub(super) fn sync_inherited_target_language(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if cx
+            .global::<LibraryStore>()
+            .document_target_language(&self.path)
+            .is_some()
+        {
+            return;
+        }
+        let target = cx
+            .global::<SettingsStore>()
+            .settings
+            .translation
+            .resolved_target_language();
+        let Ok(target) = LanguageCode::new(target) else {
+            return;
+        };
+        if self.target_language == target.as_str() {
+            return;
+        }
+        self.target_language = target.as_str().to_string();
+        for select in [
+            self.translation_popup_language_select.as_ref(),
+            self.pinned_translation_language_select.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let value = self.target_language.clone();
+            select.state.update(cx, |select, cx| {
+                select.set_selected_value(&value, window, cx);
+            });
+        }
+        cx.notify();
+    }
+}
+
 fn translation_hover_region_id(page_index: usize, namespace: &str, source_id: &str) -> String {
     format!("page:{page_index}:{namespace}:{source_id}")
 }
@@ -249,21 +290,22 @@ impl DocumentView {
             .source_language
             .as_deref()
             .and_then(|language| LanguageCode::new(language).ok());
-        let target_language = match LanguageCode::new(&settings.translation.target_language) {
-            Ok(language) => language,
-            Err(_) => {
-                let source_path = self.path.clone();
-                self.document_translation_jobs.update(cx, |jobs, cx| {
-                    jobs.report_preflight_error(
-                        source_path,
-                        DocumentTranslationOpenMode::Document,
-                        "Choose a valid target language in Translation Settings.",
-                        cx,
-                    );
-                });
-                return;
-            }
-        };
+        let target_language =
+            match LanguageCode::new(settings.translation.resolved_target_language()) {
+                Ok(language) => language,
+                Err(_) => {
+                    let source_path = self.path.clone();
+                    self.document_translation_jobs.update(cx, |jobs, cx| {
+                        jobs.report_preflight_error(
+                            source_path,
+                            DocumentTranslationOpenMode::Document,
+                            "Choose a valid target language in Translation Settings.",
+                            cx,
+                        );
+                    });
+                    return;
+                }
+            };
         let mode = settings.translation.document_mode;
         let request = PdfTranslationSessionRequest {
             source_path,
@@ -1002,6 +1044,16 @@ impl DocumentView {
             return;
         };
         if self.target_language == target_language.as_str() {
+            if cx
+                .global::<LibraryStore>()
+                .document_target_language(&self.path)
+                .is_none()
+                && let Err(error) = cx
+                    .global_mut::<LibraryStore>()
+                    .set_document_target_language(&self.path, target_language.as_str())
+            {
+                eprintln!("failed to save document translation language: {error:#}");
+            }
             return;
         }
         if self.translation_session_id.is_some() {

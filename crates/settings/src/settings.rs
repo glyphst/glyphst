@@ -40,7 +40,6 @@ const MIN_QUICK_ASK_TRANSPARENCY: f32 = 0.0;
 const MAX_QUICK_ASK_TRANSPARENCY: f32 = 1.0;
 const MIN_QUICK_ASK_TEXT_SIZE: f32 = 8.0;
 const MAX_QUICK_ASK_TEXT_SIZE: f32 = 32.0;
-const DEFAULT_TRANSLATION_TARGET_LANGUAGE: &str = "en";
 const DEFAULT_PINNED_TRANSLATION_WIDTH: f32 = 360.0;
 const MIN_PINNED_TRANSLATION_WIDTH: f32 = 240.0;
 const MAX_PINNED_TRANSLATION_WIDTH: f32 = 640.0;
@@ -67,7 +66,7 @@ mod translation;
 pub use ai::{
     AiApiStyle, AiCapabilityOverride, AiCapabilitySupport, AiModel, AiModelCapabilities,
     AiProvider, AiProviderConfig, AiSettings, AiThinkingLevel, ModelRef, PageImageQuality,
-    PageTextFormat, QuickAskSettings, ResolvedAiConfig,
+    PageTextFormat, QuickAskPosition, QuickAskSettings, ResolvedAiConfig,
 };
 pub use general::{
     AppLanguage, BehaviorSettings, CopyFormat, FontSettings, KeyBindingOverride, KeymapPreset,
@@ -81,7 +80,7 @@ pub use store::{SettingsStore, setup_ui_font, sync_component_theme};
 pub use translation::{
     DocumentTranslationMode, PdfContentReviewMode, PdfContentReviewSettings,
     PinnedTranslationSettings, TranslationBoxCorner, TranslationProvider,
-    TranslationProviderConfig, TranslationSettings,
+    TranslationProviderConfig, TranslationSettings, TranslationTargetLanguage,
 };
 
 #[cfg(test)]

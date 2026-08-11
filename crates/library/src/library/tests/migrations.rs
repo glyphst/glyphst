@@ -74,9 +74,7 @@ fn migrates_legacy_storage_without_replacing_legacy_rows() {
     };
     let session = AiSession {
         id: 1,
-        path: document_path.clone(),
         title: "legacy session".to_string(),
-        page: 1,
         messages: vec![AiSessionMessage {
             role: AiSessionRole::User,
             content: "legacy message".to_string(),
@@ -84,6 +82,8 @@ fn migrates_legacy_storage_without_replacing_legacy_rows() {
             references: Vec::new(),
             occurrences: Vec::new(),
             images: Vec::new(),
+            document_path: None,
+            document_label: None,
             agent_parts: Vec::new(),
         }],
         queued_messages: Vec::new(),
@@ -178,9 +178,9 @@ fn migrates_legacy_storage_without_replacing_legacy_rows() {
                     session.id,
                     encode(&LegacyAiSession {
                         id: session.id,
-                        path: session.path.clone(),
+                        path: document_path.clone(),
                         title: session.title.clone(),
-                        page: session.page,
+                        page: 1,
                         messages: session
                             .messages
                             .iter()
@@ -247,7 +247,9 @@ fn migrates_legacy_storage_without_replacing_legacy_rows() {
             vec![highlight.clone()]
         );
         assert_eq!(store.notes_for(&document_path), vec![note.clone()]);
-        assert_eq!(store.ai_sessions_for(&document_path), vec![session.clone()]);
+        // Global V6 chat intentionally starts fresh instead of importing
+        // document-bound legacy sessions.
+        assert!(store.ai_sessions().is_empty());
         assert_eq!(store.sidebar_widths(), Some(widths));
         assert!(store.library_items().is_empty());
     }
