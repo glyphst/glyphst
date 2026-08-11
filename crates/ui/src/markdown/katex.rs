@@ -68,8 +68,8 @@ pub(super) struct KatexState {
 }
 
 impl KatexState {
-    pub(super) fn update_source(&mut self, source: &str) {
-        let parsed_occurrences = extract_math_occurrences(source);
+    pub(super) fn update_source(&mut self, source: &str, extensions: &MarkdownExtensions) {
+        let parsed_occurrences = extract_math_occurrences(source, extensions);
         let old_occurrences = std::mem::take(&mut self.occurrences);
         let can_migrate_rendered_keys = old_occurrences.len() == parsed_occurrences.len();
 
@@ -395,11 +395,11 @@ fn render_math_svg(contents: &MathContents) -> Result<String, SharedString> {
     ))
 }
 
-fn extract_math_occurrences(source: &str) -> Vec<(usize, SharedString, MathMode)> {
-    let mut options = ::markdown::ParseOptions::gfm();
-    options.constructs.math_flow = true;
-    options.constructs.math_text = true;
-    let Ok(root) = ::markdown::to_mdast(source, &options) else {
+fn extract_math_occurrences(
+    source: &str,
+    extensions: &MarkdownExtensions,
+) -> Vec<(usize, SharedString, MathMode)> {
+    let Ok(root) = extensions.parse_ast(source) else {
         return Vec::new();
     };
 
@@ -447,7 +447,10 @@ fn source_for_position<'a>(node: &markdown_ast::Node, source: &'a str) -> Option
 }
 
 fn mode_for_inline_source(source: &str) -> MathMode {
-    if source.starts_with("$$") && source.ends_with("$$") && source.len() >= 4 {
+    if ((source.starts_with("$$") && source.ends_with("$$"))
+        || (source.starts_with("\\[") && source.ends_with("\\]")))
+        && source.len() >= 4
+    {
         MathMode::Display
     } else {
         MathMode::Inline
@@ -529,15 +532,60 @@ mod tests {
     }
 
     #[test]
-    fn extracts_inline_and_display_math_occurrences() {
-        let source = "Inline $x^2$\n\n$$y$$";
-        let occurrences = extract_math_occurrences(source);
-        assert_eq!(occurrences.len(), 2);
+    fn extracts_dollar_and_latex_math_occurrences() {
+        let source = r"Inline $x^2$ and \(z\)
+
+$$y$$
+
+\[
+w
+\]
+
+\[q\]";
+        let extensions = MarkdownExtensions::default().math();
+        let occurrences = extract_math_occurrences(source, &extensions);
+        assert_eq!(occurrences.len(), 5);
         assert_eq!(occurrences[0].0, "Inline ".len());
         assert_eq!(occurrences[0].1, "x^2");
         assert_eq!(occurrences[0].2, MathMode::Inline);
-        assert_eq!(occurrences[1].1, "y");
-        assert_eq!(occurrences[1].2, MathMode::Display);
+        assert_eq!(occurrences[1].0, source.find(r"\(z\)").unwrap());
+        assert_eq!(occurrences[1].1, "z");
+        assert_eq!(occurrences[1].2, MathMode::Inline);
+        assert_eq!(occurrences[2].1, "y");
+        assert_eq!(occurrences[2].2, MathMode::Display);
+        assert_eq!(occurrences[3].1, "w");
+        assert_eq!(occurrences[3].2, MathMode::Display);
+        assert_eq!(occurrences[4].1, "q");
+        assert_eq!(occurrences[4].2, MathMode::Display);
+    }
+
+    #[test]
+    fn extracts_display_formula_containing_markdown_heading_marker() {
+        let source = r"\[
+\boxed{
+C_{\text{R-SWA}}(T)
+=
+L_m+\min(n,T)
+\leq L_m+n
+}
+\tag{6}
+\]";
+        let extensions = MarkdownExtensions::default().math();
+        let occurrences = extract_math_occurrences(source, &extensions);
+
+        assert_eq!(occurrences.len(), 1);
+        assert_eq!(occurrences[0].0, 0);
+        assert_eq!(occurrences[0].2, MathMode::Display);
+        assert_eq!(
+            occurrences[0].1,
+            r"\boxed{
+C_{\text{R-SWA}}(T)
+=
+L_m+\min(n,T)
+\leq L_m+n
+}
+\tag{6}"
+        );
     }
 
     #[gpui::test]
@@ -552,7 +600,7 @@ mod tests {
         let (_, cx) = cx.add_window_view(|_, _| TestRoot);
         let markdown = cx.new(|cx| {
             Markdown::new_with_features(
-                "$x$ $y$ $z$".into(),
+                r"\(x\) \(y\) \(z\)".into(),
                 super::super::MarkdownFeatures {
                     math: true,
                     mermaid: false,
@@ -560,14 +608,17 @@ mod tests {
                 cx,
             )
         });
-        let y_start = "$x$ ".len();
+        let y_start = r"\(x\) ".len();
         let old_y = math_contents("y", MathMode::Inline, 1_400);
         let new_y = math_contents("y^2", MathMode::Inline, 1_400);
         let image = mock_render_image(cx);
 
         markdown.update(cx, |markdown, cx| {
             seed_rendered_cache(&mut markdown.katex, y_start, old_y, image.clone());
-            markdown.katex.update_source("$x$ $y^2$ $z$");
+            let extensions = markdown.extensions.clone();
+            markdown
+                .katex
+                .update_source(r"\(x\) \(y^2\) \(z\)", &extensions);
             markdown.katex.ensure_cached_contents(y_start, &new_y, cx);
             assert_eq!(
                 markdown
@@ -608,7 +659,8 @@ mod tests {
 
         markdown.update(cx, |markdown, cx| {
             seed_rendered_cache(&mut markdown.katex, old_z_start, old_z, image);
-            markdown.katex.update_source("$x$ $y$ $z$");
+            let extensions = markdown.extensions.clone();
+            markdown.katex.update_source("$x$ $y$ $z$", &extensions);
             markdown
                 .katex
                 .ensure_cached_contents(old_z_start, &new_y, cx);
@@ -636,5 +688,22 @@ mod tests {
             assert!(svg.contains("<svg"));
             assert!(svg.contains("<path"));
         }
+
+        let svg = render_math_svg(&MathContents {
+            contents: r"\boxed{
+C_{\text{R-SWA}}(T)
+=
+L_m+\min(n,T)
+\leq L_m+n
+}
+\tag{6}"
+                .into(),
+            mode: MathMode::Display,
+            font_size: 1_400,
+            color: [32, 48, 64, 255],
+        })
+        .expect("AI-style display formula should render");
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("<path"));
     }
 }

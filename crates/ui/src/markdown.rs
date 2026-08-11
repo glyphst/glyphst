@@ -112,7 +112,7 @@ impl Markdown {
         let extensions = embedded::extensions(features, cx.weak_entity());
         let mut katex = katex::KatexState::default();
         if features.math {
-            katex.update_source(source.as_ref());
+            katex.update_source(source.as_ref(), &extensions);
         }
         Self {
             source,
@@ -140,7 +140,7 @@ impl Markdown {
         self.text_view
             .update(cx, |state, cx| state.set_text(source.as_ref(), cx));
         if self.features.math {
-            self.katex.update_source(source.as_ref());
+            self.katex.update_source(source.as_ref(), &self.extensions);
         }
         self.source = source;
         self.embedded.source_changed();
@@ -346,6 +346,112 @@ mod tests {
         assert!(
             formula.bottom() <= footer.top(),
             "formula overlapped content after the Markdown message: formula={formula:?}, footer={footer:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn ai_style_math_message_stays_within_layout_after_render(cx: &mut TestAppContext) {
+        const SOURCE: &str = r#"## Most important formula
+
+The paper’s central result is the **bounded KV-cache size** of Reference Sliding Window Attention (R-SWA):
+
+\[
+\boxed{
+C_{\text{R-SWA}}(T)
+=
+L_m+\min(n,T)
+\leq L_m+n
+}
+\tag{6}
+\]
+
+where:
+
+- \(T\): number of generated output tokens,
+- \(L_m\): fixed prefix length containing the visual and prompt tokens,
+- \(n\): fixed sliding-window width over recently generated tokens.
+
+### Why it matters
+
+With standard multi-head attention, the cache grows linearly:
+
+\[
+C_{\text{MHA}}(T)=L_m+T.
+\]
+
+R-SWA instead keeps **all fixed reference tokens but only the latest \(n\) output tokens**. Thus, once \(T\ge n\), its KV cache stays capped at \(L_m+n\), regardless of how long generation continues. This is the mechanism that enables the paper’s “unlimited” long-horizon OCR claim (pp. 6–7)."#;
+
+        struct MathMessageLayoutRoot {
+            markdown: Entity<Markdown>,
+        }
+
+        impl Render for MathMessageLayoutRoot {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let mut base_text_style = window.text_style();
+                base_text_style.font_family = ".ZedMono".into();
+                base_text_style.font_size = px(17.).into();
+                base_text_style.line_height = px(29.).into();
+                let style = MarkdownStyle::from_theme(cx.theme().colors, base_text_style);
+
+                div()
+                    .w(px(390.))
+                    .child(
+                        div()
+                            .debug_selector(|| "math-message-layout-body".into())
+                            .w_full()
+                            .px_2()
+                            .child(MarkdownElement::new(self.markdown.clone(), style)),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "math-message-layout-footer".into())
+                            .h(px(1.)),
+                    )
+            }
+        }
+
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|cx| MathMessageLayoutRoot {
+                markdown: cx.new(|cx| {
+                    Markdown::new_with_features(
+                        SOURCE.into(),
+                        MarkdownFeatures {
+                            math: true,
+                            mermaid: false,
+                        },
+                        cx,
+                    )
+                }),
+            });
+            gpui_component::Root::new(content, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let body = cx.debug_bounds("math-message-layout-body").unwrap();
+        let footer = cx.debug_bounds("math-message-layout-footer").unwrap();
+        let formula = cx
+            .debug_bounds("markdown-math")
+            .expect("rendered formula in AI-style message");
+        assert!(
+            formula.left() >= body.left() - px(0.5)
+                && formula.right() <= body.right() + px(0.5)
+                && formula.top() >= body.top() - px(0.5)
+                && formula.bottom() <= body.bottom() + px(0.5),
+            "rendered formula escaped the AI-message body: formula={formula:?}, body={body:?}"
+        );
+        assert!(
+            body.bottom() <= footer.top(),
+            "AI-style math message overlapped following content: body={body:?}, footer={footer:?}"
         );
     }
 }
