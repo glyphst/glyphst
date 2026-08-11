@@ -283,12 +283,16 @@ mod tests {
 
         impl Render for MathLayoutRoot {
             fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let style = MarkdownStyle::from_theme(cx.theme().colors, window.text_style());
+                let mut base_text_style = window.text_style();
+                base_text_style.font_size = px(13.).into();
+                let style = MarkdownStyle::from_theme(cx.theme().colors, base_text_style);
                 div()
-                    .w(px(390.))
+                    .w(px(350.))
                     .child(
                         div()
                             .debug_selector(|| "math-layout-body".into())
+                            .w_full()
+                            .px_2()
                             .child(MarkdownElement::new(self.markdown.clone(), style)),
                     )
                     .child(
@@ -334,8 +338,10 @@ mod tests {
         let body = cx.debug_bounds("math-layout-body").unwrap();
         let footer = cx.debug_bounds("math-layout-footer").unwrap();
         assert!(
-            formula.bottom() <= body.bottom(),
-            "formula escaped the Markdown body's measured height: formula={formula:?}, body={body:?}"
+            formula.left() >= body.left()
+                && formula.right() <= body.right()
+                && formula.bottom() <= body.bottom(),
+            "formula escaped the padded Markdown body: formula={formula:?}, body={body:?}"
         );
         assert!(
             formula.bottom() <= footer.top(),
