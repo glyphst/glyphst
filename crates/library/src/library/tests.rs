@@ -194,6 +194,8 @@ fn persists_history_bookmarks_and_highlights() {
                         request_content: Some("Explain @selection\n\nAttached context".to_string()),
                         references: Vec::new(),
                         occurrences: Vec::new(),
+                        images: Vec::new(),
+                        agent_parts: Vec::new(),
                     },
                     AiSessionMessage {
                         role: AiSessionRole::Assistant,
@@ -201,8 +203,11 @@ fn persists_history_bookmarks_and_highlights() {
                         request_content: None,
                         references: Vec::new(),
                         occurrences: Vec::new(),
+                        images: Vec::new(),
+                        agent_parts: Vec::new(),
                     },
                 ],
+                queued_messages: Vec::new(),
                 created: 100,
                 updated: 101,
             })
@@ -610,6 +615,7 @@ fn failed_edits_do_not_move_and_conflicts_clear_history() {
         library: Library::default(),
         database: None,
         managed_library_root: None,
+        ai_image_memory: HashMap::new(),
         startup_error: Some("database startup failed".to_string()),
         document_edit_histories: HashMap::new(),
         next_document_edit_sequence: 0,
@@ -772,6 +778,14 @@ fn loads_v1_ai_sessions_and_migrates_them_without_references() {
             read_txn
                 .open_table(STORAGE_MIGRATIONS_TABLE)
                 .unwrap()
+                .get(AI_SESSIONS_V5_MIGRATION_KEY)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            read_txn
+                .open_table(STORAGE_MIGRATIONS_TABLE)
+                .unwrap()
                 .get(AI_SESSIONS_V3_MIGRATION_KEY)
                 .unwrap()
                 .is_some()
@@ -836,6 +850,15 @@ fn loads_v1_ai_sessions_and_migrates_them_without_references() {
                 .occurrences
                 .is_empty()
         );
+        let v5_value = read_txn
+            .open_table(AI_SESSIONS_V5_TABLE)
+            .unwrap()
+            .get(stored_session.id)
+            .unwrap()
+            .unwrap();
+        let v5 = decode::<StoredAiSessionV5>(v5_value.value()).unwrap();
+        assert!(v5.messages[0].occurrences.is_empty());
+        assert!(v5.messages[0].images.is_empty());
     }
 
     {
@@ -992,7 +1015,10 @@ fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
                     request_content: Some("Compare the attached context".to_string()),
                     references: references.clone(),
                     occurrences: Vec::new(),
+                    images: Vec::new(),
+                    agent_parts: Vec::new(),
                 }],
+                queued_messages: Vec::new(),
                 created: 20,
                 updated: 21,
             })
@@ -1042,7 +1068,10 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
                     request_content: Some("Compare the attached selections".to_string()),
                     references: vec![reference.clone(), reference],
                     occurrences: occurrences.clone(),
+                    images: Vec::new(),
+                    agent_parts: Vec::new(),
                 }],
+                queued_messages: Vec::new(),
                 created: 30,
                 updated: 31,
             })
@@ -1061,9 +1090,9 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
 }
 
 #[test]
-fn round_trips_v4_selected_page_snapshots() {
-    let database_path = temp_library_path("ai-session-v4-selected-pages");
-    let document_path = PathBuf::from("/tmp/v4-selected-pages.pdf");
+fn round_trips_v5_selected_page_snapshots() {
+    let database_path = temp_library_path("ai-session-v5-selected-pages");
+    let document_path = PathBuf::from("/tmp/v5-selected-pages.pdf");
     let occurrences = vec![
         AiMentionOccurrence {
             start: 0,
@@ -1094,7 +1123,10 @@ fn round_trips_v4_selected_page_snapshots() {
                     request_content: Some("Compare the attached pages".to_string()),
                     references: Vec::new(),
                     occurrences: occurrences.clone(),
+                    images: Vec::new(),
+                    agent_parts: Vec::new(),
                 }],
+                queued_messages: Vec::new(),
                 created: 35,
                 updated: 36,
             })
@@ -1112,17 +1144,133 @@ fn round_trips_v4_selected_page_snapshots() {
         let database = Database::open(&database_path).unwrap();
         let read_txn = database.begin_read().unwrap();
         let stored = read_txn
-            .open_table(AI_SESSIONS_V4_TABLE)
+            .open_table(AI_SESSIONS_V5_TABLE)
             .unwrap()
             .get(session_id)
             .unwrap()
             .unwrap();
-        let stored = decode::<StoredAiSessionV4>(stored.value()).unwrap();
-        assert_eq!(stored.version, AI_SESSIONS_V4_VERSION);
+        let stored = decode::<StoredAiSessionV5>(stored.value()).unwrap();
+        assert_eq!(stored.version, AI_SESSIONS_V5_VERSION);
         assert_eq!(stored.messages[0].occurrences, occurrences);
     }
 
     let _ = fs::remove_file(database_path);
+}
+
+#[test]
+fn v5_round_trips_managed_images_agent_trace_and_queue() {
+    let database_path = temp_library_path("ai-session-v5-images");
+    let managed_root = database_path.with_extension("managed-library");
+    let document_path = PathBuf::from("/tmp/v5-images.pdf");
+    let bytes = b"test-png-payload".to_vec();
+    let session_id;
+    let image;
+
+    {
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        image = store
+            .install_ai_image(Some("figure.png"), "image/png", 12, 8, &bytes)
+            .unwrap();
+        session_id = store.next_ai_session_id();
+        store
+            .save_ai_session(AiSession {
+                id: session_id,
+                path: document_path.clone(),
+                title: "Image trace".to_string(),
+                page: 2,
+                messages: vec![
+                    AiSessionMessage {
+                        role: AiSessionRole::User,
+                        content: "What is shown?".to_string(),
+                        request_content: None,
+                        references: Vec::new(),
+                        occurrences: Vec::new(),
+                        images: vec![image.clone()],
+                        agent_parts: Vec::new(),
+                    },
+                    AiSessionMessage {
+                        role: AiSessionRole::Assistant,
+                        content: "I inspected the page.".to_string(),
+                        request_content: None,
+                        references: Vec::new(),
+                        occurrences: Vec::new(),
+                        images: Vec::new(),
+                        agent_parts: vec![
+                            AiSessionAgentPart::ToolCall {
+                                id: "call-1".to_string(),
+                                name: "render_document_pages".to_string(),
+                                arguments: "{\"pages\":[2]}".to_string(),
+                                status: AiSessionToolStatus::Completed,
+                            },
+                            AiSessionAgentPart::ToolResult {
+                                call_id: "call-1".to_string(),
+                                tool_name: "render_document_pages".to_string(),
+                                content: vec![AiSessionToolResultPart::Image(image.clone())],
+                                is_error: false,
+                            },
+                            AiSessionAgentPart::AssistantText("I inspected the page.".to_string()),
+                        ],
+                    },
+                ],
+                queued_messages: vec![AiSessionMessage {
+                    role: AiSessionRole::User,
+                    content: "Then compare it.".to_string(),
+                    request_content: None,
+                    references: Vec::new(),
+                    occurrences: Vec::new(),
+                    images: vec![image.clone()],
+                    agent_parts: Vec::new(),
+                }],
+                created: 50,
+                updated: 51,
+            })
+            .unwrap();
+    }
+
+    let asset_path = managed_root
+        .join("ai-images")
+        .join(format!("{}.png", image.asset_id));
+    assert!(asset_path.is_file());
+    {
+        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let sessions = store.ai_sessions_for(&document_path);
+        let session = &sessions[0];
+        assert_eq!(session.queued_messages.len(), 1);
+        assert_eq!(session.messages[0].images, vec![image.clone()]);
+        assert_eq!(store.load_ai_image(&image).unwrap(), bytes);
+        assert!(matches!(
+            session.messages[1].agent_parts[1],
+            AiSessionAgentPart::ToolResult { .. }
+        ));
+    }
+
+    {
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        store
+            .save_ai_session(AiSession {
+                id: session_id,
+                path: document_path,
+                title: "Image trace".to_string(),
+                page: 2,
+                messages: vec![AiSessionMessage {
+                    role: AiSessionRole::User,
+                    content: "No image now".to_string(),
+                    request_content: None,
+                    references: Vec::new(),
+                    occurrences: Vec::new(),
+                    images: Vec::new(),
+                    agent_parts: Vec::new(),
+                }],
+                queued_messages: Vec::new(),
+                created: 50,
+                updated: 52,
+            })
+            .unwrap();
+    }
+    assert!(!asset_path.exists());
+
+    let _ = fs::remove_file(database_path);
+    let _ = fs::remove_dir_all(managed_root);
 }
 
 #[test]
@@ -1170,7 +1318,10 @@ fn round_trips_v3_region_occurrence_geometry() {
                         reference: region_reference.clone(),
                     }],
                     occurrences: vec![occurrence.clone()],
+                    images: Vec::new(),
+                    agent_parts: Vec::new(),
                 }],
+                queued_messages: Vec::new(),
                 created: 40,
                 updated: 41,
             })
@@ -1533,6 +1684,7 @@ fn history_save_fails_when_database_is_unavailable() {
         library: Library::default(),
         database: None,
         managed_library_root: None,
+        ai_image_memory: HashMap::new(),
         startup_error: Some("database startup failed".to_string()),
         document_edit_histories: HashMap::new(),
         next_document_edit_sequence: 0,
@@ -1566,6 +1718,7 @@ fn document_preference_writes_fail_when_database_is_unavailable() {
         library: Library::default(),
         database: None,
         managed_library_root: None,
+        ai_image_memory: HashMap::new(),
         startup_error: Some("database startup failed".to_string()),
         document_edit_histories: HashMap::new(),
         next_document_edit_sequence: 0,
@@ -2082,7 +2235,10 @@ fn persists_non_utf8_paths_for_all_path_records() {
                     request_content: None,
                     references: Vec::new(),
                     occurrences: Vec::new(),
+                    images: Vec::new(),
+                    agent_parts: Vec::new(),
                 }],
+                queued_messages: Vec::new(),
                 created: 1,
                 updated: 1,
             })

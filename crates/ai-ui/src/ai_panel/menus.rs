@@ -208,6 +208,29 @@ impl AiPanel {
     ) -> PopupMenu {
         menu = menu.min_w(px(260.0)).max_w(px(320.0));
 
+        menu = menu
+            .item(
+                PopupMenuItem::new(tr("ai-attach-image-file"))
+                    .icon(IconName::Image)
+                    .on_click({
+                        let panel = panel.clone();
+                        move |_, _, cx| {
+                            panel.update(cx, |this, cx| this.pick_user_images(cx));
+                        }
+                    }),
+            )
+            .item(
+                PopupMenuItem::new(tr("ai-paste-image"))
+                    .icon(IconName::Copy)
+                    .on_click({
+                        let panel = panel.clone();
+                        move |_, _, cx| {
+                            panel.update(cx, |this, cx| this.paste_user_image(cx));
+                        }
+                    }),
+            )
+            .separator();
+
         for mention in MentionKind::ALL.into_iter().filter(|mention| {
             mention_is_available(
                 *mention,
@@ -365,6 +388,13 @@ impl AiPanel {
                         .into_any_element(),
                     ModelMenuEntry::Model(provider, model) => {
                         let selected = provider == selected_provider && model.id == selected_model;
+                        let image_support = model.image_input_support(provider);
+                        let tool_support = model.tool_use_support(provider);
+                        let capability_marker = |support| match support {
+                            AiCapabilitySupport::Supported => "✓",
+                            AiCapabilitySupport::Unsupported => "—",
+                            AiCapabilitySupport::Unknown => "?",
+                        };
                         let model_for_click = model.id.clone();
                         let panel = state.panel.clone();
                         let popover = state.popover.clone();
@@ -402,12 +432,26 @@ impl AiPanel {
                             .child(div().truncate().min_w_0().child(model.name))
                             .child(
                                 div()
+                                    .flex()
                                     .flex_none()
-                                    .max_w(px(96.0))
-                                    .truncate()
-                                    .text_size(ui_rems(11.0))
+                                    .items_center()
+                                    .gap_1()
+                                    .text_size(ui_rems(9.0))
                                     .text_color(theme.muted_foreground)
-                                    .child(model.group),
+                                    .child(format!(
+                                        "{}{} {}{}",
+                                        tr("ai-capability-image-short"),
+                                        capability_marker(image_support),
+                                        tr("ai-capability-tool-short"),
+                                        capability_marker(tool_support)
+                                    ))
+                                    .child(
+                                        div()
+                                            .max_w(px(72.0))
+                                            .truncate()
+                                            .text_size(ui_rems(11.0))
+                                            .child(model.group),
+                                    ),
                             )
                             .into_any_element()
                     }

@@ -184,12 +184,10 @@ fn configures_native_thinking_for_supported_models() {
 fn responses_payload_uses_typed_text_and_image_parts() {
     let parts = vec![
         RequestPart::Text("question".to_string()),
-        RequestPart::Image(ImageContext::new(
-            MentionKind::SelectedPagesImage,
-            Some(2),
-            "image/jpeg",
-            vec![1, 2, 3],
-        )),
+        RequestPart::Image {
+            media_type: "image/jpeg".to_string(),
+            bytes: vec![1, 2, 3].into(),
+        },
     ];
     let user = responses_message_content(Role::User, &parts);
     assert_eq!(user[0], json!({"type": "input_text", "text": "question"}));

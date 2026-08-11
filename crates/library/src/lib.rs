@@ -1,7 +1,8 @@
 mod library;
 
 pub use library::{
-    AiMentionOccurrence, AiMentionReference, AiSession, AiSessionMessage, AiSessionRole, Bookmark,
+    AiMentionOccurrence, AiMentionReference, AiSession, AiSessionAgentPart, AiSessionImage,
+    AiSessionMessage, AiSessionRole, AiSessionToolResultPart, AiSessionToolStatus, Bookmark,
     BrowserPresentation, DocumentBrowserSize, DocumentEditRevision, DocumentFormat, DocumentId,
     DocumentPosition, DocumentPreferences, DocumentRotation, EpubReaderPreferences, Highlight,
     HighlightColor, HighlightRect, HistoryEntry, HistoryEntryPersistenceSnapshot, HomeDestination,

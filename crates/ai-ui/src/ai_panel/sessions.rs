@@ -93,12 +93,39 @@ impl AiPanel {
             .as_ref()
             .map(|failure| failure.assistant_index);
 
+        let (messages, queued_messages) = {
+            let library = cx.global_mut::<LibraryStore>();
+            let messages = match persisted_session_messages_with_assets(
+                &self.messages,
+                failed_assistant,
+                library,
+            ) {
+                Ok(messages) => messages,
+                Err(error) => {
+                    eprintln!("failed to persist AI session images: {error:#}");
+                    return;
+                }
+            };
+            let queued_messages = match persisted_session_messages_with_assets(
+                &self.queued_messages,
+                None,
+                library,
+            ) {
+                Ok(messages) => messages,
+                Err(error) => {
+                    eprintln!("failed to persist queued AI images: {error:#}");
+                    return;
+                }
+            };
+            (messages, queued_messages)
+        };
         let session = AiSession {
             id: self.session_id,
             path: self.document_path.clone(),
             title: self.session_title.clone(),
             page: self.current_page,
-            messages: persisted_session_messages(&self.messages, failed_assistant),
+            messages,
+            queued_messages,
             created: self.session_created,
             updated: self.session_updated,
         };
@@ -143,6 +170,10 @@ impl AiPanel {
         self.session_updated = 0;
         self.invalidate_mention_preview();
         self.messages.clear();
+        self.queued_messages.clear();
+        self.composer_images.clear();
+        self.tool_cards.clear();
+        self.expanded_tool_cards.clear();
         self.markdown_views.clear();
         self.content = SharedString::default();
         self.selected_range = 0..0;
@@ -183,34 +214,18 @@ impl AiPanel {
         self.session_created = session.created;
         self.session_updated = session.updated;
         self.current_page = session.page;
+        self.tool_cards.clear();
+        self.expanded_tool_cards.clear();
+        let library = cx.global::<LibraryStore>();
         self.messages = session
             .messages
             .into_iter()
-            .map(|message| {
-                let role = match message.role {
-                    AiSessionRole::User => Role::User,
-                    AiSessionRole::Assistant => Role::Assistant,
-                };
-                let references = message
-                    .references
-                    .iter()
-                    .filter_map(library_reference_to_ai)
-                    .collect();
-                let region_references = message
-                    .references
-                    .iter()
-                    .filter_map(library_reference_to_region)
-                    .collect();
-                let occurrences = message
-                    .occurrences
-                    .iter()
-                    .filter_map(library_occurrence_to_ai)
-                    .collect();
-                ChatMessage::from_persisted(role, message.content, message.request_content)
-                    .with_references(references)
-                    .with_region_references(region_references)
-                    .with_mention_occurrences(occurrences)
-            })
+            .map(|message| chat_message_from_session(message, library))
+            .collect();
+        self.queued_messages = session
+            .queued_messages
+            .into_iter()
+            .map(|message| chat_message_from_session(message, library))
             .collect();
         self.markdown_views = self
             .messages
@@ -232,6 +247,7 @@ impl AiPanel {
         self.selection_reversed = false;
         self.marked_range = None;
         self.composer_mentions.clear();
+        self.composer_images.clear();
         self.pending_title_task = None;
         self.generation_failure = None;
         self.active_generation = None;

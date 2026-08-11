@@ -622,3 +622,336 @@ impl DocumentView {
         Ok(bytes)
     }
 }
+
+impl AgentToolExecutor for DocumentAgentTools {
+    fn definitions(&self) -> Vec<AgentToolDefinition> {
+        let mut search = AgentToolDefinition::new(
+            "search_document",
+            "Search the open document for text. Returns concise matches with page numbers for PDFs and character locations for reflowable documents.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Text to search for"},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 20}
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        );
+        search.strict = false;
+        let mut read = AgentToolDefinition::new(
+            "read_document",
+            "Read text from the open document. For PDFs pass pages (1-based); for EPUB pass offset and max_chars. If omitted, reads near the current location.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "pages": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1},
+                        "maxItems": 12
+                    },
+                    "start_page": {"type": "integer", "minimum": 1},
+                    "end_page": {"type": "integer", "minimum": 1},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "max_chars": {"type": "integer", "minimum": 1, "maximum": 12000}
+                },
+                "additionalProperties": false
+            }),
+        );
+        read.strict = false;
+        let mut render = AgentToolDefinition::new(
+            "render_document_pages",
+            "Render one or more 1-based PDF pages as images. This tool is unavailable for EPUB documents.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "pages": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1},
+                        "minItems": 1
+                    }
+                },
+                "required": ["pages"],
+                "additionalProperties": false
+            }),
+        );
+        render.strict = false;
+        let mut definitions = vec![search, read];
+        if self.reflow_text.is_none() && matches!(self.document_layout, DocumentLayout::Fixed) {
+            definitions.push(render);
+        }
+        definitions
+    }
+
+    fn execute(
+        &self,
+        call: &AgentToolCall,
+        cancellation: &AgentCancellationToken,
+    ) -> AgentToolResult {
+        let result = match call.name.as_str() {
+            "search_document" => self.search_document(call, cancellation),
+            "read_document" => self.read_document(call, cancellation),
+            "render_document_pages" => self.render_document_pages(call, cancellation),
+            _ => Err(anyhow!("unknown document tool: {}", call.name)),
+        };
+        match result {
+            Ok(content) => AgentToolResult {
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                content,
+                is_error: false,
+            },
+            Err(error) => {
+                AgentToolResult::error(call.id.clone(), call.name.clone(), format!("{error:#}"))
+            }
+        }
+    }
+}
+
+impl DocumentAgentTools {
+    fn search_document(
+        &self,
+        call: &AgentToolCall,
+        cancellation: &AgentCancellationToken,
+    ) -> Result<Vec<AgentToolResultPart>> {
+        let arguments = call.arguments_json()?;
+        let query = arguments["query"]
+            .as_str()
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .ok_or_else(|| anyhow!("query must be a non-empty string"))?;
+        let max_results = arguments["max_results"].as_u64().unwrap_or(8).clamp(1, 20) as usize;
+        if cancellation.is_canceled() {
+            bail!("agent run canceled");
+        }
+
+        let mut matches = Vec::new();
+        if let Some(text) = &self.reflow_text {
+            let mut char_offset = 0usize;
+            for (line_index, line) in text.lines().enumerate() {
+                if cancellation.is_canceled() {
+                    bail!("agent run canceled");
+                }
+                if line.to_lowercase().contains(&query.to_lowercase()) {
+                    matches.push(format!(
+                        "- location {char_offset} (line {}): {}",
+                        line_index + 1,
+                        compact_tool_snippet(line, 420)
+                    ));
+                    if matches.len() >= max_results {
+                        break;
+                    }
+                }
+                char_offset = char_offset.saturating_add(line.chars().count() + 1);
+            }
+        } else {
+            let references = (1..=self.page_count)
+                .map(|page| MentionReference::new(MentionKind::Page, Some(page)))
+                .collect();
+            let pages = DocumentView::resolve_page_contexts(
+                &self.snapshot,
+                self.document_layout,
+                self.page_count,
+                self.text_format,
+                self.image_quality,
+                self.rotation,
+                references,
+            )?;
+            let query = query.to_lowercase();
+            for page in pages {
+                if cancellation.is_canceled() {
+                    bail!("agent run canceled");
+                }
+                let ResolvedPageContext::Text(page) = page else {
+                    continue;
+                };
+                for line in page.text.lines() {
+                    if line.to_lowercase().contains(&query) {
+                        matches.push(format!(
+                            "- page {}: {}",
+                            page.page.unwrap_or(0),
+                            compact_tool_snippet(line, 420)
+                        ));
+                        if matches.len() >= max_results {
+                            break;
+                        }
+                    }
+                }
+                if matches.len() >= max_results {
+                    break;
+                }
+            }
+        }
+        let text = if matches.is_empty() {
+            format!("No matches found for {query:?}.")
+        } else {
+            format!("Matches for {query:?}:\n{}", matches.join("\n"))
+        };
+        Ok(vec![AgentToolResultPart::Text(text)])
+    }
+
+    fn read_document(
+        &self,
+        call: &AgentToolCall,
+        cancellation: &AgentCancellationToken,
+    ) -> Result<Vec<AgentToolResultPart>> {
+        let arguments = call.arguments_json()?;
+        if cancellation.is_canceled() {
+            bail!("agent run canceled");
+        }
+        if let Some(text) = &self.reflow_text {
+            let offset = arguments["offset"].as_u64().unwrap_or(0) as usize;
+            let max_chars = arguments["max_chars"]
+                .as_u64()
+                .unwrap_or(8_000)
+                .clamp(1, 12_000) as usize;
+            let content = text
+                .chars()
+                .skip(offset)
+                .take(max_chars)
+                .collect::<String>();
+            if content.is_empty() {
+                bail!("offset {offset} is past the end of the document");
+            }
+            return Ok(vec![AgentToolResultPart::Text(format!(
+                "Document text at character offset {offset}:\n{content}"
+            ))]);
+        }
+
+        let pages = self.requested_pages(&arguments, 12, true)?;
+        let references = pages
+            .iter()
+            .map(|page| MentionReference::new(MentionKind::Page, Some(*page)))
+            .collect();
+        let resolved = DocumentView::resolve_page_contexts(
+            &self.snapshot,
+            self.document_layout,
+            self.page_count,
+            self.text_format,
+            self.image_quality,
+            self.rotation,
+            references,
+        )?;
+        let mut output = String::new();
+        for page in resolved {
+            if cancellation.is_canceled() {
+                bail!("agent run canceled");
+            }
+            let ResolvedPageContext::Text(page) = page else {
+                continue;
+            };
+            output.push_str(&format!(
+                "## Page {}\n\n{}\n\n",
+                page.page.unwrap_or(0),
+                page.text
+            ));
+        }
+        Ok(vec![AgentToolResultPart::Text(
+            output.trim_end().to_string(),
+        )])
+    }
+
+    fn render_document_pages(
+        &self,
+        call: &AgentToolCall,
+        cancellation: &AgentCancellationToken,
+    ) -> Result<Vec<AgentToolResultPart>> {
+        if self.reflow_text.is_some() || !matches!(self.document_layout, DocumentLayout::Fixed) {
+            bail!("render_document_pages is available only for PDF documents");
+        }
+        let arguments = call.arguments_json()?;
+        let pages = self.requested_pages(&arguments, self.page_image_limit, false)?;
+        let references = pages
+            .iter()
+            .map(|page| MentionReference::new(MentionKind::PageImage, Some(*page)))
+            .collect();
+        let resolved = DocumentView::resolve_page_contexts(
+            &self.snapshot,
+            self.document_layout,
+            self.page_count,
+            self.text_format,
+            self.image_quality,
+            self.rotation,
+            references,
+        )?;
+        let mut content = Vec::with_capacity(resolved.len() * 2);
+        for page in resolved {
+            if cancellation.is_canceled() {
+                bail!("agent run canceled");
+            }
+            let ResolvedPageContext::Image(image) = page else {
+                continue;
+            };
+            let decoded = image::load_from_memory(&image.bytes)
+                .context("failed to inspect rendered page image")?;
+            let (width, height) = decoded.dimensions();
+            let page_number = image.page.unwrap_or(0);
+            content.push(AgentToolResultPart::Text(format!(
+                "Rendered PDF page {page_number}."
+            )));
+            content.push(AgentToolResultPart::Image(
+                AgentImage::new(image.media_type, width, height, image.bytes)
+                    .with_name(format!("page-{page_number}.jpg")),
+            ));
+        }
+        Ok(content)
+    }
+
+    fn requested_pages(
+        &self,
+        arguments: &serde_json::Value,
+        limit: usize,
+        default_current: bool,
+    ) -> Result<Vec<usize>> {
+        let mut pages = arguments["pages"]
+            .as_array()
+            .map(|pages| {
+                pages
+                    .iter()
+                    .filter_map(serde_json::Value::as_u64)
+                    .map(|page| page as usize)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if pages.is_empty()
+            && let Some(start) = arguments["start_page"].as_u64()
+        {
+            let start = start as usize;
+            let end = arguments["end_page"].as_u64().unwrap_or(start as u64) as usize;
+            if end < start {
+                bail!("end_page must not be before start_page");
+            }
+            pages.extend(start..=end);
+        }
+        if pages.is_empty() && default_current {
+            pages.push(self.current_page.max(1));
+        }
+        pages.sort_unstable();
+        pages.dedup();
+        if pages.is_empty() {
+            bail!("at least one page is required");
+        }
+        if pages.len() > limit.max(1) {
+            bail!("too many pages requested: maximum is {}", limit.max(1));
+        }
+        if let Some(page) = pages
+            .iter()
+            .find(|page| **page == 0 || **page > self.page_count)
+        {
+            bail!(
+                "invalid page {page}: page must be between 1 and {}",
+                self.page_count
+            );
+        }
+        Ok(pages)
+    }
+}
+
+fn compact_tool_snippet(text: &str, max_chars: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= max_chars {
+        text
+    } else {
+        format!("{}…", text.chars().take(max_chars).collect::<String>())
+    }
+}

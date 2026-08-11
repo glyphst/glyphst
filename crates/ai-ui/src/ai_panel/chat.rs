@@ -8,7 +8,7 @@ impl AiPanel {
     ) -> Option<PreparedComposerMessage> {
         let (display_prompt, submitted_mentions) =
             trimmed_composer_content(&self.content, &self.composer_mentions);
-        if display_prompt.is_empty() {
+        if display_prompt.is_empty() && self.composer_images.is_empty() {
             return None;
         }
 
@@ -37,10 +37,13 @@ impl AiPanel {
                 },
             })
             .collect();
-        let user_message =
+        let mut user_message =
             ChatMessage::user(display_prompt.clone(), request_prompt, contexts, references)
                 .with_region_references(region_references)
                 .with_mention_occurrences(mention_occurrences);
+        for image in &self.composer_images {
+            user_message.attach_user_image(image.clone());
+        }
 
         Some(PreparedComposerMessage {
             display_prompt,
@@ -74,6 +77,15 @@ impl AiPanel {
             &user_message,
             self.page_count,
             ai_settings.page_image_limit,
+        ) {
+            self.show_validation_notice(error.to_string(), window, cx);
+            return;
+        }
+        if let Err(error) = validate_model_image_support(
+            self.messages[..editing.message_index]
+                .iter()
+                .chain(std::iter::once(&user_message)),
+            main_model_image_support(cx),
         ) {
             self.show_validation_notice(error.to_string(), window, cx);
             return;
@@ -118,6 +130,13 @@ impl AiPanel {
             self.messages[..prefix_len].iter(),
             self.page_count,
             page_image_limit,
+        ) {
+            self.show_validation_notice(error.to_string(), window, cx);
+            return;
+        }
+        if let Err(error) = validate_model_image_support(
+            self.messages[..prefix_len].iter(),
+            main_model_image_support(cx),
         ) {
             self.show_validation_notice(error.to_string(), window, cx);
             return;
@@ -173,6 +192,9 @@ impl AiPanel {
     fn truncate_messages(&mut self, len: usize) {
         self.messages.truncate(len);
         self.markdown_views.truncate(len);
+        self.tool_cards.retain(|index, _| *index < len);
+        self.expanded_tool_cards
+            .retain(|(message_index, _)| *message_index < len);
         debug_assert_eq!(self.messages.len(), self.markdown_views.len());
     }
 
@@ -200,6 +222,9 @@ impl AiPanel {
 
         self.stream_render_task = None;
         self.generation_id = self.generation_id.wrapping_add(1);
+        if let Some(cancellation) = self.agent_cancellation.take() {
+            cancellation.cancel();
+        }
         let target = GenerationTarget {
             id: self.generation_id,
             assistant_index,
@@ -224,7 +249,20 @@ impl AiPanel {
         .detach();
         cx.notify();
 
-        let settings = cx.global::<SettingsStore>().settings.ai.resolved_main();
+        let ai_settings = cx.global::<SettingsStore>().settings.ai.clone();
+        let settings = ai_settings.resolved_main();
+        let tool_support = ai_settings
+            .provider_config(settings.provider)
+            .model(&settings.model)
+            .map(|model| model.tool_use_support(settings.provider))
+            .unwrap_or_default();
+        let tools = tool_support
+            .is_supported()
+            .then(|| self.context_provider.agent_tools(cx))
+            .flatten();
+        let cancellation = AgentCancellationToken::default();
+        self.agent_cancellation = Some(cancellation.clone());
+        self.tool_cards.remove(&assistant_index);
         let mut request_messages = self.messages[..assistant_index].to_vec();
         let page_references = unresolved_page_references(&request_messages, self.page_count);
         let region_references = unresolved_region_references(&request_messages);
@@ -240,9 +278,9 @@ impl AiPanel {
                 Ok(resolved) => resolved,
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.apply_stream_event(
+                        this.apply_generation_event(
                             target,
-                            AiStreamEvent::Error(format!("{error:#}")),
+                            GenerationEvent::Error(format!("{error:#}")),
                             cx,
                         );
                         cx.notify();
@@ -254,9 +292,9 @@ impl AiPanel {
                 Ok(resolved) => resolved,
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.apply_stream_event(
+                        this.apply_generation_event(
                             target,
-                            AiStreamEvent::Error(format!("{error:#}")),
+                            GenerationEvent::Error(format!("{error:#}")),
                             cx,
                         );
                         cx.notify();
@@ -270,7 +308,11 @@ impl AiPanel {
                 &resolved_regions,
             ) {
                 let _ = this.update(cx, |this, cx| {
-                    this.apply_stream_event(target, AiStreamEvent::Error(error.to_string()), cx);
+                    this.apply_generation_event(
+                        target,
+                        GenerationEvent::Error(error.to_string()),
+                        cx,
+                    );
                     cx.notify();
                 });
                 return;
@@ -291,18 +333,34 @@ impl AiPanel {
                 return;
             }
 
-            let (tx, mut rx) = mpsc::unbounded::<AiStreamEvent>();
+            let agent_messages = request_messages
+                .iter()
+                .flat_map(ChatMessage::into_agent_messages)
+                .collect::<Vec<_>>();
+            let (tx, mut rx) = mpsc::unbounded::<GenerationEvent>();
             thread::spawn(move || {
-                let mut send_event =
-                    |event| tx.unbounded_send(event).map_err(|_| anyhow!("closed"));
-                let result =
-                    stream_completion(settings, request_messages, document, &mut send_event);
+                let mut send_event = |event| {
+                    tx.unbounded_send(GenerationEvent::Agent(event))
+                        .map_err(|_| anyhow!("closed"))
+                };
+                let result = run_agent(
+                    settings,
+                    agent_messages,
+                    document,
+                    tools,
+                    cancellation,
+                    AgentLimits::default(),
+                    &mut send_event,
+                );
                 match result {
-                    Ok(()) => {
-                        let _ = send_event(AiStreamEvent::Done);
+                    Ok(result) => {
+                        let _ = tx.unbounded_send(GenerationEvent::Finished {
+                            trace: result.appended_messages,
+                            limit_reached: result.limit_reached,
+                        });
                     }
                     Err(error) if error.to_string() != "closed" => {
-                        let _ = send_event(AiStreamEvent::Error(format!("{error:#}")));
+                        let _ = tx.unbounded_send(GenerationEvent::Error(format!("{error:#}")));
                     }
                     Err(_) => {}
                 }
@@ -311,7 +369,7 @@ impl AiPanel {
             while let Some(event) = rx.next().await {
                 if this
                     .update(cx, |this, cx| {
-                        this.apply_stream_event(target, event, cx);
+                        this.apply_generation_event(target, event, cx);
                     })
                     .is_err()
                 {
@@ -322,7 +380,7 @@ impl AiPanel {
     }
 
     pub(super) fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading || self.editing_turn.is_some() || self.generation_failure.is_some() {
+        if self.editing_turn.is_some() || self.generation_failure.is_some() {
             return;
         }
 
@@ -335,10 +393,12 @@ impl AiPanel {
         else {
             return;
         };
+        let mut validation_history = self.messages.clone();
+        validation_history.extend(self.queued_messages.iter().cloned());
         let ai_settings = cx.global::<SettingsStore>().settings.ai.clone();
         if let Err(error) = validate_composer_page_image_preflight(
             self.mode,
-            &self.messages,
+            &validation_history,
             &user_message,
             self.page_count,
             ai_settings.page_image_limit,
@@ -346,10 +406,37 @@ impl AiPanel {
             self.show_validation_notice(error.to_string(), window, cx);
             return;
         }
+        if let Err(error) = validate_model_image_support(
+            validation_history
+                .iter()
+                .chain(std::iter::once(&user_message)),
+            main_model_image_support(cx),
+        ) {
+            self.show_validation_notice(error.to_string(), window, cx);
+            return;
+        }
+
+        if self.loading {
+            self.content = SharedString::default();
+            self.selected_range = 0..0;
+            self.selection_reversed = false;
+            self.marked_range = None;
+            self.composer_mentions.clear();
+            self.composer_images.clear();
+            self.close_composer_menus();
+            self.clear_validation_notice();
+            self.queued_messages.push(user_message);
+            if self.mode == AiPanelMode::Sidebar {
+                self.save_current_session(cx);
+            }
+            cx.notify();
+            return;
+        }
 
         if self.mode == AiPanelMode::QuickAsk {
             self.messages.clear();
             self.markdown_views.clear();
+            self.tool_cards.clear();
         } else if self.messages.is_empty() {
             self.session_title = session_title_for_prompt(&display_prompt);
         }
@@ -357,6 +444,7 @@ impl AiPanel {
             self.content = SharedString::default();
             self.selected_range = 0..0;
             self.composer_mentions.clear();
+            self.composer_images.clear();
         } else {
             self.content = display_prompt.clone().into();
             self.selected_range = display_prompt.len()..display_prompt.len();
@@ -371,7 +459,7 @@ impl AiPanel {
         self.start_generation(document, cx);
     }
 
-    fn schedule_stream_render(&mut self, target: GenerationTarget, cx: &mut Context<Self>) {
+    fn schedule_generation_render(&mut self, target: GenerationTarget, cx: &mut Context<Self>) {
         if self.stream_render_task.is_some() {
             return;
         }
@@ -380,14 +468,14 @@ impl AiPanel {
             let _ = this.update(cx, |this, cx| {
                 this.stream_render_task = None;
                 if this.active_generation == Some(target) {
-                    this.sync_stream_render(target, cx);
+                    this.sync_generation_render(target, cx);
                     cx.notify();
                 }
             });
         }));
     }
 
-    fn sync_stream_render(&mut self, target: GenerationTarget, cx: &mut Context<Self>) {
+    fn sync_generation_render(&mut self, target: GenerationTarget, cx: &mut Context<Self>) {
         self.sync_markdown(target.assistant_index, cx);
         if self.follow_output && !self.is_near_message_bottom() {
             self.follow_output = false;
@@ -397,10 +485,10 @@ impl AiPanel {
         }
     }
 
-    fn apply_stream_event(
+    pub(super) fn apply_generation_event(
         &mut self,
         target: GenerationTarget,
-        event: AiStreamEvent,
+        event: GenerationEvent,
         cx: &mut Context<Self>,
     ) {
         if self.active_generation != Some(target) {
@@ -408,17 +496,115 @@ impl AiPanel {
         }
 
         match event {
-            AiStreamEvent::Delta(delta) => {
+            GenerationEvent::Agent(AgentEvent::TextDelta(delta)) => {
                 if let Some(message) = self.messages.get_mut(target.assistant_index) {
                     message.push_text(&delta);
                 }
-                self.schedule_stream_render(target, cx);
+                self.schedule_generation_render(target, cx);
             }
-            AiStreamEvent::Error(error) => {
+            GenerationEvent::Agent(AgentEvent::ToolCallStarted { id, name }) => {
+                self.tool_cards
+                    .entry(target.assistant_index)
+                    .or_default()
+                    .push(AgentToolCard {
+                        id,
+                        name,
+                        arguments: String::new(),
+                        result: Vec::new(),
+                        status: AgentToolCardStatus::Requested,
+                    });
+                self.schedule_generation_render(target, cx);
+            }
+            GenerationEvent::Agent(AgentEvent::ToolCallArgumentsDelta { id, delta }) => {
+                if let Some(card) = self
+                    .tool_cards
+                    .entry(target.assistant_index)
+                    .or_default()
+                    .iter_mut()
+                    .rev()
+                    .find(|card| card.id == id || card.id.is_empty())
+                {
+                    if card.id.is_empty() {
+                        card.id = id;
+                    }
+                    card.arguments.push_str(&delta);
+                }
+                self.schedule_generation_render(target, cx);
+            }
+            GenerationEvent::Agent(AgentEvent::ToolCallCompleted(call)) => {
+                let cards = self.tool_cards.entry(target.assistant_index).or_default();
+                if let Some(card) = cards
+                    .iter_mut()
+                    .rev()
+                    .find(|card| card.id == call.id || card.name == call.name)
+                {
+                    card.id = call.id;
+                    card.name = call.name;
+                    card.arguments = call.arguments;
+                } else {
+                    cards.push(AgentToolCard {
+                        id: call.id,
+                        name: call.name,
+                        arguments: call.arguments,
+                        result: Vec::new(),
+                        status: AgentToolCardStatus::Requested,
+                    });
+                }
+                self.schedule_generation_render(target, cx);
+            }
+            GenerationEvent::Agent(AgentEvent::ToolExecutionStarted { id, name }) => {
+                let cards = self.tool_cards.entry(target.assistant_index).or_default();
+                if let Some(card) = cards.iter_mut().rev().find(|card| card.id == id) {
+                    card.status = AgentToolCardStatus::Running;
+                } else {
+                    cards.push(AgentToolCard {
+                        id,
+                        name,
+                        arguments: String::new(),
+                        result: Vec::new(),
+                        status: AgentToolCardStatus::Running,
+                    });
+                }
+                self.schedule_generation_render(target, cx);
+            }
+            GenerationEvent::Agent(AgentEvent::ToolExecutionCompleted(result)) => {
+                let cards = self.tool_cards.entry(target.assistant_index).or_default();
+                if let Some(card) = cards
+                    .iter_mut()
+                    .rev()
+                    .find(|card| card.id == result.call_id)
+                {
+                    card.result = result.content;
+                    card.status = if result.is_error {
+                        AgentToolCardStatus::Error
+                    } else {
+                        AgentToolCardStatus::Completed
+                    };
+                }
+                self.schedule_generation_render(target, cx);
+            }
+            GenerationEvent::Agent(
+                AgentEvent::TurnStarted { .. }
+                | AgentEvent::TurnCompleted { .. }
+                | AgentEvent::LimitReached
+                | AgentEvent::Done,
+            ) => {}
+            GenerationEvent::Error(error) => {
+                if let Some(cards) = self.tool_cards.get_mut(&target.assistant_index) {
+                    for card in cards.iter_mut().filter(|card| {
+                        matches!(
+                            card.status,
+                            AgentToolCardStatus::Requested | AgentToolCardStatus::Running
+                        )
+                    }) {
+                        card.status = AgentToolCardStatus::Error;
+                    }
+                }
                 self.stream_render_task = None;
-                self.sync_stream_render(target, cx);
+                self.sync_generation_render(target, cx);
                 self.loading = false;
                 self.active_generation = None;
+                self.agent_cancellation = None;
                 self.generation_failure = Some(GenerationFailure {
                     assistant_index: target.assistant_index,
                     message: error,
@@ -429,20 +615,57 @@ impl AiPanel {
                 }
                 cx.notify();
             }
-            AiStreamEvent::Done => {
+            GenerationEvent::Finished {
+                trace,
+                limit_reached,
+            } => {
+                if let Some(message) = self.messages.get_mut(target.assistant_index) {
+                    message.set_agent_trace(trace);
+                    if limit_reached {
+                        message.push_text(&format!("\n\n{}", tr("ai-tool-limit-reached")));
+                    }
+                }
                 self.stream_render_task = None;
-                self.sync_stream_render(target, cx);
+                self.sync_generation_render(target, cx);
                 self.loading = false;
                 self.active_generation = None;
+                self.agent_cancellation = None;
                 self.generation_failure = None;
                 self.pending_stream = None;
                 if self.mode == AiPanelMode::Sidebar {
                     self.maybe_generate_title(cx);
                     self.save_current_session(cx);
                 }
+                self.start_next_queued_turn(cx);
                 cx.notify();
             }
         }
+    }
+
+    fn start_next_queued_turn(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.loading || self.queued_messages.is_empty() {
+            return false;
+        }
+        let user_message = self.queued_messages.remove(0);
+        self.push_message(user_message, cx);
+        self.push_message(ChatMessage::assistant(String::new()), cx);
+        if self.mode == AiPanelMode::Sidebar {
+            self.save_current_session(cx);
+        }
+        let document = self.document_context(cx);
+        self.start_generation(document, cx);
+        true
+    }
+
+    pub(super) fn remove_queued_message(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.queued_messages.len() {
+            return;
+        }
+        self.queued_messages.remove(index);
+        if self.mode == AiPanelMode::Sidebar {
+            self.save_current_session(cx);
+        }
+        cx.notify();
     }
 
     pub(super) fn stop_generation(&mut self, cx: &mut Context<Self>) -> bool {
@@ -451,10 +674,23 @@ impl AiPanel {
         };
 
         self.generation_id = self.generation_id.wrapping_add(1);
+        if let Some(cancellation) = self.agent_cancellation.take() {
+            cancellation.cancel();
+        }
         self.pending_stream = None;
         self.stream_render_task = None;
         self.loading = false;
         self.generation_failure = None;
+        if let Some(cards) = self.tool_cards.get_mut(&target.assistant_index) {
+            for card in cards.iter_mut().filter(|card| {
+                matches!(
+                    card.status,
+                    AgentToolCardStatus::Requested | AgentToolCardStatus::Running
+                )
+            }) {
+                card.status = AgentToolCardStatus::Canceled;
+            }
+        }
 
         if self
             .messages

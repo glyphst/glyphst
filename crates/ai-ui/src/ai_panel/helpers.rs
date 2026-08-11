@@ -509,6 +509,17 @@ fn preview_image_dimensions(format: ImageFormat, bytes: &[u8]) -> Result<(u32, u
         .map_err(|error| format!("Failed to read preview image dimensions: {error}"))
 }
 
+pub(super) fn agent_image_preview(image: &AgentImage) -> Option<Arc<Image>> {
+    let format = match image.media_type.as_str() {
+        "image/png" => ImageFormat::Png,
+        "image/jpeg" | "image/jpg" => ImageFormat::Jpeg,
+        "image/gif" => ImageFormat::Gif,
+        "image/webp" => ImageFormat::Webp,
+        _ => return None,
+    };
+    Some(Arc::new(Image::from_bytes(format, image.bytes.to_vec())))
+}
+
 pub(super) fn mention_preview_matches(
     preview: &MentionPreview,
     generation: u64,
@@ -743,6 +754,36 @@ pub(super) fn validate_composer_page_image_preflight(
     )
 }
 
+pub(super) fn main_model_image_support(cx: &App) -> AiCapabilitySupport {
+    let ai = &cx.global::<SettingsStore>().settings.ai;
+    let resolved = ai.resolved_main();
+    ai.provider_config(resolved.provider)
+        .model(&resolved.model)
+        .map(|model| model.image_input_support(resolved.provider))
+        .unwrap_or_default()
+}
+
+pub(super) fn validate_model_image_support<'a>(
+    messages: impl IntoIterator<Item = &'a ChatMessage>,
+    support: AiCapabilitySupport,
+) -> Result<()> {
+    if support != AiCapabilitySupport::Unsupported {
+        return Ok(());
+    }
+    let has_images = messages.into_iter().any(|message| {
+        message.user_images().next().is_some()
+            || message
+                .references()
+                .iter()
+                .any(|reference| reference.kind.is_image())
+            || !message.region_references().is_empty()
+    });
+    if has_images {
+        bail!("{}", tr("ai-model-no-image-support"));
+    }
+    Ok(())
+}
+
 pub(super) fn message_has_resolved_reference(
     message: &ChatMessage,
     reference: MentionReference,
@@ -932,6 +973,7 @@ pub(super) fn hydrate_region_contexts(
     }
 }
 
+#[cfg(test)]
 pub(super) fn persisted_session_messages(
     messages: &[ChatMessage],
     excluded_index: Option<usize>,
@@ -968,9 +1010,297 @@ pub(super) fn persisted_session_messages(
                     .iter()
                     .filter_map(ai_occurrence_to_library)
                     .collect(),
+                images: Vec::new(),
+                agent_parts: Vec::new(),
             }
         })
         .collect()
+}
+
+pub(super) fn persisted_session_messages_with_assets(
+    messages: &[ChatMessage],
+    excluded_index: Option<usize>,
+    library: &mut LibraryStore,
+) -> Result<Vec<AiSessionMessage>> {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != excluded_index)
+        .map(|(_, message)| {
+            let content = message.display_text();
+            let request_content = message.request_text();
+            let images = message
+                .user_images()
+                .map(|image| install_agent_image(image, library))
+                .collect::<Result<Vec<_>>>()?;
+            let result_ids = message
+                .agent_trace()
+                .iter()
+                .flat_map(|message| &message.content)
+                .filter_map(|part| match part {
+                    AgentContentPart::ToolResult(result) => {
+                        Some((result.call_id.as_str(), result.is_error))
+                    }
+                    _ => None,
+                })
+                .collect::<HashMap<_, _>>();
+            let mut agent_parts = Vec::new();
+            for trace_message in message.agent_trace() {
+                for part in &trace_message.content {
+                    match part {
+                        AgentContentPart::Text(text) => {
+                            agent_parts.push(AiSessionAgentPart::AssistantText(text.clone()));
+                        }
+                        AgentContentPart::ToolCall(call) => {
+                            let status = match result_ids.get(call.id.as_str()) {
+                                Some(true) => AiSessionToolStatus::Error,
+                                Some(false) => AiSessionToolStatus::Completed,
+                                None => AiSessionToolStatus::Pending,
+                            };
+                            agent_parts.push(AiSessionAgentPart::ToolCall {
+                                id: call.id.clone(),
+                                name: call.name.clone(),
+                                arguments: call.arguments.clone(),
+                                status,
+                            });
+                        }
+                        AgentContentPart::ToolResult(result) => {
+                            let result_content = result
+                                .content
+                                .iter()
+                                .map(|part| match part {
+                                    AgentToolResultPart::Text(text) => {
+                                        Ok(AiSessionToolResultPart::Text(text.clone()))
+                                    }
+                                    AgentToolResultPart::Image(image) => {
+                                        install_agent_image(image, library)
+                                            .map(AiSessionToolResultPart::Image)
+                                    }
+                                })
+                                .collect::<Result<Vec<_>>>()?;
+                            agent_parts.push(AiSessionAgentPart::ToolResult {
+                                call_id: result.call_id.clone(),
+                                tool_name: result.tool_name.clone(),
+                                content: result_content,
+                                is_error: result.is_error,
+                            });
+                        }
+                        AgentContentPart::OpaqueReasoning { api_style, value } => {
+                            agent_parts.push(AiSessionAgentPart::OpaqueReasoning {
+                                api_style: api_style.as_str().to_string(),
+                                value: serde_json::to_string(value)
+                                    .context("failed to encode agent continuation state")?,
+                            });
+                        }
+                        AgentContentPart::Image(_) => {}
+                    }
+                }
+            }
+            Ok(AiSessionMessage {
+                role: match message.role {
+                    Role::User => AiSessionRole::User,
+                    Role::Assistant => AiSessionRole::Assistant,
+                },
+                content: content.clone(),
+                request_content: (request_content != content).then_some(request_content),
+                references: message
+                    .references()
+                    .iter()
+                    .copied()
+                    .map(ai_reference_to_library)
+                    .chain(
+                        message
+                            .region_references()
+                            .iter()
+                            .cloned()
+                            .map(|reference| AiMentionReference::RegionImage { reference }),
+                    )
+                    .collect(),
+                occurrences: message
+                    .mention_occurrences()
+                    .iter()
+                    .filter_map(ai_occurrence_to_library)
+                    .collect(),
+                images,
+                agent_parts,
+            })
+        })
+        .collect()
+}
+
+fn install_agent_image(image: &AgentImage, library: &mut LibraryStore) -> Result<AiSessionImage> {
+    library.install_ai_image(
+        image.name.as_deref(),
+        &image.media_type,
+        image.width,
+        image.height,
+        &image.bytes,
+    )
+}
+
+pub(super) fn chat_message_from_session(
+    message: AiSessionMessage,
+    library: &LibraryStore,
+) -> ChatMessage {
+    let role = match message.role {
+        AiSessionRole::User => Role::User,
+        AiSessionRole::Assistant => Role::Assistant,
+    };
+    let references = message
+        .references
+        .iter()
+        .filter_map(library_reference_to_ai)
+        .collect();
+    let region_references = message
+        .references
+        .iter()
+        .filter_map(library_reference_to_region)
+        .collect();
+    let occurrences = message
+        .occurrences
+        .iter()
+        .filter_map(library_occurrence_to_ai)
+        .collect();
+    let mut chat = ChatMessage::from_persisted(role, message.content, message.request_content)
+        .with_references(references)
+        .with_region_references(region_references)
+        .with_mention_occurrences(occurrences);
+    for image in &message.images {
+        match library.load_ai_image(image) {
+            Ok(bytes) => chat.attach_user_image(
+                AgentImage::new(image.media_type.clone(), image.width, image.height, bytes)
+                    .with_optional_name(image.name.clone()),
+            ),
+            Err(error) => eprintln!("failed to load AI image {}: {error:#}", image.asset_id),
+        }
+    }
+
+    let mut trace = Vec::new();
+    for part in message.agent_parts {
+        match part {
+            AiSessionAgentPart::AssistantText(text) => {
+                append_assistant_trace_part(&mut trace, AgentContentPart::Text(text))
+            }
+            AiSessionAgentPart::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } => append_assistant_trace_part(
+                &mut trace,
+                AgentContentPart::ToolCall(AgentToolCall {
+                    id,
+                    name,
+                    arguments,
+                }),
+            ),
+            AiSessionAgentPart::ToolResult {
+                call_id,
+                tool_name,
+                content,
+                is_error,
+            } => {
+                let content = content
+                    .into_iter()
+                    .filter_map(|part| match part {
+                        AiSessionToolResultPart::Text(text) => {
+                            Some(AgentToolResultPart::Text(text))
+                        }
+                        AiSessionToolResultPart::Image(image) => {
+                            match library.load_ai_image(&image) {
+                                Ok(bytes) => Some(AgentToolResultPart::Image(
+                                    AgentImage::new(
+                                        image.media_type,
+                                        image.width,
+                                        image.height,
+                                        bytes,
+                                    )
+                                    .with_optional_name(image.name),
+                                )),
+                                Err(error) => {
+                                    eprintln!(
+                                        "failed to load AI tool image {}: {error:#}",
+                                        image.asset_id
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                    })
+                    .collect();
+                trace.push(AgentMessage::tool_result(AgentToolResult {
+                    call_id,
+                    tool_name,
+                    content,
+                    is_error,
+                }));
+            }
+            AiSessionAgentPart::OpaqueReasoning { api_style, value } => {
+                let api_style = match api_style.as_str() {
+                    "openai-compatible" => Some(AiApiStyle::OpenAi),
+                    "openai-responses" => Some(AiApiStyle::OpenAiResponses),
+                    "anthropic-compatible" => Some(AiApiStyle::Anthropic),
+                    _ => None,
+                };
+                if let (Some(api_style), Ok(value)) = (api_style, serde_json::from_str(&value)) {
+                    append_assistant_trace_part(
+                        &mut trace,
+                        AgentContentPart::OpaqueReasoning { api_style, value },
+                    );
+                }
+            }
+        }
+    }
+    chat.set_agent_trace(trace);
+    chat
+}
+
+fn append_assistant_trace_part(trace: &mut Vec<AgentMessage>, part: AgentContentPart) {
+    if let Some(message) = trace.last_mut()
+        && message.role == AgentRole::Assistant
+    {
+        message.content.push(part);
+    } else {
+        trace.push(AgentMessage {
+            role: AgentRole::Assistant,
+            content: vec![part],
+        });
+    }
+}
+
+pub(super) fn tool_cards_from_trace(trace: &[AgentMessage]) -> Vec<AgentToolCard> {
+    let mut cards = Vec::<AgentToolCard>::new();
+    for message in trace {
+        for part in &message.content {
+            match part {
+                AgentContentPart::ToolCall(call) => cards.push(AgentToolCard {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                    result: Vec::new(),
+                    status: AgentToolCardStatus::Requested,
+                }),
+                AgentContentPart::ToolResult(result) => {
+                    if let Some(card) = cards
+                        .iter_mut()
+                        .rev()
+                        .find(|card| card.id == result.call_id)
+                    {
+                        card.result = result.content.clone();
+                        card.status = if result.is_error {
+                            AgentToolCardStatus::Error
+                        } else {
+                            AgentToolCardStatus::Completed
+                        };
+                    }
+                }
+                AgentContentPart::Text(_)
+                | AgentContentPart::Image(_)
+                | AgentContentPart::OpaqueReasoning { .. } => {}
+            }
+        }
+    }
+    cards
 }
 
 pub(super) fn ai_reference_to_library(reference: MentionReference) -> AiMentionReference {

@@ -24,5 +24,6 @@ gpui_component.workspace = true
 image.workspace = true
 mupdf.workspace = true
 smallvec.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 ztracing.workspace = true

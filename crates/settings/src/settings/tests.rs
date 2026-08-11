@@ -542,6 +542,62 @@ fn custom_provider_metadata_order_and_models_round_trip() {
 }
 
 #[test]
+fn model_capability_overrides_round_trip_and_resolve() {
+    let settings = parse_settings(
+        r##"
+ai {
+    main_model "openai" "custom-vision"
+    providers {
+        openai {
+            enabled #true
+            models {
+                model "custom-vision" "Custom Vision" "Custom" image_input="disabled" tool_use="enabled"
+            }
+        }
+    }
+}
+"##,
+    )
+    .unwrap();
+    let model = settings
+        .ai
+        .provider_config(AiProvider::OpenAi)
+        .models
+        .into_iter()
+        .find(|model| model.id == "custom-vision")
+        .unwrap();
+    assert_eq!(
+        model.capabilities.image_input,
+        AiCapabilityOverride::Disabled
+    );
+    assert_eq!(model.capabilities.tool_use, AiCapabilityOverride::Enabled);
+    assert_eq!(
+        model.image_input_support(AiProvider::OpenAi),
+        AiCapabilitySupport::Unsupported
+    );
+    assert_eq!(
+        model.tool_use_support(AiProvider::OpenAi),
+        AiCapabilitySupport::Supported
+    );
+    assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+
+    let gpt = AiModel::new("gpt-4.1-mini", "GPT-4.1 mini", "OpenAI");
+    assert_eq!(
+        gpt.image_input_support(AiProvider::OpenAi),
+        AiCapabilitySupport::Supported
+    );
+    assert_eq!(
+        gpt.tool_use_support(AiProvider::OpenAi),
+        AiCapabilitySupport::Supported
+    );
+    let deepseek = AiModel::new("deepseek-chat", "DeepSeek Chat", "DeepSeek");
+    assert_eq!(
+        deepseek.image_input_support(AiProvider::DeepSeek),
+        AiCapabilitySupport::Unsupported
+    );
+}
+
+#[test]
 fn disabling_the_selected_provider_uses_ordered_fallback_without_restoring_it() {
     let mut settings = Settings::default();
     settings

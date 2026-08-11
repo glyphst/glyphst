@@ -5,6 +5,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use glyphst_core::{RegionImageReference, SelectedPagesReference};
 use serde_json::{Value, json};
 
+use crate::agent::{AgentContentPart, AgentImage, AgentMessage, AgentRole};
 use crate::chatgpt_subscription::{
     acquire_request_access, invalidate_credentials, response_error, responses_url,
 };
@@ -40,6 +41,7 @@ pub enum ContentPart {
     Text(String),
     Context(ContextBlock),
     Image(ImageContext),
+    UserImage(AgentImage),
 }
 
 #[derive(Clone, Debug)]
@@ -190,6 +192,7 @@ pub struct ChatMessage {
     mention_occurrences: Vec<MentionOccurrence>,
     request_prompt: Option<String>,
     request_content: Option<String>,
+    agent_trace: Vec<AgentMessage>,
 }
 
 impl ChatMessage {
@@ -210,6 +213,7 @@ impl ChatMessage {
             mention_occurrences: Vec::new(),
             request_prompt,
             request_content: None,
+            agent_trace: Vec::new(),
         }
     }
 
@@ -222,6 +226,7 @@ impl ChatMessage {
             mention_occurrences: Vec::new(),
             request_prompt: None,
             request_content: None,
+            agent_trace: Vec::new(),
         }
     }
 
@@ -234,6 +239,7 @@ impl ChatMessage {
             mention_occurrences: Vec::new(),
             request_prompt: None,
             request_content: None,
+            agent_trace: Vec::new(),
         }
     }
 
@@ -249,6 +255,7 @@ impl ChatMessage {
             mention_occurrences: Vec::new(),
             request_prompt: None,
             request_content,
+            agent_trace: Vec::new(),
         }
     }
 
@@ -286,7 +293,7 @@ impl ChatMessage {
                 ContentPart::Image(image) if !text.contains(&image.descriptor()) => {
                     images.push(image);
                 }
-                ContentPart::Image(_) => {}
+                ContentPart::Image(_) | ContentPart::UserImage(_) => {}
             }
         }
 
@@ -318,7 +325,7 @@ impl ChatMessage {
             .iter()
             .filter_map(|part| match part {
                 ContentPart::Context(context) => Some(context.clone()),
-                ContentPart::Text(_) | ContentPart::Image(_) => None,
+                ContentPart::Text(_) | ContentPart::Image(_) | ContentPart::UserImage(_) => None,
             })
             .collect::<Vec<_>>();
         let mut contexts = self
@@ -383,7 +390,7 @@ impl ChatMessage {
                 ) && image.kind == reference.kind
                     && image.page == reference.page
             }
-            ContentPart::Text(_) => false,
+            ContentPart::Text(_) | ContentPart::UserImage(_) => false,
         })
     }
 
@@ -392,6 +399,7 @@ impl ChatMessage {
             .iter()
             .filter_map(|part| match part {
                 ContentPart::Image(image) => Some(image.bytes.len()),
+                ContentPart::UserImage(image) => Some(image.bytes.len()),
                 ContentPart::Text(_) | ContentPart::Context(_) => None,
             })
             .sum()
@@ -417,7 +425,7 @@ impl ChatMessage {
             ContentPart::Image(image) => {
                 image.kind == MentionKind::RegionImage && image.region.as_deref() == Some(reference)
             }
-            ContentPart::Text(_) | ContentPart::Context(_) => false,
+            ContentPart::Text(_) | ContentPart::Context(_) | ContentPart::UserImage(_) => false,
         })
     }
 
@@ -429,6 +437,54 @@ impl ChatMessage {
         self.parts.push(ContentPart::Image(image));
     }
 
+    pub fn attach_user_image(&mut self, image: AgentImage) {
+        self.parts.push(ContentPart::UserImage(image));
+    }
+
+    pub fn user_images(&self) -> impl Iterator<Item = &AgentImage> {
+        self.parts.iter().filter_map(|part| match part {
+            ContentPart::UserImage(image) => Some(image),
+            _ => None,
+        })
+    }
+
+    pub fn agent_trace(&self) -> &[AgentMessage] {
+        &self.agent_trace
+    }
+
+    pub fn set_agent_trace(&mut self, trace: Vec<AgentMessage>) {
+        self.agent_trace = trace;
+    }
+
+    pub fn into_agent_messages(&self) -> Vec<AgentMessage> {
+        if self.role == Role::Assistant && !self.agent_trace.is_empty() {
+            return self.agent_trace.clone();
+        }
+        let mut content = Vec::new();
+        let text = self.request_text();
+        if !text.is_empty() {
+            content.push(AgentContentPart::Text(text));
+        }
+        for part in &self.parts {
+            match part {
+                ContentPart::Image(image) => content.push(AgentContentPart::Image(
+                    AgentImage::new(image.media_type.clone(), 0, 0, image.bytes.clone()),
+                )),
+                ContentPart::UserImage(image) => {
+                    content.push(AgentContentPart::Image(image.clone()))
+                }
+                ContentPart::Text(_) | ContentPart::Context(_) => {}
+            }
+        }
+        vec![AgentMessage {
+            role: match self.role {
+                Role::User => AgentRole::User,
+                Role::Assistant => AgentRole::Assistant,
+            },
+            content,
+        }]
+    }
+
     pub fn title_safe(&self) -> Self {
         Self {
             role: self.role,
@@ -438,17 +494,18 @@ impl ChatMessage {
             mention_occurrences: Vec::new(),
             request_prompt: None,
             request_content: None,
+            agent_trace: Vec::new(),
         }
     }
 
     pub fn is_display_empty(&self) -> bool {
-        self.display_text().trim().is_empty()
+        self.display_text().trim().is_empty() && self.user_images().next().is_none()
     }
 
     pub fn push_text(&mut self, text: &str) {
         if let Some(existing) = self.parts.iter_mut().find_map(|part| match part {
             ContentPart::Text(existing) => Some(existing),
-            ContentPart::Context(_) | ContentPart::Image(_) => None,
+            ContentPart::Context(_) | ContentPart::Image(_) | ContentPart::UserImage(_) => None,
         }) {
             existing.push_str(text);
         } else {
@@ -465,7 +522,7 @@ fn normalized_request_content(parts: &[ContentPart], request_prompt: String) -> 
         .iter()
         .filter_map(|part| match part {
             ContentPart::Text(text) => Some(text.as_str()),
-            ContentPart::Context(_) | ContentPart::Image(_) => None,
+            ContentPart::Context(_) | ContentPart::Image(_) | ContentPart::UserImage(_) => None,
         })
         .collect::<String>();
     (request_prompt != display_content).then_some(request_prompt)
@@ -661,7 +718,10 @@ struct RequestMessage {
 
 enum RequestPart {
     Text(String),
-    Image(ImageContext),
+    Image {
+        media_type: String,
+        bytes: Arc<[u8]>,
+    },
 }
 
 pub fn stream_completion(
@@ -706,7 +766,14 @@ fn build_request_messages(messages: Vec<ChatMessage>) -> Vec<RequestMessage> {
         .map(|message| {
             let mut parts = vec![RequestPart::Text(message.request_text())];
             parts.extend(message.parts.into_iter().filter_map(|part| match part {
-                ContentPart::Image(image) => Some(RequestPart::Image(image)),
+                ContentPart::Image(image) => Some(RequestPart::Image {
+                    media_type: image.media_type,
+                    bytes: image.bytes,
+                }),
+                ContentPart::UserImage(image) => Some(RequestPart::Image {
+                    media_type: image.media_type,
+                    bytes: image.bytes,
+                }),
                 ContentPart::Text(_) | ContentPart::Context(_) => None,
             }));
             RequestMessage {
@@ -731,13 +798,13 @@ fn openai_message_content(parts: &[RequestPart]) -> Value {
                     "type": "text",
                     "text": text,
                 })),
-                RequestPart::Image(image) => Some(json!({
+                RequestPart::Image { media_type, bytes } => Some(json!({
                     "type": "image_url",
                     "image_url": {
                         "url": format!(
                             "data:{};base64,{}",
-                            image.media_type,
-                            BASE64_STANDARD.encode(image.bytes.as_ref())
+                            media_type,
+                            BASE64_STANDARD.encode(bytes.as_ref())
                         ),
                     },
                 })),
@@ -760,12 +827,12 @@ fn anthropic_message_content(parts: &[RequestPart]) -> Value {
                     "type": "text",
                     "text": text,
                 })),
-                RequestPart::Image(image) => Some(json!({
+                RequestPart::Image { media_type, bytes } => Some(json!({
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": image.media_type.as_str(),
-                        "data": BASE64_STANDARD.encode(image.bytes.as_ref()),
+                        "media_type": media_type.as_str(),
+                        "data": BASE64_STANDARD.encode(bytes.as_ref()),
                     },
                 })),
             })
@@ -788,17 +855,17 @@ fn responses_message_content(role: Role, parts: &[RequestPart]) -> Value {
                     "type": "input_text",
                     "text": text,
                 })),
-                RequestPart::Image(image) if role == Role::Assistant => Some(json!({
+                RequestPart::Image { .. } if role == Role::Assistant => Some(json!({
                     "type": "output_text",
                     "text": "[image omitted]",
                     "annotations": [],
                 })),
-                RequestPart::Image(image) => Some(json!({
+                RequestPart::Image { media_type, bytes } => Some(json!({
                     "type": "input_image",
                     "image_url": format!(
                         "data:{};base64,{}",
-                        image.media_type,
-                        BASE64_STANDARD.encode(image.bytes.as_ref())
+                        media_type,
+                        BASE64_STANDARD.encode(bytes.as_ref())
                     ),
                 })),
             })
@@ -912,7 +979,7 @@ fn stream_anthropic(
     let mut body = json!({
         "model": settings.model.clone(),
         "messages": request_messages,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "stream": true,
         "system": system,
     });

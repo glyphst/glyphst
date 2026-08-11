@@ -461,6 +461,70 @@ pub struct AiModel {
     pub id: String,
     pub name: String,
     pub group: String,
+    pub capabilities: AiModelCapabilities,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AiCapabilityOverride {
+    #[default]
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+impl AiCapabilityOverride {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Auto => Self::Enabled,
+            Self::Enabled => Self::Disabled,
+            Self::Disabled => Self::Auto,
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "auto" | "default" => Some(Self::Auto),
+            "enabled" | "true" | "yes" => Some(Self::Enabled),
+            "disabled" | "false" | "no" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+
+    fn resolve(self, automatic: AiCapabilitySupport) -> AiCapabilitySupport {
+        match self {
+            Self::Auto => automatic,
+            Self::Enabled => AiCapabilitySupport::Supported,
+            Self::Disabled => AiCapabilitySupport::Unsupported,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AiCapabilitySupport {
+    Supported,
+    Unsupported,
+    #[default]
+    Unknown,
+}
+
+impl AiCapabilitySupport {
+    pub fn is_supported(self) -> bool {
+        self == Self::Supported
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AiModelCapabilities {
+    pub image_input: AiCapabilityOverride,
+    pub tool_use: AiCapabilityOverride,
 }
 
 impl AiModel {
@@ -469,7 +533,32 @@ impl AiModel {
             id: id.into(),
             name: name.into(),
             group: group.into(),
+            capabilities: AiModelCapabilities::default(),
         }
+    }
+
+    pub fn with_capabilities(
+        mut self,
+        image_input: AiCapabilityOverride,
+        tool_use: AiCapabilityOverride,
+    ) -> Self {
+        self.capabilities = AiModelCapabilities {
+            image_input,
+            tool_use,
+        };
+        self
+    }
+
+    pub fn image_input_support(&self, provider: AiProvider) -> AiCapabilitySupport {
+        self.capabilities
+            .image_input
+            .resolve(automatic_model_capabilities(provider, &self.id).image_input)
+    }
+
+    pub fn tool_use_support(&self, provider: AiProvider) -> AiCapabilitySupport {
+        self.capabilities
+            .tool_use
+            .resolve(automatic_model_capabilities(provider, &self.id).tool_use)
     }
 
     pub(super) fn sanitize(&mut self, provider: AiProvider) {
@@ -500,7 +589,24 @@ impl AiModel {
             .and_then(KdlValue::as_string)
             .unwrap_or(provider.label())
             .to_string();
-        let mut model = Self { id, name, group };
+        let capabilities = AiModelCapabilities {
+            image_input: node
+                .get("image_input")
+                .and_then(KdlValue::as_string)
+                .and_then(AiCapabilityOverride::from_str)
+                .unwrap_or_default(),
+            tool_use: node
+                .get("tool_use")
+                .and_then(KdlValue::as_string)
+                .and_then(AiCapabilityOverride::from_str)
+                .unwrap_or_default(),
+        };
+        let mut model = Self {
+            id,
+            name,
+            group,
+            capabilities,
+        };
         model.sanitize(provider);
         (!model.id.is_empty()).then_some(model)
     }
@@ -510,7 +616,71 @@ impl AiModel {
         node.push(self.id.clone());
         node.push(self.name.clone());
         node.push(self.group.clone());
+        if self.capabilities.image_input != AiCapabilityOverride::Auto {
+            node.insert(
+                "image_input",
+                self.capabilities.image_input.as_str().to_string(),
+            );
+        }
+        if self.capabilities.tool_use != AiCapabilityOverride::Auto {
+            node.insert("tool_use", self.capabilities.tool_use.as_str().to_string());
+        }
         document.nodes_mut().push(node);
+    }
+}
+
+fn automatic_model_capabilities(provider: AiProvider, model: &str) -> AutomaticModelCapabilities {
+    let family = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .trim()
+        .to_ascii_lowercase();
+    let openai_multimodal = family.starts_with("gpt-4o")
+        || family.starts_with("gpt-4.1")
+        || family.starts_with("gpt-5")
+        || family.starts_with("o3")
+        || family.starts_with("o4");
+    let claude_multimodal = family.starts_with("claude-3")
+        || family.starts_with("claude-sonnet-4")
+        || family.starts_with("claude-opus-4")
+        || family.starts_with("claude-haiku-4");
+
+    match provider {
+        AiProvider::ChatGptSubscription => AutomaticModelCapabilities::supported(),
+        AiProvider::OpenAi if openai_multimodal => AutomaticModelCapabilities::supported(),
+        AiProvider::Anthropic if claude_multimodal => AutomaticModelCapabilities::supported(),
+        AiProvider::DeepSeek => AutomaticModelCapabilities {
+            image_input: AiCapabilitySupport::Unsupported,
+            tool_use: AiCapabilitySupport::Supported,
+        },
+        AiProvider::OpenRouter if openai_multimodal || claude_multimodal => {
+            AutomaticModelCapabilities::supported()
+        }
+        AiProvider::Fireworks if family.contains("llama-v3") => AutomaticModelCapabilities {
+            image_input: AiCapabilitySupport::Unsupported,
+            tool_use: AiCapabilitySupport::Unknown,
+        },
+        AiProvider::OpenAi
+        | AiProvider::Anthropic
+        | AiProvider::OpenRouter
+        | AiProvider::Fireworks
+        | AiProvider::Custom(_) => AutomaticModelCapabilities::default(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AutomaticModelCapabilities {
+    image_input: AiCapabilitySupport,
+    tool_use: AiCapabilitySupport,
+}
+
+impl AutomaticModelCapabilities {
+    fn supported() -> Self {
+        Self {
+            image_input: AiCapabilitySupport::Supported,
+            tool_use: AiCapabilitySupport::Supported,
+        }
     }
 }
 

@@ -149,6 +149,33 @@ ai-scroll-top = Scroll to Top
 ai-scroll-bottom = Scroll to Bottom
 ai-scroll-latest-user = Scroll to Most Recent User Message
 ai-stop-generation = Stop Generation
+ai-tool-limit-reached = _Stopped after reaching the 8-round tool limit._
+ai-tool-requested = Requested
+ai-tool-running = Running
+ai-tool-completed = Completed
+ai-tool-error = Error
+ai-tool-canceled = Canceled
+ai-tool-search-document = Search document
+ai-tool-read-document = Read document
+ai-tool-render-document-pages = Render document pages
+ai-tool-input = Input
+ai-tool-output = Output
+ai-queue-message = Queue message
+ai-queued = Queued
+ai-queued-images = { $count ->
+    [one] 1 queued image
+   *[other] { $count } queued images
+}
+ai-attach-image-file = Attach image from file
+ai-paste-image = Paste image from clipboard
+ai-attach-images-prompt = Attach images
+ai-attach-image-error = Could not attach image
+ai-paste-image-error = Could not paste image
+ai-too-many-images = Too many images: attach at most { $limit } per message.
+ai-image-size-limit = Attached images exceed the { $limit } MiB limit.
+ai-model-no-image-support = The selected model is configured without image input support. Choose a vision-capable model.
+ai-capability-image-short = Img
+ai-capability-tool-short = Tool
 ai-show-chat = Show Chat
 ai-show-history = Show Chat History
 ai-close-panel = Close AI Panel

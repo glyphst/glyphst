@@ -65,6 +65,9 @@ const AI_SESSIONS_V3_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("
 const AI_SESSIONS_V4_MIGRATION_KEY: &str = "ai_sessions_v4";
 const AI_SESSIONS_V4_VERSION: u8 = 4;
 const AI_SESSIONS_V4_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v4");
+const AI_SESSIONS_V5_MIGRATION_KEY: &str = "ai_sessions_v5";
+const AI_SESSIONS_V5_VERSION: u8 = 5;
+const AI_SESSIONS_V5_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v5");
 const SIDEBAR_WIDTHS_KEY: &str = "sidebar_widths";
 const DOCUMENT_BROWSER_SIZE_KEY: &str = "document_browser_size";
 const HOME_PREFERENCES_KEY: &str = "home_preferences";
@@ -264,6 +267,7 @@ impl LegacyAiSession {
                 .into_iter()
                 .map(AiSessionMessage::from)
                 .collect(),
+            queued_messages: Vec::new(),
             created: self.created,
             updated: self.updated,
         }
@@ -466,6 +470,7 @@ impl StoredAiSessionV1 {
                 .into_iter()
                 .map(AiSessionMessage::from)
                 .collect(),
+            queued_messages: Vec::new(),
             created: self.created,
             updated: self.updated,
         })
@@ -497,6 +502,8 @@ impl From<StoredAiSessionMessageV1> for AiSessionMessage {
             request_content: message.request_content,
             references: Vec::new(),
             occurrences: Vec::new(),
+            images: Vec::new(),
+            agent_parts: Vec::new(),
         }
     }
 }
@@ -528,6 +535,8 @@ impl From<StoredAiSessionMessageV2> for AiSessionMessage {
             request_content: message.request_content,
             references: message.references,
             occurrences: Vec::new(),
+            images: Vec::new(),
+            agent_parts: Vec::new(),
         }
     }
 }
@@ -576,6 +585,7 @@ impl StoredAiSessionV2 {
                 .into_iter()
                 .map(AiSessionMessage::from)
                 .collect(),
+            queued_messages: Vec::new(),
             created: self.created,
             updated: self.updated,
         })
@@ -611,6 +621,8 @@ impl From<StoredAiSessionMessageV3> for AiSessionMessage {
             request_content: message.request_content,
             references: message.references,
             occurrences: message.occurrences,
+            images: Vec::new(),
+            agent_parts: Vec::new(),
         }
     }
 }
@@ -659,6 +671,7 @@ impl StoredAiSessionV3 {
                 .into_iter()
                 .map(AiSessionMessage::from)
                 .collect(),
+            queued_messages: Vec::new(),
             created: self.created,
             updated: self.updated,
         })
@@ -706,6 +719,107 @@ impl StoredAiSessionV4 {
             page: self.page,
             messages: self
                 .messages
+                .into_iter()
+                .map(AiSessionMessage::from)
+                .collect(),
+            queued_messages: Vec::new(),
+            created: self.created,
+            updated: self.updated,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredAiSessionMessageV5 {
+    role: AiSessionRole,
+    content: String,
+    request_content: Option<String>,
+    references: Vec<AiMentionReference>,
+    occurrences: Vec<AiMentionOccurrence>,
+    images: Vec<AiSessionImage>,
+    agent_parts: Vec<AiSessionAgentPart>,
+}
+
+impl From<&AiSessionMessage> for StoredAiSessionMessageV5 {
+    fn from(message: &AiSessionMessage) -> Self {
+        Self {
+            role: message.role,
+            content: message.content.clone(),
+            request_content: message.request_content.clone(),
+            references: message.references.clone(),
+            occurrences: message.occurrences.clone(),
+            images: message.images.clone(),
+            agent_parts: message.agent_parts.clone(),
+        }
+    }
+}
+
+impl From<StoredAiSessionMessageV5> for AiSessionMessage {
+    fn from(message: StoredAiSessionMessageV5) -> Self {
+        Self {
+            role: message.role,
+            content: message.content,
+            request_content: message.request_content,
+            references: message.references,
+            occurrences: message.occurrences,
+            images: message.images,
+            agent_parts: message.agent_parts,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredAiSessionV5 {
+    version: u8,
+    id: u64,
+    path: StoredPathV1,
+    title: String,
+    page: usize,
+    messages: Vec<StoredAiSessionMessageV5>,
+    queued_messages: Vec<StoredAiSessionMessageV5>,
+    created: u64,
+    updated: u64,
+}
+
+impl From<&AiSession> for StoredAiSessionV5 {
+    fn from(session: &AiSession) -> Self {
+        Self {
+            version: AI_SESSIONS_V5_VERSION,
+            id: session.id,
+            path: StoredPathV1::from_path(&session.path),
+            title: session.title.clone(),
+            page: session.page,
+            messages: session
+                .messages
+                .iter()
+                .map(StoredAiSessionMessageV5::from)
+                .collect(),
+            queued_messages: session
+                .queued_messages
+                .iter()
+                .map(StoredAiSessionMessageV5::from)
+                .collect(),
+            created: session.created,
+            updated: session.updated,
+        }
+    }
+}
+
+impl StoredAiSessionV5 {
+    fn into_domain(self) -> Result<AiSession> {
+        require_storage_version(self.version, AI_SESSIONS_V5_VERSION)?;
+        Ok(AiSession {
+            id: self.id,
+            path: self.path.into_path()?,
+            title: self.title,
+            page: self.page,
+            messages: self
+                .messages
+                .into_iter()
+                .map(AiSessionMessage::from)
+                .collect(),
+            queued_messages: self
+                .queued_messages
                 .into_iter()
                 .map(AiSessionMessage::from)
                 .collect(),
@@ -1983,6 +2097,58 @@ pub struct AiSessionMessage {
     pub request_content: Option<String>,
     pub references: Vec<AiMentionReference>,
     pub occurrences: Vec<AiMentionOccurrence>,
+    pub images: Vec<AiSessionImage>,
+    pub agent_parts: Vec<AiSessionAgentPart>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiSessionImage {
+    /// Lowercase SHA-256 digest used as the managed asset key.
+    pub asset_id: String,
+    pub name: Option<String>,
+    pub media_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub byte_len: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AiSessionToolStatus {
+    Pending,
+    Running,
+    Completed,
+    Error,
+    Canceled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AiSessionToolResultPart {
+    Text(String),
+    Image(AiSessionImage),
+}
+
+/// Provider-neutral continuation state and visible tool trace for an assistant
+/// message. Provider-owned reasoning is stored opaquely and never rendered as
+/// assistant prose.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AiSessionAgentPart {
+    AssistantText(String),
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+        status: AiSessionToolStatus,
+    },
+    ToolResult {
+        call_id: String,
+        tool_name: String,
+        content: Vec<AiSessionToolResultPart>,
+        is_error: bool,
+    },
+    OpaqueReasoning {
+        api_style: String,
+        value: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1992,6 +2158,7 @@ pub struct AiSession {
     pub title: String,
     pub page: usize,
     pub messages: Vec<AiSessionMessage>,
+    pub queued_messages: Vec<AiSessionMessage>,
     pub created: u64,
     pub updated: u64,
 }
@@ -2336,6 +2503,7 @@ pub struct LibraryStore {
     pub library: Library,
     database: Option<Arc<Database>>,
     managed_library_root: Option<PathBuf>,
+    ai_image_memory: HashMap<String, Vec<u8>>,
     startup_error: Option<String>,
     document_edit_histories: HashMap<PathBuf, DocumentEditHistory>,
     next_document_edit_sequence: u64,

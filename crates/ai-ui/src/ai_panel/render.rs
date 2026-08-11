@@ -1,3 +1,4 @@
+use super::helpers::agent_image_preview;
 use super::*;
 
 impl Render for AiPanel {
@@ -27,11 +28,10 @@ impl Render for AiPanel {
             (store.settings.ai.clone(), base_text_style)
         };
         let editing = self.editing_turn.is_some();
-        let can_send = !self.loading
-            && !editing
+        let can_send = !editing
             && self.generation_failure.is_none()
             && ai_settings.main_model.is_some()
-            && !self.content.trim().is_empty();
+            && (!self.content.trim().is_empty() || !self.composer_images.is_empty());
         let resolved_main = ai_settings.resolved_main();
         let selected_provider = resolved_main.provider;
         let selected_model = resolved_main.model;
@@ -69,6 +69,90 @@ impl Render for AiPanel {
         let empty_chat = self.messages.is_empty();
         let panel_width = self.width;
         let validation_notice = self.validation_notice.clone();
+        let composer_image_previews = self
+            .composer_images
+            .iter()
+            .enumerate()
+            .filter_map(|(index, image)| {
+                let preview = agent_image_preview(image)?;
+                let panel = entity.clone();
+                Some(
+                    div()
+                        .id(("ai-composer-image", index))
+                        .relative()
+                        .flex_none()
+                        .w(px(58.0))
+                        .h(px(58.0))
+                        .overflow_hidden()
+                        .rounded(px(5.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.tab_active)
+                        .child(img(preview).size_full().object_fit(ObjectFit::Cover))
+                        .child(
+                            toolbar_icon_button(("ai-composer-image-remove", index), IconName::X)
+                                .xsmall()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .bg(theme.popover.opacity(0.9))
+                                .on_click(move |_, _, cx| {
+                                    panel.update(cx, |this, cx| {
+                                        this.remove_composer_image(index, cx);
+                                        cx.stop_propagation();
+                                    });
+                                }),
+                        )
+                        .into_any_element(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let queued_rows = self
+            .queued_messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| {
+                let panel = entity.clone();
+                let text = message.display_text();
+                let image_count = message.user_images().count();
+                let label = if text.trim().is_empty() {
+                    tr_with_number("ai-queued-images", "count", image_count)
+                } else if text.chars().count() > 80 {
+                    format!("{}…", text.chars().take(80).collect::<String>())
+                } else {
+                    text
+                };
+                div()
+                    .id(("ai-queued-message", index))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.muted.opacity(0.18))
+                    .pl_2()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(ui_rems(10.0))
+                            .text_color(theme.muted_foreground)
+                            .child(format!("{} · {label}", tr("ai-queued"))),
+                    )
+                    .child(
+                        toolbar_icon_button(("ai-queued-remove", index), IconName::X)
+                            .xsmall()
+                            .on_click(move |_, _, cx| {
+                                panel.update(cx, |this, cx| {
+                                    this.remove_queued_message(index, cx);
+                                    cx.stop_propagation();
+                                });
+                            }),
+                    )
+            })
+            .collect::<Vec<_>>();
         let message_context_menu = self.message_context_menu.clone();
         let mention_preview = self.mention_preview.clone();
         let mention_preview_scroll = self.mention_preview_scroll.clone();
@@ -120,27 +204,30 @@ impl Render for AiPanel {
             handle: self.scroll_handle.clone(),
             interacted: self.message_scroll_interacted.clone(),
         };
-        let attachment_trigger = toolbar_icon_button("ai-attachment-menu-button", IconName::Plus)
+        let attachment_trigger = Button::new("ai-attachment-menu-button")
+            .small()
+            .compact()
+            .ghost()
+            .icon(IconName::Plus)
+            .w(ui_rems(28.0))
+            .h(ui_rems(28.0))
+            .debug_selector(|| "ai-attachment-menu-button".to_string())
             .text_color(theme.muted_foreground)
             .tooltip(tr("attach"));
-        let attachment_control = if loading {
-            attachment_trigger.disabled(true).into_any_element()
-        } else {
-            let panel = entity.clone();
-            let page_count = self.page_count;
-            attachment_trigger
-                .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
-                    Self::build_attachment_menu(
-                        menu,
-                        page_count,
-                        has_current_selection,
-                        has_current_region,
-                        has_selected_pages,
-                        panel.clone(),
-                    )
-                })
-                .into_any_element()
-        };
+        let panel = entity.clone();
+        let page_count = self.page_count;
+        let attachment_control = attachment_trigger
+            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                Self::build_attachment_menu(
+                    menu,
+                    page_count,
+                    has_current_selection,
+                    has_current_region,
+                    has_selected_pages,
+                    panel.clone(),
+                )
+            })
+            .into_any_element();
         let thinking_trigger = Button::new("ai-thinking-menu-button")
             .xsmall()
             .compact()
@@ -229,11 +316,11 @@ impl Render for AiPanel {
         let send_control = Button::new("ai-send-button")
             .small()
             .compact()
-            .when(loading, |button| button.danger().icon(IconName::Stop))
-            .when(!loading, |button| button.primary().icon(IconName::ArrowUp))
-            .disabled(!loading && !can_send)
+            .primary()
+            .icon(IconName::ArrowUp)
+            .disabled(!can_send)
             .tooltip(if loading {
-                tr("ai-stop-generation")
+                tr("ai-queue-message")
             } else if can_send {
                 tr("send")
             } else {
@@ -243,14 +330,29 @@ impl Render for AiPanel {
             .h(ui_rems(28.0))
             .on_click(move |_, window, cx| {
                 send_panel.update(cx, |this, cx| {
-                    if this.loading {
-                        this.stop_generation(cx);
-                    } else if can_send {
+                    if can_send {
                         this.send_message(window, cx);
                     }
                     cx.stop_propagation();
                 });
             });
+        let stop_control = loading.then(|| {
+            let panel = entity.clone();
+            Button::new("ai-stop-button")
+                .small()
+                .compact()
+                .danger()
+                .icon(IconName::Stop)
+                .tooltip(tr("ai-stop-generation"))
+                .w(ui_rems(28.0))
+                .h(ui_rems(28.0))
+                .on_click(move |_, _, cx| {
+                    panel.update(cx, |this, cx| {
+                        this.stop_generation(cx);
+                        cx.stop_propagation();
+                    });
+                })
+        });
 
         div()
             .key_context("AiPanel")
@@ -275,6 +377,18 @@ impl Render for AiPanel {
             .on_mouse_down(MouseButton::Right, |_, _, cx| {
                 cx.stop_propagation();
             })
+            .on_drag_move::<ExternalPaths>(cx.listener(
+                |_, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                    if event.bounds.contains(&event.event.position) {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.attach_external_image_paths(paths.paths().to_vec(), cx);
+                cx.stop_propagation();
+            }))
+            .on_action(cx.listener(Self::on_composer_paste))
             .on_action(cx.listener(Self::close))
             .child(
                 div()
@@ -470,6 +584,28 @@ impl Render for AiPanel {
                                     .border_color(theme.border)
                                     .bg(theme.popover)
                                     .shadow_sm()
+                                    .when(!queued_rows.is_empty(), |this| {
+                                        this.child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .px_2()
+                                                .pt_2()
+                                                .children(queued_rows),
+                                        )
+                                    })
+                                    .when(!composer_image_previews.is_empty(), |this| {
+                                        this.child(
+                                            div()
+                                                .flex()
+                                                .flex_wrap()
+                                                .gap_1()
+                                                .px_2()
+                                                .pt_2()
+                                                .children(composer_image_previews),
+                                        )
+                                    })
                                     .child(
                                         div()
                                             .id("ai-panel-composer-input")
@@ -528,6 +664,7 @@ impl Render for AiPanel {
                                                     .justify_end()
                                                     .gap_1()
                                                     .child(model_control)
+                                                    .children(stop_control)
                                                     .child(send_control),
                                             ),
                                     ),

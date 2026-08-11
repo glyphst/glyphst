@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use gpui::{App, Task};
 
 pub mod ai_panel;
 
 use anyhow::Result;
+use glyphst_ai::agent::AgentToolExecutor;
 use glyphst_ai::ai_chat::{ContextBlock, ImageContext, MentionReference};
 use glyphst_core::{RegionImageReference, SelectedPagesReference};
 
@@ -55,4 +58,10 @@ pub trait AiContextProvider: 'static {
         references: Vec<RegionImageReference>,
         cx: &App,
     ) -> Task<Result<Vec<ResolvedRegionContext>>>;
+
+    /// Returns a read-only executor backed by a stable document snapshot.
+    /// Providers without a document can leave agent tools unavailable.
+    fn agent_tools(&self, _cx: &App) -> Option<Arc<dyn AgentToolExecutor>> {
+        None
+    }
 }

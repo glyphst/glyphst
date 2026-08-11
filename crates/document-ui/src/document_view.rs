@@ -39,6 +39,10 @@ use crate::toc::{TocPalette, TocPaletteDelegate, TocPaletteEntry};
 use anyhow::{Context as _, Result, anyhow, bail};
 use arboard::{Clipboard, ImageData};
 pub use glyphst_actions::document_viewer::*;
+use glyphst_ai::agent::{
+    AgentCancellationToken, AgentImage, AgentToolCall, AgentToolDefinition, AgentToolExecutor,
+    AgentToolResult, AgentToolResultPart,
+};
 use glyphst_ai::ai_chat::{
     ContextBlock, ImageContext, MAX_PAGE_IMAGE_BYTES, MentionKind, MentionReference,
 };
@@ -93,12 +97,13 @@ use gpui_component::{
     searchable_list::SearchableVec,
     select::{Select, SelectEvent, SelectState},
 };
-use image::{Frame, RgbaImage, codecs::jpeg::JpegEncoder};
+use image::{Frame, GenericImageView as _, RgbaImage, codecs::jpeg::JpegEncoder};
 use mupdf::text_page::{TextBlockType, TextCharFlags};
 use mupdf::{
     ColorParams, Colorspace, DestinationKind, Device, DisplayList, Image as PdfImage, Matrix,
     Pixmap, Quad, Rect, TextPageFlags,
 };
+use serde_json::json;
 use smallvec::{SmallVec, smallvec};
 
 const INITIAL_SELECTION_TOLERANCE_PX: f32 = 24.0;
@@ -1585,6 +1590,18 @@ struct DocumentViewAiContextProvider {
     document_view: gpui::WeakEntity<DocumentView>,
 }
 
+struct DocumentAgentTools {
+    snapshot: Arc<DocumentSnapshot>,
+    document_layout: DocumentLayout,
+    page_count: usize,
+    current_page: usize,
+    text_format: PageTextFormat,
+    image_quality: PageImageQuality,
+    page_image_limit: usize,
+    rotation: DocumentRotation,
+    reflow_text: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 struct TextFormatBlock {
     lines: Vec<String>,
@@ -1741,6 +1758,29 @@ impl AiContextProvider for DocumentViewAiContextProvider {
                 references,
             )
         })
+    }
+
+    fn agent_tools(&self, cx: &gpui::App) -> Option<Arc<dyn AgentToolExecutor>> {
+        self.document_view
+            .read_with(cx, |document_view, cx| {
+                let ai_settings = &cx.global::<SettingsStore>().settings.ai;
+                Arc::new(DocumentAgentTools {
+                    snapshot: document_view.document_snapshot.clone(),
+                    document_layout: document_view.document_layout,
+                    page_count: document_view.page_count,
+                    current_page: document_view.current_page(),
+                    text_format: ai_settings.page_text_format,
+                    image_quality: ai_settings.page_image_quality,
+                    page_image_limit: ai_settings.page_image_limit,
+                    rotation: document_view.rotation,
+                    reflow_text: document_view
+                        .capabilities
+                        .reflow
+                        .then(|| document_view.document_text())
+                        .flatten(),
+                }) as Arc<dyn AgentToolExecutor>
+            })
+            .ok()
     }
 }
 

@@ -318,6 +318,279 @@ fn clicking_outside_an_edited_user_message_cancels_editing(cx: &mut TestAppConte
     });
 }
 
+#[gpui::test]
+fn attachment_button_opens_attachment_actions(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        install_test_settings(cx);
+        cx.set_global(LibraryStore::memory());
+    });
+
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let panel = cx.new(|cx| {
+            AiPanel::new(
+                cx.focus_handle(),
+                EmptyAiContextProvider,
+                PathBuf::from("/tmp/attachment-menu-test.pdf"),
+                AiPageState::default(),
+                AI_PANEL_WIDTH,
+                window,
+                cx,
+            )
+        });
+        panel.focus_handle(cx).focus(window, cx);
+        Root::new(panel, window, cx)
+    });
+
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    let trigger = cx
+        .debug_bounds("ai-attachment-menu-button")
+        .expect("attachment trigger bounds");
+    cx.simulate_click(trigger.center(), gpui::Modifiers::default());
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    cx.simulate_keystrokes("down enter");
+
+    assert!(cx.did_prompt_for_paths());
+}
+
+#[gpui::test]
+fn pasting_an_image_attaches_it_to_the_focused_composer(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        install_test_settings(cx);
+        cx.set_global(LibraryStore::memory());
+    });
+
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let panel = cx.new(|cx| {
+            AiPanel::new(
+                cx.focus_handle(),
+                EmptyAiContextProvider,
+                PathBuf::from("/tmp/image-paste-test.pdf"),
+                AiPageState::default(),
+                AI_PANEL_WIDTH,
+                window,
+                cx,
+            )
+        });
+        panel.focus_handle(cx).focus(window, cx);
+        Root::new(panel, window, cx)
+    });
+    let panel = root.read_with(cx, |root, _| {
+        root.view().clone().downcast::<AiPanel>().unwrap()
+    });
+
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        2,
+        3,
+        image::Rgba([12, 34, 56, 255]),
+    ))
+    .write_to(&mut png, image::ImageFormat::Png)
+    .unwrap();
+    let clipboard_image = Image::from_bytes(ImageFormat::Png, png.into_inner());
+    cx.write_to_clipboard(ClipboardItem {
+        entries: vec![
+            ClipboardEntry::Image(clipboard_image),
+            ClipboardEntry::from("alternate text representation".to_string()),
+        ],
+    });
+
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    #[cfg(target_os = "macos")]
+    cx.simulate_keystrokes("cmd-v");
+    #[cfg(not(target_os = "macos"))]
+    cx.simulate_keystrokes("ctrl-v");
+    cx.run_until_parked();
+
+    panel.read_with(cx, |panel, _| {
+        assert!(panel.content.is_empty());
+        assert_eq!(panel.composer_images.len(), 1);
+        assert_eq!(panel.composer_images[0].media_type, "image/png");
+        assert_eq!(
+            (
+                panel.composer_images[0].width,
+                panel.composer_images[0].height
+            ),
+            (2, 3)
+        );
+    });
+}
+
+#[gpui::test]
+fn assistant_text_is_laid_out_after_its_tool_card(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        install_test_settings(cx);
+        cx.set_global(LibraryStore::memory());
+    });
+
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let panel = cx.new(|cx| {
+            AiPanel::new(
+                cx.focus_handle(),
+                EmptyAiContextProvider,
+                PathBuf::from("/tmp/tool-order-test.pdf"),
+                AiPageState::default(),
+                AI_PANEL_WIDTH,
+                window,
+                cx,
+            )
+        });
+        panel.update(cx, |panel, cx| {
+            let mut message = ChatMessage::assistant("The document contains a chart.".to_string());
+            message.set_agent_trace(vec![
+                AgentMessage {
+                    role: AgentRole::Assistant,
+                    content: vec![AgentContentPart::ToolCall(AgentToolCall {
+                        id: "call-1".to_string(),
+                        name: "inspect_document".to_string(),
+                        arguments: "{}".to_string(),
+                    })],
+                },
+                AgentMessage::tool_result(AgentToolResult::text(
+                    "call-1",
+                    "inspect_document",
+                    "chart found",
+                )),
+                AgentMessage::assistant_text("The document contains a chart."),
+            ]);
+            panel.push_message(message, cx);
+        });
+        Root::new(panel, window, cx)
+    });
+
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    let tool_card = cx
+        .debug_bounds("ai-tool-card-0-0")
+        .expect("tool card bounds");
+    assert!(tool_card.size.height <= px(28.0));
+    assert!(cx.debug_bounds("ai-tool-detail-0-0").is_none());
+    let assistant_text = cx
+        .debug_bounds("ai-message-content-0")
+        .expect("assistant message bounds");
+    assert!(tool_card.bottom() <= assistant_text.top());
+
+    cx.simulate_click(tool_card.center(), gpui::Modifiers::default());
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    let expanded_tool_card = cx
+        .debug_bounds("ai-tool-card-0-0")
+        .expect("expanded tool card bounds");
+    assert!(cx.debug_bounds("ai-tool-detail-0-0").is_some());
+    assert!(expanded_tool_card.size.height > tool_card.size.height);
+    let assistant_text = cx
+        .debug_bounds("ai-message-content-0")
+        .expect("assistant message bounds after expansion");
+    assert!(expanded_tool_card.bottom() <= assistant_text.top());
+}
+
+#[gpui::test]
+fn tool_events_follow_output_without_overriding_manual_scroll(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        install_test_settings(cx);
+        cx.set_global(LibraryStore::memory());
+    });
+
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let panel = cx.new(|cx| {
+            AiPanel::new(
+                cx.focus_handle(),
+                EmptyAiContextProvider,
+                PathBuf::from("/tmp/tool-scroll-test.pdf"),
+                AiPageState::default(),
+                AI_PANEL_WIDTH,
+                window,
+                cx,
+            )
+        });
+        panel.update(cx, |panel, cx| {
+            panel.push_message(
+                ChatMessage::user_text(
+                    (0..80)
+                        .map(|line| format!("Document question line {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                cx,
+            );
+            panel.push_message(ChatMessage::assistant(String::new()), cx);
+            let target = GenerationTarget {
+                id: 1,
+                assistant_index: 1,
+            };
+            panel.active_generation = Some(target);
+            panel.loading = true;
+            panel.follow_output = true;
+        });
+        Root::new(panel, window, cx)
+    });
+    let panel = root.read_with(cx, |root, _| {
+        root.view().clone().downcast::<AiPanel>().unwrap()
+    });
+
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+        panel.update(cx, |panel, _| panel.scroll_handle.scroll_to_bottom());
+        _ = window.draw(cx);
+    });
+    let before_max = panel.read_with(cx, |panel, _| panel.scroll_handle.max_offset().y);
+    assert!(before_max > px(0.0));
+
+    panel.update(cx, |panel, cx| {
+        panel.apply_generation_event(
+            GenerationTarget {
+                id: 1,
+                assistant_index: 1,
+            },
+            GenerationEvent::Agent(AgentEvent::ToolCallStarted {
+                id: "call-1".to_string(),
+                name: "search_document".to_string(),
+            }),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    panel.read_with(cx, |panel, _| {
+        let max_offset = panel.scroll_handle.max_offset().y;
+        assert!(max_offset > before_max);
+        assert_eq!(panel.scroll_handle.offset().y, -max_offset);
+    });
+
+    panel.update(cx, |panel, cx| {
+        panel.follow_output = false;
+        panel.scroll_handle.set_offset(point(px(0.0), px(0.0)));
+        panel.apply_generation_event(
+            GenerationTarget {
+                id: 1,
+                assistant_index: 1,
+            },
+            GenerationEvent::Agent(AgentEvent::ToolCallStarted {
+                id: "call-2".to_string(),
+                name: "read_document".to_string(),
+            }),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    panel.read_with(cx, |panel, _| {
+        assert_eq!(panel.scroll_handle.offset().y, px(0.0));
+        assert!(!panel.follow_output);
+    });
+}
+
 #[test]
 fn edit_adjusts_ranges_and_removes_overlapping_mentions() {
     let mut mentions = parse_composer_mentions("@selection then @page(3)");
@@ -973,6 +1246,67 @@ fn document_image_persistence_mapping_round_trips() {
     assert_eq!(
         library_reference_to_ai(&ai_reference_to_library(reference)),
         Some(reference)
+    );
+}
+
+#[test]
+fn user_images_and_tool_trace_round_trip_through_session_mapping() {
+    let mut message = ChatMessage::user_text("Inspect this".to_string());
+    let image = AgentImage::new("image/png", 2, 3, vec![1, 2, 3, 4]).with_name("figure.png");
+    message.attach_user_image(image.clone());
+    let tool_result = AgentToolResult {
+        call_id: "call-1".to_string(),
+        tool_name: "render_document_pages".to_string(),
+        content: vec![AgentToolResultPart::Image(image.clone())],
+        is_error: false,
+    };
+    message.set_agent_trace(vec![
+        AgentMessage {
+            role: AgentRole::Assistant,
+            content: vec![AgentContentPart::ToolCall(AgentToolCall {
+                id: "call-1".to_string(),
+                name: "render_document_pages".to_string(),
+                arguments: "{\"pages\":[1]}".to_string(),
+            })],
+        },
+        AgentMessage::tool_result(tool_result),
+        AgentMessage::assistant_text("The page contains a chart."),
+    ]);
+
+    let mut library = LibraryStore::memory();
+    let persisted =
+        persisted_session_messages_with_assets(std::slice::from_ref(&message), None, &mut library)
+            .unwrap();
+    assert_eq!(persisted[0].images.len(), 1);
+    assert!(matches!(
+        persisted[0].agent_parts[1],
+        AiSessionAgentPart::ToolResult { .. }
+    ));
+
+    let hydrated = chat_message_from_session(persisted.into_iter().next().unwrap(), &library);
+    let hydrated_image = hydrated.user_images().next().unwrap();
+    assert_eq!(hydrated_image.bytes.as_ref(), image.bytes.as_ref());
+    assert_eq!(hydrated.agent_trace().len(), 3);
+    assert_eq!(tool_cards_from_trace(hydrated.agent_trace()).len(), 1);
+}
+
+#[test]
+fn unsupported_model_capability_rejects_image_messages() {
+    let mut message = ChatMessage::user_text(String::new());
+    message.attach_user_image(AgentImage::new("image/png", 1, 1, vec![1]));
+    assert!(
+        validate_model_image_support(
+            std::slice::from_ref(&message),
+            AiCapabilitySupport::Unsupported,
+        )
+        .is_err()
+    );
+    assert!(
+        validate_model_image_support(
+            std::slice::from_ref(&message),
+            AiCapabilitySupport::Supported,
+        )
+        .is_ok()
     );
 }
 

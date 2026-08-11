@@ -48,6 +48,7 @@ pub(super) fn managed_library_root() -> PathBuf {
 pub(super) fn ensure_managed_library_directories(root: &Path) -> Result<()> {
     create_private_directory(root)?;
     create_private_directory(&root.join("files"))?;
+    create_private_directory(&root.join("ai-images"))?;
     create_private_directory(&root.join(".staging"))?;
     create_private_directory(&root.join(".deleting"))?;
     Ok(())
@@ -159,6 +160,9 @@ pub(super) fn ensure_tables(database: &Database) -> Result<()> {
         write_txn.open_table(AI_SESSIONS_V4_TABLE)?;
     }
     {
+        write_txn.open_table(AI_SESSIONS_V5_TABLE)?;
+    }
+    {
         write_txn.open_table(LIBRARY_ITEMS_V1_TABLE)?;
     }
     {
@@ -241,6 +245,7 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
         has_ai_sessions_v2,
         has_ai_sessions_v3,
         has_ai_sessions_v4,
+        has_ai_sessions_v5,
     ) = {
         let read_txn = database.begin_read()?;
         let table = read_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
@@ -251,6 +256,7 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
             table.get(AI_SESSIONS_V2_MIGRATION_KEY)?.is_some(),
             table.get(AI_SESSIONS_V3_MIGRATION_KEY)?.is_some(),
             table.get(AI_SESSIONS_V4_MIGRATION_KEY)?.is_some(),
+            table.get(AI_SESSIONS_V5_MIGRATION_KEY)?.is_some(),
         )
     };
 
@@ -262,6 +268,7 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
             has_ai_sessions_v2,
             has_ai_sessions_v3,
             has_ai_sessions_v4,
+            has_ai_sessions_v5,
         )?;
     } else if has_v1_storage {
         load_storage_v1(
@@ -270,6 +277,7 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
             has_ai_sessions_v2,
             has_ai_sessions_v3,
             has_ai_sessions_v4,
+            has_ai_sessions_v5,
         )?;
     } else {
         load_legacy_storage(
@@ -278,6 +286,7 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
             has_ai_sessions_v2,
             has_ai_sessions_v3,
             has_ai_sessions_v4,
+            has_ai_sessions_v5,
         )?;
     }
     load_document_preferences(
@@ -308,6 +317,9 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
     }
     if !has_ai_sessions_v4 {
         migrate_ai_sessions_v4(database, &library)?;
+    }
+    if !has_ai_sessions_v5 {
+        migrate_ai_sessions_v5(database, &library)?;
     }
     Ok(library)
 }
@@ -417,6 +429,7 @@ fn load_storage_v2(
     has_ai_sessions_v2: bool,
     has_ai_sessions_v3: bool,
     has_ai_sessions_v4: bool,
+    has_ai_sessions_v5: bool,
 ) -> Result<()> {
     {
         let table = read_txn.open_table(HISTORY_V2_TABLE)?;
@@ -481,6 +494,7 @@ fn load_storage_v2(
         has_ai_sessions_v2,
         has_ai_sessions_v3,
         has_ai_sessions_v4,
+        has_ai_sessions_v5,
     )?;
     load_shared_v1_storage(read_txn, library)?;
     Ok(())
@@ -492,6 +506,7 @@ fn load_storage_v1(
     has_ai_sessions_v2: bool,
     has_ai_sessions_v3: bool,
     has_ai_sessions_v4: bool,
+    has_ai_sessions_v5: bool,
 ) -> Result<()> {
     {
         let table = read_txn.open_table(HISTORY_V1_TABLE)?;
@@ -560,6 +575,7 @@ fn load_storage_v1(
         has_ai_sessions_v2,
         has_ai_sessions_v3,
         has_ai_sessions_v4,
+        has_ai_sessions_v5,
     )?;
     load_shared_v1_storage(read_txn, library)?;
     Ok(())
@@ -671,8 +687,23 @@ fn load_ai_sessions(
     has_ai_sessions_v2: bool,
     has_ai_sessions_v3: bool,
     has_ai_sessions_v4: bool,
+    has_ai_sessions_v5: bool,
 ) -> Result<()> {
-    if has_ai_sessions_v4 {
+    if has_ai_sessions_v5 {
+        let table = read_txn.open_table(AI_SESSIONS_V5_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredAiSessionV5>(value.value())
+                .and_then(StoredAiSessionV5::into_domain)
+            {
+                Ok(mut entry) => {
+                    entry.path = normalize_path(&entry.path);
+                    library.ai_sessions.push(entry);
+                }
+                Err(error) => eprintln!("failed to decode AI session: {error:#}"),
+            }
+        }
+    } else if has_ai_sessions_v4 {
         let table = read_txn.open_table(AI_SESSIONS_V4_TABLE)?;
         for entry in table.iter()? {
             let (_, value) = entry?;
@@ -738,6 +769,7 @@ fn load_legacy_storage(
     has_ai_sessions_v2: bool,
     has_ai_sessions_v3: bool,
     has_ai_sessions_v4: bool,
+    has_ai_sessions_v5: bool,
 ) -> Result<()> {
     {
         let table = read_txn.open_table(HISTORY_TABLE)?;
@@ -799,13 +831,14 @@ fn load_legacy_storage(
         }
     }
 
-    if has_ai_sessions_v2 || has_ai_sessions_v3 || has_ai_sessions_v4 {
+    if has_ai_sessions_v2 || has_ai_sessions_v3 || has_ai_sessions_v4 || has_ai_sessions_v5 {
         load_ai_sessions(
             read_txn,
             library,
             has_ai_sessions_v2,
             has_ai_sessions_v3,
             has_ai_sessions_v4,
+            has_ai_sessions_v5,
         )?;
     } else {
         let table = read_txn.open_table(AI_SESSIONS_TABLE)?;
@@ -1070,6 +1103,32 @@ fn migrate_ai_sessions_v4(database: &Database, library: &Library) -> Result<()> 
         migrations.insert(
             AI_SESSIONS_V4_MIGRATION_KEY,
             [AI_SESSIONS_V4_VERSION].as_slice(),
+        )?;
+    }
+    write_txn.commit()?;
+    Ok(())
+}
+
+fn migrate_ai_sessions_v5(database: &Database, library: &Library) -> Result<()> {
+    let write_txn = database.begin_write()?;
+    {
+        let migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        if migrations.get(AI_SESSIONS_V5_MIGRATION_KEY)?.is_some() {
+            return Ok(());
+        }
+    }
+    {
+        let mut table = write_txn.open_table(AI_SESSIONS_V5_TABLE)?;
+        for session in &library.ai_sessions {
+            let encoded = encode(&StoredAiSessionV5::from(session))?;
+            table.insert(session.id, encoded.as_slice())?;
+        }
+    }
+    {
+        let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        migrations.insert(
+            AI_SESSIONS_V5_MIGRATION_KEY,
+            [AI_SESSIONS_V5_VERSION].as_slice(),
         )?;
     }
     write_txn.commit()?;

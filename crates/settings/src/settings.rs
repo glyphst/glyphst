@@ -65,8 +65,9 @@ mod store;
 mod translation;
 
 pub use ai::{
-    AiApiStyle, AiModel, AiProvider, AiProviderConfig, AiSettings, AiThinkingLevel, ModelRef,
-    PageImageQuality, PageTextFormat, QuickAskSettings, ResolvedAiConfig,
+    AiApiStyle, AiCapabilityOverride, AiCapabilitySupport, AiModel, AiModelCapabilities,
+    AiProvider, AiProviderConfig, AiSettings, AiThinkingLevel, ModelRef, PageImageQuality,
+    PageTextFormat, QuickAskSettings, ResolvedAiConfig,
 };
 pub use general::{
     AppLanguage, BehaviorSettings, CopyFormat, FontSettings, KeyBindingOverride, KeymapPreset,

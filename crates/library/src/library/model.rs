@@ -101,14 +101,9 @@ impl Library {
             if session.title.is_empty() {
                 session.title = "New Chat".to_string();
             }
-            session.messages.retain_mut(|message| {
-                message.content = message.content.trim().to_string();
-                message.request_content = message
-                    .request_content
-                    .take()
-                    .map(|content| content.trim().to_string())
-                    .filter(|content| !content.is_empty() && *content != message.content);
-                !message.content.is_empty()
+            session.messages.retain_mut(sanitize_ai_session_message);
+            session.queued_messages.retain_mut(|message| {
+                message.role == AiSessionRole::User && sanitize_ai_session_message(message)
             });
             !session.path.as_os_str().is_empty()
                 && session.id > 0
@@ -168,4 +163,63 @@ impl Library {
                 + 1,
         );
     }
+}
+
+fn sanitize_ai_session_message(message: &mut AiSessionMessage) -> bool {
+    message.content = message.content.trim().to_string();
+    message.request_content = message
+        .request_content
+        .take()
+        .map(|content| content.trim().to_string())
+        .filter(|content| !content.is_empty() && *content != message.content);
+    message.images.retain(sane_ai_image);
+    message.agent_parts.retain_mut(|part| match part {
+        AiSessionAgentPart::AssistantText(text) => {
+            *text = text.trim().to_string();
+            !text.is_empty()
+        }
+        AiSessionAgentPart::ToolCall {
+            id,
+            name,
+            arguments,
+            ..
+        } => {
+            *id = id.trim().to_string();
+            *name = name.trim().to_string();
+            *arguments = arguments.trim().to_string();
+            !id.is_empty() && !name.is_empty()
+        }
+        AiSessionAgentPart::ToolResult {
+            call_id,
+            tool_name,
+            content,
+            ..
+        } => {
+            *call_id = call_id.trim().to_string();
+            *tool_name = tool_name.trim().to_string();
+            content.retain_mut(|part| match part {
+                AiSessionToolResultPart::Text(text) => {
+                    *text = text.trim().to_string();
+                    !text.is_empty()
+                }
+                AiSessionToolResultPart::Image(image) => sane_ai_image(image),
+            });
+            !call_id.is_empty() && !tool_name.is_empty()
+        }
+        AiSessionAgentPart::OpaqueReasoning { api_style, value } => {
+            *api_style = api_style.trim().to_string();
+            *value = value.trim().to_string();
+            !api_style.is_empty() && !value.is_empty()
+        }
+    });
+    !message.content.is_empty() || !message.images.is_empty() || !message.agent_parts.is_empty()
+}
+
+fn sane_ai_image(image: &AiSessionImage) -> bool {
+    image.asset_id.len() == 64
+        && image.asset_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !image.media_type.trim().is_empty()
+        && image.width > 0
+        && image.height > 0
+        && image.byte_len > 0
 }

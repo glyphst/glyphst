@@ -83,7 +83,10 @@ fn migrates_legacy_storage_without_replacing_legacy_rows() {
             request_content: None,
             references: Vec::new(),
             occurrences: Vec::new(),
+            images: Vec::new(),
+            agent_parts: Vec::new(),
         }],
+        queued_messages: Vec::new(),
         created: 5,
         updated: 6,
     };

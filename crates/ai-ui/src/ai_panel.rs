@@ -1,14 +1,25 @@
 use std::{
-    cell::Cell, collections::HashSet, io::Cursor, ops::Range, path::PathBuf, rc::Rc, sync::Arc,
-    thread, time::Duration,
+    cell::Cell,
+    collections::{HashMap, HashSet},
+    io::Cursor,
+    ops::Range,
+    path::PathBuf,
+    rc::Rc,
+    sync::Arc,
+    thread,
+    time::Duration,
 };
 
 use crate::{
     AiContext, AiContextProvider, AiPageState, ResolvedPageContext, ResolvedRegionContext,
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use futures::{StreamExt, channel::mpsc};
 use glyphst_actions::ai_panel::AiPanelClose;
+use glyphst_ai::agent::{
+    AgentCancellationToken, AgentContentPart, AgentEvent, AgentImage, AgentLimits, AgentMessage,
+    AgentRole, AgentToolCall, AgentToolResult, AgentToolResultPart, run_agent,
+};
 use glyphst_ai::ai_chat::{
     AiStreamEvent, ChatMessage, ContextBlock, DEFAULT_SESSION_TITLE, DocumentContext,
     MAX_PAGE_IMAGE_BYTES, MentionKind, MentionOccurrence, MentionReference, Role,
@@ -17,11 +28,12 @@ use glyphst_ai::ai_chat::{
 };
 use glyphst_core::{RegionImageReference, SelectedPagesReference};
 use glyphst_library::{
-    AiMentionOccurrence, AiMentionReference, AiSession, AiSessionMessage, AiSessionRole,
-    LibraryStore, current_timestamp,
+    AiMentionOccurrence, AiMentionReference, AiSession, AiSessionAgentPart, AiSessionImage,
+    AiSessionMessage, AiSessionRole, AiSessionToolResultPart, AiSessionToolStatus, LibraryStore,
+    current_timestamp,
 };
 use glyphst_settings::{
-    AiApiStyle, AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore,
+    AiApiStyle, AiCapabilitySupport, AiModel, AiProvider, AiThinkingLevel, ModelRef, SettingsStore,
     localize::{tr, tr_with_number},
     ui_rems,
 };
@@ -35,12 +47,12 @@ use glyphst_ui::{
     scrollbar::{ScrollbarHandle, WithScrollbar as _},
 };
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, DismissEvent,
-    ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, Image, ImageFormat,
-    IntoElement, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point as GpuiPoint, Render,
-    ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, TextStyle,
-    WeakEntity, Window, anchored, canvas, deferred, div, img, point, prelude::*, px,
-    transparent_black,
+    Anchor, Animation, AnimationExt, AnyElement, App, Bounds, ClipboardEntry, ClipboardItem,
+    Context, DismissEvent, DragMoveEvent, ElementId, Entity, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable, FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton,
+    MouseDownEvent, ObjectFit, PathPromptOptions, Pixels, Point as GpuiPoint, Render, ScrollDelta,
+    ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, TextStyle, WeakEntity,
+    Window, anchored, canvas, deferred, div, img, point, prelude::*, px, transparent_black,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, InteractiveElementExt as _, Selectable as _, Sizable as _,
@@ -49,7 +61,7 @@ use gpui_component::{
     button::{Button, ButtonGroup, ButtonVariants as _},
     input::{
         CompletionMenuOptions, CompletionProvider, CompletionTriggerEvent, Escape as InputEscape,
-        Input, InputEvent, InputSpan, InputState, Rope, RopeExt,
+        Input, InputEvent, InputSpan, InputState, Paste as InputPaste, Rope, RopeExt,
     },
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
@@ -69,6 +81,11 @@ const MENTION_PREVIEW_WINDOW_MARGIN: f32 = 8.0;
 const MENTION_PREVIEW_BRIDGE_HEIGHT: f32 = 6.0;
 const MENTION_COMPLETION_MIN_WIDTH: f32 = 280.0;
 const MENTION_COMPLETION_MAX_WIDTH: f32 = 540.0;
+const MAX_USER_IMAGES: usize = 8;
+const MAX_USER_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_USER_IMAGE_DIMENSION: u32 = 16_384;
+const MAX_USER_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
+const MAX_USER_IMAGE_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
 struct AiValidationNotification;
 
@@ -238,6 +255,33 @@ struct GenerationFailure {
     message: String,
 }
 
+enum GenerationEvent {
+    Agent(AgentEvent),
+    Finished {
+        trace: Vec<AgentMessage>,
+        limit_reached: bool,
+    },
+    Error(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentToolCardStatus {
+    Requested,
+    Running,
+    Completed,
+    Error,
+    Canceled,
+}
+
+#[derive(Clone, Debug)]
+struct AgentToolCard {
+    id: String,
+    name: String,
+    arguments: String,
+    result: Vec<AgentToolResultPart>,
+    status: AgentToolCardStatus,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SubmitAction {
     Edit,
@@ -262,6 +306,7 @@ struct ComposerSnapshot {
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
     mentions: Vec<ComposerMention>,
+    images: Vec<AgentImage>,
 }
 
 #[derive(Clone)]
@@ -324,6 +369,8 @@ pub struct AiPanel {
     previous_focus_handle: FocusHandle,
     mode: AiPanelMode,
     messages: Vec<ChatMessage>,
+    queued_messages: Vec<ChatMessage>,
+    composer_images: Vec<AgentImage>,
     width: f32,
     content: SharedString,
     selected_range: Range<usize>,
@@ -333,9 +380,12 @@ pub struct AiPanel {
     scroll_handle: ScrollHandle,
     sessions_scroll: ScrollHandle,
     pending_stream: Option<Task<()>>,
+    agent_cancellation: Option<AgentCancellationToken>,
     stream_render_task: Option<Task<()>>,
     generation_id: u64,
     active_generation: Option<GenerationTarget>,
+    tool_cards: HashMap<usize, Vec<AgentToolCard>>,
+    expanded_tool_cards: HashSet<(usize, usize)>,
     generation_failure: Option<GenerationFailure>,
     pending_title_task: Option<Task<()>>,
     context_provider: Box<dyn AiContextProvider>,
@@ -463,6 +513,7 @@ impl AiPanel {
                 .auto_grow(min_rows, max_rows)
                 .soft_wrap(true)
                 .submit_on_enter(true)
+                .passthrough_structured_paste(true)
                 .placeholder(tr("ai-ask-placeholder"));
             input.lsp.completion_provider = Some(composer_provider.clone());
             input
@@ -471,7 +522,8 @@ impl AiPanel {
             let mut input = InputState::new(window, cx)
                 .auto_grow(1, usize::MAX)
                 .soft_wrap(true)
-                .submit_on_enter(true);
+                .submit_on_enter(true)
+                .passthrough_structured_paste(true);
             input.lsp.completion_provider = Some(edit_provider.clone());
             input
         });
@@ -499,6 +551,8 @@ impl AiPanel {
             previous_focus_handle: init.previous_focus_handle,
             mode: init.mode,
             messages: Vec::new(),
+            queued_messages: Vec::new(),
+            composer_images: Vec::new(),
             width: init.width,
             content: SharedString::default(),
             selected_range: 0..0,
@@ -508,9 +562,12 @@ impl AiPanel {
             scroll_handle: ScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
             pending_stream: None,
+            agent_cancellation: None,
             stream_render_task: None,
             generation_id: 0,
             active_generation: None,
+            tool_cards: HashMap::new(),
+            expanded_tool_cards: HashSet::new(),
             generation_failure: None,
             pending_title_task: None,
             context_provider: init.context_provider,
