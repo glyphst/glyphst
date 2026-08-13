@@ -178,6 +178,79 @@ fn duplicate_tab_uses_the_workspace_shortcut_in_both_presets() {
 }
 
 #[test]
+fn zen_mode_is_unbound_by_default_and_can_be_user_bound() {
+    for preset in [KeymapPreset::Modern, KeymapPreset::Vim] {
+        let binding = editable_bindings(preset, &[])
+            .into_iter()
+            .find(|binding| {
+                binding.action == "toggle-zen-mode"
+                    && binding.category == KeyBindingCategory::Workspace
+            })
+            .expect("Zen mode binding should be editable");
+        assert!(binding.keystrokes.is_empty());
+        assert!(binding.default_keystrokes.is_empty());
+
+        let overrides = [KeyBindingOverride {
+            keymap: preset,
+            action: "zen-mode".to_string(),
+            keystrokes: "ctrl-alt-z".to_string(),
+            context: Some(KeyBindingCategory::Workspace.id().to_string()),
+        }];
+        let overridden = editable_bindings(preset, &overrides)
+            .into_iter()
+            .find(|binding| {
+                binding.action == "toggle-zen-mode"
+                    && binding.category == KeyBindingCategory::Workspace
+            })
+            .expect("overridden Zen mode binding should remain editable");
+        assert_eq!(overridden.keystrokes, vec!["ctrl-alt-z".to_string()]);
+        assert!(overridden.default_keystrokes.is_empty());
+    }
+}
+
+#[test]
+fn nested_escape_binding_wins_before_zen_mode() {
+    let mut keymap = Keymap::default();
+    keymap.add_bindings([
+        KeyBinding::load(
+            "escape",
+            Box::new(ToggleZenMode),
+            Some(Rc::new(
+                KeyBindingContextPredicate::parse("ZenMode").unwrap(),
+            )),
+            false,
+            None,
+            &DummyKeyboardMapper,
+        )
+        .unwrap(),
+        KeyBinding::load(
+            "escape",
+            Box::new(ToggleGridOverview),
+            Some(Rc::new(
+                KeyBindingContextPredicate::parse("GridOverview").unwrap(),
+            )),
+            false,
+            None,
+            &DummyKeyboardMapper,
+        )
+        .unwrap(),
+    ]);
+
+    assert_eq!(
+        first_action_for(&keymap, "escape", &["Workspace ZenMode", "DocumentView"]),
+        ToggleZenMode::name_for_type()
+    );
+    assert_eq!(
+        first_action_for(
+            &keymap,
+            "escape",
+            &["Workspace ZenMode", "DocumentView GridOverview"],
+        ),
+        ToggleGridOverview::name_for_type()
+    );
+}
+
+#[test]
 fn source_reflects_user_override_versus_default() {
     let preset = KeymapPreset::Modern;
     let defaults = editable_bindings(preset, &[]);

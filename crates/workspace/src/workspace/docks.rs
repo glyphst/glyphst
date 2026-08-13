@@ -399,6 +399,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.exit_zen_mode(window, cx);
         if self.surface_mode != WorkspaceSurfaceMode::Panes {
             return;
         }
@@ -421,6 +422,7 @@ impl Workspace {
     }
 
     pub(super) fn toggle_ai_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.exit_zen_mode(window, cx);
         if self.docks.ai_panel_open {
             self.close_ai_dock(cx);
             if self.surface_mode == WorkspaceSurfaceMode::Home {
@@ -739,6 +741,27 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active_document_view = self.active_pane.read(cx).active_document_view();
+        if self.zen_mode {
+            if let Some(document_view) = active_document_view.as_ref() {
+                document_view.update(cx, |document_view, cx| {
+                    document_view.set_dock_snapshot(DocumentDockSnapshot::default(), cx);
+                });
+            }
+            let focus_handle = self.active_pane.read(cx).focus_handle();
+            if let Some(content) = self.active_pane.read(cx).active_zen_mode_content() {
+                return div()
+                    .id("workspace-zen-surface")
+                    .debug_selector(|| "workspace-zen-surface".to_string())
+                    .relative()
+                    .size_full()
+                    .overflow_hidden()
+                    .track_focus(&focus_handle)
+                    .on_drag_move::<ExternalPaths>(cx.listener(Self::track_external_document_drag))
+                    .child(content)
+                    .children(self.external_document_drop_overlay(theme))
+                    .into_any_element();
+            }
+        }
         if let Some(active_document_view) = active_document_view.clone()
             && active_document_view.read(cx).is_presentation_mode()
         {

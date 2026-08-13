@@ -1,4 +1,5 @@
 use super::*;
+use glyphst_actions::workspace::ToggleZenMode;
 
 impl DocumentView {
     pub(super) fn open_context_menu(
@@ -514,6 +515,10 @@ impl DocumentView {
                 view.clone(),
                 |_, window, _| window.toggle_fullscreen(),
             ))
+            .menu(
+                crate::fl!("pdf-context-toggle-zen-mode"),
+                Box::new(ToggleZenMode),
+            )
             .item(Self::context_menu_item(
                 crate::fl!("settings-title"),
                 view,

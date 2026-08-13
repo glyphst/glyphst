@@ -803,6 +803,21 @@ impl Pane {
         }
     }
 
+    pub(crate) fn active_tab_supports_zen_mode(&self) -> bool {
+        matches!(
+            self.tabs.get(self.active_tab),
+            Some(Tab::Document(_) | Tab::LoadingDocument(_))
+        )
+    }
+
+    pub(crate) fn active_zen_mode_content(&self) -> Option<AnyElement> {
+        match self.tabs.get(self.active_tab) {
+            Some(Tab::Document(document_view)) => Some(document_view.clone().into_any_element()),
+            Some(Tab::LoadingDocument(loading)) => Some(loading.clone().into_any_element()),
+            Some(Tab::NewTab(_)) | Some(Tab::Keymap(_)) | None => None,
+        }
+    }
+
     pub(crate) fn document_view_at(&self, tab_ix: usize) -> Option<Entity<DocumentView>> {
         match self.tabs.get(tab_ix) {
             Some(Tab::Document(document_view)) => Some(document_view.clone()),

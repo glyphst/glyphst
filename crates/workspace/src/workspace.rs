@@ -37,7 +37,7 @@ pub use glyphst_actions::workspace::{
     ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight, ActivatePaneUp,
     ActivatePreviousPane, CloseOtherPanes, MovePaneDown, MovePaneLeft, MovePaneRight, MovePaneUp,
     ResetPaneSizes, ResizePaneDown, ResizePaneLeft, ResizePaneRight, ResizePaneUp, SwapPaneDown,
-    SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleMode, ToggleThemeSelector,
+    SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleMode, ToggleThemeSelector, ToggleZenMode,
 };
 
 use crate::{
@@ -89,6 +89,7 @@ pub struct Workspace {
     pane_group: PaneGroup,
     active_pane: Entity<Pane>,
     surface_mode: WorkspaceSurfaceMode,
+    zen_mode: bool,
     home_view: Entity<NewTab>,
     home_previous_focus_handle: Option<FocusHandle>,
     callbacks: WorkspaceCallbacks,
@@ -399,6 +400,7 @@ impl Workspace {
             pane_group: PaneGroup::new(pane.clone()),
             active_pane: pane.clone(),
             surface_mode: WorkspaceSurfaceMode::Panes,
+            zen_mode: false,
             home_view: home_view.clone(),
             home_previous_focus_handle: None,
             callbacks,
@@ -1019,6 +1021,7 @@ impl Workspace {
     }
 
     fn open_settings_window(&mut self, cx: &mut Context<Self>) {
+        self.leave_zen_mode(cx);
         self.set_title_bar_menu_expanded(false, cx);
         (self.callbacks.open_settings_window)(cx);
     }
@@ -1033,6 +1036,7 @@ impl Workspace {
                     if this.active_pane != pane_for_events {
                         this.active_pane = pane_for_events.clone();
                     }
+                    this.exit_zen_mode_for_unsupported_active_tab(cx);
                     this.record_document_context(&pane_for_events, cx);
                     cx.notify();
                 }
@@ -1179,6 +1183,7 @@ impl Workspace {
             if this.active_pane != pane_for_focus {
                 this.active_pane = pane_for_focus.clone();
             }
+            this.exit_zen_mode_for_unsupported_active_tab(cx);
             this.record_document_context(&pane_for_focus, cx);
             cx.notify();
         })
@@ -1188,6 +1193,7 @@ impl Workspace {
         cx.observe(pane, move |this, _, cx| {
             this.refresh_live_translation_pair_activity(cx);
             if this.active_pane == pane_for_observe {
+                this.exit_zen_mode_for_unsupported_active_tab(cx);
                 this.record_document_context(&pane_for_observe, cx);
                 cx.notify();
             }
@@ -1204,7 +1210,48 @@ impl Workspace {
         self.surface_mode
     }
 
+    fn leave_zen_mode(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.zen_mode {
+            return false;
+        }
+        self.zen_mode = false;
+        cx.notify();
+        true
+    }
+
+    fn exit_zen_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.leave_zen_mode(cx) {
+            self.focus_active_pane(window, cx);
+        }
+    }
+
+    fn exit_zen_mode_for_unsupported_active_tab(&mut self, cx: &mut Context<Self>) {
+        if self.zen_mode && !self.active_pane.read(cx).active_tab_supports_zen_mode() {
+            self.leave_zen_mode(cx);
+        }
+    }
+
+    fn toggle_zen_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.zen_mode {
+            self.exit_zen_mode(window, cx);
+            return;
+        }
+        if self.surface_mode != WorkspaceSurfaceMode::Panes
+            || self.active_pane.read(cx).active_document_view().is_none()
+        {
+            return;
+        }
+
+        self.set_title_bar_menu_expanded(false, cx);
+        self.finish_synchronized_connection(cx);
+        self.fading_synchronized_connection = None;
+        self.zen_mode = true;
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
     fn enter_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.leave_zen_mode(cx);
         if self.surface_mode == WorkspaceSurfaceMode::Home {
             return;
         }
@@ -2458,6 +2505,7 @@ impl Workspace {
     }
 
     fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.exit_zen_mode(window, cx);
         self.set_title_bar_menu_expanded(false, cx);
         if self.surface_mode == WorkspaceSurfaceMode::Home
             && self.active_pane.read(cx).active_tab_is_new_tab()
@@ -2471,6 +2519,7 @@ impl Workspace {
     }
 
     pub fn open_keymap_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.exit_zen_mode(window, cx);
         self.leave_home(window, cx);
         let active_pane = self.active_pane.clone();
         active_pane.update(cx, |pane, cx| pane.open_keymap_tab(window, cx));
@@ -2800,6 +2849,7 @@ impl Workspace {
         } else if pane_was_active {
             pane.update(cx, |pane, cx| pane.focus(window, cx));
         }
+        self.exit_zen_mode_for_unsupported_active_tab(cx);
         self.prune_document_context(cx);
         self.refresh_synchronized_tab_presentation(cx);
         cx.notify();
@@ -2861,6 +2911,7 @@ impl Workspace {
             self.active_pane
                 .update(cx, |pane, cx| pane.focus(window, cx));
         }
+        self.exit_zen_mode_for_unsupported_active_tab(cx);
         self.prune_document_context(cx);
         self.refresh_synchronized_tab_presentation(cx);
         cx.notify();
@@ -2903,6 +2954,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.exit_zen_mode(window, cx);
         if self.surface_mode != WorkspaceSurfaceMode::Panes {
             return;
         }
@@ -2937,6 +2989,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
+        self.exit_zen_mode(window, cx);
         let source_path = normalize_path(source_path);
         let Some((source_pane, tab_ix)) = self.document_location(&source_path, cx) else {
             return Err(anyhow::anyhow!(
@@ -3146,6 +3199,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
+        self.exit_zen_mode(window, cx);
         let translated_pane = self.create_empty_pane(window, cx);
         self.pane_group
             .split(&source_pane, &translated_pane, SplitDirection::Right, cx);
@@ -3500,6 +3554,7 @@ impl Workspace {
 
     fn activate_pane(&mut self, pane: Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
         self.active_pane = pane.clone();
+        self.exit_zen_mode_for_unsupported_active_tab(cx);
         pane.update(cx, |pane, cx| pane.focus(window, cx));
         cx.notify();
     }
@@ -3542,6 +3597,7 @@ impl Workspace {
     }
 
     fn swap_pane_in_direction(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
+        self.leave_zen_mode(cx);
         if self.surface_mode != WorkspaceSurfaceMode::Panes {
             return;
         }
@@ -3555,6 +3611,7 @@ impl Workspace {
     }
 
     fn move_pane_to_border(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
+        self.leave_zen_mode(cx);
         if self.surface_mode != WorkspaceSurfaceMode::Panes {
             return;
         }
@@ -3572,6 +3629,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.exit_zen_mode(window, cx);
         if self.surface_mode != WorkspaceSurfaceMode::Panes {
             return;
         }
@@ -3581,6 +3639,7 @@ impl Workspace {
     }
 
     fn close_other_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.exit_zen_mode(window, cx);
         if self.surface_mode != WorkspaceSurfaceMode::Panes {
             return;
         }
@@ -3674,6 +3733,7 @@ impl Workspace {
     }
 
     fn reset_pane_sizes(&mut self, cx: &mut Context<Self>) {
+        self.leave_zen_mode(cx);
         if self.surface_mode != WorkspaceSurfaceMode::Panes {
             return;
         }
@@ -3877,6 +3937,7 @@ impl Workspace {
     ) {
         match target {
             PaneDropTarget::Content(Some(direction)) => {
+                self.exit_zen_mode(window, cx);
                 let new_pane = self.create_empty_pane(window, cx);
                 new_pane.update(cx, |pane, cx| {
                     pane.insert_transferred_tab(transfer, to, window, cx)
@@ -4069,6 +4130,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.exit_zen_mode(window, cx);
         if self.theme_selector.is_some() {
             self.close_theme_selector(window, cx);
             return;
@@ -4267,13 +4329,16 @@ impl Render for Workspace {
             .settings
             .behavior
             .dim_inactive_panes;
-        let active_pdf_is_presentation = self.surface_mode == WorkspaceSurfaceMode::Panes
-            && self
-                .active_pane
-                .read(cx)
-                .active_document_view()
-                .is_some_and(|document_view| document_view.read(cx).is_presentation_mode());
-        let title_bar = (!active_pdf_is_presentation).then(|| {
+        self.exit_zen_mode_for_unsupported_active_tab(cx);
+        let zen_mode = self.zen_mode;
+        let active_document_view = (self.surface_mode == WorkspaceSurfaceMode::Panes)
+            .then(|| self.active_pane.read(cx).active_document_view())
+            .flatten();
+        let active_pdf_is_presentation = active_document_view
+            .as_ref()
+            .is_some_and(|document_view| document_view.read(cx).is_presentation_mode());
+        let zen_action_available = zen_mode || active_document_view.is_some();
+        let title_bar = (!active_pdf_is_presentation && !zen_mode).then(|| {
             WorkspaceTitleBar::new(
                 cx.entity(),
                 self.title_bar_open_menu,
@@ -4287,7 +4352,8 @@ impl Render for Workspace {
                 shell,
             )
         });
-        let synchronized_connection = (self.surface_mode == WorkspaceSurfaceMode::Panes)
+        let synchronized_connection = (self.surface_mode == WorkspaceSurfaceMode::Panes
+            && !zen_mode)
             .then(|| self.render_synchronized_connection(theme, window, cx))
             .flatten();
         let body = if self.surface_mode == WorkspaceSurfaceMode::Home {
@@ -4302,7 +4368,11 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .bg(shell)
-            .key_context("Workspace")
+            .key_context(if zen_mode {
+                "Workspace ZenMode"
+            } else {
+                "Workspace"
+            })
             .track_focus(&self.focus_handle)
             .font(ui_font)
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -4336,6 +4406,11 @@ impl Render for Workspace {
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.open_external_document_paths(paths.paths(), window, cx);
             }))
+            .when(zen_action_available, |this| {
+                this.on_action(cx.listener(|this, _: &ToggleZenMode, window, cx| {
+                    this.toggle_zen_mode(window, cx);
+                }))
+            })
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, window, cx| {
@@ -4541,9 +4616,10 @@ mod tests {
     use super::{
         PaneEvent, SplitDirection, SynchronizedConnectionAnchor, SynchronizedConnectionAnchorEdge,
         SynchronizedConnectionCurve, SynchronizedConnectionGroup,
-        SynchronizedConnectionInvalidReason, SynchronizedConnectionTabState, Workspace,
-        WorkspaceAiContextProvider, WorkspaceCallbacks, WorkspaceMenu, WorkspaceSurfaceMode,
-        WorkspaceWindowHandle, WorkspaceWindowRequest, live_translation_pair_is_active,
+        SynchronizedConnectionInvalidReason, SynchronizedConnectionTabState, ToggleZenMode,
+        Workspace, WorkspaceAiContextProvider, WorkspaceCallbacks, WorkspaceMenu,
+        WorkspaceSurfaceMode, WorkspaceWindowHandle, WorkspaceWindowRequest,
+        live_translation_pair_is_active,
     };
     use crate::{
         document_view::{
@@ -5118,6 +5194,166 @@ mod tests {
 
         fs::remove_file(left_path).unwrap();
         fs::remove_file(right_path).unwrap();
+    }
+
+    #[gpui::test]
+    fn zen_mode_hides_workspace_chrome_preserves_state_and_restores_with_escape(
+        cx: &mut TestAppContext,
+    ) {
+        let first_path = temporary_pdf_path("zen-mode-first");
+        let second_path = temporary_pdf_path("zen-mode-second");
+        write_minimal_pdf(&first_path);
+        write_minimal_pdf(&second_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::keybindings::capture_framework_bindings(cx);
+            crate::keybindings::apply(cx, glyphst_settings::KeymapPreset::Modern, &[]);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = first_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            assert!(
+                window
+                    .available_actions(cx)
+                    .iter()
+                    .any(|action| action.partial_eq(&ToggleZenMode))
+            );
+        });
+
+        let fullscreen_before = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
+            workspace.toggle_ai_dock(window, cx);
+            let fullscreen = window.is_fullscreen();
+            workspace.toggle_zen_mode(window, cx);
+            assert!(workspace.zen_mode);
+            assert_eq!(workspace.pane_group.panes().len(), 2);
+            assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Toc));
+            assert!(workspace.docks.ai_panel_open);
+            fullscreen
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("workspace-zen-surface").is_some());
+        assert!(cx.debug_bounds("workspace-title-bar-drag-region").is_none());
+        assert!(cx.debug_bounds("workspace-pane-column").is_none());
+        assert!(cx.debug_bounds("active-pane-surface").is_none());
+        assert!(cx.debug_bounds("workspace-left-dock").is_none());
+        assert!(cx.debug_bounds("workspace-ai-dock").is_none());
+        assert!(cx.debug_bounds("workspace-pane-footbar").is_none());
+        cx.update(|window, _| assert_eq!(window.is_fullscreen(), fullscreen_before));
+
+        cx.simulate_keystrokes("tab");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.zen_mode);
+            assert!(workspace.quick_ask_visible);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("workspace-quick-ask-panel").is_some());
+        assert!(cx.debug_bounds("workspace-zen-surface").is_some());
+        assert!(cx.debug_bounds("workspace-pane-column").is_none());
+
+        cx.simulate_keystrokes("escape");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.zen_mode);
+            assert!(!workspace.quick_ask_visible);
+            assert!(workspace.quick_ask.is_none());
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("workspace-quick-ask-panel").is_none());
+        assert!(cx.debug_bounds("workspace-zen-surface").is_some());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .open_document_in_active_pane(second_path.clone(), None, window, cx)
+                .unwrap();
+            assert!(workspace.zen_mode);
+            assert!(workspace.active_pane.read(cx).active_tab_is_loading());
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("workspace-zen-surface").is_some());
+        assert!(cx.debug_bounds("document-open-loading").is_some());
+        cx.update(|window, cx| {
+            assert!(
+                window
+                    .available_actions(cx)
+                    .iter()
+                    .any(|action| action.partial_eq(&ToggleZenMode))
+            );
+        });
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("document-open-loading").is_none());
+
+        cx.simulate_keystrokes("escape");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.zen_mode);
+            assert_eq!(workspace.pane_group.panes().len(), 2);
+            assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Toc));
+            assert!(workspace.docks.ai_panel_open);
+        });
+        cx.update(|window, cx| {
+            assert_eq!(window.is_fullscreen(), fullscreen_before);
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("workspace-zen-surface").is_none());
+        assert!(cx.debug_bounds("workspace-title-bar-drag-region").is_some());
+        assert!(cx.debug_bounds("workspace-pane-column").is_some());
+        assert!(cx.debug_bounds("active-pane-surface").is_some());
+        assert!(cx.debug_bounds("workspace-left-dock").is_some());
+        assert!(cx.debug_bounds("workspace-ai-dock").is_some());
+        assert!(cx.debug_bounds("workspace-pane-footbar").is_some());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.enter_home(window, cx);
+            workspace.toggle_zen_mode(window, cx);
+            assert!(!workspace.zen_mode);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            assert!(
+                window
+                    .available_actions(cx)
+                    .iter()
+                    .all(|action| !action.partial_eq(&ToggleZenMode))
+            );
+        });
+
+        fs::remove_file(first_path).unwrap();
+        fs::remove_file(second_path).unwrap();
     }
 
     #[gpui::test]

@@ -31,6 +31,7 @@ use glyphst_actions::{
         ActivatePreviousPane, CloseOtherPanes, MovePaneDown, MovePaneLeft, MovePaneRight,
         MovePaneUp, ResetPaneSizes, ResizePaneDown, ResizePaneLeft, ResizePaneRight, ResizePaneUp,
         SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleMode, ToggleThemeSelector,
+        ToggleZenMode,
     },
 };
 use glyphst_settings::{KeyBindingOverride, KeymapPreset, Settings};
@@ -559,6 +560,7 @@ fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
     add_many::<OpenQuickAsk>(cx, bindings, &["tab"], "QuickAsk");
     add_many::<PanelClose>(cx, bindings, &["escape"], "SettingsPanel");
     add_many::<TogglePresentationMode>(cx, bindings, &["escape"], "PresentationMode");
+    add_many::<ToggleZenMode>(cx, bindings, &["escape"], "ZenMode");
     add_many::<CancelRegionSelection>(cx, bindings, &["escape"], "RegionSelection");
 }
 
@@ -717,6 +719,15 @@ fn command_specs() -> &'static [CommandSpec] {
                     &["f11"],
                     &["f11"],
                     &["toggle-fullscreen", "fullscreen"],
+                    true,
+                ),
+                spec::<ToggleZenMode>(
+                    "toggle-zen-mode",
+                    "Toggle Zen Mode",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &[],
+                    &["zen", "zen-mode"],
                     true,
                 ),
                 spec::<ToggleTransparency>(

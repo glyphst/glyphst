@@ -151,6 +151,7 @@ pub mod workspace {
             ResetPaneSizes,
             ToggleMode,
             ToggleThemeSelector,
+            ToggleZenMode,
         ]
     );
 }
