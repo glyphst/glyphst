@@ -233,6 +233,10 @@ struct TrackedScrollHandle {
 }
 
 impl ScrollbarHandle for TrackedScrollHandle {
+    fn viewport_bounds(&self) -> Bounds<Pixels> {
+        self.handle.bounds()
+    }
+
     fn set_offset(&self, point: GpuiPoint<Pixels>) {
         self.interacted.set(true);
         self.handle.set_offset(point);
@@ -648,7 +652,7 @@ impl AiPanel {
         }
         let active_input = self.active_composer_input();
         let completion_closed = active_input.update(cx, |input, cx| {
-            input.handle_action_for_context_menu(Box::new(InputEscape), window, cx)
+            input.route_overlay_action(Box::new(InputEscape), window, cx)
         });
         if completion_closed {
             return;

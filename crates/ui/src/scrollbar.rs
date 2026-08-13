@@ -3,7 +3,7 @@ use std::{cell::RefCell, panic::Location, rc::Rc};
 use gpui::{App, Bounds, Div, ElementId, Pixels, Point, Stateful, Window, div, prelude::*, size};
 
 pub use gpui_component::scroll::{
-    ScrollableElement, Scrollbar, ScrollbarAxis, ScrollbarHandle, ScrollbarShow,
+    ScrollableElement, Scrollbar, ScrollbarAxis, ScrollbarHandle, ScrollbarMode,
 };
 
 /// Compatibility builder for Glyphst surfaces that already own their scroll
@@ -146,6 +146,10 @@ impl ManualScrollHandle {
 }
 
 impl ScrollbarHandle for ManualScrollHandle {
+    fn viewport_bounds(&self) -> Bounds<Pixels> {
+        self.0.borrow().viewport
+    }
+
     fn offset(&self) -> Point<Pixels> {
         self.0.borrow().offset
     }
@@ -218,7 +222,7 @@ mod tests {
     fn overlay_scrollbar_track_controls_nested_scroll_area(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
-            Theme::global_mut(cx).scrollbar_show = ScrollbarShow::Always;
+            Theme::set_scrollbar_mode(ScrollbarMode::Always, cx);
         });
 
         let handle = ScrollHandle::new();
@@ -267,7 +271,7 @@ mod tests {
     fn overlay_scrollbar_stays_interactive_for_uniform_list(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
-            Theme::global_mut(cx).scrollbar_show = ScrollbarShow::Always;
+            Theme::set_scrollbar_mode(ScrollbarMode::Always, cx);
         });
 
         let handle = UniformListScrollHandle::new();

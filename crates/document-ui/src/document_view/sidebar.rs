@@ -21,6 +21,10 @@ struct TocSidebarScrollbarHandle {
 // Only the rendered scrollbar receives this wrapper. Auto-follow scrolls the
 // original uniform-list handle, so it cannot accidentally mark itself manual.
 impl ScrollbarHandle for TocSidebarScrollbarHandle {
+    fn viewport_bounds(&self) -> Bounds<Pixels> {
+        ScrollbarHandle::viewport_bounds(&self.scroll_handle)
+    }
+
     fn offset(&self) -> GpuiPoint<Pixels> {
         ScrollbarHandle::offset(&self.scroll_handle)
     }

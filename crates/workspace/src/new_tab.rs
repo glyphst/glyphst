@@ -27,7 +27,7 @@ use gpui_component::{
     alert::Alert,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
-    dialog::CancelDialog,
+    dialog::Cancel,
     input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
 };
@@ -7384,7 +7384,7 @@ impl Render for NewTab {
             .when(management_host, |this| {
                 this.on_drag_move::<ExternalPaths>(cx.listener(Self::track_external_document_drag))
             })
-            .on_action(cx.listener(|this, _: &CancelDialog, window, cx| {
+            .on_action(cx.listener(|this, _: &Cancel, window, cx| {
                 if this.cancel_topmost_editor(window, cx) {
                     cx.stop_propagation();
                 } else {
