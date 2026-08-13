@@ -20,6 +20,7 @@ macro_rules! fl {
 
 pub mod command_palette;
 pub mod document_browser;
+mod external_drop;
 mod navigation_rail;
 pub mod new_tab;
 pub mod pane;

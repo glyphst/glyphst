@@ -32,6 +32,15 @@ actions-menu = 操作 ▾
 selected-count = 已选择 { $count } 项
 item-count = { $count } 项
 page-title = 第 { $page } 页
+external-drop-open-title = 拖放以打开 { $count } 个文档
+external-drop-supported-hint = PDF 和 EPUB 文档
+external-drop-mixed-hint = PDF 和 EPUB 文档 · 将跳过 { $count } 个不支持的项目
+external-drop-unsupported-title = 无法打开这些项目
+external-drop-unsupported-hint = Glyphst Reader 当前支持 PDF 和 EPUB 文档。
+external-drop-none-title = 没有支持的文档
+external-drop-none-message = 拖放 PDF 或 EPUB 文件即可在 Glyphst Reader 中打开。
+external-drop-skipped-title = 部分项目未打开
+external-drop-skipped-message = 已跳过 { $count } 个不支持的项目。
 
 ## Pickers
 
@@ -162,6 +171,12 @@ ai-paste-image = 从剪贴板粘贴图像
 ai-attach-images-prompt = 附加图像
 ai-attach-image-error = 无法附加图像
 ai-paste-image-error = 无法粘贴图像
+ai-external-drop-attach-title = 拖放以附加 { $count } 张图像
+ai-external-drop-mixed-title = 拖放以打开文档并附加图像
+ai-external-drop-image-hint = PNG、JPEG、GIF 和 WebP 图像
+ai-external-drop-mixed-hint = PDF 和 EPUB 文档 · PNG、JPEG、GIF 和 WebP 图像
+ai-external-drop-skipped-hint = 将使用支持的文件，并跳过 { $count } 个不支持的项目
+ai-external-drop-unsupported-hint = 请拖放 PDF 或 EPUB 文档，或者 PNG、JPEG、GIF 和 WebP 图像。
 ai-too-many-images = 图像过多：每条消息最多附加 { $limit } 张图像。
 ai-image-size-limit = 附加图像超过 { $limit } MiB 的大小限制。
 ai-model-no-image-support = 当前模型被配置为不支持图像输入。请选择支持视觉的模型。

@@ -45,6 +45,10 @@ pub use glyphst_actions::new_tab::{
 use crate::navigation_rail::{slim_navigation_button, slim_navigation_rail};
 use crate::{
     document_view::{NextHalfPage, PreviousHalfPage, ScrollLineDown, ScrollLineUp},
+    external_drop::{
+        ExternalDocumentDropFeedback, classify_external_document_paths,
+        render_external_document_drop_overlay,
+    },
     icons::{Icon, IconName},
     library::{
         BrowserPresentation, DocumentId, HistoryEntry, HomeDestination, LibraryCollectionId,
@@ -424,6 +428,7 @@ pub struct NewTab {
     tree_anchor: Option<LibraryNodeId>,
     dragging_library_nodes: BTreeSet<LibraryNodeId>,
     library_drop_target: Option<LibraryDropTarget>,
+    external_document_drop_feedback: Option<ExternalDocumentDropFeedback>,
     hover_expand_task: Option<Task<()>>,
     hover_scroll_task: Option<Task<()>>,
     import_cancel: Option<Arc<AtomicBool>>,
@@ -771,6 +776,7 @@ impl NewTab {
             tree_anchor: None,
             dragging_library_nodes: BTreeSet::new(),
             library_drop_target: None,
+            external_document_drop_feedback: None,
             hover_expand_task: None,
             hover_scroll_task: None,
             import_cancel: None,
@@ -2771,6 +2777,23 @@ impl NewTab {
         let paths = paths.paths().to_vec();
         self.clear_library_drag_state(cx);
         self.start_library_import(paths, parent_id, cx);
+    }
+
+    fn track_external_document_drag(
+        &mut self,
+        event: &DragMoveEvent<ExternalPaths>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let feedback = event
+            .bounds
+            .contains(&event.event.position)
+            .then(|| classify_external_document_paths(event.drag(cx).paths()).feedback())
+            .flatten();
+        if self.external_document_drop_feedback != feedback {
+            self.external_document_drop_feedback = feedback;
+            cx.notify();
+        }
     }
 
     fn handle_library_drag_move<T: 'static>(
@@ -7330,6 +7353,12 @@ impl Render for NewTab {
                 || self.saved_view_editor_open
                 || self.tag_editor_id.is_some()
                 || self.folder_editor.is_some());
+        let external_drop_overlay = (management_host && self.library_drop_target.is_none())
+            .then(|| {
+                self.external_document_drop_feedback
+                    .map(|feedback| render_external_document_drop_overlay(feedback, theme))
+            })
+            .flatten();
 
         div()
             .id(if management_host {
@@ -7352,6 +7381,9 @@ impl Render for NewTab {
                 "NewTab"
             })
             .track_focus(&self.focus_handle)
+            .when(management_host, |this| {
+                this.on_drag_move::<ExternalPaths>(cx.listener(Self::track_external_document_drag))
+            })
             .on_action(cx.listener(|this, _: &CancelDialog, window, cx| {
                 if this.cancel_topmost_editor(window, cx) {
                     cx.stop_propagation();
@@ -7442,6 +7474,7 @@ impl Render for NewTab {
             .children(saved_view_overlay)
             .children(tag_editor_overlay)
             .children(folder_editor_overlay)
+            .children(external_drop_overlay)
     }
 }
 

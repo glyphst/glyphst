@@ -15,6 +15,7 @@ impl Render for AiPanel {
 
         let entity = cx.entity();
         let theme = cx.theme().colors;
+        let external_drop_overlay = self.render_external_drop_overlay(theme);
         let (ai_settings, base_text_style) = {
             let store = cx.global::<SettingsStore>();
             let font = &store.settings.font;
@@ -377,17 +378,8 @@ impl Render for AiPanel {
             .on_mouse_down(MouseButton::Right, |_, _, cx| {
                 cx.stop_propagation();
             })
-            .on_drag_move::<ExternalPaths>(cx.listener(
-                |_, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    if event.bounds.contains(&event.event.position) {
-                        cx.stop_propagation();
-                    }
-                },
-            ))
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                this.attach_external_image_paths(paths.paths().to_vec(), cx);
-                cx.stop_propagation();
-            }))
+            .on_drag_move::<ExternalPaths>(cx.listener(Self::track_external_paths_drag))
+            .on_drop(cx.listener(Self::drop_external_paths))
             .on_action(cx.listener(Self::on_composer_paste))
             .on_action(cx.listener(Self::close))
             .child(
@@ -698,6 +690,7 @@ impl Render for AiPanel {
                     .with_priority(4),
                 )
             })
+            .children(external_drop_overlay)
             .into_any_element()
     }
 }

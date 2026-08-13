@@ -40,6 +40,27 @@ item-count =
        *[other] { $count } items
     }
 page-title = Page { $page }
+external-drop-open-title =
+    { $count ->
+        [one] Drop to open this document
+       *[other] Drop to open { $count } documents
+    }
+external-drop-supported-hint = PDF and EPUB documents
+external-drop-mixed-hint =
+    { $count ->
+        [one] PDF and EPUB documents · 1 unsupported item will be skipped
+       *[other] PDF and EPUB documents · { $count } unsupported items will be skipped
+    }
+external-drop-unsupported-title = These items can’t be opened
+external-drop-unsupported-hint = Glyphst Reader currently supports PDF and EPUB documents.
+external-drop-none-title = No supported documents
+external-drop-none-message = Drop PDF or EPUB files to open them in Glyphst Reader.
+external-drop-skipped-title = Some items weren’t opened
+external-drop-skipped-message =
+    { $count ->
+        [one] 1 unsupported item was skipped.
+       *[other] { $count } unsupported items were skipped.
+    }
 
 ## Pickers
 
@@ -173,6 +194,20 @@ ai-paste-image = Paste image from clipboard
 ai-attach-images-prompt = Attach images
 ai-attach-image-error = Could not attach image
 ai-paste-image-error = Could not paste image
+ai-external-drop-attach-title =
+    { $count ->
+        [one] Drop to attach this image
+       *[other] Drop to attach { $count } images
+    }
+ai-external-drop-mixed-title = Drop to open documents and attach images
+ai-external-drop-image-hint = PNG, JPEG, GIF, and WebP images
+ai-external-drop-mixed-hint = PDF and EPUB documents · PNG, JPEG, GIF, and WebP images
+ai-external-drop-skipped-hint =
+    { $count ->
+        [one] Supported files will be used · 1 unsupported item will be skipped
+       *[other] Supported files will be used · { $count } unsupported items will be skipped
+    }
+ai-external-drop-unsupported-hint = Drop PDF or EPUB documents, or PNG, JPEG, GIF, and WebP images.
 ai-too-many-images = Too many images: attach at most { $limit } per message.
 ai-image-size-limit = Attached images exceed the { $limit } MiB limit.
 ai-model-no-image-support = The selected model is configured without image input support. Choose a vision-capable model.

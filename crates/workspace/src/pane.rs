@@ -15,9 +15,10 @@ use glyphst_core::DocumentFormat;
 use glyphst_translation_ui::{DocumentTranslationJobId, DocumentTranslationJobManager};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, AppContext, Axis, Bounds, Context,
-    DismissEvent, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString,
-    Styled, Task, Window, WindowHandle, anchored, deferred, div, point, prelude::*, px, relative,
+    DismissEvent, DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle,
+    Focusable, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render,
+    SharedString, Styled, Task, Window, WindowHandle, anchored, deferred, div, point, prelude::*,
+    px, relative,
 };
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Root, Selectable as _, Sizable as _, ThemeColor as Theme,
@@ -37,6 +38,10 @@ use crate::{
     document_view::{
         DocumentAnnotations, DocumentOpenOptions, DocumentView, DocumentViewEvent,
         PreparedDocumentOpen, SynchronizedScrollDelta,
+    },
+    external_drop::{
+        ExternalDocumentDropFeedback, classify_external_document_paths,
+        render_external_document_drop_overlay_for_pane,
     },
     icons::{Icon, IconName},
     library::{
@@ -256,6 +261,7 @@ pub(crate) enum PaneEvent {
         position: Option<DocumentPosition>,
         replace_active_new_tab: bool,
     },
+    ExternalPathsDropped(Vec<PathBuf>),
     DocumentOpenFinished {
         job_id: DocumentTranslationJobId,
         result: std::result::Result<(), SharedString>,
@@ -346,6 +352,7 @@ pub(crate) struct Pane {
     document_translation_jobs: Entity<DocumentTranslationJobManager>,
     tab_focus_handles: HashMap<EntityId, FocusHandle>,
     drag_split_direction: Option<SplitDirection>,
+    external_document_drop_feedback: Option<ExternalDocumentDropFeedback>,
     force_show_tab_bar: bool,
     synchronized_presentation: PaneSynchronizedPresentation,
     tab_bounds: Rc<RefCell<HashMap<EntityId, PaneTabBounds>>>,
@@ -385,6 +392,7 @@ impl Pane {
             document_translation_jobs,
             tab_focus_handles: HashMap::new(),
             drag_split_direction: None,
+            external_document_drop_feedback: None,
             force_show_tab_bar: false,
             synchronized_presentation: PaneSynchronizedPresentation::default(),
             tab_bounds: Rc::new(RefCell::new(HashMap::new())),
@@ -2218,6 +2226,37 @@ impl Pane {
         }
     }
 
+    fn handle_external_document_drag_move(
+        &mut self,
+        event: &DragMoveEvent<ExternalPaths>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let is_inside = event.bounds.contains(&event.event.position);
+        let feedback = is_inside
+            .then(|| classify_external_document_paths(event.drag(cx).paths()).feedback())
+            .flatten();
+        if self.external_document_drop_feedback != feedback {
+            self.external_document_drop_feedback = feedback;
+            cx.notify();
+        }
+        if is_inside {
+            cx.stop_propagation();
+        }
+    }
+
+    fn handle_external_document_drop(
+        &mut self,
+        paths: &ExternalPaths,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.external_document_drop_feedback = None;
+        cx.emit(PaneEvent::ExternalPathsDropped(paths.paths().to_vec()));
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn render_drop_overlay(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         let direction = self.drag_split_direction;
         let half = relative(0.5);
@@ -2259,7 +2298,14 @@ impl EventEmitter<PaneEvent> for Pane {}
 
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !cx.has_active_drag() {
+            self.external_document_drop_feedback = None;
+        }
         let theme = cx.theme().colors;
+        let pane_id = cx.entity_id().as_u64();
+        let external_drop_overlay = self.external_document_drop_feedback.map(|feedback| {
+            render_external_document_drop_overlay_for_pane(feedback, theme, pane_id)
+        });
         let tab_bar_visibility = cx.global::<SettingsStore>().settings.tab_bar_visibility;
         let show_tab_bar = tab_bar_visibility == TabBarVisibility::Always
             || self.force_show_tab_bar
@@ -2285,6 +2331,8 @@ impl Render for Pane {
             .flex_col()
             .overflow_hidden()
             .track_focus(&self.focus_handle)
+            .on_drag_move::<ExternalPaths>(cx.listener(Self::handle_external_document_drag_move))
+            .on_drop(cx.listener(Self::handle_external_document_drop))
             .when(show_tab_bar, |this| {
                 this.child(self.render_tab_bar(theme, window, cx))
             })
@@ -2302,6 +2350,7 @@ impl Render for Pane {
                     .child(self.render_drop_overlay(theme, cx)),
             )
             .children(context_menu)
+            .children(external_drop_overlay)
     }
 }
 

@@ -1,6 +1,61 @@
 use super::helpers::*;
 use super::*;
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ExternalAiDrop {
+    images: Vec<PathBuf>,
+    remaining: Vec<PathBuf>,
+    feedback: Option<ExternalAiDropFeedback>,
+}
+
+fn is_external_image_path(path: &std::path::Path) -> bool {
+    path.is_file()
+        && matches!(
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("png" | "jpg" | "jpeg" | "gif" | "webp")
+        )
+}
+
+fn is_external_document_path(path: &std::path::Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(DocumentFormat::from_extension)
+            .is_some()
+}
+
+fn classify_external_ai_paths(paths: &[PathBuf]) -> ExternalAiDrop {
+    let mut drop = ExternalAiDrop::default();
+    let mut documents = 0;
+    let mut rejected = 0;
+
+    for path in paths {
+        if is_external_image_path(path) {
+            drop.images.push(path.clone());
+        } else {
+            if is_external_document_path(path) {
+                documents += 1;
+            } else {
+                rejected += 1;
+            }
+            drop.remaining.push(path.clone());
+        }
+    }
+
+    let images = drop.images.len();
+    drop.feedback =
+        (images > 0 || documents > 0 || rejected > 0).then_some(ExternalAiDropFeedback {
+            images,
+            documents,
+            rejected,
+        });
+    drop
+}
+
 fn changed_range(old: &str, new: &str) -> (Range<usize>, usize) {
     let mut prefix = old
         .bytes()
@@ -31,6 +86,145 @@ fn changed_range(old: &str, new: &str) -> (Range<usize>, usize) {
 }
 
 impl AiPanel {
+    pub(super) fn track_external_paths_drag(
+        &mut self,
+        event: &DragMoveEvent<ExternalPaths>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let is_inside = event.bounds.contains(&event.event.position);
+        let feedback = is_inside
+            .then(|| classify_external_ai_paths(event.drag(cx).paths()))
+            .and_then(|drop| drop.feedback);
+        if self.external_drop_feedback != feedback {
+            self.external_drop_feedback = feedback;
+            cx.notify();
+        }
+        if is_inside {
+            cx.stop_propagation();
+        }
+    }
+
+    pub(super) fn drop_external_paths(
+        &mut self,
+        paths: &ExternalPaths,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.external_drop_feedback = None;
+        let drop = classify_external_ai_paths(paths.paths());
+        if !drop.images.is_empty() {
+            self.attach_external_image_paths(drop.images, cx);
+        }
+        if !drop.remaining.is_empty() {
+            cx.emit(AiPanelEvent::ExternalPathsDropped(drop.remaining));
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn render_external_drop_overlay(&self, theme: Theme) -> Option<AnyElement> {
+        let feedback = self.external_drop_feedback?;
+        let accepts_items = feedback.images > 0 || feedback.documents > 0;
+        let accent = if accepts_items {
+            theme.drag_border
+        } else {
+            theme.danger
+        };
+        let background = if accepts_items {
+            theme.drop_target
+        } else {
+            theme.danger.opacity(0.12)
+        };
+        let title = if feedback.images > 0 && feedback.documents > 0 {
+            tr("ai-external-drop-mixed-title")
+        } else if feedback.images > 0 {
+            tr_with_number("ai-external-drop-attach-title", "count", feedback.images)
+        } else if feedback.documents > 0 {
+            tr_with_number("external-drop-open-title", "count", feedback.documents)
+        } else {
+            tr("external-drop-unsupported-title")
+        };
+        let hint = if feedback.rejected > 0 && accepts_items {
+            tr_with_number("ai-external-drop-skipped-hint", "count", feedback.rejected)
+        } else if !accepts_items {
+            tr("ai-external-drop-unsupported-hint")
+        } else if feedback.images > 0 && feedback.documents > 0 {
+            tr("ai-external-drop-mixed-hint")
+        } else if feedback.images > 0 {
+            tr("ai-external-drop-image-hint")
+        } else {
+            tr("external-drop-supported-hint")
+        };
+        let selector = if accepts_items {
+            "ai-external-drop-overlay-accepted"
+        } else {
+            "ai-external-drop-overlay-rejected"
+        };
+
+        Some(
+            div()
+                .id("ai-external-drop-overlay")
+                .debug_selector(move || selector.to_string())
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .left_0()
+                .invisible()
+                .drag_over::<ExternalPaths>(|style, _, _, _| style.visible())
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_3()
+                .bg(background)
+                .border_2()
+                .border_dashed()
+                .border_color(accent)
+                .child(
+                    div()
+                        .max_w(px(320.0))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .rounded(px(10.0))
+                        .border_1()
+                        .border_color(accent.opacity(0.55))
+                        .bg(theme.background.opacity(0.94))
+                        .px_5()
+                        .py_4()
+                        .shadow_lg()
+                        .child(
+                            Icon::new(if !accepts_items {
+                                IconName::TriangleAlert
+                            } else if feedback.images > 0 && feedback.documents == 0 {
+                                IconName::Image
+                            } else {
+                                IconName::FileText
+                            })
+                            .size(ui_rems(28.0))
+                            .text_color(accent),
+                        )
+                        .child(
+                            div()
+                                .text_center()
+                                .text_size(ui_rems(14.0))
+                                .text_color(theme.foreground)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_center()
+                                .text_size(ui_rems(11.0))
+                                .text_color(theme.muted_foreground)
+                                .child(hint),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn active_composer_input(&self) -> Entity<InputState> {
         if self.editing_turn.is_some() {
             self.edit_input.clone()
@@ -548,4 +742,60 @@ fn validate_user_image_dimensions(width: u32, height: u32) -> Result<()> {
         bail!("image dimensions {width}×{height} exceed the supported limits");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod external_drop_tests {
+    use std::{fs, time::SystemTime};
+
+    use super::*;
+
+    fn temporary_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "glyphst-ai-external-drop-{}-{}-{name}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn partitions_images_from_documents_and_rejected_items() {
+        let image = temporary_path("diagram.PNG");
+        let pdf = temporary_path("paper.PDF");
+        let unsupported = temporary_path("notes.txt");
+        let folder = temporary_path("book.epub");
+        fs::write(&image, b"image").unwrap();
+        fs::write(&pdf, b"pdf").unwrap();
+        fs::write(&unsupported, b"text").unwrap();
+        fs::create_dir(&folder).unwrap();
+
+        let classified = classify_external_ai_paths(&[
+            pdf.clone(),
+            image.clone(),
+            unsupported.clone(),
+            folder.clone(),
+        ]);
+
+        assert_eq!(classified.images, vec![image.clone()]);
+        assert_eq!(
+            classified.remaining,
+            vec![pdf.clone(), unsupported.clone(), folder.clone()]
+        );
+        assert_eq!(
+            classified.feedback,
+            Some(ExternalAiDropFeedback {
+                images: 1,
+                documents: 1,
+                rejected: 2,
+            })
+        );
+
+        fs::remove_file(image).unwrap();
+        fs::remove_file(pdf).unwrap();
+        fs::remove_file(unsupported).unwrap();
+        fs::remove_dir(folder).unwrap();
+    }
 }

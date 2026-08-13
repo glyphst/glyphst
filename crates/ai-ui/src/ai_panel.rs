@@ -26,7 +26,7 @@ use glyphst_ai::ai_chat::{
     Role, TITLE_GENERATION_PROMPT, find_mention_references, session_title_for_prompt,
     stream_completion, thinking_level_description, title_from_response,
 };
-use glyphst_core::{RegionImageReference, SelectedPagesReference};
+use glyphst_core::{DocumentFormat, RegionImageReference, SelectedPagesReference};
 use glyphst_library::{
     AiMentionOccurrence, AiMentionReference, AiSession, AiSessionAgentPart, AiSessionImage,
     AiSessionMessage, AiSessionRole, AiSessionToolResultPart, AiSessionToolStatus, LibraryStore,
@@ -89,10 +89,18 @@ const MAX_USER_IMAGE_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
 struct AiValidationNotification;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AiPanelEvent {
     Dismissed,
     Changed,
+    ExternalPathsDropped(Vec<PathBuf>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExternalAiDropFeedback {
+    images: usize,
+    documents: usize,
+    rejected: usize,
 }
 
 struct ModelMenuRenderState {
@@ -371,6 +379,7 @@ pub struct AiPanel {
     messages: Vec<ChatMessage>,
     queued_messages: Vec<ChatMessage>,
     composer_images: Vec<AgentImage>,
+    external_drop_feedback: Option<ExternalAiDropFeedback>,
     width: f32,
     content: SharedString,
     selected_range: Range<usize>,
@@ -547,6 +556,7 @@ impl AiPanel {
             messages: Vec::new(),
             queued_messages: Vec::new(),
             composer_images: Vec::new(),
+            external_drop_feedback: None,
             width: init.width,
             content: SharedString::default(),
             selected_range: 0..0,

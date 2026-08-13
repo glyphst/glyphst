@@ -742,7 +742,15 @@ impl Workspace {
         if let Some(active_document_view) = active_document_view.clone()
             && active_document_view.read(cx).is_presentation_mode()
         {
-            return active_document_view.into_any_element();
+            return div()
+                .id("workspace-presentation-drop-surface")
+                .debug_selector(|| "workspace-presentation-drop-surface".to_string())
+                .relative()
+                .size_full()
+                .on_drag_move::<ExternalPaths>(cx.listener(Self::track_external_document_drag))
+                .child(active_document_view)
+                .children(self.external_document_drop_overlay(theme))
+                .into_any_element();
         }
 
         let dock_document_view = self

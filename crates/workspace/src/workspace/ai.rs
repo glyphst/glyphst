@@ -464,6 +464,9 @@ impl Workspace {
                 |this, _, event: &AiPanelEvent, window, cx| match event {
                     AiPanelEvent::Dismissed => this.dismiss_quick_ask(window, cx),
                     AiPanelEvent::Changed => {}
+                    AiPanelEvent::ExternalPathsDropped(paths) => {
+                        this.open_external_document_paths(paths, window, cx);
+                    }
                 },
             )
             .detach();

@@ -19,13 +19,15 @@ use glyphst_ui::{
     style::{apply_window_background, shell_background},
 };
 use gpui::{
-    AnyElement, App, Bounds, Context, DismissEvent, DragMoveEvent, Entity, EntityId, FocusHandle,
-    Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    AnyElement, App, Bounds, Context, DismissEvent, DragMoveEvent, Entity, EntityId, ExternalPaths,
+    FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render,
     SharedString, WeakEntity, Window, WindowAppearance, bounds, canvas, div, fill, point,
     prelude::*, px, size,
 };
-use gpui_component::{ActiveTheme as _, ThemeColor, WindowExt as _, menu::PopupMenu};
+use gpui_component::{
+    ActiveTheme as _, ThemeColor, WindowExt as _, menu::PopupMenu, notification::Notification,
+};
 
 mod ai;
 mod chrome;
@@ -46,6 +48,10 @@ use crate::{
         OpenKeybindings, OpenNewTab, OpenQuickAsk, OpenSettings, OpenWithSystemPicker,
         ToggleAiPanel, ToggleCommandPalette, ToggleHome, ToggleNotes, ToggleThumbnailSidebar,
         ToggleToc, ToggleTransparency, TranslationViewportAnchor,
+    },
+    external_drop::{
+        ExternalDocumentDropFeedback, classify_external_document_paths,
+        render_external_document_drop_overlay,
     },
     library::{
         DocumentPosition, ReaderSidebar, ReaderSynchronizedGroup, ReaderTranslationSession,
@@ -100,6 +106,7 @@ pub struct Workspace {
     title_bar_open_menu: Option<WorkspaceMenu>,
     title_bar_popup_menu: Option<Entity<PopupMenu>>,
     dragged_tab_outside_window: Option<DraggedTab>,
+    external_document_drop_feedback: Option<ExternalDocumentDropFeedback>,
     synchronized_tabs: SynchronizedTabRegistry,
     restored_tab_ids: HashMap<u64, (EntityId, EntityId)>,
     pending_restored_documents: usize,
@@ -191,6 +198,8 @@ struct PendingTranslationSplit {
     job_id: DocumentTranslationJobId,
     stage: PendingTranslationSplitStage,
 }
+
+struct ExternalDocumentDropNotification;
 
 struct LiveTranslationPair {
     source_id: EntityId,
@@ -407,6 +416,7 @@ impl Workspace {
             title_bar_open_menu: None,
             title_bar_popup_menu: None,
             dragged_tab_outside_window: None,
+            external_document_drop_feedback: None,
             synchronized_tabs: SynchronizedTabRegistry::default(),
             restored_tab_ids: HashMap::new(),
             pending_restored_documents: 0,
@@ -445,9 +455,12 @@ impl Workspace {
         cx.subscribe_in(
             &ai_panel,
             window,
-            |this, _, event: &AiPanelEvent, _, cx| match event {
+            |this, _, event: &AiPanelEvent, window, cx| match event {
                 AiPanelEvent::Dismissed => this.close_ai_dock(cx),
                 AiPanelEvent::Changed => {}
+                AiPanelEvent::ExternalPathsDropped(paths) => {
+                    this.open_external_document_paths(paths, window, cx);
+                }
             },
         )
         .detach();
@@ -657,6 +670,111 @@ impl Workspace {
         self.home_previous_focus_handle = None;
         cx.notify();
         Ok(())
+    }
+
+    fn open_external_document_paths(
+        &mut self,
+        paths: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target_pane = self.active_pane.clone();
+        self.open_external_document_paths_in_pane(paths, &target_pane, window, cx);
+    }
+
+    fn open_external_document_paths_in_pane(
+        &mut self,
+        paths: &[PathBuf],
+        target_pane: &Entity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.external_document_drop_feedback = None;
+        if paths.is_empty() {
+            cx.notify();
+            return;
+        }
+
+        let classified = classify_external_document_paths(paths);
+        let target_pane = target_pane.clone();
+        let mut opened_count = 0usize;
+        let mut failed_count = 0usize;
+        let mut last_opened_path = None;
+
+        if !classified.supported.is_empty() {
+            self.set_title_bar_menu_expanded(false, cx);
+            self.close_command_palette(window, cx);
+            self.close_theme_selector(window, cx);
+            self.close_document_browser(window, cx);
+        }
+
+        for path in classified.supported {
+            self.active_pane = target_pane.clone();
+            match self.open_document_in_active_pane(path.clone(), None, window, cx) {
+                Ok(()) => {
+                    opened_count += 1;
+                    last_opened_path = Some(path);
+                }
+                Err(error) => {
+                    failed_count += 1;
+                    eprintln!("failed to open dropped document: {error:#}");
+                }
+            }
+        }
+
+        if let Some(path) = last_opened_path
+            && let Some((pane, tab_ix)) = self.document_location(&path, cx)
+        {
+            self.active_pane = pane.clone();
+            pane.update(cx, |pane, cx| {
+                pane.activate_existing_document(tab_ix, None, false, window, cx);
+            });
+            self.surface_mode = WorkspaceSurfaceMode::Panes;
+            self.home_previous_focus_handle = None;
+        }
+
+        let skipped_count = classified.rejected.len() + failed_count;
+        if opened_count == 0 {
+            window.push_notification(
+                Notification::warning(crate::fl!("external-drop-none-message"))
+                    .title(crate::fl!("external-drop-none-title"))
+                    .id::<ExternalDocumentDropNotification>(),
+                cx,
+            );
+        } else if skipped_count > 0 {
+            window.push_notification(
+                Notification::warning(crate::fl!(
+                    "external-drop-skipped-message",
+                    count = skipped_count as i64
+                ))
+                .title(crate::fl!("external-drop-skipped-title"))
+                .id::<ExternalDocumentDropNotification>(),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    pub(super) fn track_external_document_drag(
+        &mut self,
+        event: &DragMoveEvent<ExternalPaths>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let feedback = event
+            .bounds
+            .contains(&event.event.position)
+            .then(|| classify_external_document_paths(event.drag(cx).paths()).feedback())
+            .flatten();
+        if self.external_document_drop_feedback != feedback {
+            self.external_document_drop_feedback = feedback;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn external_document_drop_overlay(&self, theme: ThemeColor) -> Option<AnyElement> {
+        self.external_document_drop_feedback
+            .map(|feedback| render_external_document_drop_overlay(feedback, theme))
     }
 
     pub fn reader_session_restore_pending(&self) -> bool {
@@ -947,6 +1065,9 @@ impl Workspace {
                     if let Err(error) = result {
                         eprintln!("failed to open document: {error:#}");
                     }
+                }
+                PaneEvent::ExternalPathsDropped(paths) => {
+                    this.open_external_document_paths_in_pane(paths, &pane_for_events, window, cx);
                 }
                 PaneEvent::DocumentOpenFinished { job_id, result } => {
                     if !this.continue_translation_split_open(*job_id, result.clone(), window, cx) {
@@ -4212,6 +4333,9 @@ impl Render for Workspace {
                     this.track_dragged_tab_outside_window(event, window, cx);
                 },
             ))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.open_external_document_paths(paths.paths(), window, cx);
+            }))
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, window, cx| {
@@ -4409,8 +4533,8 @@ mod tests {
     use glyphst_ai_ui::AiContextProvider as _;
     use glyphst_translation_ui::DocumentTranslationOpenMode;
     use gpui::{
-        AppContext as _, EntityId, Modifiers, MouseButton, MouseUpEvent, TestAppContext, bounds,
-        point, px, size,
+        AppContext as _, EntityId, ExternalPaths, FileDropEvent, Modifiers, MouseButton,
+        MouseUpEvent, TestAppContext, bounds, point, px, size,
     };
     use gpui_component::{Root, WindowExt as _};
 
@@ -6818,6 +6942,315 @@ mod tests {
         workspace.update_in(cx, |_, window, cx| {
             assert_eq!(window.notifications(cx).len(), 1);
         });
+    }
+
+    #[gpui::test]
+    fn dropped_documents_open_in_order_and_report_skipped_items(cx: &mut TestAppContext) {
+        let first_path = temporary_pdf_path("external-drop-first");
+        let second_path = temporary_pdf_path("external-drop-second");
+        let unsupported_path =
+            temporary_pdf_path("external-drop-unsupported").with_extension("txt");
+        write_minimal_pdf(&first_path);
+        write_minimal_pdf(&second_path);
+        fs::write(&unsupported_path, b"not a document").unwrap();
+
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            glyphst_ui::activity::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_external_document_paths(
+                &[
+                    first_path.clone(),
+                    unsupported_path.clone(),
+                    second_path.clone(),
+                ],
+                window,
+                cx,
+            );
+            assert_eq!(window.notifications(cx).len(), 1);
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.surface_mode, WorkspaceSurfaceMode::Panes);
+            let pane = workspace.active_pane.read(cx);
+            assert_eq!(pane.len(), 2);
+            assert_eq!(pane.active_tab_ix(), 1);
+            let paths = pane
+                .document_views()
+                .into_iter()
+                .map(|view| view.read(cx).path().to_path_buf())
+                .collect::<Vec<_>>();
+            assert_eq!(paths, vec![first_path.clone(), second_path.clone()]);
+        });
+
+        fs::remove_file(first_path).unwrap();
+        fs::remove_file(second_path).unwrap();
+        fs::remove_file(unsupported_path).unwrap();
+    }
+
+    #[gpui::test]
+    fn pane_drop_opens_documents_in_the_hovered_inactive_pane(cx: &mut TestAppContext) {
+        let first_path = temporary_pdf_path("pane-drop-first");
+        let second_path = temporary_pdf_path("pane-drop-second");
+        let unsupported_path = temporary_pdf_path("pane-drop-unsupported").with_extension("txt");
+        write_minimal_pdf(&first_path);
+        write_minimal_pdf(&second_path);
+        fs::write(&unsupported_path, b"not a document").unwrap();
+
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            glyphst_ui::activity::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        let hovered_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.leave_home(window, cx);
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        let previously_active_pane =
+            workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let drop_position = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .pane_group
+                .bounding_box_for_pane(&hovered_pane)
+                .expect("hovered pane bounds")
+                .center()
+        });
+        cx.simulate_event(FileDropEvent::Entered {
+            position: drop_position,
+            paths: ExternalPaths(
+                [
+                    first_path.clone(),
+                    unsupported_path.clone(),
+                    second_path.clone(),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        });
+        cx.simulate_event(FileDropEvent::Submit {
+            position: drop_position,
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(workspace.active_pane, hovered_pane);
+            assert_eq!(window.notifications(cx).len(), 1);
+            let hovered = hovered_pane.read(cx);
+            assert_eq!(hovered.len(), 2);
+            assert_eq!(hovered.active_tab_ix(), 1);
+            let paths = hovered
+                .document_views()
+                .into_iter()
+                .map(|view| view.read(cx).path().to_path_buf())
+                .collect::<Vec<_>>();
+            assert_eq!(paths, vec![first_path.clone(), second_path.clone()]);
+            let previous = previously_active_pane.read(cx);
+            assert_eq!(previous.len(), 0);
+        });
+
+        fs::remove_file(first_path).unwrap();
+        fs::remove_file(second_path).unwrap();
+        fs::remove_file(unsupported_path).unwrap();
+    }
+
+    #[gpui::test]
+    fn unsupported_pane_drop_does_not_activate_the_hovered_pane(cx: &mut TestAppContext) {
+        let unsupported_path = temporary_pdf_path("pane-drop-invalid").with_extension("txt");
+        fs::write(&unsupported_path, b"not a document").unwrap();
+
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            glyphst_ui::activity::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        let hovered_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.leave_home(window, cx);
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        let active_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let drop_position = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .pane_group
+                .bounding_box_for_pane(&hovered_pane)
+                .expect("hovered pane bounds")
+                .center()
+        });
+        cx.simulate_event(FileDropEvent::Entered {
+            position: drop_position,
+            paths: ExternalPaths([unsupported_path.clone()].into_iter().collect()),
+        });
+        cx.simulate_event(FileDropEvent::Submit {
+            position: drop_position,
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(workspace.active_pane, active_pane);
+            assert_eq!(window.notifications(cx).len(), 1);
+            assert!(hovered_pane.read(cx).active_tab_is_new_tab());
+        });
+
+        fs::remove_file(unsupported_path).unwrap();
+    }
+
+    #[gpui::test]
+    fn external_drop_overlay_is_scoped_to_the_hovered_pane(cx: &mut TestAppContext) {
+        let document_path = temporary_pdf_path("pane-drop-overlay");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        let hovered_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.leave_home(window, cx);
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        let other_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let drop_position = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .pane_group
+                .bounding_box_for_pane(&hovered_pane)
+                .expect("hovered pane bounds")
+                .center()
+        });
+        cx.simulate_event(FileDropEvent::Entered {
+            position: drop_position,
+            paths: ExternalPaths([document_path.clone()].into_iter().collect()),
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let hovered_selector = Box::leak(
+            format!(
+                "pane-external-document-drop-overlay-{}-accepted",
+                hovered_pane.entity_id().as_u64()
+            )
+            .into_boxed_str(),
+        );
+        let other_selector = Box::leak(
+            format!(
+                "pane-external-document-drop-overlay-{}-accepted",
+                other_pane.entity_id().as_u64()
+            )
+            .into_boxed_str(),
+        );
+        let overlay_bounds = cx
+            .debug_bounds(hovered_selector)
+            .expect("hovered pane drop overlay");
+        let (hovered_bounds, other_bounds) = workspace.read_with(cx, |workspace, _| {
+            (
+                workspace
+                    .pane_group
+                    .bounding_box_for_pane(&hovered_pane)
+                    .expect("hovered pane bounds"),
+                workspace
+                    .pane_group
+                    .bounding_box_for_pane(&other_pane)
+                    .expect("other pane bounds"),
+            )
+        });
+        assert!(overlay_bounds.left() >= hovered_bounds.left());
+        assert!(overlay_bounds.top() >= hovered_bounds.top());
+        assert!(overlay_bounds.right() <= hovered_bounds.right());
+        assert!(overlay_bounds.bottom() <= hovered_bounds.bottom());
+        assert!(!overlay_bounds.intersects(&other_bounds));
+        assert!(cx.debug_bounds(other_selector).is_none());
+        assert_ne!(
+            overlay_bounds,
+            cx.debug_bounds("workspace-pane-column").unwrap()
+        );
+
+        cx.simulate_event(FileDropEvent::Pending {
+            position: other_bounds.center(),
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds(hovered_selector).is_none());
+        let other_overlay_bounds = cx
+            .debug_bounds(other_selector)
+            .expect("newly hovered pane drop overlay");
+        assert!(other_overlay_bounds.left() >= other_bounds.left());
+        assert!(other_overlay_bounds.top() >= other_bounds.top());
+        assert!(other_overlay_bounds.right() <= other_bounds.right());
+        assert!(other_overlay_bounds.bottom() <= other_bounds.bottom());
+        assert!(!other_overlay_bounds.intersects(&hovered_bounds));
+
+        cx.simulate_event(FileDropEvent::Exited);
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds(other_selector).is_none());
+        fs::remove_file(document_path).unwrap();
     }
 
     #[gpui::test]
