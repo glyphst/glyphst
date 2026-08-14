@@ -28,6 +28,9 @@ impl DocumentView {
                     .flex()
                     .items_center()
                     .gap_1()
+                    .when(self.capabilities.two_column_layout, |this| {
+                        this.child(self.render_two_column_button(cx))
+                    })
                     .when(self.capabilities.page_overview, |this| {
                         this.child(self.render_grid_overview_button(cx))
                     })
@@ -40,7 +43,7 @@ impl DocumentView {
                     }),
             )
             .child(div().flex_none().text_color(theme.muted_foreground).child(
-                Self::page_counter_label(self.current_page(), self.pages.len()),
+                Self::page_counter_label(self.current_page_range(), self.pages.len()),
             ))
             .child(
                 div()

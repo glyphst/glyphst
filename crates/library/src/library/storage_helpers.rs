@@ -151,6 +151,9 @@ pub(super) fn ensure_tables(database: &Database) -> Result<()> {
         write_txn.open_table(DOCUMENT_PREFERENCES_V3_TABLE)?;
     }
     {
+        write_txn.open_table(DOCUMENT_PREFERENCES_V4_TABLE)?;
+    }
+    {
         write_txn.open_table(AI_SESSIONS_V2_TABLE)?;
     }
     {
@@ -245,6 +248,7 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
         has_v1_storage,
         has_v2_storage,
         has_document_preferences_v3,
+        has_document_preferences_v4,
         has_ai_sessions_v2,
         has_ai_sessions_v3,
         has_ai_sessions_v4,
@@ -257,6 +261,7 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
             table.get(STORAGE_V1_MIGRATION_KEY)?.is_some(),
             table.get(STORAGE_V2_MIGRATION_KEY)?.is_some(),
             table.get(DOCUMENT_PREFERENCES_V3_MIGRATION_KEY)?.is_some(),
+            table.get(DOCUMENT_PREFERENCES_V4_MIGRATION_KEY)?.is_some(),
             table.get(AI_SESSIONS_V2_MIGRATION_KEY)?.is_some(),
             table.get(AI_SESSIONS_V3_MIGRATION_KEY)?.is_some(),
             table.get(AI_SESSIONS_V4_MIGRATION_KEY)?.is_some(),
@@ -276,6 +281,7 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
     load_document_preferences(
         &read_txn,
         &mut library,
+        has_document_preferences_v4,
         has_document_preferences_v3,
         has_v2_storage,
         has_v1_storage,
@@ -292,6 +298,9 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
     }
     if !has_document_preferences_v3 {
         migrate_document_preferences_v3(database, &library)?;
+    }
+    if !has_document_preferences_v4 {
+        migrate_document_preferences_v4(database, &library)?;
     }
     if !has_ai_sessions_v2 {
         migrate_ai_sessions_v2(database, &library)?;
@@ -553,11 +562,26 @@ fn load_storage_v1(
 fn load_document_preferences(
     read_txn: &redb::ReadTransaction,
     library: &mut Library,
+    has_v4: bool,
     has_v3: bool,
     has_v2: bool,
     has_v1: bool,
 ) -> Result<()> {
-    if has_v3 {
+    if has_v4 {
+        let table = read_txn.open_table(DOCUMENT_PREFERENCES_V4_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredDocumentPreferencesV4>(value.value())
+                .and_then(StoredDocumentPreferencesV4::into_domain)
+            {
+                Ok(mut preferences) => {
+                    preferences.path = normalize_path(&preferences.path);
+                    library.document_preferences.push(preferences);
+                }
+                Err(error) => eprintln!("failed to decode document preferences: {error:#}"),
+            }
+        }
+    } else if has_v3 {
         let table = read_txn.open_table(DOCUMENT_PREFERENCES_V3_TABLE)?;
         for entry in table.iter()? {
             let (_, value) = entry?;
@@ -906,6 +930,36 @@ fn migrate_document_preferences_v3(database: &Database, library: &Library) -> Re
         migrations.insert(
             DOCUMENT_PREFERENCES_V3_MIGRATION_KEY,
             [DOCUMENT_PREFERENCES_V3_VERSION].as_slice(),
+        )?;
+    }
+    write_txn.commit()?;
+    Ok(())
+}
+
+fn migrate_document_preferences_v4(database: &Database, library: &Library) -> Result<()> {
+    let write_txn = database.begin_write()?;
+    {
+        let migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        if migrations
+            .get(DOCUMENT_PREFERENCES_V4_MIGRATION_KEY)?
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
+    {
+        let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V4_TABLE)?;
+        for preferences in &library.document_preferences {
+            let key = history_key(&preferences.path);
+            let encoded = encode(&StoredDocumentPreferencesV4::from(preferences))?;
+            table.insert(key.as_slice(), encoded.as_slice())?;
+        }
+    }
+    {
+        let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE)?;
+        migrations.insert(
+            DOCUMENT_PREFERENCES_V4_MIGRATION_KEY,
+            [DOCUMENT_PREFERENCES_V4_VERSION].as_slice(),
         )?;
     }
     write_txn.commit()?;

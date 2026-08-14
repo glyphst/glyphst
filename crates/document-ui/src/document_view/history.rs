@@ -49,12 +49,14 @@ impl DocumentView {
             return JumpPosition {
                 scroll_x_doc: 0.0,
                 scroll_y_doc: self.page_scroll_y_doc(page_idx),
+                presentation_page: Some(page_idx),
             };
         }
 
         JumpPosition {
             scroll_x_doc: self.scroll_x_doc,
             scroll_y_doc: self.scroll_y_doc,
+            presentation_page: None,
         }
     }
 
@@ -62,6 +64,7 @@ impl DocumentView {
         if stack.last().is_some_and(|last| {
             (last.scroll_x_doc - position.scroll_x_doc).abs() <= JUMP_POSITION_EPSILON_DOC
                 && (last.scroll_y_doc - position.scroll_y_doc).abs() <= JUMP_POSITION_EPSILON_DOC
+                && last.presentation_page == position.presentation_page
         }) {
             return;
         }
@@ -96,7 +99,12 @@ impl DocumentView {
         let current_position = self.current_jump_position();
         Self::push_jump_position(&mut self.jump_forward, current_position);
         if self.is_presentation_mode() {
-            self.set_presentation_page(self.page_index_for_doc_y(position.scroll_y_doc), cx);
+            self.set_presentation_page(
+                position
+                    .presentation_page
+                    .unwrap_or_else(|| self.page_index_for_doc_y(position.scroll_y_doc)),
+                cx,
+            );
         } else {
             self.set_scroll_doc(position.scroll_x_doc, position.scroll_y_doc, cx);
         }
@@ -111,7 +119,12 @@ impl DocumentView {
         let current_position = self.current_jump_position();
         Self::push_jump_position(&mut self.jump_back, current_position);
         if self.is_presentation_mode() {
-            self.set_presentation_page(self.page_index_for_doc_y(position.scroll_y_doc), cx);
+            self.set_presentation_page(
+                position
+                    .presentation_page
+                    .unwrap_or_else(|| self.page_index_for_doc_y(position.scroll_y_doc)),
+                cx,
+            );
         } else {
             self.set_scroll_doc(position.scroll_x_doc, position.scroll_y_doc, cx);
         }

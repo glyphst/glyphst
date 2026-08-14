@@ -2,11 +2,8 @@ use super::*;
 
 impl DocumentView {
     pub(super) fn screen_to_document(&self, point: GpuiPoint<Pixels>) -> Option<mupdf::Point> {
-        let (page_idx, bounds) = self
-            .page_image_bounds
-            .iter()
-            .enumerate()
-            .find_map(|(page_idx, bounds)| bounds.as_ref().map(|bounds| (page_idx, bounds)))?;
+        let page_idx = self.page_at_screen(point)?;
+        let bounds = self.page_image_bounds.get(page_idx)?.as_ref()?;
         let page = self.pages.get(page_idx)?;
         let (page_width, page_height) = self.page_dimensions(page_idx);
         let scale_x = bounds.size.width.as_f32() / page_width;
@@ -15,9 +12,8 @@ impl DocumentView {
             return None;
         }
 
-        let page_left = (self.max_page_width - page_width) / 2.0;
         Some(mupdf::Point {
-            x: (page_left + (point.x.as_f32() - bounds.origin.x.as_f32()) / scale_x)
+            x: (page.offset_x + (point.x.as_f32() - bounds.origin.x.as_f32()) / scale_x)
                 .clamp(0.0, self.max_page_width),
             y: (page.offset_y + (point.y.as_f32() - bounds.origin.y.as_f32()) / scale_y)
                 .clamp(0.0, self.content_height_doc),
@@ -39,7 +35,7 @@ impl DocumentView {
 
     pub(super) fn region_reference_for_pages(
         pages: &[DocumentPage],
-        max_page_width: f32,
+        _max_page_width: f32,
         scale: f32,
         rotation: DocumentRotation,
         drag: RegionDragState,
@@ -54,15 +50,12 @@ impl DocumentView {
             return None;
         }
 
-        let display_height = |page: &DocumentPage| Self::page_dimensions_for(page, rotation).1;
-        let start_page = pages.partition_point(|page| page.offset_y + display_height(page) <= y0);
-        let end_page = start_page + pages[start_page..].partition_point(|page| page.offset_y < y1);
-        let regions = pages[start_page..end_page]
+        let regions = pages
             .iter()
             .enumerate()
-            .filter_map(|(relative_page_idx, page)| {
+            .filter_map(|(page_idx, page)| {
                 let (page_width, page_height) = Self::page_dimensions_for(page, rotation);
-                let page_left = (max_page_width - page_width) / 2.0;
+                let page_left = page.offset_x;
                 let page_right = page_left + page_width;
                 let page_bottom = page.offset_y + page_height;
                 let region_x0 = x0.max(page_left);
@@ -84,7 +77,7 @@ impl DocumentView {
                     ),
                 );
                 Some(PageRegion {
-                    page: PageIndex(start_page + relative_page_idx),
+                    page: PageIndex(page_idx),
                     x0: source_rect.x0,
                     y0: source_rect.y0,
                     x1: source_rect.x1,

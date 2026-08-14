@@ -72,30 +72,24 @@ impl DocumentView {
     pub(super) fn page_index_for_scroll_y(&self, scroll_y_doc: f32) -> usize {
         let scale = self.effective_scale();
         let center_doc = scroll_y_doc + self.viewport_height / (2.0 * scale);
-        let mut current = 0;
-
-        for (idx, page) in self.pages.iter().enumerate() {
-            if center_doc >= page.offset_y {
-                current = idx;
-            } else {
-                break;
-            }
-        }
-
-        current
+        self.page_index_for_doc_y(center_doc)
     }
 
     pub(super) fn page_index_for_doc_y(&self, doc_y: f32) -> usize {
         let mut current = 0;
+        let mut current_offset = f32::NEG_INFINITY;
         for (idx, page) in self.pages.iter().enumerate() {
-            if doc_y >= page.offset_y {
+            if doc_y >= page.offset_y && page.offset_y > current_offset {
                 current = idx;
+                current_offset = page.offset_y;
             } else {
-                break;
+                if page.offset_y > doc_y {
+                    break;
+                }
             }
         }
 
-        current
+        self.spread_start_page(current)
     }
 
     pub fn is_presentation_mode(&self) -> bool {
@@ -130,8 +124,20 @@ impl DocumentView {
         self.pages.len()
     }
 
-    pub(super) fn page_counter_label(current_page: usize, page_count: usize) -> String {
-        format!("{current_page} / {page_count}")
+    pub(super) fn current_page_range(&self) -> Range<usize> {
+        if let Some(page_idx) = self.presentation_page_index() {
+            return page_idx..(page_idx + 1).min(self.pages.len());
+        }
+        self.spread_page_range(self.current_page_index())
+    }
+
+    pub(super) fn page_counter_label(page_range: Range<usize>, page_count: usize) -> String {
+        let start = page_range.start + 1;
+        if page_range.end > page_range.start + 1 {
+            format!("{start}–{} / {page_count}", page_range.end)
+        } else {
+            format!("{start} / {page_count}")
+        }
     }
 
     pub(super) fn last_page_index(&self) -> usize {
@@ -172,13 +178,15 @@ impl DocumentView {
     }
 
     fn navigate_to_page_start(&mut self, page_idx: usize, cx: &mut Context<Self>) {
-        let target_page = page_idx.min(self.last_page_index());
         if self.is_presentation_mode() {
+            let target_page = page_idx.min(self.last_page_index());
             if self.set_presentation_page(target_page, cx) {
                 self.mark_manual_navigation();
             }
             return;
         }
+
+        let target_page = self.spread_start_page(page_idx);
 
         let target = self
             .pages
@@ -292,7 +300,12 @@ impl DocumentView {
             return;
         }
 
-        self.navigate_to_page_start(self.current_page_index() + 1, cx);
+        let step = if self.is_two_column_layout() && !self.is_presentation_mode() {
+            2
+        } else {
+            1
+        };
+        self.navigate_to_page_start(self.current_page_index().saturating_add(step), cx);
     }
 
     pub(super) fn previous_page(&mut self, cx: &mut Context<Self>) {
@@ -301,7 +314,12 @@ impl DocumentView {
             return;
         }
 
-        self.navigate_to_page_start(self.current_page_index().saturating_sub(1), cx);
+        let step = if self.is_two_column_layout() && !self.is_presentation_mode() {
+            2
+        } else {
+            1
+        };
+        self.navigate_to_page_start(self.current_page_index().saturating_sub(step), cx);
     }
 
     pub(super) fn go_to_beginning(&mut self, cx: &mut Context<Self>) {

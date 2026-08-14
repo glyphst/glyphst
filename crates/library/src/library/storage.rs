@@ -342,10 +342,10 @@ impl LibraryStore {
             return Err(anyhow!("document library database is unavailable"));
         };
         let key = history_key(&preferences.path);
-        let encoded = encode(&StoredDocumentPreferencesV3::from(preferences))?;
+        let encoded = encode(&StoredDocumentPreferencesV4::from(preferences))?;
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V3_TABLE)?;
+            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V4_TABLE)?;
             table.insert(key.as_slice(), encoded.as_slice())?;
         }
         write_txn.commit()?;
@@ -359,7 +359,7 @@ impl LibraryStore {
         let key = history_key(path);
         let write_txn = database.begin_write()?;
         {
-            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V3_TABLE)?;
+            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V4_TABLE)?;
             table.remove(key.as_slice())?;
         }
         write_txn.commit()?;
@@ -462,7 +462,7 @@ impl LibraryStore {
             }
         }
         {
-            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V3_TABLE)?;
+            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V4_TABLE)?;
             let keys = table
                 .iter()?
                 .filter_map(|entry| entry.ok().map(|(key, _)| key.value().to_vec()))
@@ -472,7 +472,7 @@ impl LibraryStore {
             }
             for entry in &self.library.document_preferences {
                 let key = history_key(&entry.path);
-                let encoded = encode(&StoredDocumentPreferencesV3::from(entry))?;
+                let encoded = encode(&StoredDocumentPreferencesV4::from(entry))?;
                 table.insert(key.as_slice(), encoded.as_slice())?;
             }
         }

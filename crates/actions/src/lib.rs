@@ -94,6 +94,7 @@ pub mod document_viewer {
             ToggleCommandPalette,
             ToggleFullScreen,
             TogglePresentationMode,
+            ToggleTwoColumnMode,
             ToggleTransparency,
             OpenSettings,
             OpenKeybindings,

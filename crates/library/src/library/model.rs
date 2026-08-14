@@ -126,7 +126,8 @@ impl Library {
             !preferences.path.as_os_str().is_empty()
                 && (!preferences.target_language.is_empty()
                     || preferences.epub.is_some()
-                    || preferences.rotation != DocumentRotation::default())
+                    || preferences.rotation != DocumentRotation::default()
+                    || preferences.page_layout != DocumentPageLayout::default())
         });
         self.document_preferences
             .sort_by(|left, right| left.path.cmp(&right.path));

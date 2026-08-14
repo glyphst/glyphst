@@ -539,6 +539,33 @@ fn vim_ctrl_r_still_dispatches_reload() {
 }
 
 #[test]
+fn two_column_mode_uses_only_the_vim_d_default() {
+    let modern = preset_keymap(KeymapPreset::Modern);
+    let vim = preset_keymap(KeymapPreset::Vim);
+
+    assert!(
+        action_names_for(&modern, "d", &["DocumentView"])
+            .iter()
+            .all(|name| name != ToggleTwoColumnMode::name_for_type())
+    );
+    assert_eq!(
+        first_action_for(&vim, "d", &["DocumentView"]),
+        ToggleTwoColumnMode::name_for_type()
+    );
+
+    let modern_binding = editable_bindings(KeymapPreset::Modern, &[])
+        .into_iter()
+        .find(|binding| binding.action == "toggle-two-column-mode")
+        .unwrap();
+    let vim_binding = editable_bindings(KeymapPreset::Vim, &[])
+        .into_iter()
+        .find(|binding| binding.action == "toggle-two-column-mode")
+        .unwrap();
+    assert!(modern_binding.keystrokes.is_empty());
+    assert_eq!(vim_binding.keystrokes, vec!["d".to_string()]);
+}
+
+#[test]
 fn new_tab_navigation_uses_native_and_vim_defaults() {
     let modern = preset_keymap(KeymapPreset::Modern);
     assert_eq!(

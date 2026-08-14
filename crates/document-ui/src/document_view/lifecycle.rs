@@ -68,6 +68,7 @@ impl DocumentView {
             page_count,
             max_page_width: loaded.max_page_width.max(1.0),
             content_height_doc: loaded.content_height_doc,
+            page_gap,
             toc,
         })
     }
@@ -92,6 +93,7 @@ impl DocumentView {
             page_count: self.page_count,
             max_page_width: self.max_page_width,
             content_height_doc: self.content_height_doc,
+            page_gap: self.page_gap,
             toc: self.toc.clone(),
         }
     }
@@ -115,12 +117,18 @@ impl DocumentView {
             page_count,
             max_page_width,
             content_height_doc,
+            page_gap,
             toc,
         } = prepared;
         let rotation = if capabilities.reflow {
             DocumentRotation::default()
         } else {
             options.rotation
+        };
+        let page_layout = if capabilities.two_column_layout {
+            options.page_layout
+        } else {
+            DocumentPageLayout::default()
         };
         let page_image_bounds = (0..pages.len()).map(|_| None).collect();
         let mut view = Self {
@@ -206,6 +214,8 @@ impl DocumentView {
             focus_handle,
             pending_renders: Vec::new(),
             rotation,
+            page_layout,
+            page_gap,
             zoom: behavior.default_zoom,
             base_scale: 1.0,
             viewport_origin: point(px(0.0), px(0.0)),
@@ -283,6 +293,7 @@ impl DocumentView {
             bookmarks_revision: 0,
             _image_clipboard: None,
         };
+        view.recompute_layout(page_gap);
         if let Some(position) = view.pending_initial_position.take() {
             view.restore_position(position);
         }
@@ -317,6 +328,9 @@ impl DocumentView {
         cx.observe_global::<SettingsStore>(|this, cx| {
             let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
             this.recompute_layout(page_gap);
+            if !this.capabilities.reflow {
+                this.base_scale = this.viewport_width.max(1.0) / this.max_page_width.max(1.0);
+            }
             cx.notify();
         })
         .detach();
@@ -694,6 +708,7 @@ impl DocumentView {
                 bounds: page_bounds,
                 width: page_width,
                 height: page_height,
+                offset_x: 0.0,
                 offset_y: 0.0,
                 glyph_range: 0..0,
             });
@@ -729,6 +744,7 @@ impl DocumentView {
                 bounds: page_bounds,
                 width: page_width,
                 height: page_height,
+                offset_x: 0.0,
                 offset_y: 0.0,
                 glyph_range: 0..0,
             })
@@ -759,6 +775,7 @@ impl DocumentView {
             max_page_width = max_page_width.max(chunk.max_page_width);
 
             for page in &mut chunk.pages {
+                page.offset_x = 0.0;
                 page.offset_y = offset_y;
                 offset_y += page.height + page_gap;
             }

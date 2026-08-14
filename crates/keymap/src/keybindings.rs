@@ -12,8 +12,8 @@ use glyphst_actions::{
         ScrollLineDown, ScrollLineUp, Search, SelectAll, Toc, ToggleAiPanel, ToggleCommandPalette,
         ToggleFullScreen, ToggleGridOverview, ToggleNotes, TogglePinnedTranslation,
         TogglePresentationMode, TogglePublisherStyles, ToggleRegionSelection,
-        ToggleThumbnailSidebar, ToggleToc, ToggleTransparency, TranslateDocument,
-        TranslateSelection, Undo, ZoomIn, ZoomOut,
+        ToggleThumbnailSidebar, ToggleToc, ToggleTransparency, ToggleTwoColumnMode,
+        TranslateDocument, TranslateSelection, Undo, ZoomIn, ZoomOut,
     },
     menu,
     new_tab::{
@@ -1205,6 +1205,15 @@ fn command_specs() -> &'static [CommandSpec] {
                     &["f5"],
                     &["f5"],
                     &["toggle-presentation", "presentation", "presentation-mode"],
+                    true,
+                ),
+                spec::<ToggleTwoColumnMode>(
+                    "toggle-two-column-mode",
+                    "Toggle Two-Column Mode",
+                    KeyBindingCategory::DocumentView,
+                    &[],
+                    &["d"],
+                    &["two-column", "two-page", "dual-page"],
                     true,
                 ),
                 spec::<Search>(

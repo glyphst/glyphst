@@ -27,8 +27,8 @@ use super::{
 };
 use glyphst_ai::ai_chat::{MentionKind, MentionReference};
 use glyphst_core::{
-    DocumentLayout, DocumentRotation, EpubLayout, HighlightColor, PageIndex, PageRegion,
-    RegionImageReference,
+    DocumentLayout, DocumentPageLayout, DocumentRotation, EpubLayout, HighlightColor, PageIndex,
+    PageRegion, RegionImageReference,
 };
 use glyphst_library::{Highlight, HighlightRect, Note};
 use glyphst_translation::LanguageCode;
@@ -53,7 +53,75 @@ fn annotation_reconciliation_clears_only_stale_ids() {
 
 #[test]
 fn page_counter_uses_generated_pages_for_any_document_format() {
-    assert_eq!(DocumentView::page_counter_label(3, 12), "3 / 12");
+    assert_eq!(DocumentView::page_counter_label(2..3, 12), "3 / 12");
+    assert_eq!(DocumentView::page_counter_label(2..4, 12), "3–4 / 12");
+}
+
+fn layout_test_page(width: f32, height: f32) -> DocumentPage {
+    DocumentPage {
+        bounds: Rect::new(0.0, 0.0, width, height),
+        width,
+        height,
+        offset_x: 0.0,
+        offset_y: 0.0,
+        glyph_range: 0..0,
+    }
+}
+
+#[test]
+fn two_column_layout_pairs_sequential_pages_and_keeps_odd_page_left() {
+    let mut pages = vec![
+        layout_test_page(100.0, 200.0),
+        layout_test_page(80.0, 180.0),
+        layout_test_page(60.0, 220.0),
+        layout_test_page(120.0, 160.0),
+        layout_test_page(70.0, 140.0),
+    ];
+
+    let (width, height) = DocumentView::layout_pages(
+        &mut pages,
+        DocumentPageLayout::TwoColumn,
+        DocumentRotation::Degrees0,
+        10.0,
+    );
+
+    assert_eq!((width, height), (230.0, 580.0));
+    assert_eq!((pages[0].offset_x, pages[0].offset_y), (0.0, 0.0));
+    assert_eq!((pages[1].offset_x, pages[1].offset_y), (130.0, 0.0));
+    assert_eq!((pages[2].offset_x, pages[2].offset_y), (20.0, 210.0));
+    assert_eq!((pages[3].offset_x, pages[3].offset_y), (110.0, 210.0));
+    assert_eq!((pages[4].offset_x, pages[4].offset_y), (15.0, 440.0));
+}
+
+#[test]
+fn two_column_layout_mirrors_a_missing_right_column_and_honors_rotation() {
+    let mut single = vec![layout_test_page(100.0, 200.0)];
+    assert_eq!(
+        DocumentView::layout_pages(
+            &mut single,
+            DocumentPageLayout::TwoColumn,
+            DocumentRotation::Degrees0,
+            8.0,
+        ),
+        (208.0, 200.0)
+    );
+    assert_eq!((single[0].offset_x, single[0].offset_y), (0.0, 0.0));
+
+    let mut rotated = vec![
+        layout_test_page(100.0, 200.0),
+        layout_test_page(80.0, 150.0),
+    ];
+    assert_eq!(
+        DocumentView::layout_pages(
+            &mut rotated,
+            DocumentPageLayout::TwoColumn,
+            DocumentRotation::Degrees90,
+            10.0,
+        ),
+        (360.0, 100.0)
+    );
+    assert_eq!((rotated[0].offset_x, rotated[0].offset_y), (0.0, 0.0));
+    assert_eq!((rotated[1].offset_x, rotated[1].offset_y), (210.0, 0.0));
 }
 
 #[test]
@@ -864,6 +932,7 @@ fn translated_page_text_replaces_only_its_page_and_rebases_following_ranges() {
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             width: 100.0,
             height: 100.0,
+            offset_x: 0.0,
             offset_y: 0.0,
             glyph_range: 0..1,
         },
@@ -871,6 +940,7 @@ fn translated_page_text_replaces_only_its_page_and_rebases_following_ranges() {
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             width: 100.0,
             height: 100.0,
+            offset_x: 0.0,
             offset_y: 108.0,
             glyph_range: 1..2,
         },
@@ -1202,6 +1272,7 @@ fn region_drag_intersects_centered_pages_and_omits_gaps() {
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             width: 100.0,
             height: 100.0,
+            offset_x: 0.0,
             offset_y: 0.0,
             glyph_range: 0..0,
         },
@@ -1209,6 +1280,7 @@ fn region_drag_intersects_centered_pages_and_omits_gaps() {
             bounds: Rect::new(10.0, 20.0, 70.0, 120.0),
             width: 60.0,
             height: 100.0,
+            offset_x: 20.0,
             offset_y: 120.0,
             glyph_range: 0..0,
         },
@@ -1247,11 +1319,58 @@ fn region_drag_intersects_centered_pages_and_omits_gaps() {
 }
 
 #[test]
+fn region_drag_intersects_both_pages_in_a_two_column_row() {
+    let mut pages = vec![
+        layout_test_page(100.0, 100.0),
+        layout_test_page(100.0, 100.0),
+    ];
+    let (layout_width, _) = DocumentView::layout_pages(
+        &mut pages,
+        DocumentPageLayout::TwoColumn,
+        DocumentRotation::Degrees0,
+        10.0,
+    );
+
+    let reference = DocumentView::region_reference_for_pages(
+        &pages,
+        layout_width,
+        1.0,
+        DocumentRotation::Degrees0,
+        RegionDragState {
+            anchor: Point::new(50.0, 20.0),
+            current: Point::new(160.0, 80.0),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        reference.regions,
+        vec![
+            PageRegion {
+                page: PageIndex(0),
+                x0: 50.0,
+                y0: 20.0,
+                x1: 100.0,
+                y1: 80.0,
+            },
+            PageRegion {
+                page: PageIndex(1),
+                x0: 0.0,
+                y0: 20.0,
+                x1: 50.0,
+                y1: 80.0,
+            },
+        ]
+    );
+}
+
+#[test]
 fn region_drag_rejects_tiny_marquees() {
     let pages = [DocumentPage {
         bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
         width: 100.0,
         height: 100.0,
+        offset_x: 0.0,
         offset_y: 0.0,
         glyph_range: 0..0,
     }];
@@ -1276,6 +1395,7 @@ fn rotated_region_drag_maps_back_to_pdf_coordinates() {
         bounds: Rect::new(10.0, 20.0, 110.0, 220.0),
         width: 100.0,
         height: 200.0,
+        offset_x: 0.0,
         offset_y: 0.0,
         glyph_range: 0..0,
     }];

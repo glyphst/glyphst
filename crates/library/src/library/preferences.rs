@@ -30,6 +30,16 @@ impl LibraryStore {
             .unwrap_or_default()
     }
 
+    pub fn document_page_layout(&self, path: &Path) -> DocumentPageLayout {
+        let path = normalize_path(path);
+        self.library
+            .document_preferences
+            .iter()
+            .find(|preferences| preferences.path == path)
+            .map(|preferences| preferences.page_layout)
+            .unwrap_or_default()
+    }
+
     pub(super) fn update_document_preferences(
         &mut self,
         path: &Path,
@@ -48,6 +58,7 @@ impl LibraryStore {
                 target_language: String::new(),
                 epub: None,
                 rotation: DocumentRotation::default(),
+                page_layout: DocumentPageLayout::default(),
             });
         let previous = preferences.clone();
         update(&mut preferences);
@@ -120,6 +131,21 @@ impl LibraryStore {
             before,
             after: rotation,
         });
+        Ok(true)
+    }
+
+    pub fn set_document_page_layout(
+        &mut self,
+        path: &Path,
+        page_layout: DocumentPageLayout,
+    ) -> Result<bool> {
+        let path = normalize_path(path);
+        if self.document_page_layout(&path) == page_layout {
+            return Ok(false);
+        }
+        self.update_document_preferences(&path, |preferences| {
+            preferences.page_layout = page_layout;
+        })?;
         Ok(true)
     }
 

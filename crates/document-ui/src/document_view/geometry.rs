@@ -12,8 +12,9 @@ impl DocumentView {
         let image_width = px(page_width * scale);
         let image_height = px(page_height * scale);
         let origin = point(
-            bounds.origin.x + (bounds.size.width - image_width) / 2.0
-                - px(self.scroll_x_doc * scale),
+            bounds.origin.x
+                + (bounds.size.width - px(self.max_page_width * scale)) / 2.0
+                + px((page.offset_x - self.scroll_x_doc) * scale),
             bounds.origin.y + px((page.offset_y - self.scroll_y_doc) * scale),
         );
 

@@ -1699,6 +1699,7 @@ fn document_preference_writes_fail_when_database_is_unavailable() {
             target_language: "ja".to_string(),
             epub: Some(preferences),
             rotation: DocumentRotation::default(),
+            page_layout: DocumentPageLayout::default(),
         });
     let clear_error = store
         .clear_epub_reader_preferences(document_path)
@@ -1779,11 +1780,18 @@ fn preference_setters_preserve_other_document_fields() {
             .set_document_rotation(document_path, DocumentRotation::Degrees90)
             .unwrap();
         store
+            .set_document_page_layout(document_path, DocumentPageLayout::TwoColumn)
+            .unwrap();
+        store
             .set_epub_reader_preferences(document_path, preferences)
             .unwrap();
         assert_eq!(
             store.document_rotation(document_path),
             DocumentRotation::Degrees90
+        );
+        assert_eq!(
+            store.document_page_layout(document_path),
+            DocumentPageLayout::TwoColumn
         );
 
         store
@@ -1797,6 +1805,10 @@ fn preference_setters_preserve_other_document_fields() {
             store.document_rotation(document_path),
             DocumentRotation::Degrees90
         );
+        assert_eq!(
+            store.document_page_layout(document_path),
+            DocumentPageLayout::TwoColumn
+        );
 
         store.clear_epub_reader_preferences(document_path).unwrap();
         assert_eq!(
@@ -1806,6 +1818,10 @@ fn preference_setters_preserve_other_document_fields() {
         assert_eq!(
             store.document_rotation(document_path),
             DocumentRotation::Degrees90
+        );
+        assert_eq!(
+            store.document_page_layout(document_path),
+            DocumentPageLayout::TwoColumn
         );
 
         store
@@ -1833,6 +1849,10 @@ fn preference_setters_preserve_other_document_fields() {
         assert_eq!(
             store.document_rotation(document_path),
             DocumentRotation::Degrees90
+        );
+        assert_eq!(
+            store.document_page_layout(document_path),
+            DocumentPageLayout::TwoColumn
         );
         assert_eq!(
             store.document_rotation(rotation_only_path),
@@ -1864,6 +1884,35 @@ fn persists_document_rotation_round_trip() {
         assert_eq!(
             store.document_rotation(document_path),
             DocumentRotation::Degrees270
+        );
+    }
+
+    let _ = fs::remove_file(database_path);
+}
+
+#[test]
+fn persists_document_page_layout_round_trip() {
+    let database_path = temp_library_path("document-page-layout-round-trip");
+    let document_path = Path::new("/tmp/two-column.pdf");
+
+    {
+        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        assert_eq!(
+            store.document_page_layout(document_path),
+            DocumentPageLayout::SingleColumn
+        );
+        assert!(
+            store
+                .set_document_page_layout(document_path, DocumentPageLayout::TwoColumn)
+                .unwrap()
+        );
+    }
+
+    {
+        let store = LibraryStore::open(database_path.clone()).unwrap();
+        assert_eq!(
+            store.document_page_layout(document_path),
+            DocumentPageLayout::TwoColumn
         );
     }
 
@@ -1929,6 +1978,10 @@ fn migrates_v2_document_preferences_with_default_rotation() {
             store.document_rotation(&document_path),
             DocumentRotation::default()
         );
+        assert_eq!(
+            store.document_page_layout(&document_path),
+            DocumentPageLayout::SingleColumn
+        );
     }
 
     {
@@ -1953,6 +2006,83 @@ fn migrates_v2_document_preferences_with_default_rotation() {
         assert_eq!(migrated.target_language, "ja");
         assert_eq!(migrated.epub, Some(epub));
         assert_eq!(migrated.rotation, DocumentRotation::default());
+
+        assert!(
+            read_txn
+                .open_table(STORAGE_MIGRATIONS_TABLE)
+                .unwrap()
+                .get(DOCUMENT_PREFERENCES_V4_MIGRATION_KEY)
+                .unwrap()
+                .is_some()
+        );
+        let value = read_txn
+            .open_table(DOCUMENT_PREFERENCES_V4_TABLE)
+            .unwrap()
+            .get(key.as_slice())
+            .unwrap()
+            .unwrap();
+        let migrated = decode::<StoredDocumentPreferencesV4>(value.value()).unwrap();
+        assert_eq!(migrated.page_layout, DocumentPageLayout::SingleColumn);
+    }
+
+    let _ = fs::remove_file(database_path);
+}
+
+#[test]
+fn migrates_v3_document_preferences_with_default_page_layout() {
+    let database_path = temp_library_path("document-preferences-v3-migration");
+    let document_path = PathBuf::from("/tmp/v3-preferences.pdf");
+    let stored_preferences = StoredDocumentPreferencesV3 {
+        version: DOCUMENT_PREFERENCES_V3_VERSION,
+        path: StoredPathV1::from_path(&document_path),
+        target_language: "zh-cn".to_string(),
+        epub: None,
+        rotation: DocumentRotation::Degrees90,
+    };
+
+    {
+        let database = Database::create(&database_path).unwrap();
+        ensure_tables(&database).unwrap();
+        let write_txn = database.begin_write().unwrap();
+        let key = history_key(&document_path);
+        write_txn
+            .open_table(DOCUMENT_PREFERENCES_V3_TABLE)
+            .unwrap()
+            .insert(
+                key.as_slice(),
+                encode(&stored_preferences).unwrap().as_slice(),
+            )
+            .unwrap();
+        let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE).unwrap();
+        migrations
+            .insert(
+                STORAGE_V1_MIGRATION_KEY,
+                [STORAGE_SCHEMA_VERSION].as_slice(),
+            )
+            .unwrap();
+        migrations
+            .insert(STORAGE_V2_MIGRATION_KEY, [STORAGE_V2_VERSION].as_slice())
+            .unwrap();
+        migrations
+            .insert(
+                DOCUMENT_PREFERENCES_V3_MIGRATION_KEY,
+                [DOCUMENT_PREFERENCES_V3_VERSION].as_slice(),
+            )
+            .unwrap();
+        drop(migrations);
+        write_txn.commit().unwrap();
+    }
+
+    {
+        let store = LibraryStore::open(database_path.clone()).unwrap();
+        assert_eq!(
+            store.document_rotation(&document_path),
+            DocumentRotation::Degrees90
+        );
+        assert_eq!(
+            store.document_page_layout(&document_path),
+            DocumentPageLayout::SingleColumn
+        );
     }
 
     let _ = fs::remove_file(database_path);
@@ -2102,6 +2232,7 @@ fn serializes_non_utf8_paths_without_loss() {
         target_language: "ja".to_string(),
         epub: None,
         rotation: DocumentRotation::default(),
+        page_layout: DocumentPageLayout::default(),
     };
     assert_eq!(
         decode::<StoredDocumentPreferencesV1>(

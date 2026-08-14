@@ -41,7 +41,6 @@ impl DocumentView {
         target_left: Option<f32>,
     ) -> Option<(f32, f32)> {
         let page = self.pages.get(page_idx)?;
-        let (page_width, _) = self.page_dimensions(page_idx);
         let target_point = Self::pdf_point_to_view(
             page.bounds,
             self.rotation,
@@ -59,7 +58,7 @@ impl DocumentView {
             };
         let scroll_x_doc =
             if (swapped && target_top.is_some()) || (!swapped && target_left.is_some()) {
-                target_point.x - page_width / 2.0
+                page.offset_x + target_point.x - self.max_page_width / 2.0
             } else {
                 self.scroll_x_doc
             };

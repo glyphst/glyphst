@@ -50,9 +50,9 @@ use glyphst_ai_ui::{
     AiContext, AiContextProvider, AiPageState, ResolvedPageContext, ResolvedRegionContext,
 };
 use glyphst_core::{
-    DocumentCapabilities, DocumentFormat, DocumentLayout, DocumentRotation, EpubReaderPreferences,
-    EpubTheme, PageIndex, PageRegion, RegionImageReference, SelectedPagesReference,
-    SemanticTextAnchor,
+    DocumentCapabilities, DocumentFormat, DocumentLayout, DocumentPageLayout, DocumentRotation,
+    EpubReaderPreferences, EpubTheme, PageIndex, PageRegion, RegionImageReference,
+    SelectedPagesReference, SemanticTextAnchor,
 };
 use glyphst_pdf::{
     DocumentRenderSession, DocumentSnapshot, ReloadCoordinator, ReloadDisposition,
@@ -274,6 +274,7 @@ struct DocumentPage {
     bounds: Rect,
     width: f32,
     height: f32,
+    offset_x: f32,
     offset_y: f32,
     glyph_range: Range<usize>,
 }
@@ -1155,6 +1156,7 @@ pub struct DocumentOpenOptions {
     pub target_language: String,
     pub epub_preferences: EpubReaderPreferences,
     pub rotation: DocumentRotation,
+    pub page_layout: DocumentPageLayout,
     pub document_translation_jobs: Entity<DocumentTranslationJobManager>,
 }
 
@@ -1171,6 +1173,7 @@ pub struct PreparedDocumentOpen {
     page_count: usize,
     max_page_width: f32,
     content_height_doc: f32,
+    page_gap: f32,
     toc: Vec<TocEntry>,
 }
 
@@ -1317,6 +1320,7 @@ struct PanState {
 struct JumpPosition {
     scroll_x_doc: f32,
     scroll_y_doc: f32,
+    presentation_page: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1503,6 +1507,8 @@ pub struct DocumentView {
     focus_handle: FocusHandle,
     pending_renders: Vec<PendingRender>,
     rotation: DocumentRotation,
+    page_layout: DocumentPageLayout,
+    page_gap: f32,
     zoom: f32,
     base_scale: f32,
     viewport_origin: GpuiPoint<Pixels>,

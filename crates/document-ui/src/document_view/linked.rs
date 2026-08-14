@@ -44,12 +44,12 @@ impl DocumentView {
                 };
                 let viewport_height_doc = self.viewport_height / self.effective_scale();
                 let anchor_doc_y = scroll_y_doc + viewport_height_doc * viewport_y_fraction;
-                let page_idx = self.page_index_for_doc_y(anchor_doc_y);
+                let anchor_doc_x = self.max_page_width / 2.0 + scroll_x_doc;
+                let page_idx = self.page_index_for_doc_point(anchor_doc_x, anchor_doc_y);
                 let page = self.pages.get(page_idx)?;
-                let (page_width, _) = self.page_dimensions(page_idx);
                 (
                     page_idx,
-                    page_width / 2.0 + scroll_x_doc,
+                    anchor_doc_x - page.offset_x,
                     anchor_doc_y - page.offset_y,
                     viewport_y_fraction,
                 )
@@ -118,8 +118,7 @@ impl DocumentView {
                 y: anchor.pdf_y,
             },
         );
-        let (page_width, _) = self.page_dimensions(anchor.page_index);
-        let scroll_x_doc = point.x - page_width / 2.0;
+        let scroll_x_doc = page.offset_x + point.x - self.max_page_width / 2.0;
         let viewport_y_fraction = anchor.viewport_y_fraction.clamp(0.0, 1.0);
         let scroll_y_doc = page.offset_y + point.y
             - self.viewport_height / self.effective_scale() * viewport_y_fraction;
@@ -154,17 +153,18 @@ impl DocumentView {
         self.apply_live_translation_viewport_anchor(session_id, anchor, cx);
     }
 
-    fn viewport_center_pdf_anchor(&self) -> Option<(usize, mupdf::Point)> {
+    pub(super) fn viewport_center_pdf_anchor(&self) -> Option<(usize, mupdf::Point)> {
         if self.pages.is_empty() {
             return None;
         }
         let scale = self.effective_scale();
         let center_y = self.target_scroll_y_doc + self.viewport_height / (2.0 * scale);
-        let page_idx = self.page_index_for_doc_y(center_y);
+        let center_x = self.max_page_width / 2.0 + self.target_scroll_x_doc;
+        let page_idx = self.page_index_for_doc_point(center_x, center_y);
         let page = self.pages.get(page_idx)?;
         let (page_width, page_height) = self.page_dimensions(page_idx);
         let point = mupdf::Point {
-            x: (page_width / 2.0 + self.target_scroll_x_doc).clamp(0.0, page_width),
+            x: (center_x - page.offset_x).clamp(0.0, page_width),
             y: (center_y - page.offset_y).clamp(0.0, page_height),
         };
         Some((
@@ -208,9 +208,8 @@ impl DocumentView {
             && let Some(page) = self.pages.get(page_idx)
         {
             let point = Self::pdf_point_to_view(page.bounds, self.rotation, source_point);
-            let (page_width, _) = self.page_dimensions(page_idx);
             let scale = self.effective_scale();
-            self.scroll_x_doc = point.x - page_width / 2.0;
+            self.scroll_x_doc = page.offset_x + point.x - self.max_page_width / 2.0;
             self.scroll_y_doc = page.offset_y + point.y - self.viewport_height / (2.0 * scale);
             self.target_scroll_x_doc = self.scroll_x_doc;
             self.target_scroll_y_doc = self.scroll_y_doc;

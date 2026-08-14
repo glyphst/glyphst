@@ -13,8 +13,8 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow};
 pub use glyphst_core::{
-    DocumentFormat, DocumentId, DocumentRotation, EpubReaderPreferences, HighlightColor,
-    RegionImageReference, SemanticTextAnchor,
+    DocumentFormat, DocumentId, DocumentPageLayout, DocumentRotation, EpubReaderPreferences,
+    HighlightColor, RegionImageReference, SemanticTextAnchor,
 };
 use gpui::Global;
 use redb::{Database, ReadableTable, TableDefinition};
@@ -57,6 +57,10 @@ const DOCUMENT_PREFERENCES_V3_MIGRATION_KEY: &str = "document_preferences_v3";
 const DOCUMENT_PREFERENCES_V3_VERSION: u8 = 3;
 const DOCUMENT_PREFERENCES_V3_TABLE: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("document_preferences_v3");
+const DOCUMENT_PREFERENCES_V4_MIGRATION_KEY: &str = "document_preferences_v4";
+const DOCUMENT_PREFERENCES_V4_VERSION: u8 = 4;
+const DOCUMENT_PREFERENCES_V4_TABLE: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("document_preferences_v4");
 const AI_SESSIONS_V2_MIGRATION_KEY: &str = "ai_sessions_v2";
 const AI_SESSIONS_V2_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("ai_sessions_v2");
 const AI_SESSIONS_V3_MIGRATION_KEY: &str = "ai_sessions_v3";
@@ -1777,6 +1781,7 @@ impl StoredDocumentPreferencesV1 {
             target_language: self.target_language,
             epub: None,
             rotation: DocumentRotation::default(),
+            page_layout: DocumentPageLayout::default(),
         })
     }
 }
@@ -1964,6 +1969,7 @@ impl StoredDocumentPreferencesV2 {
             target_language: self.target_language,
             epub: self.epub,
             rotation: DocumentRotation::default(),
+            page_layout: DocumentPageLayout::default(),
         })
     }
 }
@@ -1997,6 +2003,43 @@ impl StoredDocumentPreferencesV3 {
             target_language: self.target_language,
             epub: self.epub,
             rotation: self.rotation,
+            page_layout: DocumentPageLayout::default(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredDocumentPreferencesV4 {
+    version: u8,
+    path: StoredPathV1,
+    target_language: String,
+    epub: Option<EpubReaderPreferences>,
+    rotation: DocumentRotation,
+    page_layout: DocumentPageLayout,
+}
+
+impl From<&DocumentPreferences> for StoredDocumentPreferencesV4 {
+    fn from(preferences: &DocumentPreferences) -> Self {
+        Self {
+            version: DOCUMENT_PREFERENCES_V4_VERSION,
+            path: StoredPathV1::from_path(&preferences.path),
+            target_language: preferences.target_language.clone(),
+            epub: preferences.epub,
+            rotation: preferences.rotation,
+            page_layout: preferences.page_layout,
+        }
+    }
+}
+
+impl StoredDocumentPreferencesV4 {
+    fn into_domain(self) -> Result<DocumentPreferences> {
+        require_storage_version(self.version, DOCUMENT_PREFERENCES_V4_VERSION)?;
+        Ok(DocumentPreferences {
+            path: self.path.into_path()?,
+            target_language: self.target_language,
+            epub: self.epub,
+            rotation: self.rotation,
+            page_layout: self.page_layout,
         })
     }
 }
@@ -2574,6 +2617,7 @@ pub struct DocumentPreferences {
     pub target_language: String,
     pub epub: Option<EpubReaderPreferences>,
     pub rotation: DocumentRotation,
+    pub page_layout: DocumentPageLayout,
 }
 
 impl DocumentPreferences {
@@ -2581,6 +2625,7 @@ impl DocumentPreferences {
         self.target_language.is_empty()
             && self.epub.is_none()
             && self.rotation == DocumentRotation::default()
+            && self.page_layout == DocumentPageLayout::default()
     }
 }
 

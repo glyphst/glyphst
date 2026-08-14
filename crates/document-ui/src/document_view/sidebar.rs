@@ -526,8 +526,16 @@ impl DocumentView {
 
     fn current_toc_entry_ix(&self) -> Option<usize> {
         let anchor_y = self.toc_viewport_anchor_y_doc()?;
+        let leading_page = self.current_page_index();
 
         current_toc_entry_for_anchor(&self.toc, anchor_y, |entry| {
+            if !self.is_presentation_mode()
+                && self.is_two_column_layout()
+                && self.spread_start_page(entry.page_idx) == leading_page
+                && entry.page_idx != leading_page
+            {
+                return None;
+            }
             self.pdf_destination_scroll_position(
                 entry.page_idx,
                 entry.target_top,

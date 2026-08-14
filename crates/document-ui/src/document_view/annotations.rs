@@ -108,11 +108,12 @@ impl DocumentView {
     }
 
     pub(super) fn sync_document_edits_from_store(&mut self, cx: &mut Context<Self>) {
-        let (document_edit_revision, bookmarks_revision) = {
+        let (document_edit_revision, bookmarks_revision, page_layout) = {
             let store = cx.global::<LibraryStore>();
             (
                 store.document_edit_revision(&self.path),
                 store.bookmarks_revision(),
+                store.document_page_layout(&self.path),
             )
         };
         let annotations_changed =
@@ -120,7 +121,9 @@ impl DocumentView {
         let rotation_changed =
             document_edit_revision.rotation != self.document_edit_revision.rotation;
         let bookmarks_changed = bookmarks_revision != self.bookmarks_revision;
-        if !annotations_changed && !rotation_changed && !bookmarks_changed {
+        let page_layout_changed =
+            self.capabilities.two_column_layout && page_layout != self.page_layout;
+        if !annotations_changed && !rotation_changed && !bookmarks_changed && !page_layout_changed {
             return;
         }
 
@@ -186,6 +189,11 @@ impl DocumentView {
             visible_state_changed = true;
             let rotation = cx.global::<LibraryStore>().document_rotation(&self.path);
             self.apply_stored_rotation(rotation, cx);
+        }
+
+        if page_layout_changed {
+            visible_state_changed = true;
+            self.apply_stored_page_layout(page_layout, cx);
         }
 
         if bookmarks_changed && let Some(palette) = self.bookmark_palette.clone() {

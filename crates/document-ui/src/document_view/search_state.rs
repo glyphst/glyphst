@@ -260,13 +260,12 @@ impl DocumentView {
             return;
         };
 
-        let page_width = self.pages[search_match.page_idx].width;
         let scale = self.effective_scale();
         let center_x = (doc_rect.x0 + doc_rect.x1) / 2.0;
         let center_y = (doc_rect.y0 + doc_rect.y1) / 2.0;
 
         self.set_scroll_doc(
-            center_x - page_width / 2.0,
+            center_x - self.max_page_width / 2.0,
             center_y - self.viewport_height / (2.0 * scale),
             cx,
         );
@@ -296,11 +295,12 @@ impl DocumentView {
 
         let rect = rect?;
         let page = &self.pages[search_match.page_idx];
+        let rect = Self::pdf_rect_to_view(page.bounds, self.rotation, rect);
         Some(Rect::new(
-            rect.x0 - page.bounds.x0,
-            page.offset_y + rect.y0 - page.bounds.y0,
-            rect.x1 - page.bounds.x0,
-            page.offset_y + rect.y1 - page.bounds.y0,
+            page.offset_x + rect.x0,
+            page.offset_y + rect.y0,
+            page.offset_x + rect.x1,
+            page.offset_y + rect.y1,
         ))
     }
 

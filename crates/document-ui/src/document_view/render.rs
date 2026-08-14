@@ -310,6 +310,9 @@ impl Render for DocumentView {
             .on_action(cx.listener(|this, _: &TogglePresentationMode, window, cx| {
                 this.toggle_presentation_mode(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleTwoColumnMode, _, cx| {
+                this.toggle_two_column_mode(cx);
+            }))
             .on_action(cx.listener(|_, _: &OpenSettings, _, cx| {
                 cx.emit(DocumentViewEvent::OpenSettings);
             }))

@@ -56,6 +56,17 @@ impl DocumentView {
         )
     }
 
+    pub(super) fn render_two_column_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Self::render_footbar_icon_button(
+            "footbar-two-column",
+            IconName::BookOpen,
+            self.is_two_column_layout(),
+            |this, _, cx| this.toggle_two_column_mode(cx),
+            cx,
+        )
+        .tooltip(crate::fl!("pdf-two-column-tooltip"))
+    }
+
     pub(super) fn render_ai_button(&self, open: bool, cx: &mut Context<Self>) -> impl IntoElement {
         Self::render_footbar_icon_button(
             "footbar-ai",

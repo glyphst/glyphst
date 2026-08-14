@@ -42,6 +42,13 @@ pub enum DocumentRotation {
     Degrees270,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DocumentPageLayout {
+    #[default]
+    SingleColumn,
+    TwoColumn,
+}
+
 impl DocumentRotation {
     pub const fn clockwise(self) -> Self {
         match self {
@@ -78,6 +85,7 @@ impl DocumentRotation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DocumentCapabilities {
     pub reflow: bool,
+    pub two_column_layout: bool,
     pub publisher_styles: bool,
     pub page_overview: bool,
     pub page_export: bool,
@@ -92,6 +100,7 @@ impl DocumentCapabilities {
         let fixed_layout = !reflowable;
         Self {
             reflow: reflowable,
+            two_column_layout: fixed_layout,
             publisher_styles: format == DocumentFormat::Epub && reflowable,
             page_overview: fixed_layout || (format == DocumentFormat::Epub && reflowable),
             page_export: fixed_layout,

@@ -554,6 +554,7 @@ impl Pane {
             target_language,
             epub_preferences,
             rotation: cx.global::<LibraryStore>().document_rotation(&path),
+            page_layout: cx.global::<LibraryStore>().document_page_layout(&path),
             document_translation_jobs: self.document_translation_jobs.clone(),
         };
         let loading = cx.new(|_| LoadingDocumentView {
@@ -701,6 +702,7 @@ impl Pane {
             target_language,
             epub_preferences,
             rotation: cx.global::<LibraryStore>().document_rotation(&path),
+            page_layout: cx.global::<LibraryStore>().document_page_layout(&path),
             document_translation_jobs: self.document_translation_jobs.clone(),
         };
         let mut duplicate =
@@ -768,6 +770,7 @@ impl Pane {
             target_language,
             epub_preferences,
             rotation: cx.global::<LibraryStore>().document_rotation(&path),
+            page_layout: cx.global::<LibraryStore>().document_page_layout(&path),
             document_translation_jobs: self.document_translation_jobs.clone(),
         };
         let duplicate =
@@ -1134,6 +1137,7 @@ impl Pane {
             target_language,
             epub_preferences,
             rotation,
+            page_layout: cx.global::<LibraryStore>().document_page_layout(&path),
             document_translation_jobs: self.document_translation_jobs.clone(),
         };
         let loading = cx.new(|_cx| LoadingDocumentView {

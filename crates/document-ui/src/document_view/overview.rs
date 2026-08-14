@@ -462,8 +462,7 @@ impl DocumentView {
                                         let document_theme =
                                             cx.global::<SettingsStore>().resolved_theme;
                                         let theme = cx.theme().colors;
-                                        let current_page =
-                                            this.current_page_index().min(this.last_page_index());
+                                        let current_pages = this.current_page_range();
                                         let selecting = this.thumbnail_sidebar_selecting;
 
                                         visible_range
@@ -471,7 +470,7 @@ impl DocumentView {
                                                 this.pages.get(page_idx)?;
                                                 let (thumbnail_width, thumbnail_height) =
                                                     this.grid_overview_thumbnail_size(page_idx, zoom);
-                                                let current = page_idx == current_page;
+                                                let current = current_pages.contains(&page_idx);
                                                 let selected = this
                                                     .thumbnail_sidebar_selection
                                                     .contains(&page_idx);
