@@ -3,6 +3,11 @@ use super::*;
 impl Render for DocumentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_inherited_target_language(window, cx);
+        if self.zoom_popup_visible
+            && (self.grid_overview_open || self.is_presentation_mode() || self.search_bar.is_some())
+        {
+            self.dismiss_zoom_popup();
+        }
         let view = cx.entity();
         let prepaint_view = view.clone();
         let theme = cx.global::<SettingsStore>().resolved_theme;
@@ -802,6 +807,21 @@ impl Render for DocumentView {
             .when(self.grid_overview_open, |this| {
                 this.child(self.render_grid_overview(ui_theme, window, cx))
             })
+            .when(
+                self.zoom_popup_visible
+                    && !self.grid_overview_open
+                    && !self.is_presentation_mode()
+                    && self.search_bar.is_none(),
+                |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .top(px(12.0))
+                            .right(px(16.0))
+                            .child(self.render_zoom_popup(cx)),
+                    )
+                },
+            )
             .when_some(self.search_bar.clone(), |this, search_bar| {
                 this.child(
                     div()

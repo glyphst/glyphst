@@ -1,6 +1,90 @@
 use super::*;
 
 impl DocumentView {
+    pub(super) fn render_zoom_popup(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let percentage = format!("{:.0}%", self.zoom * 100.0);
+
+        div()
+            .id("document-zoom-popup")
+            .debug_selector(|| "document-zoom-popup".to_string())
+            .occlude()
+            .flex()
+            .items_center()
+            .gap_1()
+            .p_1()
+            .popover_style(cx)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.set_zoom_popup_hovered(*hovered, cx);
+            }))
+            .child(
+                toolbar_icon_button("zoom-popup-out", IconName::Minus)
+                    .debug_selector(|| "zoom-popup-out".to_string())
+                    .disabled(self.zoom <= MIN_ZOOM)
+                    .tooltip(crate::fl!("zoom-out"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.zoom_out(cx);
+                        cx.stop_propagation();
+                    })),
+            )
+            .child(
+                Button::new("zoom-popup-reset")
+                    .debug_selector(|| "zoom-popup-reset".to_string())
+                    .small()
+                    .compact()
+                    .ghost()
+                    .label(percentage)
+                    .min_w(px(54.0))
+                    .h(ui_rems(CONTROL_SIZE))
+                    .px_2()
+                    .tooltip(crate::fl!("reset-zoom"))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.reset_zoom(cx);
+                        cx.stop_propagation();
+                    })),
+            )
+            .child(
+                toolbar_icon_button("zoom-popup-in", IconName::Plus)
+                    .debug_selector(|| "zoom-popup-in".to_string())
+                    .disabled(self.zoom >= MAX_ZOOM)
+                    .tooltip(crate::fl!("zoom-in"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.zoom_in(cx);
+                        cx.stop_propagation();
+                    })),
+            )
+            .when(!self.capabilities.reflow, |this| {
+                this.child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(theme.border))
+                    .child(
+                        toolbar_icon_button("zoom-popup-fit-width", IconName::MoveHorizontal)
+                            .debug_selector(|| "zoom-popup-fit-width".to_string())
+                            .tooltip(crate::fl!("zoom-fit-width"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.fit_to_width(cx);
+                                cx.stop_propagation();
+                            })),
+                    )
+                    .child(
+                        toolbar_icon_button("zoom-popup-fit-height", IconName::MoveVertical)
+                            .debug_selector(|| "zoom-popup-fit-height".to_string())
+                            .tooltip(crate::fl!("zoom-fit-height"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.fit_to_height(cx);
+                                cx.stop_propagation();
+                            })),
+                    )
+            })
+    }
+
     pub(super) fn ensure_toc_sidebar_visible_entries(&mut self) {
         if !self.toc_sidebar_entries_dirty {
             return;

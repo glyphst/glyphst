@@ -45,9 +45,9 @@ use crate::{
     document_browser::{DocumentBrowser, DocumentBrowserEvent},
     document_view::{
         CloseTab, DocumentSidebar, DocumentView, DocumentViewEvent, DuplicateTab, OpenFile,
-        OpenKeybindings, OpenNewTab, OpenQuickAsk, OpenSettings, OpenWithSystemPicker,
+        OpenKeybindings, OpenNewTab, OpenQuickAsk, OpenSettings, OpenWithSystemPicker, ResetZoom,
         ToggleAiPanel, ToggleCommandPalette, ToggleHome, ToggleNotes, ToggleThumbnailSidebar,
-        ToggleToc, ToggleTransparency, TranslationViewportAnchor,
+        ToggleToc, ToggleTransparency, TranslationViewportAnchor, ZoomIn, ZoomOut,
     },
     external_drop::{
         ExternalDocumentDropFeedback, classify_external_document_paths,
@@ -1204,6 +1204,19 @@ impl Workspace {
     fn focus_active_pane(&self, window: &mut Window, cx: &mut Context<Self>) {
         let active_pane = self.active_pane.clone();
         active_pane.update(cx, |pane, cx| pane.focus(window, cx));
+    }
+
+    fn update_active_document_view(
+        &self,
+        cx: &mut Context<Self>,
+        update: impl FnOnce(&mut DocumentView, &mut Context<DocumentView>),
+    ) {
+        if self.surface_mode != WorkspaceSurfaceMode::Panes {
+            return;
+        }
+        if let Some(document_view) = self.active_pane.read(cx).active_document_view() {
+            document_view.update(cx, update);
+        }
     }
 
     pub fn surface_mode(&self) -> WorkspaceSurfaceMode {
@@ -4374,6 +4387,24 @@ impl Render for Workspace {
                 "Workspace"
             })
             .track_focus(&self.focus_handle)
+            .capture_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                this.update_active_document_view(cx, |document_view, cx| {
+                    document_view.zoom_in(cx);
+                });
+                cx.stop_propagation();
+            }))
+            .capture_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                this.update_active_document_view(cx, |document_view, cx| {
+                    document_view.zoom_out(cx);
+                });
+                cx.stop_propagation();
+            }))
+            .capture_action(cx.listener(|this, _: &ResetZoom, _, cx| {
+                this.update_active_document_view(cx, |document_view, cx| {
+                    document_view.reset_zoom(cx);
+                });
+                cx.stop_propagation();
+            }))
             .font(ui_font)
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 if event.button == MouseButton::Right && this.synchronized_connection.is_some() {
@@ -4864,6 +4895,145 @@ mod tests {
         assert!(cx.debug_bounds("home-navigation-rail").is_some());
         assert!(cx.debug_bounds("workspace-home").is_some());
         assert!(cx.debug_bounds("workspace-pane-column").is_none());
+    }
+
+    #[gpui::test]
+    fn zoom_actions_target_the_active_pane_and_show_a_local_transient_popup(
+        cx: &mut TestAppContext,
+    ) {
+        let document_path = temporary_pdf_path("active-pane-zoom");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::keybindings::capture_framework_bindings(cx);
+            crate::keybindings::apply(cx, glyphst_settings::KeymapPreset::Modern, &[]);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_active_pane(SplitDirection::Right, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (left_pane, right_pane, left_document, right_document, zoom_step) = workspace
+            .update_in(cx, |workspace, window, cx| {
+                let panes = workspace.pane_group.panes();
+                let left_pane = panes[0].clone();
+                let right_pane = panes[1].clone();
+                let left_document = left_pane.read(cx).active_document_view().unwrap();
+                let right_document = right_pane.read(cx).active_document_view().unwrap();
+
+                // Keep descendant focus on the right to reproduce the stale focus path that
+                // previously consumed document actions, while the workspace source of truth is
+                // the left pane.
+                right_pane.update(cx, |pane, cx| pane.focus(window, cx));
+                workspace.active_pane = left_pane.clone();
+                cx.notify();
+
+                (
+                    left_pane,
+                    right_pane,
+                    left_document,
+                    right_document,
+                    cx.global::<SettingsStore>().settings.behavior.zoom_step,
+                )
+            });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let zooms = |cx: &TestAppContext| {
+            (
+                left_document.read_with(cx, |view, _| view.current_document_position().zoom),
+                right_document.read_with(cx, |view, _| view.current_document_position().zoom),
+            )
+        };
+        assert_eq!(zooms(cx), (1.0, 1.0));
+
+        cx.simulate_keystrokes("+");
+        let (left_zoom, right_zoom) = zooms(cx);
+        assert!((left_zoom - zoom_step).abs() < 0.0001);
+        assert_eq!(right_zoom, 1.0);
+
+        cx.simulate_keystrokes("=");
+        assert_eq!(zooms(cx), (1.0, 1.0));
+
+        cx.simulate_keystrokes("-");
+        let (left_zoom, right_zoom) = zooms(cx);
+        assert!((left_zoom - 1.0 / zoom_step).abs() < 0.0001);
+        assert_eq!(right_zoom, 1.0);
+
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let popup = cx
+            .debug_bounds("document-zoom-popup")
+            .expect("zoom popup after a keyboard zoom");
+        let left_bounds = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .pane_group
+                .bounding_box_for_pane(&left_pane)
+                .expect("left pane bounds")
+        });
+        let right_bounds = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .pane_group
+                .bounding_box_for_pane(&right_pane)
+                .expect("right pane bounds")
+        });
+        assert!(left_bounds.contains(&popup.center()));
+        assert!(!right_bounds.contains(&popup.center()));
+        assert!(cx.debug_bounds("zoom-popup-out").is_some());
+        assert!(cx.debug_bounds("zoom-popup-reset").is_some());
+        assert!(cx.debug_bounds("zoom-popup-in").is_some());
+        let fit_width = cx
+            .debug_bounds("zoom-popup-fit-width")
+            .expect("fit-width control for a fixed-layout document");
+        assert!(cx.debug_bounds("zoom-popup-fit-height").is_some());
+
+        cx.simulate_click(fit_width.center(), Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert_eq!(zooms(cx), (1.0, 1.0));
+
+        let popup = cx.debug_bounds("document-zoom-popup").unwrap();
+        cx.simulate_mouse_move(popup.center(), None, Modifiers::default());
+        cx.executor()
+            .advance_clock(glyphst_ui::TRANSIENT_FEEDBACK_DURATION);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("document-zoom-popup").is_some());
+
+        cx.simulate_mouse_move(right_bounds.center(), None, Modifiers::default());
+        cx.executor()
+            .advance_clock(glyphst_ui::TRANSIENT_FEEDBACK_DURATION);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("document-zoom-popup").is_none());
+
+        fs::remove_file(document_path).unwrap();
     }
 
     #[gpui::test]

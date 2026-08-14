@@ -74,6 +74,7 @@ use glyphst_ui::{
     markdown::{Markdown, MarkdownElement, MarkdownStyle},
     motion::{EASE_OUT, HOVER, LAYOUT, MotionSpec, ScalarTween},
     sticky_items::{StickyCandidate, sticky_items},
+    style::CONTROL_SIZE,
     tooltip::text_tooltip,
 };
 use gpui::{
@@ -1510,6 +1511,10 @@ pub struct DocumentView {
     page_layout: DocumentPageLayout,
     page_gap: f32,
     zoom: f32,
+    zoom_popup_visible: bool,
+    zoom_popup_hovered: bool,
+    zoom_popup_generation: u64,
+    zoom_popup_hide_task: Option<Task<()>>,
     base_scale: f32,
     viewport_origin: GpuiPoint<Pixels>,
     viewport_width: f32,

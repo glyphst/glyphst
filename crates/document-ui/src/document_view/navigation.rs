@@ -1,5 +1,32 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+struct ZoomFitBounds {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+pub(super) fn zoom_for_fit_extent(
+    viewport_extent: f32,
+    base_scale: f32,
+    content_extent: f32,
+) -> Option<f32> {
+    if !viewport_extent.is_finite()
+        || !base_scale.is_finite()
+        || !content_extent.is_finite()
+        || viewport_extent <= 0.0
+        || base_scale <= 0.0
+        || content_extent <= 0.0
+    {
+        return None;
+    }
+
+    let zoom = viewport_extent / (base_scale * content_extent);
+    zoom.is_finite().then_some(zoom)
+}
+
 impl DocumentView {
     pub(super) fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
         let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
@@ -23,7 +50,138 @@ impl DocumentView {
         cx.notify();
     }
 
-    pub(super) fn zoom_in(&mut self, cx: &mut Context<Self>) {
+    fn cancel_zoom_popup_hide(&mut self) {
+        self.zoom_popup_generation = self.zoom_popup_generation.wrapping_add(1);
+        self.zoom_popup_hide_task = None;
+    }
+
+    fn schedule_zoom_popup_hide(&mut self, cx: &mut Context<Self>) {
+        self.cancel_zoom_popup_hide();
+        if !self.zoom_popup_visible || self.zoom_popup_hovered {
+            return;
+        }
+
+        let generation = self.zoom_popup_generation;
+        self.zoom_popup_hide_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(glyphst_ui::TRANSIENT_FEEDBACK_DURATION)
+                .await;
+            _ = this.update(cx, |this, cx| {
+                if this.zoom_popup_generation != generation || this.zoom_popup_hovered {
+                    return;
+                }
+                this.zoom_popup_hide_task = None;
+                this.zoom_popup_visible = false;
+                this.zoom_popup_hovered = false;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn show_zoom_popup(&mut self, cx: &mut Context<Self>) {
+        if self.grid_overview_open || self.is_presentation_mode() {
+            return;
+        }
+        self.zoom_popup_visible = true;
+        self.schedule_zoom_popup_hide(cx);
+        cx.notify();
+    }
+
+    pub(super) fn dismiss_zoom_popup(&mut self) {
+        if !self.zoom_popup_visible
+            && !self.zoom_popup_hovered
+            && self.zoom_popup_hide_task.is_none()
+        {
+            return;
+        }
+        self.zoom_popup_visible = false;
+        self.zoom_popup_hovered = false;
+        self.cancel_zoom_popup_hide();
+    }
+
+    pub(super) fn set_zoom_popup_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.zoom_popup_hovered == hovered {
+            return;
+        }
+        self.zoom_popup_hovered = hovered;
+        if hovered {
+            self.cancel_zoom_popup_hide();
+        } else {
+            self.schedule_zoom_popup_hide(cx);
+        }
+    }
+
+    fn current_zoom_fit_bounds(&self) -> Option<ZoomFitBounds> {
+        let current_page = self.current_page_index();
+        let range = self.spread_page_range(current_page);
+        let first_page = self.pages.get(range.start)?;
+        let mut top = f32::INFINITY;
+        let mut bottom = f32::NEG_INFINITY;
+        for page_idx in range {
+            let page = self.pages.get(page_idx)?;
+            let (_, height) = self.page_dimensions(page_idx);
+            top = top.min(page.offset_y);
+            bottom = bottom.max(page.offset_y + height);
+        }
+
+        let (left, width) = if self.is_two_column_layout() {
+            (0.0, self.max_page_width)
+        } else {
+            let (width, _) = self.page_dimensions(current_page);
+            (first_page.offset_x, width)
+        };
+        let height = bottom - top;
+        (left.is_finite()
+            && top.is_finite()
+            && width.is_finite()
+            && height.is_finite()
+            && width > 0.0
+            && height > 0.0)
+            .then_some(ZoomFitBounds {
+                left,
+                top,
+                width,
+                height,
+            })
+    }
+
+    pub(super) fn fit_to_width(&mut self, cx: &mut Context<Self>) {
+        if self.capabilities.reflow || self.grid_overview_open || self.is_presentation_mode() {
+            return;
+        }
+        let Some(bounds) = self.current_zoom_fit_bounds() else {
+            return;
+        };
+        let Some(zoom) = zoom_for_fit_extent(self.viewport_width, self.base_scale, bounds.width)
+        else {
+            return;
+        };
+
+        self.set_zoom(zoom, cx);
+        let centered_x = bounds.left + bounds.width / 2.0 - self.max_page_width / 2.0;
+        self.set_scroll_doc(centered_x, self.scroll_y_doc, cx);
+        self.show_zoom_popup(cx);
+    }
+
+    pub(super) fn fit_to_height(&mut self, cx: &mut Context<Self>) {
+        if self.capabilities.reflow || self.grid_overview_open || self.is_presentation_mode() {
+            return;
+        }
+        let Some(bounds) = self.current_zoom_fit_bounds() else {
+            return;
+        };
+        let Some(zoom) = zoom_for_fit_extent(self.viewport_height, self.base_scale, bounds.height)
+        else {
+            return;
+        };
+
+        self.set_zoom(zoom, cx);
+        let centered_x = bounds.left + bounds.width / 2.0 - self.max_page_width / 2.0;
+        self.set_scroll_doc(centered_x, bounds.top, cx);
+        self.show_zoom_popup(cx);
+    }
+
+    pub fn zoom_in(&mut self, cx: &mut Context<Self>) {
         let zoom_step = cx.global::<SettingsStore>().settings.behavior.zoom_step;
         if self.grid_overview_open {
             self.set_grid_overview_zoom(self.grid_overview_zoom * zoom_step, cx);
@@ -34,9 +192,10 @@ impl DocumentView {
         }
 
         self.set_zoom(self.zoom * zoom_step, cx);
+        self.show_zoom_popup(cx);
     }
 
-    pub(super) fn zoom_out(&mut self, cx: &mut Context<Self>) {
+    pub fn zoom_out(&mut self, cx: &mut Context<Self>) {
         let zoom_step = cx.global::<SettingsStore>().settings.behavior.zoom_step;
         if self.grid_overview_open {
             self.set_grid_overview_zoom(self.grid_overview_zoom / zoom_step, cx);
@@ -47,15 +206,17 @@ impl DocumentView {
         }
 
         self.set_zoom(self.zoom / zoom_step, cx);
+        self.show_zoom_popup(cx);
     }
 
-    pub(super) fn reset_zoom(&mut self, cx: &mut Context<Self>) {
-        if self.is_presentation_mode() {
+    pub fn reset_zoom(&mut self, cx: &mut Context<Self>) {
+        if self.grid_overview_open || self.is_presentation_mode() {
             return;
         }
 
         let default_zoom = cx.global::<SettingsStore>().settings.behavior.default_zoom;
         self.set_zoom(default_zoom, cx);
+        self.show_zoom_popup(cx);
     }
 
     fn set_grid_overview_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
@@ -430,6 +591,7 @@ impl DocumentView {
                 self.set_grid_overview_zoom(self.grid_overview_zoom * factor, cx);
             } else if !self.is_presentation_mode() {
                 self.set_zoom(self.zoom * factor, cx);
+                self.show_zoom_popup(cx);
             }
         } else {
             let (delta_x, delta_y) = match event.delta {

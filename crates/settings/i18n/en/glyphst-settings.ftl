@@ -28,6 +28,8 @@ untitled = Untitled
 view = View
 zoom-in = Zoom In
 zoom-out = Zoom Out
+zoom-fit-width = Fit to Width
+zoom-fit-height = Fit to Height
 actions-menu = Actions ▾
 selected-count =
     { $count ->

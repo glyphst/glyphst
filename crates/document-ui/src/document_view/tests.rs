@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::navigation::zoom_for_fit_extent;
 use super::translation::replace_page_text_data;
 use super::{
     DocumentPage, DocumentView, Glyph, PreparedPageText, RegionDragState, RegionImageExport,
@@ -122,6 +123,22 @@ fn two_column_layout_mirrors_a_missing_right_column_and_honors_rotation() {
     );
     assert_eq!((rotated[0].offset_x, rotated[0].offset_y), (0.0, 0.0));
     assert_eq!((rotated[1].offset_x, rotated[1].offset_y), (210.0, 0.0));
+}
+
+#[test]
+fn fit_zoom_uses_the_viewport_base_scale_and_content_extent() {
+    assert_eq!(zoom_for_fit_extent(800.0, 2.0, 200.0), Some(2.0));
+    assert_eq!(zoom_for_fit_extent(600.0, 1.5, 400.0), Some(1.0));
+
+    for (viewport, base_scale, content) in [
+        (0.0, 1.0, 100.0),
+        (100.0, 0.0, 100.0),
+        (100.0, 1.0, 0.0),
+        (f32::NAN, 1.0, 100.0),
+        (100.0, f32::INFINITY, 100.0),
+    ] {
+        assert_eq!(zoom_for_fit_extent(viewport, base_scale, content), None);
+    }
 }
 
 #[test]
