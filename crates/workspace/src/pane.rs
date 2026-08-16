@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 
 use anyhow::{Result, bail};
 use glyphst_core::DocumentFormat;
+use glyphst_pdf::{DocumentAuthenticationError, DocumentPassword};
 use glyphst_translation_ui::{DocumentTranslationJobId, DocumentTranslationJobManager};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, AppContext, Axis, Bounds, Context,
@@ -21,12 +22,17 @@ use gpui::{
     px, relative,
 };
 use gpui_component::{
-    ActiveTheme as _, ElementExt as _, Root, Selectable as _, Sizable as _, ThemeColor as Theme,
+    ActiveTheme as _, Disableable as _, ElementExt as _, Root, Selectable as _, Sizable as _,
+    ThemeColor as Theme, WindowExt as _,
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     h_flex,
+    input::{Input, InputContentType, InputEvent, InputState},
     menu::{PopupMenu, PopupMenuItem},
+    notification::Notification,
     resizable::{ResizablePanelGroup, ResizableState, resizable_panel},
     tab::{Tab as ComponentTab, TabBar as ComponentTabBar},
+    v_flex,
 };
 
 pub use glyphst_actions::pane::{
@@ -49,6 +55,7 @@ use crate::{
         ReaderSplitAxis, ReaderTabKind, ReaderTabSession, normalize_path,
     },
     new_tab::{NewTab, NewTabEvent},
+    pdf_password_store::{PdfPasswordStore, StoredPdfPassword},
     settings::{SettingsStore, TabBarVisibility, ui_rems},
     synchronized_tabs::{SynchronizedGroupId, SynchronizedGroupSummary},
 };
@@ -139,15 +146,195 @@ pub(crate) struct LoadingDocumentView {
     restore_tab_id: Option<u64>,
     focus_handle: FocusHandle,
     job_ids: Vec<DocumentTranslationJobId>,
-    error: Option<SharedString>,
+    password_input: Entity<InputState>,
+    remember_password: bool,
+    status: LoadingDocumentStatus,
+    pending_open: Option<PendingDocumentOpen>,
     _task: Option<Task<()>>,
 }
 
-impl Render for LoadingDocumentView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+struct PendingDocumentOpen {
+    behavior: glyphst_settings::BehaviorSettings,
+    options: DocumentOpenOptions,
+    epub_preferences: glyphst_core::EpubReaderPreferences,
+    page_gap: f32,
+}
+
+#[derive(Clone)]
+enum LoadingDocumentStatus {
+    Loading,
+    CheckingSavedPassword,
+    Unlocking,
+    PasswordRequired {
+        error: Option<SharedString>,
+        keychain_warning: Option<SharedString>,
+    },
+    Error(SharedString),
+}
+
+enum LoadingDocumentEvent {
+    SubmitPassword {
+        password: DocumentPassword,
+        remember: bool,
+    },
+    Cancel,
+}
+
+impl EventEmitter<LoadingDocumentEvent> for LoadingDocumentView {}
+
+#[derive(Clone)]
+enum DocumentOpenAttempt {
+    Initial,
+    Saved(DocumentPassword),
+    Shared(DocumentPassword),
+    Entered {
+        password: DocumentPassword,
+        remember: bool,
+    },
+}
+
+impl DocumentOpenAttempt {
+    fn password(&self) -> Option<DocumentPassword> {
+        match self {
+            Self::Initial => None,
+            Self::Saved(password) | Self::Shared(password) | Self::Entered { password, .. } => {
+                Some(password.clone())
+            }
+        }
+    }
+}
+
+enum DocumentOpenFailure {
+    Authentication,
+    Other(String),
+}
+
+fn classify_document_open_error(error: anyhow::Error) -> DocumentOpenFailure {
+    if error
+        .downcast_ref::<DocumentAuthenticationError>()
+        .is_some()
+    {
+        DocumentOpenFailure::Authentication
+    } else {
+        DocumentOpenFailure::Other(format!("{error:#}"))
+    }
+}
+
+struct PdfPasswordSaveNotification;
+struct PdfPasswordForgetNotification;
+
+impl LoadingDocumentView {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        path: PathBuf,
+        initial_position: DocumentPosition,
+        restore_tab_id: Option<u64>,
+        focus_handle: FocusHandle,
+        job_ids: Vec<DocumentTranslationJobId>,
+        pending_open: PendingDocumentOpen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let password_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder(crate::fl!("pdf-password-placeholder"))
+        });
+        cx.subscribe_in(
+            &password_input,
+            window,
+            |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.submit_password(window, cx),
+                InputEvent::Change => cx.notify(),
+                InputEvent::CompletionAccepted { .. }
+                | InputEvent::SpanHoverChanged { .. }
+                | InputEvent::Focus
+                | InputEvent::Blur => {}
+            },
+        )
+        .detach();
+
+        Self {
+            path,
+            initial_position,
+            restore_tab_id,
+            focus_handle,
+            job_ids,
+            password_input,
+            remember_password: true,
+            status: LoadingDocumentStatus::Loading,
+            pending_open: Some(pending_open),
+            _task: None,
+        }
+    }
+
+    fn submit_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.status, LoadingDocumentStatus::PasswordRequired { .. }) {
+            return;
+        }
+        let password = self.password_input.read(cx).value().to_string();
+        if password.is_empty() {
+            return;
+        }
+        self.password_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        cx.emit(LoadingDocumentEvent::SubmitPassword {
+            password: DocumentPassword::new(password),
+            remember: self.remember_password,
+        });
+    }
+
+    fn render_progress(&self, label: SharedString, cx: &App) -> AnyElement {
         let theme = cx.theme().colors;
-        let content = if let Some(error) = self.error.clone() {
-            div()
+        v_flex()
+            .items_center()
+            .gap_2()
+            .text_align(gpui::TextAlign::Center)
+            .debug_selector(|| "document-open-loading".to_string())
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(LOADING_GRID_GAP))
+                    .w(px(LOADING_GRID_SQUARE_SIZE * 3.0 + LOADING_GRID_GAP * 3.0))
+                    .items_center()
+                    .justify_center()
+                    .debug_selector(|| "document-open-loading-grid".to_string())
+                    .children((0..9).map(|index| {
+                        let phase = LOADING_GRID_PHASES[index];
+                        div()
+                            .w(px(LOADING_GRID_SQUARE_SIZE))
+                            .h(px(LOADING_GRID_SQUARE_SIZE))
+                            .bg(theme.primary)
+                            .with_animation(
+                                ("document-open-loading-square", index),
+                                Animation::new(LOADING_GRID_DURATION).repeat(),
+                                move |element, delta| {
+                                    element.opacity(loading_grid_opacity(delta, phase))
+                                },
+                            )
+                    })),
+            )
+            .child(
+                div()
+                    .text_size(ui_rems(14.0))
+                    .text_color(theme.muted_foreground)
+                    .child(label),
+            )
+            .into_any_element()
+    }
+}
+
+impl Render for LoadingDocumentView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let file_name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("document");
+        let content = match &self.status {
+            LoadingDocumentStatus::Error(error) => div()
                 .flex()
                 .items_center()
                 .gap_2()
@@ -158,54 +345,119 @@ impl Render for LoadingDocumentView {
                         .size(ui_rems(14.0))
                         .text_color(theme.danger),
                 )
-                .child(error)
-                .into_any_element()
-        } else {
-            let file_name = self
-                .path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("document");
-
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_2()
-                .text_align(gpui::TextAlign::Center)
-                .debug_selector(|| "document-open-loading".to_string())
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(LOADING_GRID_GAP))
-                        .w(px(LOADING_GRID_SQUARE_SIZE * 3.0 + LOADING_GRID_GAP * 3.0))
-                        .items_center()
-                        .justify_center()
-                        .debug_selector(|| "document-open-loading-grid".to_string())
-                        .children((0..9).map(|index| {
-                            let phase = LOADING_GRID_PHASES[index];
-
+                .child(error.clone())
+                .into_any_element(),
+            LoadingDocumentStatus::Loading => {
+                self.render_progress(crate::fl!("pdf-loading", name = file_name).into(), cx)
+            }
+            LoadingDocumentStatus::CheckingSavedPassword => self.render_progress(
+                crate::fl!("pdf-password-checking", name = file_name).into(),
+                cx,
+            ),
+            LoadingDocumentStatus::Unlocking => self.render_progress(
+                crate::fl!("pdf-password-unlocking", name = file_name).into(),
+                cx,
+            ),
+            LoadingDocumentStatus::PasswordRequired {
+                error,
+                keychain_warning,
+            } => {
+                let can_submit = !self.password_input.read(cx).value().is_empty();
+                let loading = cx.entity();
+                let checkbox_loading = loading.clone();
+                v_flex()
+                    .w(px(420.0))
+                    .max_w_full()
+                    .gap_3()
+                    .p_4()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .debug_selector(|| "document-password-prompt".to_string())
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(ui_rems(16.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(crate::fl!("pdf-password-title")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(ui_rems(13.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(crate::fl!("pdf-password-detail", name = file_name)),
+                            ),
+                    )
+                    .child(
+                        Input::new(&self.password_input)
+                            .w_full()
+                            .content_type(InputContentType::Password)
+                            .mask_toggle(),
+                    )
+                    .when_some(error.clone(), |this, error| {
+                        this.child(
                             div()
-                                .w(px(LOADING_GRID_SQUARE_SIZE))
-                                .h(px(LOADING_GRID_SQUARE_SIZE))
-                                .bg(theme.primary)
-                                .with_animation(
-                                    ("document-open-loading-square", index),
-                                    Animation::new(LOADING_GRID_DURATION).repeat(),
-                                    move |element, delta| {
-                                        element.opacity(loading_grid_opacity(delta, phase))
-                                    },
-                                )
-                        })),
-                )
-                .child(
-                    div()
-                        .text_size(ui_rems(14.0))
-                        .text_color(theme.muted_foreground)
-                        .child(crate::fl!("pdf-loading", name = file_name)),
-                )
-                .into_any_element()
+                                .text_size(ui_rems(12.0))
+                                .text_color(theme.danger)
+                                .debug_selector(|| "document-password-error".to_string())
+                                .child(error),
+                        )
+                    })
+                    .when_some(keychain_warning.clone(), |this, warning| {
+                        this.child(
+                            div()
+                                .text_size(ui_rems(12.0))
+                                .text_color(theme.warning)
+                                .debug_selector(|| "document-password-keychain-warning".to_string())
+                                .child(warning),
+                        )
+                    })
+                    .child(
+                        Checkbox::new("document-password-remember")
+                            .label(crate::fl!("pdf-password-remember"))
+                            .checked(self.remember_password)
+                            .on_click(move |checked, _, cx| {
+                                checkbox_loading.update(cx, |loading, cx| {
+                                    loading.remember_password = *checked;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("document-password-cancel")
+                                    .label(crate::fl!("cancel"))
+                                    .outline()
+                                    .on_click({
+                                        let loading = loading.clone();
+                                        move |_, _, cx| {
+                                            loading.update(cx, |_, cx| {
+                                                cx.emit(LoadingDocumentEvent::Cancel)
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("document-password-unlock")
+                                    .label(crate::fl!("pdf-password-unlock"))
+                                    .primary()
+                                    .disabled(!can_submit)
+                                    .on_click(move |_, window, cx| {
+                                        loading.update(cx, |loading, cx| {
+                                            loading.submit_password(window, cx)
+                                        });
+                                    }),
+                            ),
+                    )
+                    .into_any_element()
+            }
         };
 
         div()
@@ -214,6 +466,7 @@ impl Render for LoadingDocumentView {
             .items_center()
             .justify_center()
             .bg(theme.background)
+            .p_4()
             .child(content)
     }
 }
@@ -269,6 +522,10 @@ pub(crate) enum PaneEvent {
     RestoredDocumentFinished {
         session_tab_id: u64,
         document_tab_id: Option<EntityId>,
+    },
+    DocumentPasswordAuthenticated {
+        path: PathBuf,
+        password: DocumentPassword,
     },
     OpenSettings,
     DocumentSidebarNavigation(EntityId),
@@ -557,48 +814,34 @@ impl Pane {
             page_layout: cx.global::<LibraryStore>().document_page_layout(&path),
             document_translation_jobs: self.document_translation_jobs.clone(),
         };
-        let loading = cx.new(|_| LoadingDocumentView {
-            path: path.clone(),
-            initial_position: position.clone(),
-            restore_tab_id: Some(session_tab_id),
-            focus_handle: self.focus_handle.clone(),
-            job_ids: Vec::new(),
-            error: None,
-            _task: None,
+        let pending_open = PendingDocumentOpen {
+            behavior,
+            options,
+            epub_preferences,
+            page_gap: document_theme.page_gap,
+        };
+        let loading = cx.new(|cx| {
+            LoadingDocumentView::new(
+                path,
+                position,
+                Some(session_tab_id),
+                self.focus_handle.clone(),
+                Vec::new(),
+                pending_open,
+                window,
+                cx,
+            )
         });
-        let loading_id = loading.entity_id();
         let tab = Tab::LoadingDocument(loading.clone());
         self.register_tab_focus_handle(&tab, loading.read(cx).focus_handle.clone());
         self.subscribe_to_tab(&tab, window, cx);
-
-        let prepare_path = path.clone();
-        let prepare_preferences = epub_preferences;
-        let loading_started_at = Instant::now();
-        let minimum_loading_duration = debug_file_open_min_duration();
-        let task = cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    DocumentView::prepare_open(
-                        prepare_path,
-                        prepare_preferences,
-                        document_theme.page_gap,
-                    )
-                    .map_err(|error| format!("{error:#}"))
-                })
-                .await;
-            if let Some(remaining) = remaining_file_open_min_duration(
-                minimum_loading_duration,
-                loading_started_at.elapsed(),
-            ) {
-                cx.background_executor().timer(remaining).await;
-            }
-            _ = this.update_in(cx, |this, window, cx| {
-                this.finish_document_open(
-                    loading_id, path, position, behavior, options, result, window, cx,
-                );
-            });
-        });
-        loading.update(cx, |loading, _| loading._task = Some(task));
+        self.start_document_prepare(
+            loading,
+            DocumentOpenAttempt::Initial,
+            debug_file_open_min_duration(),
+            window,
+            cx,
+        );
         Ok(tab)
     }
 
@@ -848,6 +1091,66 @@ impl Pane {
             self.tabs.get(self.active_tab),
             Some(Tab::LoadingDocument(_))
         )
+    }
+
+    pub(crate) fn unlock_pending_documents_with_password(
+        &mut self,
+        path: &Path,
+        password: DocumentPassword,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = normalize_path(path);
+        let loading_documents = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                let Tab::LoadingDocument(loading) = tab else {
+                    return None;
+                };
+                let pending = loading.read(cx);
+                (pending.path == path && pending.pending_open.is_some()).then(|| loading.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for loading in loading_documents {
+            self.start_document_prepare(
+                loading,
+                DocumentOpenAttempt::Shared(password.clone()),
+                None,
+                window,
+                cx,
+            );
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn submit_document_password_for_test(
+        &mut self,
+        path: &Path,
+        password: &str,
+        remember: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let path = normalize_path(path);
+        let loading = self.tabs.iter().find_map(|tab| {
+            let Tab::LoadingDocument(loading) = tab else {
+                return None;
+            };
+            (loading.read(cx).path == path).then(|| loading.clone())
+        });
+        let Some(loading) = loading else {
+            return false;
+        };
+        loading.update(cx, |loading, cx| {
+            loading.remember_password = remember;
+            loading.password_input.update(cx, |input, cx| {
+                input.set_value(password, window, cx);
+            });
+            loading.submit_password(window, cx);
+        });
+        true
     }
 
     pub(crate) fn document_views(&self) -> Vec<Entity<DocumentView>> {
@@ -1140,16 +1443,24 @@ impl Pane {
             page_layout: cx.global::<LibraryStore>().document_page_layout(&path),
             document_translation_jobs: self.document_translation_jobs.clone(),
         };
-        let loading = cx.new(|_cx| LoadingDocumentView {
-            path: path.clone(),
-            initial_position: initial_position.clone(),
-            restore_tab_id: None,
-            focus_handle: self.focus_handle.clone(),
-            job_ids: job_id.into_iter().collect(),
-            error: None,
-            _task: None,
+        let pending_open = PendingDocumentOpen {
+            behavior,
+            options,
+            epub_preferences,
+            page_gap: document_theme.page_gap,
+        };
+        let loading = cx.new(|cx| {
+            LoadingDocumentView::new(
+                path,
+                initial_position,
+                None,
+                self.focus_handle.clone(),
+                job_id.into_iter().collect(),
+                pending_open,
+                window,
+                cx,
+            )
         });
-        let loading_id = loading.entity_id();
         let tab = Tab::LoadingDocument(loading.clone());
         self.register_tab_focus_handle(&tab, loading.read(cx).focus_handle.clone());
         self.subscribe_to_tab(&tab, window, cx);
@@ -1163,43 +1474,14 @@ impl Pane {
         }
         self.sync_active_focus_handle();
         self.focus(window, cx);
-        let loading_started_at = Instant::now();
-        let minimum_loading_duration = debug_file_open_min_duration();
         cx.notify();
-
-        let prepare_path = path.clone();
-        let prepare_preferences = epub_preferences;
-        let task = cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    DocumentView::prepare_open(
-                        prepare_path,
-                        prepare_preferences,
-                        document_theme.page_gap,
-                    )
-                    .map_err(|error| format!("{error:#}"))
-                })
-                .await;
-            if let Some(remaining) = remaining_file_open_min_duration(
-                minimum_loading_duration,
-                loading_started_at.elapsed(),
-            ) {
-                cx.background_executor().timer(remaining).await;
-            }
-            _ = this.update_in(cx, |this, window, cx| {
-                this.finish_document_open(
-                    loading_id,
-                    path,
-                    initial_position,
-                    behavior,
-                    options,
-                    result,
-                    window,
-                    cx,
-                );
-            });
-        });
-        loading.update(cx, |loading, _| loading._task = Some(task));
+        self.start_document_prepare(
+            loading,
+            DocumentOpenAttempt::Initial,
+            debug_file_open_min_duration(),
+            window,
+            cx,
+        );
         Ok(())
     }
 
@@ -1406,83 +1688,318 @@ impl Pane {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    fn start_document_prepare(
+        &mut self,
+        loading: Entity<LoadingDocumentView>,
+        attempt: DocumentOpenAttempt,
+        minimum_loading_duration: Option<Duration>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (path, epub_preferences, page_gap) = {
+            let loading = loading.read(cx);
+            let Some(pending) = loading.pending_open.as_ref() else {
+                return;
+            };
+            (
+                loading.path.clone(),
+                pending.epub_preferences,
+                pending.page_gap,
+            )
+        };
+        loading.update(cx, |loading, cx| {
+            loading.status = match &attempt {
+                DocumentOpenAttempt::Initial => LoadingDocumentStatus::Loading,
+                DocumentOpenAttempt::Saved(_)
+                | DocumentOpenAttempt::Shared(_)
+                | DocumentOpenAttempt::Entered { .. } => LoadingDocumentStatus::Unlocking,
+            };
+            cx.notify();
+        });
+
+        let loading_id = loading.entity_id();
+        let loading_started_at = Instant::now();
+        let password = attempt.password();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    DocumentView::prepare_open_with_password(
+                        path,
+                        epub_preferences,
+                        page_gap,
+                        password,
+                    )
+                    .map_err(classify_document_open_error)
+                })
+                .await;
+            if let Some(remaining) = remaining_file_open_min_duration(
+                minimum_loading_duration,
+                loading_started_at.elapsed(),
+            ) {
+                cx.background_executor().timer(remaining).await;
+            }
+            _ = this.update_in(cx, |this, window, cx| {
+                this.finish_document_open(loading_id, attempt, result, window, cx);
+            });
+        });
+        loading.update(cx, |loading, _| loading._task = Some(task));
+    }
+
     fn finish_document_open(
         &mut self,
         loading_id: EntityId,
-        path: PathBuf,
-        initial_position: DocumentPosition,
-        behavior: glyphst_settings::BehaviorSettings,
-        options: DocumentOpenOptions,
-        result: std::result::Result<PreparedDocumentOpen, String>,
+        attempt: DocumentOpenAttempt,
+        result: std::result::Result<PreparedDocumentOpen, DocumentOpenFailure>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(tab_ix) = self.tab_ix_for_entity_id(loading_id) else {
             return;
         };
-        let (job_ids, restore_tab_id) = match self.tabs.get(tab_ix) {
-            Some(Tab::LoadingDocument(loading)) => {
-                let loading = loading.read(cx);
-                (loading.job_ids.clone(), loading.restore_tab_id)
-            }
+        let loading = match self.tabs.get(tab_ix) {
+            Some(Tab::LoadingDocument(loading)) => loading.clone(),
             _ => return,
         };
+
         let prepared = match result {
             Ok(prepared) => prepared,
-            Err(error) => {
-                for job_id in job_ids.iter().copied() {
-                    cx.emit(PaneEvent::DocumentOpenFinished {
-                        job_id,
-                        result: Err(error.clone().into()),
-                    });
-                }
-                if let Some(Tab::LoadingDocument(loading)) = self.tabs.get(tab_ix) {
-                    loading.update(cx, |loading, cx| {
-                        loading.error = Some(error.into());
-                        loading.restore_tab_id = None;
-                        loading._task = None;
-                        cx.notify();
-                    });
-                }
-                if let Some(session_tab_id) = restore_tab_id {
-                    cx.emit(PaneEvent::RestoredDocumentFinished {
-                        session_tab_id,
-                        document_tab_id: None,
-                    });
+            Err(DocumentOpenFailure::Authentication) => {
+                match attempt {
+                    DocumentOpenAttempt::Initial => {
+                        self.start_password_lookup(loading, window, cx);
+                    }
+                    DocumentOpenAttempt::Saved(_) => {
+                        self.discard_saved_password_and_prompt(
+                            loading,
+                            crate::fl!("pdf-password-saved-invalid").into(),
+                            window,
+                            cx,
+                        );
+                    }
+                    DocumentOpenAttempt::Shared(_) | DocumentOpenAttempt::Entered { .. } => {
+                        self.show_password_prompt(
+                            loading,
+                            Some(crate::fl!("pdf-password-invalid").into()),
+                            None,
+                            window,
+                            cx,
+                        );
+                    }
                 }
                 return;
             }
+            Err(DocumentOpenFailure::Other(error)) => {
+                self.fail_document_open(loading, error, cx);
+                return;
+            }
+        };
+
+        let (authenticated_password, save_password) = match attempt {
+            DocumentOpenAttempt::Saved(password) => (Some(password), None),
+            DocumentOpenAttempt::Entered { password, remember } => {
+                let save_password = remember.then(|| password.clone());
+                (Some(password), save_password)
+            }
+            DocumentOpenAttempt::Initial | DocumentOpenAttempt::Shared(_) => (None, None),
+        };
+        let path = loading.read(cx).path.clone();
+        if !self.complete_document_open(loading, prepared, window, cx) {
+            return;
+        }
+        if let Some(password) = authenticated_password {
+            cx.emit(PaneEvent::DocumentPasswordAuthenticated {
+                path: path.clone(),
+                password,
+            });
+        }
+        if let Some(password) = save_password {
+            self.save_document_password(path, password, window, cx);
+        }
+    }
+
+    fn start_password_lookup(
+        &mut self,
+        loading: Entity<LoadingDocumentView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = loading.read(cx).path.clone();
+        loading.update(cx, |loading, cx| {
+            loading.status = LoadingDocumentStatus::CheckingSavedPassword;
+            cx.notify();
+        });
+        let store = PdfPasswordStore::ensure(cx);
+        let lookup = store.read(&path, cx);
+        let loading_id = loading.entity_id();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = lookup.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                let Some(Tab::LoadingDocument(loading)) = this
+                    .tab_ix_for_entity_id(loading_id)
+                    .and_then(|tab_ix| this.tabs.get(tab_ix))
+                else {
+                    return;
+                };
+                let loading = loading.clone();
+                match result {
+                    Ok(StoredPdfPassword::Found(password)) => this.start_document_prepare(
+                        loading,
+                        DocumentOpenAttempt::Saved(password),
+                        None,
+                        window,
+                        cx,
+                    ),
+                    Ok(StoredPdfPassword::Missing) => {
+                        this.show_password_prompt(loading, None, None, window, cx)
+                    }
+                    Ok(StoredPdfPassword::Corrupt) => this.discard_saved_password_and_prompt(
+                        loading,
+                        crate::fl!("pdf-password-saved-corrupt").into(),
+                        window,
+                        cx,
+                    ),
+                    Err(error) => {
+                        eprintln!("failed to read a saved PDF password: {error:#}");
+                        this.show_password_prompt(
+                            loading,
+                            None,
+                            Some(crate::fl!("pdf-password-keychain-read-failed").into()),
+                            window,
+                            cx,
+                        );
+                    }
+                }
+            });
+        });
+        loading.update(cx, |loading, _| loading._task = Some(task));
+    }
+
+    fn discard_saved_password_and_prompt(
+        &mut self,
+        loading: Entity<LoadingDocumentView>,
+        error: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = loading.read(cx).path.clone();
+        loading.update(cx, |loading, cx| {
+            loading.status = LoadingDocumentStatus::CheckingSavedPassword;
+            cx.notify();
+        });
+        let store = PdfPasswordStore::ensure(cx);
+        let deletion = store.delete(&path, cx);
+        let loading_id = loading.entity_id();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = deletion.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                let Some(Tab::LoadingDocument(loading)) = this
+                    .tab_ix_for_entity_id(loading_id)
+                    .and_then(|tab_ix| this.tabs.get(tab_ix))
+                else {
+                    return;
+                };
+                let loading = loading.clone();
+                let warning = result.err().map(|delete_error| {
+                    eprintln!("failed to remove a stale PDF password: {delete_error:#}");
+                    SharedString::from(crate::fl!("pdf-password-keychain-delete-failed"))
+                });
+                this.show_password_prompt(loading, Some(error), warning, window, cx);
+            });
+        });
+        loading.update(cx, |loading, _| loading._task = Some(task));
+    }
+
+    fn show_password_prompt(
+        &mut self,
+        loading: Entity<LoadingDocumentView>,
+        error: Option<SharedString>,
+        keychain_warning: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_ix) = self.tab_ix_for_entity_id(loading.entity_id()) else {
+            return;
+        };
+        let input = loading.read(cx).password_input.clone();
+        input.update(cx, |input, cx| input.set_value("", window, cx));
+        loading.update(cx, |loading, cx| {
+            loading.status = LoadingDocumentStatus::PasswordRequired {
+                error,
+                keychain_warning,
+            };
+            loading._task = None;
+            cx.notify();
+        });
+        if self.active_tab == tab_ix {
+            input.read(cx).focus_handle(cx).focus(window, cx);
+        }
+    }
+
+    fn fail_document_open(
+        &mut self,
+        loading: Entity<LoadingDocumentView>,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        let (job_ids, restore_tab_id) = {
+            let loading = loading.read(cx);
+            (loading.job_ids.clone(), loading.restore_tab_id)
+        };
+        for job_id in job_ids.iter().copied() {
+            cx.emit(PaneEvent::DocumentOpenFinished {
+                job_id,
+                result: Err(error.clone().into()),
+            });
+        }
+        loading.update(cx, |loading, cx| {
+            loading.status = LoadingDocumentStatus::Error(error.into());
+            loading.restore_tab_id = None;
+            loading.pending_open = None;
+            loading._task = None;
+            cx.notify();
+        });
+        if let Some(session_tab_id) = restore_tab_id {
+            cx.emit(PaneEvent::RestoredDocumentFinished {
+                session_tab_id,
+                document_tab_id: None,
+            });
+        }
+    }
+
+    fn complete_document_open(
+        &mut self,
+        loading: Entity<LoadingDocumentView>,
+        prepared: PreparedDocumentOpen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab_ix) = self.tab_ix_for_entity_id(loading.entity_id()) else {
+            return false;
+        };
+        let (path, initial_position, job_ids, restore_tab_id, pending) =
+            loading.update(cx, |loading, _| {
+                loading._task = None;
+                (
+                    loading.path.clone(),
+                    loading.initial_position.clone(),
+                    loading.job_ids.clone(),
+                    loading.restore_tab_id,
+                    loading.pending_open.take(),
+                )
+            });
+        let Some(pending) = pending else {
+            return false;
         };
         let mut document_view = match DocumentView::from_prepared(
             prepared,
             self.focus_handle.clone(),
-            behavior,
-            options,
+            pending.behavior,
+            pending.options,
         ) {
             Ok(document_view) => document_view,
             Err(error) => {
-                for job_id in job_ids.iter().copied() {
-                    cx.emit(PaneEvent::DocumentOpenFinished {
-                        job_id,
-                        result: Err(format!("{error:#}").into()),
-                    });
-                }
-                if let Some(Tab::LoadingDocument(loading)) = self.tabs.get(tab_ix) {
-                    loading.update(cx, |loading, cx| {
-                        loading.error = Some(format!("{error:#}").into());
-                        loading.restore_tab_id = None;
-                        loading._task = None;
-                        cx.notify();
-                    });
-                }
-                if let Some(session_tab_id) = restore_tab_id {
-                    cx.emit(PaneEvent::RestoredDocumentFinished {
-                        session_tab_id,
-                        document_tab_id: None,
-                    });
-                }
-                return;
+                self.fail_document_open(loading, format!("{error:#}"), cx);
+                return false;
             }
         };
         let document_view = cx.new(|cx| {
@@ -1523,6 +2040,63 @@ impl Pane {
             });
         }
         cx.notify();
+        true
+    }
+
+    fn save_document_password(
+        &mut self,
+        path: PathBuf,
+        password: DocumentPassword,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = PdfPasswordStore::ensure(cx);
+        let save = store.write(&path, password, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(error) = save.await {
+                eprintln!("failed to save a PDF password: {error:#}");
+                _ = this.update_in(cx, |_, window, cx| {
+                    window.push_notification(
+                        Notification::warning(crate::fl!("pdf-password-keychain-save-failed"))
+                            .title(crate::fl!("pdf-password-keychain-save-failed-title"))
+                            .id::<PdfPasswordSaveNotification>(),
+                        cx,
+                    );
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn forget_saved_document_password(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = PdfPasswordStore::ensure(cx);
+        let deletion = store.delete(&path, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = deletion.await;
+            _ = this.update_in(cx, |_, window, cx| match result {
+                Ok(()) => window.push_notification(
+                    Notification::success(crate::fl!("pdf-password-forgot"))
+                        .title(crate::fl!("pdf-password-forgot-title"))
+                        .id::<PdfPasswordForgetNotification>(),
+                    cx,
+                ),
+                Err(error) => {
+                    eprintln!("failed to forget a saved PDF password: {error:#}");
+                    window.push_notification(
+                        Notification::error(crate::fl!("pdf-password-forget-failed"))
+                            .title(crate::fl!("pdf-password-forget-failed-title"))
+                            .id::<PdfPasswordForgetNotification>(),
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
     }
 
     fn create_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Tab {
@@ -1631,6 +2205,34 @@ impl Pane {
         match tab {
             Tab::NewTab(new_tab) => self.subscribe_to_new_tab(new_tab, window, cx),
             Tab::LoadingDocument(loading) => {
+                let loading_id = loading.entity_id();
+                cx.subscribe_in(
+                    loading,
+                    window,
+                    move |pane, loading, event: &LoadingDocumentEvent, window, cx| {
+                        if !pane.has_tab_id(loading_id) {
+                            return;
+                        }
+                        match event {
+                            LoadingDocumentEvent::SubmitPassword { password, remember } => {
+                                pane.start_document_prepare(
+                                    loading.clone(),
+                                    DocumentOpenAttempt::Entered {
+                                        password: password.clone(),
+                                        remember: *remember,
+                                    },
+                                    None,
+                                    window,
+                                    cx,
+                                );
+                            }
+                            LoadingDocumentEvent::Cancel => {
+                                cx.emit(PaneEvent::CloseTab(loading_id));
+                            }
+                        }
+                    },
+                )
+                .detach();
                 cx.observe(loading, |_, _, cx| cx.notify()).detach();
             }
             Tab::Document(document_view) => {
@@ -1649,7 +2251,22 @@ impl Pane {
             self.active_tab = tab_ix;
         }
         self.sync_active_focus_handle();
-        self.focus(window, cx);
+        let password_input = self.tabs.get(tab_ix).and_then(|tab| match tab {
+            Tab::LoadingDocument(loading)
+                if matches!(
+                    loading.read(cx).status,
+                    LoadingDocumentStatus::PasswordRequired { .. }
+                ) =>
+            {
+                Some(loading.read(cx).password_input.clone())
+            }
+            _ => None,
+        });
+        if let Some(password_input) = password_input {
+            password_input.read(cx).focus_handle(cx).focus(window, cx);
+        } else {
+            self.focus(window, cx);
+        }
         cx.notify();
     }
 
@@ -1744,6 +2361,17 @@ impl Pane {
             return;
         };
         let is_document = self.tab_is_document(tab_id);
+        let saved_password_path = self.tabs.get(tab_ix).and_then(|tab| match tab {
+            Tab::Document(document_view) => {
+                let document_view = document_view.read(cx);
+                let path = document_view.path();
+                (document_view.is_password_protected()
+                    && cx.has_global::<PdfPasswordStore>()
+                    && cx.global::<PdfPasswordStore>().is_known_saved(path))
+                .then(|| path.to_path_buf())
+            }
+            _ => None,
+        });
         let group = self
             .synchronized_presentation
             .group_by_tab
@@ -1758,19 +2386,30 @@ impl Pane {
         let popup = PopupMenu::build(window, cx, move |mut menu, _, _| {
             if is_document {
                 let duplicate_pane = pane.clone();
-                menu = menu
-                    .item(
-                        PopupMenuItem::new(crate::fl!("toolbar-duplicate-tab"))
-                            .icon(IconName::Copy)
-                            .on_click(move |_, _, cx| {
-                                duplicate_pane.update(cx, |pane, cx| {
-                                    if let Some(tab_ix) = pane.tab_ix_for_entity_id(tab_id) {
-                                        cx.emit(PaneEvent::DuplicateTab(tab_ix));
-                                    }
+                menu = menu.item(
+                    PopupMenuItem::new(crate::fl!("toolbar-duplicate-tab"))
+                        .icon(IconName::Copy)
+                        .on_click(move |_, _, cx| {
+                            duplicate_pane.update(cx, |pane, cx| {
+                                if let Some(tab_ix) = pane.tab_ix_for_entity_id(tab_id) {
+                                    cx.emit(PaneEvent::DuplicateTab(tab_ix));
+                                }
+                            });
+                        }),
+                );
+                if let Some(path) = saved_password_path.clone() {
+                    let forget_pane = pane.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(crate::fl!("pdf-password-forget"))
+                            .icon(IconName::Delete)
+                            .on_click(move |_, window, cx| {
+                                forget_pane.update(cx, |pane, cx| {
+                                    pane.forget_saved_document_password(path.clone(), window, cx);
                                 });
                             }),
-                    )
-                    .separator();
+                    );
+                }
+                menu = menu.separator();
                 if group.is_some() {
                     let connect_pane = pane.clone();
                     menu = menu.item(

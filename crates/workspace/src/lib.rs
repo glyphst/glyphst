@@ -24,6 +24,7 @@ mod external_drop;
 mod navigation_rail;
 pub mod new_tab;
 pub mod pane;
+mod pdf_password_store;
 mod synchronized_tabs;
 pub mod theme_selector;
 pub mod workspace;

@@ -12,6 +12,7 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, anyhow};
+use glyphst_pdf::DocumentSnapshot;
 use glyphst_settings::{OcrMode, OcrProvider, PdfContentReviewMode, Settings};
 use glyphst_translation::{LanguageCode, TranslationService};
 use mupdf::pdf::PdfDocument as MuPdfDocument;
@@ -20,6 +21,7 @@ use mupdf::{
     text_page::{TextBlockType, TextCharFlags},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use glyphst_pdf_translation::{
     BlockKind, BoundingBox, CancellationToken, DocumentMetadata, DocumentV1, LayoutDocument,
@@ -72,6 +74,8 @@ struct LiveSessionCacheManifest {
     pipeline_version: String,
     fingerprint: String,
     source_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_sha256: Option<String>,
     request: PdfTranslationSessionRequest,
     inspection: PdfInspection,
     warnings: Vec<PdfTranslationWarning>,
@@ -332,6 +336,34 @@ impl PdfTranslationService {
         cancellation: CancellationToken,
         progress_sink: impl TranslationProgressSink + 'static,
     ) -> Result<PdfTranslationResult, PdfTranslationError> {
+        self.run_with_snapshot(settings, request, None, cancellation, progress_sink)
+    }
+
+    pub fn run_from_snapshot(
+        &self,
+        settings: Settings,
+        request: PdfTranslationRequest,
+        source_snapshot: Arc<DocumentSnapshot>,
+        cancellation: CancellationToken,
+        progress_sink: impl TranslationProgressSink + 'static,
+    ) -> Result<PdfTranslationResult, PdfTranslationError> {
+        self.run_with_snapshot(
+            settings,
+            request,
+            Some(source_snapshot.as_ref()),
+            cancellation,
+            progress_sink,
+        )
+    }
+
+    fn run_with_snapshot(
+        &self,
+        settings: Settings,
+        request: PdfTranslationRequest,
+        source_snapshot: Option<&DocumentSnapshot>,
+        cancellation: CancellationToken,
+        progress_sink: impl TranslationProgressSink + 'static,
+    ) -> Result<PdfTranslationResult, PdfTranslationError> {
         let _run_guard = self.begin_run()?;
         let mut progress = ProgressTracker::new(progress_sink);
         let session_request = PdfTranslationSessionRequest {
@@ -343,6 +375,7 @@ impl PdfTranslationService {
         let session = self.run_session_inner(
             &settings,
             session_request,
+            source_snapshot,
             &cancellation,
             &mut progress,
             &mut ignore_update,
@@ -365,6 +398,44 @@ impl PdfTranslationService {
         request: PdfTranslationSessionRequest,
         cancellation: CancellationToken,
         progress_sink: impl TranslationProgressSink + 'static,
+        update_sink: impl FnMut(PdfTranslationSessionUpdate) + Send,
+    ) -> Result<PdfTranslationSessionResult, PdfTranslationError> {
+        self.run_session_with_snapshot(
+            settings,
+            request,
+            None,
+            cancellation,
+            progress_sink,
+            update_sink,
+        )
+    }
+
+    pub fn run_session_from_snapshot(
+        &self,
+        settings: Settings,
+        request: PdfTranslationSessionRequest,
+        source_snapshot: Arc<DocumentSnapshot>,
+        cancellation: CancellationToken,
+        progress_sink: impl TranslationProgressSink + 'static,
+        update_sink: impl FnMut(PdfTranslationSessionUpdate) + Send,
+    ) -> Result<PdfTranslationSessionResult, PdfTranslationError> {
+        self.run_session_with_snapshot(
+            settings,
+            request,
+            Some(source_snapshot.as_ref()),
+            cancellation,
+            progress_sink,
+            update_sink,
+        )
+    }
+
+    fn run_session_with_snapshot(
+        &self,
+        settings: Settings,
+        request: PdfTranslationSessionRequest,
+        source_snapshot: Option<&DocumentSnapshot>,
+        cancellation: CancellationToken,
+        progress_sink: impl TranslationProgressSink + 'static,
         mut update_sink: impl FnMut(PdfTranslationSessionUpdate) + Send,
     ) -> Result<PdfTranslationSessionResult, PdfTranslationError> {
         let _run_guard = self.begin_run()?;
@@ -372,6 +443,7 @@ impl PdfTranslationService {
         self.run_session_inner(
             &settings,
             request,
+            source_snapshot,
             &cancellation,
             &mut progress,
             &mut update_sink,
@@ -384,6 +456,48 @@ impl PdfTranslationService {
         &self,
         key: &PdfTranslationSessionCacheKey,
         request: &PdfTranslationSessionRequest,
+        original_unit_ids: &[String],
+        cancellation: CancellationToken,
+        progress_sink: impl TranslationProgressSink + 'static,
+        update_sink: impl FnMut(PdfTranslationSessionUpdate) + Send,
+    ) -> Result<Option<PdfTranslationRestoredSession>, PdfTranslationError> {
+        self.restore_cached_session_with_snapshot(
+            key,
+            request,
+            None,
+            original_unit_ids,
+            cancellation,
+            progress_sink,
+            update_sink,
+        )
+    }
+
+    pub fn restore_cached_session_from_snapshot(
+        &self,
+        key: &PdfTranslationSessionCacheKey,
+        request: &PdfTranslationSessionRequest,
+        source_snapshot: Arc<DocumentSnapshot>,
+        original_unit_ids: &[String],
+        cancellation: CancellationToken,
+        progress_sink: impl TranslationProgressSink + 'static,
+        update_sink: impl FnMut(PdfTranslationSessionUpdate) + Send,
+    ) -> Result<Option<PdfTranslationRestoredSession>, PdfTranslationError> {
+        self.restore_cached_session_with_snapshot(
+            key,
+            request,
+            Some(source_snapshot.as_ref()),
+            original_unit_ids,
+            cancellation,
+            progress_sink,
+            update_sink,
+        )
+    }
+
+    fn restore_cached_session_with_snapshot(
+        &self,
+        key: &PdfTranslationSessionCacheKey,
+        request: &PdfTranslationSessionRequest,
+        source_snapshot: Option<&DocumentSnapshot>,
         original_unit_ids: &[String],
         cancellation: CancellationToken,
         progress_sink: impl TranslationProgressSink + 'static,
@@ -407,15 +521,28 @@ impl PdfTranslationService {
             _ => return Ok(None),
         };
         let source_snapshot_path = job_directory.join("source-original.pdf");
-        let current_source = match fs::read(&request.source_path) {
-            Ok(bytes) => bytes,
-            Err(_) => return Ok(None),
+        let current_source_from_path;
+        let current_source = match source_snapshot {
+            Some(snapshot) if snapshot.path() == request.source_path => snapshot.bytes(),
+            Some(_) => return Ok(None),
+            None => {
+                current_source_from_path = match fs::read(&request.source_path) {
+                    Ok(bytes) => bytes,
+                    Err(_) => return Ok(None),
+                };
+                current_source_from_path.as_slice()
+            }
         };
         let cached_source = match fs::read(&source_snapshot_path) {
             Ok(bytes) => bytes,
             Err(_) => return Ok(None),
         };
-        if current_source != cached_source {
+        let source_matches = cached_source_matches(
+            manifest.source_sha256.as_deref(),
+            current_source,
+            &cached_source,
+        );
+        if !source_matches || !is_unencrypted_pdf(&source_snapshot_path) {
             return Ok(None);
         }
         cancellation
@@ -437,7 +564,11 @@ impl PdfTranslationService {
                         && result.request == *request
                         && result.translated.document.validate().is_ok()
                 }) {
-                Some(result) => result,
+                Some(mut result) => {
+                    result.source_snapshot_path = source_snapshot_path.clone();
+                    result.job_directory = job_directory.clone();
+                    result
+                }
                 None => return Ok(None),
             }
         } else {
@@ -602,6 +733,7 @@ impl PdfTranslationService {
         &self,
         settings: &Settings,
         session_request: PdfTranslationSessionRequest,
+        source_snapshot: Option<&DocumentSnapshot>,
         cancellation: &CancellationToken,
         progress: &mut ProgressTracker,
         update_sink: &mut (impl FnMut(PdfTranslationSessionUpdate) + Send),
@@ -612,18 +744,55 @@ impl PdfTranslationService {
             source_language: session_request.source_language.clone(),
             target_language: session_request.target_language.clone(),
         };
-        let (fingerprint, source_fingerprint, source_bytes) =
-            request_fingerprint_with_source(settings, &request)?;
+        let path_snapshot;
+        let source_snapshot = match source_snapshot {
+            Some(snapshot) if snapshot.path() == request.source_path => snapshot,
+            Some(_) => {
+                return Err(PdfTranslationError::message(
+                    PdfTranslationStage::Preparing,
+                    "The authenticated PDF snapshot does not match the translation source",
+                ));
+            }
+            None => {
+                let source_bytes = fs::read(&request.source_path).map_err(|error| {
+                    PdfTranslationError::stage(
+                        PdfTranslationStage::Preparing,
+                        "Could not read the source PDF",
+                        error,
+                    )
+                })?;
+                path_snapshot = DocumentSnapshot::from_pdf_bytes(
+                    request.source_path.clone(),
+                    Arc::<[u8]>::from(source_bytes),
+                );
+                &path_snapshot
+            }
+        };
+        let (fingerprint, source_fingerprint) =
+            request_fingerprints_for_source(settings, &request, source_snapshot.bytes());
+        let working_source_bytes = source_snapshot.unencrypted_pdf_bytes().map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Preparing,
+                "Could not prepare an unencrypted source PDF",
+                error,
+            )
+        })?;
         let job_directory = create_job_directory(&fingerprint)?;
         let prepared_directory = create_prepared_directory(&source_fingerprint)?;
         let source_path = job_directory.join("source-original.pdf");
-        fs::write(&source_path, source_bytes).map_err(|error| {
+        write_private_file(&source_path, &working_source_bytes).map_err(|error| {
             PdfTranslationError::stage(
                 PdfTranslationStage::Preparing,
                 "Could not snapshot the source PDF",
                 error,
             )
         })?;
+        if !is_unencrypted_pdf(&source_path) {
+            return Err(PdfTranslationError::message(
+                PdfTranslationStage::Preparing,
+                "The PDF translation working copy is still encrypted",
+            ));
+        }
         let mut pipeline_request = request.clone();
         pipeline_request.source_path = source_path;
         progress.report(
@@ -656,6 +825,7 @@ impl PdfTranslationService {
             pipeline_version: PIPELINE_VERSION.to_string(),
             fingerprint: fingerprint.clone(),
             source_fingerprint: source_fingerprint.clone(),
+            source_sha256: Some(source_sha256(source_snapshot.bytes())),
             request: session_request.clone(),
             inspection: inspection.clone(),
             warnings: Vec::new(),
@@ -3102,13 +3272,49 @@ fn validate_rendered_output(
             error,
         )
     })?;
-    let output = Document::open(output_path).map_err(|error| {
+    let output_path_text = output_path.to_string_lossy();
+    let output = MuPdfDocument::open(output_path_text.as_ref()).map_err(|error| {
         PdfTranslationError::stage(
             PdfTranslationStage::Validating,
             "Could not open the translated PDF",
             error,
         )
     })?;
+    if output.needs_password().map_err(|error| {
+        PdfTranslationError::stage(
+            PdfTranslationStage::Validating,
+            "Could not inspect translated PDF encryption",
+            error,
+        )
+    })? {
+        return Err(PdfTranslationError::message(
+            PdfTranslationStage::Validating,
+            "Translated PDF must not require a password",
+        ));
+    }
+    let trailer = output.trailer().map_err(|error| {
+        PdfTranslationError::stage(
+            PdfTranslationStage::Validating,
+            "Could not inspect the translated PDF trailer",
+            error,
+        )
+    })?;
+    if trailer
+        .get_dict("Encrypt")
+        .map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Validating,
+                "Could not inspect the translated PDF encryption dictionary",
+                error,
+            )
+        })?
+        .is_some()
+    {
+        return Err(PdfTranslationError::message(
+            PdfTranslationStage::Validating,
+            "Translated PDF must not contain an encryption dictionary",
+        ));
+    }
     let source_pages = source.page_count().map_err(|error| {
         PdfTranslationError::stage(
             PdfTranslationStage::Validating,
@@ -3428,7 +3634,17 @@ fn request_fingerprint_with_source(
             error,
         )
     })?;
-    let source_fingerprint = source_preparation_fingerprint(settings, &source_bytes);
+    let (fingerprint, source_fingerprint) =
+        request_fingerprints_for_source(settings, request, &source_bytes);
+    Ok((fingerprint, source_fingerprint, source_bytes))
+}
+
+fn request_fingerprints_for_source(
+    settings: &Settings,
+    request: &PdfTranslationRequest,
+    source_bytes: &[u8],
+) -> (String, String) {
+    let source_fingerprint = source_preparation_fingerprint(settings, source_bytes);
     let mut translation_hasher = DefaultHasher::new();
     PIPELINE_VERSION.hash(&mut translation_hasher);
     source_fingerprint.hash(&mut translation_hasher);
@@ -3439,11 +3655,25 @@ fn request_fingerprint_with_source(
         .active_provider
         .hash(&mut translation_hasher);
     translation_provider_identity(settings).hash(&mut translation_hasher);
-    Ok((
+    (
         format!("{:016x}", translation_hasher.finish()),
         source_fingerprint,
-        source_bytes,
-    ))
+    )
+}
+
+fn source_sha256(source_bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(source_bytes))
+}
+
+fn cached_source_matches(
+    expected_sha256: Option<&str>,
+    current_source: &[u8],
+    cached_source: &[u8],
+) -> bool {
+    expected_sha256.map_or_else(
+        || current_source == cached_source,
+        |expected| source_sha256(current_source) == expected,
+    )
 }
 
 fn source_preparation_fingerprint(settings: &Settings, source_bytes: &[u8]) -> String {
@@ -3603,6 +3833,43 @@ fn create_prepared_directory(fingerprint: &str) -> Result<PathBuf, PdfTranslatio
     Ok(directory)
 }
 
+fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        std::io::Write::write_all(&mut file, bytes)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, bytes)
+    }
+}
+
+fn is_unencrypted_pdf(path: &Path) -> bool {
+    let Some(path) = path.to_str() else {
+        return false;
+    };
+    let Ok(document) = MuPdfDocument::open(path) else {
+        return false;
+    };
+    match document.needs_password() {
+        Ok(false) => {}
+        Ok(true) | Err(_) => return false,
+    }
+    document
+        .trailer()
+        .and_then(|trailer| trailer.get_dict("Encrypt"))
+        .is_ok_and(|encrypt| encrypt.is_none())
+}
+
 fn artifact_root() -> PathBuf {
     glyphst_core::paths::state_dir().join("pdf-translations")
 }
@@ -3735,7 +4002,28 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
     use super::*;
+
+    fn encrypted_pdf_bytes() -> Vec<u8> {
+        let encoded = include_str!("../../pdf/tests/fixtures/dummy-encrypted.pdf.b64")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        STANDARD.decode(encoded).unwrap()
+    }
+
+    fn temporary_test_directory(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "glyphst-pdf-translation-{label}-{}-{nonce:x}",
+            std::process::id()
+        ))
+    }
 
     fn hover_test_block(
         id: &str,
@@ -4148,6 +4436,65 @@ mod tests {
         assert_eq!(zh_source, ja_source);
         assert_ne!(zh_translation, ja_translation);
         fs::remove_file(source_path).unwrap();
+    }
+
+    #[test]
+    fn encrypted_source_identity_matches_its_decrypted_cache_copy() {
+        let encrypted = encrypted_pdf_bytes();
+        let snapshot = DocumentSnapshot::from_pdf_bytes("source.pdf", encrypted.clone())
+            .with_password(glyphst_pdf::DocumentPassword::new("123456"));
+        let decrypted = snapshot.unencrypted_pdf_bytes().unwrap();
+        let digest = source_sha256(&encrypted);
+
+        assert_ne!(encrypted.as_slice(), decrypted.as_ref());
+        assert!(cached_source_matches(Some(&digest), &encrypted, &decrypted));
+        assert!(!cached_source_matches(None, &encrypted, &decrypted));
+    }
+
+    #[test]
+    fn private_working_copy_is_unencrypted_and_owner_only() {
+        let directory = temporary_test_directory("private-source");
+        create_private_directory(&directory).unwrap();
+        let path = directory.join("source-original.pdf");
+        let snapshot = DocumentSnapshot::from_pdf_bytes("source.pdf", encrypted_pdf_bytes())
+            .with_password(glyphst_pdf::DocumentPassword::new("123456"));
+        let decrypted = snapshot.unencrypted_pdf_bytes().unwrap();
+
+        write_private_file(&path, &decrypted).unwrap();
+
+        assert!(is_unencrypted_pdf(&path));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rendered_output_validation_rejects_encryption() {
+        let directory = temporary_test_directory("encrypted-output");
+        create_private_directory(&directory).unwrap();
+        let source_path = directory.join("source.pdf");
+        let output_path = directory.join("translated.pdf");
+        let snapshot = DocumentSnapshot::from_pdf_bytes("source.pdf", encrypted_pdf_bytes())
+            .with_password(glyphst_pdf::DocumentPassword::new("123456"));
+        fs::write(&source_path, snapshot.unencrypted_pdf_bytes().unwrap()).unwrap();
+        fs::write(&output_path, encrypted_pdf_bytes()).unwrap();
+        let layout = LayoutDocument {
+            pages: Vec::new(),
+            warnings: Vec::new(),
+            preserved_on_overflow: Vec::new(),
+            overflow_policy: LayoutOptions::application_default().overflow_policy,
+        };
+
+        let error = validate_rendered_output(&source_path, &output_path, &layout).unwrap_err();
+
+        assert!(error.message.contains("must not require a password"));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

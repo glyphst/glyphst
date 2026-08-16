@@ -18,6 +18,14 @@ impl DocumentView {
         self.format
     }
 
+    pub fn is_password_protected(&self) -> bool {
+        self.password_protected
+    }
+
+    pub fn document_snapshot(&self) -> Arc<DocumentSnapshot> {
+        self.document_snapshot.clone()
+    }
+
     pub fn capabilities(&self) -> DocumentCapabilities {
         self.capabilities
     }

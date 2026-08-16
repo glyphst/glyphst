@@ -309,6 +309,84 @@ fn persist_reader_session(cx: &mut App) -> Result<()> {
         .set_reader_session(ReaderSessionSnapshot { windows })
 }
 
+fn persist_reader_session_before_window_close(
+    closing_workspace: &Entity<Workspace>,
+    closing_window: &Window,
+    cx: &mut App,
+) -> Result<()> {
+    let closing_window_id = closing_window.window_handle().window_id();
+    let closing_snapshot = closing_workspace.update(cx, |workspace, cx| {
+        if workspace.reader_session_restore_pending() {
+            None
+        } else {
+            Some(workspace.reader_window_session(closing_window, cx))
+        }
+    });
+    let Some(closing_snapshot) = closing_snapshot else {
+        // Retain the last complete snapshot rather than persisting a partially
+        // restored tree when the user closes a window during startup.
+        return Ok(());
+    };
+
+    let mut remaining_windows = Vec::new();
+    for window in cx.windows() {
+        if window.window_id() == closing_window_id {
+            continue;
+        }
+        let Some(workspace) = WorkspaceWindowHandle::from_any(window, cx) else {
+            continue;
+        };
+        let snapshot = workspace.update(cx, |workspace, window, cx| {
+            if workspace.reader_session_restore_pending() {
+                None
+            } else {
+                Some(workspace.reader_window_session(window, cx))
+            }
+        })?;
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        remaining_windows.push(snapshot);
+    }
+
+    if remaining_windows.is_empty() {
+        // Closing the final reader window exits the application on Linux and
+        // Windows. Save it while GPUI still exposes its workspace and window.
+        remaining_windows.push(closing_snapshot);
+    }
+    cx.global_mut::<LibraryStore>()
+        .set_reader_session(ReaderSessionSnapshot {
+            windows: remaining_windows,
+        })
+}
+
+fn observe_reader_workspace(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
+    workspace.update(cx, |workspace, _| {
+        workspace.set_window_close_handler(close_reader_workspace_window);
+    });
+    let persistence = cx.global::<ReaderSessionPersistence>().0.clone();
+    persistence.update(cx, |persistence, cx| {
+        persistence.observe_workspace(workspace, window, cx);
+    });
+
+    let workspace = workspace.downgrade();
+    window.on_window_should_close(cx, move |window, cx| {
+        if let Some(workspace) = workspace.upgrade()
+            && let Err(error) = persist_reader_session_before_window_close(&workspace, window, cx)
+        {
+            eprintln!("failed to save reader session before closing window: {error:#}");
+        }
+        true
+    });
+}
+
+fn close_reader_workspace_window(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
+    if let Err(error) = persist_reader_session_before_window_close(workspace, window, cx) {
+        eprintln!("failed to save reader session before closing window: {error:#}");
+    }
+    window.remove_window();
+}
+
 fn restore_reader_session(session: ReaderSessionSnapshot, cx: &mut App) -> Result<usize> {
     let mut opened = 0_usize;
     let mut missing_documents = 0_usize;
@@ -456,10 +534,7 @@ fn open_workspace_window_inner(
                     )
                 }
             });
-            let persistence = cx.global::<ReaderSessionPersistence>().0.clone();
-            persistence.update(cx, |persistence, cx| {
-                persistence.observe_workspace(&workspace, window, cx);
-            });
+            observe_reader_workspace(&workspace, window, cx);
             cx.new(|cx| Root::new(workspace, window, cx))
         },
     )?;
@@ -488,10 +563,7 @@ fn open_reader_session_window(session: ReaderWindowSession, cx: &mut App) -> Res
             let workspace = cx.new(|cx| {
                 Workspace::from_reader_session(session.clone(), workspace_callbacks(), window, cx)
             });
-            let persistence = cx.global::<ReaderSessionPersistence>().0.clone();
-            persistence.update(cx, |persistence, cx| {
-                persistence.observe_workspace(&workspace, window, cx);
-            });
+            observe_reader_workspace(&workspace, window, cx);
             cx.new(|cx| Root::new(workspace, window, cx))
         },
     )?;
@@ -518,6 +590,103 @@ fn reader_window_bounds(bounds: ReaderWindowBounds) -> WindowBounds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, path::Path, time::SystemTime};
+
+    use glyphst_library::{
+        ReaderPaneSession, ReaderPaneTree, ReaderSplitAxis, ReaderTabKind, ReaderTabSession,
+        ReaderTranslationSession,
+    };
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+
+    fn temporary_pdf_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "glyphst-reader-{label}-{}-{}.pdf",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn write_minimal_pdf(path: &Path) {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >>",
+            "<< /Length 0 >>\nstream\n\nendstream",
+        ];
+        let mut bytes = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        bytes.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn translation_reader_session(path: &Path) -> ReaderWindowSession {
+        let document_tab = |id| ReaderTabSession {
+            id,
+            kind: ReaderTabKind::Document {
+                path: path.to_path_buf(),
+                position: DocumentPosition::fixed(0.0, 0.0, 1.0, 1),
+            },
+        };
+        ReaderWindowSession {
+            bounds: ReaderWindowBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1200.0,
+                height: 800.0,
+                state: ReaderWindowState::Windowed,
+            },
+            pane_tree: ReaderPaneTree::Split {
+                axis: ReaderSplitAxis::Horizontal,
+                ratios: vec![0.5, 0.5],
+                children: vec![
+                    ReaderPaneTree::Pane(ReaderPaneSession {
+                        id: 1,
+                        tabs: vec![document_tab(1)],
+                        active_tab: Some(1),
+                    }),
+                    ReaderPaneTree::Pane(ReaderPaneSession {
+                        id: 2,
+                        tabs: vec![document_tab(2)],
+                        active_tab: Some(2),
+                    }),
+                ],
+            },
+            active_pane: 1,
+            dock_document_tab: Some(1),
+            left_sidebar: None,
+            ai_panel_open: false,
+            transparency_enabled: false,
+            synchronized_groups: Vec::new(),
+            translation_sessions: vec![ReaderTranslationSession {
+                source_tab: 1,
+                translated_tab: 2,
+                source_language: Some("en".to_string()),
+                target_language: "zh-hans".to_string(),
+                mode: "auto".to_string(),
+                cache_key: None,
+                original_unit_ids: vec!["unit-1".to_string()],
+            }],
+        }
+    }
 
     #[test]
     fn startup_session_restore_is_bypassed_by_paths_and_new_windows() {
@@ -562,5 +731,86 @@ mod tests {
             reader_window_bounds(bounds),
             WindowBounds::Maximized(_)
         ));
+    }
+
+    #[gpui::test]
+    fn final_window_title_bar_close_flushes_live_translation_before_debounce(
+        cx: &mut TestAppContext,
+    ) {
+        let document_path = temporary_pdf_path("close-live-translation");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+            let persistence = cx.new(|_| ReaderSessionPersistenceState {
+                // Keep ordinary observation disabled so only the pre-close
+                // flush can write the regression snapshot.
+                suspended: true,
+                generation: 0,
+                save_task: None,
+            });
+            cx.set_global(ReaderSessionPersistence(persistence));
+        });
+
+        let session = translation_reader_session(&document_path);
+        let root = cx.update(|cx| {
+            let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    let workspace = cx.new(|cx| {
+                        Workspace::from_reader_session(session, workspace_callbacks(), window, cx)
+                    });
+                    observe_reader_workspace(&workspace, window, cx);
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                },
+            )
+            .unwrap()
+        });
+        cx.run_until_parked();
+
+        let workspace = cx.read(|cx| WorkspaceWindowHandle::from_root(root, cx).unwrap());
+        workspace
+            .update(cx, |workspace, _, cx| {
+                assert!(!workspace.reader_session_restore_pending());
+                // Model the manager's frequent progress notifications that kept
+                // resetting the normal trailing-edge debounce.
+                for _ in 0..4 {
+                    cx.notify();
+                }
+            })
+            .unwrap();
+        assert!(cx.read(|cx| cx.global::<LibraryStore>().reader_session().is_none()));
+
+        let mut visual = VisualTestContext::from_window(root.into(), cx);
+        let close = visual.update(|window, cx| {
+            _ = window.draw(cx);
+            let size = window.window_bounds().get_bounds().size;
+            point(size.width - px(17.0), px(17.0))
+        });
+        visual.simulate_click(close, Modifiers::default());
+
+        cx.read(|cx| {
+            let snapshot = cx
+                .global::<LibraryStore>()
+                .reader_session()
+                .expect("pre-close hook should persist the final reader window");
+            assert_eq!(snapshot.windows.len(), 1);
+            let window = &snapshot.windows[0];
+            assert_eq!(window.translation_sessions.len(), 1);
+            assert_eq!(window.translation_sessions[0].source_tab, 1);
+            assert_eq!(window.translation_sessions[0].translated_tab, 2);
+            let ReaderPaneTree::Split { children, .. } = &window.pane_tree else {
+                panic!("translation session should preserve its split panes");
+            };
+            assert_eq!(children.len(), 2);
+        });
+
+        fs::remove_file(document_path).ok();
     }
 }

@@ -1,17 +1,69 @@
 use std::{
-    fs,
+    error::Error,
+    fmt, fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use glyphst_core::{DocumentCapabilities, DocumentFormat, DocumentLayout, EpubLayout};
+use mupdf::pdf::{Encryption, PdfDocument as MuPdfDocument, PdfWriteOptions};
+use zeroize::Zeroizing;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct DocumentPassword(Arc<Zeroizing<String>>);
+
+impl DocumentPassword {
+    pub fn new(password: impl Into<String>) -> Self {
+        Self(Arc::new(Zeroizing::new(password.into())))
+    }
+
+    pub fn expose_secret(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Debug for DocumentPassword {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DocumentPassword([REDACTED])")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentAuthenticationError {
+    PasswordRequired,
+    InvalidPassword,
+}
+
+impl fmt::Display for DocumentAuthenticationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PasswordRequired => formatter.write_str("document password required"),
+            Self::InvalidPassword => formatter.write_str("document password is invalid"),
+        }
+    }
+}
+
+impl Error for DocumentAuthenticationError {}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct DocumentSnapshot {
     path: PathBuf,
     bytes: Arc<[u8]>,
     format: DocumentFormat,
+    password: Option<DocumentPassword>,
+}
+
+impl fmt::Debug for DocumentSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DocumentSnapshot")
+            .field("path", &self.path)
+            .field("bytes", &format_args!("{} bytes", self.bytes.len()))
+            .field("format", &self.format)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl DocumentSnapshot {
@@ -24,6 +76,7 @@ impl DocumentSnapshot {
             path: path.to_path_buf(),
             bytes: Arc::from(bytes),
             format,
+            password: None,
         })
     }
 
@@ -38,6 +91,7 @@ impl DocumentSnapshot {
             path: path.into(),
             bytes: bytes.into(),
             format,
+            password: None,
         }
     }
 
@@ -57,6 +111,48 @@ impl DocumentSnapshot {
         self.format
     }
 
+    pub fn with_password(mut self, password: DocumentPassword) -> Self {
+        self.password = Some(password);
+        self
+    }
+
+    pub fn password(&self) -> Option<&DocumentPassword> {
+        self.password.as_ref()
+    }
+
+    /// Return PDF bytes that can be reopened without a password.
+    ///
+    /// Unencrypted snapshots reuse their immutable source bytes. Encrypted
+    /// snapshots are authenticated with the in-memory password and rewritten
+    /// without an encryption dictionary.
+    #[ztracing::instrument(skip_all)]
+    pub fn unencrypted_pdf_bytes(&self) -> Result<Arc<[u8]>> {
+        if self.format != DocumentFormat::Pdf {
+            bail!("{} is not a PDF document", self.path.display());
+        }
+
+        let mut document = MuPdfDocument::from_bytes(self.bytes())
+            .with_context(|| format!("failed to open {}", self.path.display()))?;
+        let password_protected = authenticate_snapshot_document(self, &mut document)?;
+        if !password_protected {
+            return Ok(self.bytes.clone());
+        }
+
+        let mut options = PdfWriteOptions::default();
+        options.set_encryption(Encryption::None);
+        let mut bytes = Vec::new();
+        document
+            .write_to_with_options(&mut bytes, options)
+            .with_context(|| {
+                format!(
+                    "failed to create an unencrypted copy of {}",
+                    self.path.display()
+                )
+            })?;
+        validate_unencrypted_pdf_bytes(&bytes, &self.path)?;
+        Ok(Arc::from(bytes))
+    }
+
     pub fn open(&self) -> Result<GlyphstDocument> {
         self.open_with_layout(DocumentLayout::Fixed)
     }
@@ -70,6 +166,7 @@ impl DocumentSnapshot {
 pub struct GlyphstDocument {
     inner: mupdf::Document,
     format: DocumentFormat,
+    password_protected: bool,
     reflowable: bool,
     layout: DocumentLayout,
 }
@@ -87,6 +184,7 @@ impl GlyphstDocument {
         let mut inner =
             mupdf::Document::from_bytes(snapshot.bytes(), snapshot.format().mime_type())
                 .with_context(|| format!("failed to open {}", snapshot.path().display()))?;
+        let password_protected = authenticate_snapshot_document(snapshot, &mut inner)?;
         let reflowable = inner.is_reflowable().with_context(|| {
             format!(
                 "failed to inspect document layout for {}",
@@ -106,6 +204,7 @@ impl GlyphstDocument {
         Ok(Self {
             inner,
             format: snapshot.format(),
+            password_protected,
             reflowable,
             layout,
         })
@@ -127,6 +226,10 @@ impl GlyphstDocument {
         self.reflowable
     }
 
+    pub fn is_password_protected(&self) -> bool {
+        self.password_protected
+    }
+
     pub fn layout(&self) -> DocumentLayout {
         self.layout
     }
@@ -137,6 +240,81 @@ impl GlyphstDocument {
 }
 
 pub type PdfDocument = GlyphstDocument;
+
+fn authenticate_snapshot_document(
+    snapshot: &DocumentSnapshot,
+    document: &mut mupdf::Document,
+) -> Result<bool> {
+    let password_protected = document.needs_password().with_context(|| {
+        format!(
+            "failed to inspect document security for {}",
+            snapshot.path().display()
+        )
+    })?;
+    if !password_protected {
+        return Ok(false);
+    }
+
+    let (password, authentication_error) = match snapshot.password() {
+        Some(password) => (
+            password.expose_secret(),
+            DocumentAuthenticationError::InvalidPassword,
+        ),
+        None => ("", DocumentAuthenticationError::PasswordRequired),
+    };
+    let authenticated = document.authenticate(password).with_context(|| {
+        format!(
+            "failed to authenticate document {}",
+            snapshot.path().display()
+        )
+    })?;
+    if !authenticated {
+        return Err(authentication_error.into());
+    }
+    Ok(true)
+}
+
+fn validate_unencrypted_pdf_bytes(bytes: &[u8], source_path: &Path) -> Result<()> {
+    let document = MuPdfDocument::from_bytes(bytes).with_context(|| {
+        format!(
+            "failed to validate the unencrypted copy of {}",
+            source_path.display()
+        )
+    })?;
+    if document.needs_password().with_context(|| {
+        format!(
+            "failed to inspect the unencrypted copy of {}",
+            source_path.display()
+        )
+    })? {
+        bail!(
+            "the generated copy of {} still requires a password",
+            source_path.display()
+        );
+    }
+    let trailer = document.trailer().with_context(|| {
+        format!(
+            "failed to inspect the generated copy of {}",
+            source_path.display()
+        )
+    })?;
+    if trailer
+        .get_dict("Encrypt")
+        .with_context(|| {
+            format!(
+                "failed to inspect the encryption dictionary of {}",
+                source_path.display()
+            )
+        })?
+        .is_some()
+    {
+        bail!(
+            "the generated copy of {} still contains an encryption dictionary",
+            source_path.display()
+        );
+    }
+    Ok(())
+}
 
 fn document_format(path: &Path) -> Result<DocumentFormat> {
     let extension = path
@@ -172,7 +350,17 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
     use super::*;
+
+    fn encrypted_pdf_bytes() -> Vec<u8> {
+        let encoded = include_str!("../tests/fixtures/dummy-encrypted.pdf.b64")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        STANDARD.decode(encoded).unwrap()
+    }
 
     fn temp_path(extension: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -208,6 +396,61 @@ mod tests {
         assert_eq!(snapshot.format(), DocumentFormat::Pdf);
         assert_eq!(snapshot.path(), Path::new("page-1-revision-7.pdf"));
         assert_eq!(snapshot.bytes(), bytes.as_ref());
+    }
+
+    #[test]
+    fn encrypted_snapshot_reports_password_required_and_invalid_password() {
+        let snapshot = DocumentSnapshot::from_pdf_bytes("encrypted.pdf", encrypted_pdf_bytes());
+        let missing = snapshot.open().unwrap_err();
+        assert_eq!(
+            missing.downcast_ref::<DocumentAuthenticationError>(),
+            Some(&DocumentAuthenticationError::PasswordRequired)
+        );
+
+        let invalid = snapshot
+            .clone()
+            .with_password(DocumentPassword::new("wrong-password"))
+            .open()
+            .unwrap_err();
+        assert_eq!(
+            invalid.downcast_ref::<DocumentAuthenticationError>(),
+            Some(&DocumentAuthenticationError::InvalidPassword)
+        );
+    }
+
+    #[test]
+    fn encrypted_snapshot_opens_with_password_without_exposing_it_in_debug_output() {
+        let password = DocumentPassword::new("123456");
+        assert_eq!(format!("{password:?}"), "DocumentPassword([REDACTED])");
+
+        let snapshot = DocumentSnapshot::from_pdf_bytes("encrypted.pdf", encrypted_pdf_bytes())
+            .with_password(password);
+        let debug = format!("{snapshot:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("123456"));
+
+        let document = snapshot.open().unwrap();
+        assert!(document.is_password_protected());
+        assert_eq!(document.inner().page_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn encrypted_snapshot_produces_an_unencrypted_pdf_copy() {
+        let snapshot = DocumentSnapshot::from_pdf_bytes("encrypted.pdf", encrypted_pdf_bytes())
+            .with_password(DocumentPassword::new("123456"));
+
+        let bytes = snapshot.unencrypted_pdf_bytes().unwrap();
+        let document = MuPdfDocument::from_bytes(&bytes).unwrap();
+        assert!(!document.needs_password().unwrap());
+        assert!(
+            document
+                .trailer()
+                .unwrap()
+                .get_dict("Encrypt")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(document.page_count().unwrap(), 1);
     }
 
     #[test]

@@ -195,11 +195,20 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use glyphst_core::DocumentLayout;
     use mupdf::{Colorspace, Device, Matrix, Pixmap, Rect};
 
     use super::DocumentRenderSession;
-    use crate::DocumentSnapshot;
+    use crate::{DocumentPassword, DocumentSnapshot};
+
+    fn encrypted_pdf_bytes() -> Vec<u8> {
+        let encoded = include_str!("../tests/fixtures/dummy-encrypted.pdf.b64")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        STANDARD.decode(encoded).unwrap()
+    }
 
     struct TempPdf(PathBuf);
 
@@ -311,6 +320,19 @@ mod tests {
         let snapshot = Arc::new(DocumentSnapshot::read(fixture.path()).unwrap());
         let session = DocumentRenderSession::open(snapshot.clone(), DocumentLayout::Fixed).unwrap();
         (fixture, snapshot, session)
+    }
+
+    #[test]
+    fn render_session_reopens_encrypted_snapshot_with_its_password() {
+        let snapshot = Arc::new(
+            DocumentSnapshot::from_pdf_bytes("encrypted.pdf", encrypted_pdf_bytes())
+                .with_password(DocumentPassword::new("123456")),
+        );
+        let session = DocumentRenderSession::open(snapshot, DocumentLayout::Fixed).unwrap();
+        let display_list = session
+            .create_display_list(0, Rect::new(0.0, 0.0, 595.0, 842.0))
+            .unwrap();
+        assert!(!display_list.is_empty());
     }
 
     #[test]

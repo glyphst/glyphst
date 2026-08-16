@@ -7,6 +7,7 @@ edition.workspace = true
 anyhow.workspace = true
 glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
+glyphst-pdf = { path = "../pdf" }
 glyphst-pdf-translation = { path = "../pdf-translation" }
 glyphst-settings = { path = "../settings" }
 glyphst-translation = { path = "../translation" }
@@ -14,3 +15,7 @@ gpui.workspace = true
 mupdf.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+base64.workspace = true

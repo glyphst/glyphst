@@ -93,6 +93,7 @@ pub struct Workspace {
     home_view: Entity<NewTab>,
     home_previous_focus_handle: Option<FocusHandle>,
     callbacks: WorkspaceCallbacks,
+    window_close_handler: Option<fn(&Entity<Workspace>, &mut Window, &mut App)>,
     focus_handle: FocusHandle,
     document_translation_jobs: Entity<DocumentTranslationJobManager>,
     pending_translation_splits: Vec<PendingTranslationSplit>,
@@ -404,6 +405,7 @@ impl Workspace {
             home_view: home_view.clone(),
             home_previous_focus_handle: None,
             callbacks,
+            window_close_handler: None,
             focus_handle,
             document_translation_jobs: document_translation_jobs.clone(),
             pending_translation_splits: Vec::new(),
@@ -783,6 +785,15 @@ impl Workspace {
         self.pending_restored_documents > 0
     }
 
+    /// Install host-specific work that must run before the custom Linux title
+    /// bar removes this workspace window.
+    pub fn set_window_close_handler(
+        &mut self,
+        handler: fn(&Entity<Workspace>, &mut Window, &mut App),
+    ) {
+        self.window_close_handler = Some(handler);
+    }
+
     pub fn restored_missing_document_count(&self) -> usize {
         self.restored_missing_documents
     }
@@ -968,11 +979,13 @@ impl Workspace {
                 source_language,
                 target_language,
             };
+            let source_snapshot = source.read(cx).document_snapshot();
             let settings = cx.global::<SettingsStore>().settings.clone();
             let session_id = self.document_translation_jobs.update(cx, |manager, cx| {
                 manager.restore_session(
                     settings,
                     request,
+                    source_snapshot,
                     mode,
                     cache_key,
                     session.original_unit_ids.into_iter().collect(),
@@ -1099,6 +1112,28 @@ impl Workspace {
                     } else {
                         cx.notify();
                     }
+                }
+                PaneEvent::DocumentPasswordAuthenticated { path, password } => {
+                    let workspace = cx.entity().downgrade();
+                    let path = path.clone();
+                    let password = password.clone();
+                    window.defer(cx, move |window, cx| {
+                        let Some(workspace) = workspace.upgrade() else {
+                            return;
+                        };
+                        workspace.update(cx, |workspace, cx| {
+                            for pane in workspace.pane_group.panes() {
+                                pane.update(cx, |pane, cx| {
+                                    pane.unlock_pending_documents_with_password(
+                                        &path,
+                                        password.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        });
+                    });
                 }
                 PaneEvent::OpenSettings => this.open_settings_window(cx),
                 PaneEvent::DocumentSidebarNavigation(document_view_id) => {
@@ -4363,6 +4398,7 @@ impl Render for Workspace {
                 },
                 self.surface_mode == WorkspaceSurfaceMode::Home,
                 shell,
+                self.window_close_handler,
             )
         });
         let synchronized_connection = (self.surface_mode == WorkspaceSurfaceMode::Panes
@@ -4632,11 +4668,13 @@ mod tests {
         time::{Duration, Instant, SystemTime},
     };
 
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use glyphst_ai::{
         agent::{AgentCancellationToken, AgentToolCall, AgentToolResultPart},
         ai_chat::DocumentContextScope,
     };
     use glyphst_ai_ui::AiContextProvider as _;
+    use glyphst_pdf::DocumentPassword;
     use glyphst_translation_ui::DocumentTranslationOpenMode;
     use gpui::{
         AppContext as _, EntityId, ExternalPaths, FileDropEvent, Modifiers, MouseButton,
@@ -4662,6 +4700,7 @@ mod tests {
             ReaderTabSession, ReaderTranslationSession, ReaderWindowBounds, ReaderWindowSession,
             ReaderWindowState,
         },
+        pdf_password_store::PdfPasswordStore,
         settings::SettingsStore,
     };
 
@@ -4740,6 +4779,64 @@ mod tests {
 
     fn write_minimal_pdf(path: &Path) {
         write_minimal_pdf_with_height(path, 200);
+    }
+
+    fn write_encrypted_pdf(path: &Path) {
+        let encoded = include_str!("../../pdf/tests/fixtures/dummy-encrypted.pdf.b64")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        fs::write(path, STANDARD.decode(encoded).unwrap()).unwrap();
+    }
+
+    fn encrypted_translation_reader_session(path: &Path) -> ReaderWindowSession {
+        let document_tab = |id, zoom| ReaderTabSession {
+            id,
+            kind: ReaderTabKind::Document {
+                path: path.to_path_buf(),
+                position: DocumentPosition::fixed(0.0, 0.0, zoom, 1),
+            },
+        };
+        ReaderWindowSession {
+            bounds: ReaderWindowBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1200.0,
+                height: 800.0,
+                state: ReaderWindowState::Windowed,
+            },
+            pane_tree: ReaderPaneTree::Split {
+                axis: ReaderSplitAxis::Horizontal,
+                ratios: vec![0.5, 0.5],
+                children: vec![
+                    ReaderPaneTree::Pane(ReaderPaneSession {
+                        id: 1,
+                        tabs: vec![document_tab(1, 1.0)],
+                        active_tab: Some(1),
+                    }),
+                    ReaderPaneTree::Pane(ReaderPaneSession {
+                        id: 2,
+                        tabs: vec![document_tab(2, 1.5)],
+                        active_tab: Some(2),
+                    }),
+                ],
+            },
+            active_pane: 1,
+            dock_document_tab: Some(1),
+            left_sidebar: None,
+            ai_panel_open: false,
+            transparency_enabled: true,
+            synchronized_groups: Vec::new(),
+            translation_sessions: vec![ReaderTranslationSession {
+                source_tab: 1,
+                translated_tab: 2,
+                source_language: Some("en".to_string()),
+                target_language: "zh-hans".to_string(),
+                mode: "auto".to_string(),
+                cache_key: None,
+                original_unit_ids: vec!["encrypted-unit".to_string()],
+            }],
+        }
     }
 
     #[test]
@@ -5793,6 +5890,184 @@ mod tests {
             assert_eq!(ratios.len(), 2);
             assert!((ratios[0] - 0.3).abs() < 0.001);
         });
+    }
+
+    #[gpui::test]
+    fn encrypted_reader_session_unlocks_once_and_restores_its_translation(cx: &mut TestAppContext) {
+        let document_path = temporary_pdf_path("restore-encrypted-translation");
+        write_encrypted_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+            cx.set_global(PdfPasswordStore::memory());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let session = encrypted_translation_reader_session(&document_path);
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace =
+                cx.new(|cx| Workspace::from_reader_session(session, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.reader_session_restore_pending());
+            assert!(workspace.live_translation_pairs.is_empty());
+            assert!(
+                workspace
+                    .pane_group
+                    .panes()
+                    .iter()
+                    .all(|pane| pane.read(cx).active_tab_is_loading())
+            );
+        });
+
+        let source_pane =
+            workspace.read_with(cx, |workspace, _| workspace.pane_group.panes()[0].clone());
+        source_pane.update_in(cx, |pane, window, cx| {
+            assert!(pane.submit_document_password_for_test(
+                &document_path,
+                "wrong-password",
+                false,
+                window,
+                cx,
+            ));
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.reader_session_restore_pending());
+            assert!(workspace.live_translation_pairs.is_empty());
+            assert!(
+                workspace
+                    .pane_group
+                    .panes()
+                    .iter()
+                    .all(|pane| pane.read(cx).active_tab_is_loading())
+            );
+        });
+
+        source_pane.update_in(cx, |pane, window, cx| {
+            assert!(pane.submit_document_password_for_test(
+                &document_path,
+                "123456",
+                false,
+                window,
+                cx,
+            ));
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.reader_session_restore_pending());
+            assert_eq!(workspace.live_translation_pairs.len(), 1);
+            let panes = workspace.pane_group.panes();
+            let source = panes[0].read(cx).document_views()[0].clone();
+            let translated = panes[1].read(cx).document_views()[0].clone();
+            assert!(source.read(cx).is_password_protected());
+            assert!(translated.read(cx).is_password_protected());
+            let (&session_id, pair) = workspace.live_translation_pairs.iter().next().unwrap();
+            assert_eq!(pair.source_id, source.entity_id());
+            assert_eq!(pair.translated_id, translated.entity_id());
+            assert_eq!(
+                translated.read(cx).translation_session_id(),
+                Some(session_id)
+            );
+            assert_eq!(source.read(cx).translation_session_id(), None);
+            assert_eq!(
+                workspace
+                    .synchronized_tabs
+                    .group_for_tab(source.entity_id()),
+                workspace
+                    .synchronized_tabs
+                    .group_for_tab(translated.entity_id())
+            );
+            assert!(
+                workspace
+                    .synchronized_tabs
+                    .group_for_tab(source.entity_id())
+                    .is_some()
+            );
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let snapshot = workspace.reader_window_session(window, cx);
+            assert_eq!(snapshot.translation_sessions.len(), 1);
+            assert_eq!(
+                snapshot.translation_sessions[0].source_language.as_deref(),
+                Some("en")
+            );
+            assert_eq!(snapshot.translation_sessions[0].target_language, "zh-hans");
+        });
+        assert!(cx.read(|cx| {
+            !cx.global::<PdfPasswordStore>()
+                .is_known_saved(&document_path)
+        }));
+
+        fs::remove_file(document_path).ok();
+    }
+
+    #[gpui::test]
+    fn encrypted_reader_session_uses_a_saved_password_for_both_translation_tabs(
+        cx: &mut TestAppContext,
+    ) {
+        let document_path = temporary_pdf_path("restore-encrypted-translation-saved");
+        write_encrypted_pdf(&document_path);
+        let password_store = PdfPasswordStore::memory();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+            cx.set_global(password_store.clone());
+        });
+        let save = cx
+            .update(|cx| password_store.write(&document_path, DocumentPassword::new("123456"), cx));
+        cx.foreground_executor().block_test(save).unwrap();
+
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let session = encrypted_translation_reader_session(&document_path);
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace =
+                cx.new(|cx| Workspace::from_reader_session(session, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.reader_session_restore_pending());
+            assert_eq!(workspace.live_translation_pairs.len(), 1);
+            assert!(
+                workspace.pane_group.panes().iter().all(|pane| pane
+                    .read(cx)
+                    .document_views()
+                    .len()
+                    == 1)
+            );
+        });
+        assert!(password_store.is_known_saved(&document_path));
+
+        fs::remove_file(document_path).ok();
     }
 
     #[gpui::test]

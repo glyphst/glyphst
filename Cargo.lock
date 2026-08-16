@@ -3097,9 +3097,11 @@ name = "glyphst-pdf"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "glyphst-core",
  "mupdf",
  "tracing",
+ "zeroize",
  "ztracing",
 ]
 
@@ -3125,8 +3127,10 @@ name = "glyphst-pdf-translation-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "glyphst-ai",
  "glyphst-core",
+ "glyphst-pdf",
  "glyphst-pdf-translation",
  "glyphst-settings",
  "glyphst-translation",
@@ -3134,6 +3138,7 @@ dependencies = [
  "mupdf",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -3219,6 +3224,7 @@ name = "glyphst-translation-ui"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "glyphst-pdf",
  "glyphst-pdf-translation-app",
  "glyphst-settings",
  "glyphst-translation",
@@ -3252,6 +3258,7 @@ name = "glyphst-workspace"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "dirs",
  "glyphst-actions",
@@ -3271,6 +3278,7 @@ dependencies = [
  "image",
  "mupdf",
  "serde_json",
+ "sha2",
  "smallvec",
 ]
 

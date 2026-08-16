@@ -10,6 +10,15 @@ impl DocumentView {
         epub_preferences: EpubReaderPreferences,
         page_gap: f32,
     ) -> Result<PreparedDocumentOpen> {
+        Self::prepare_open_with_password(path, epub_preferences, page_gap, None)
+    }
+
+    pub fn prepare_open_with_password(
+        path: impl AsRef<Path>,
+        epub_preferences: EpubReaderPreferences,
+        page_gap: f32,
+        password: Option<DocumentPassword>,
+    ) -> Result<PreparedDocumentOpen> {
         let path = normalize_path(path.as_ref());
         let mut file_name: SharedString = path
             .file_name()
@@ -18,7 +27,11 @@ impl DocumentView {
             .unwrap_or_else(|| crate::fl!("untitled"))
             .into();
 
-        let document_snapshot = Arc::new(DocumentSnapshot::read(&path)?);
+        let mut document_snapshot = DocumentSnapshot::read(&path)?;
+        if let Some(password) = password {
+            document_snapshot = document_snapshot.with_password(password);
+        }
+        let document_snapshot = Arc::new(document_snapshot);
         let format = document_snapshot.format();
         let epub_preferences = epub_preferences.sanitized();
         let requested_layout = if format == DocumentFormat::Epub {
@@ -27,6 +40,7 @@ impl DocumentView {
             DocumentLayout::Fixed
         };
         let opened_document = document_snapshot.open_with_layout(requested_layout)?;
+        let password_protected = opened_document.is_password_protected();
         let capabilities = opened_document.capabilities();
         let document_layout = opened_document.layout();
         if format == DocumentFormat::Epub
@@ -59,6 +73,7 @@ impl DocumentView {
             path,
             file_name,
             format,
+            password_protected,
             capabilities,
             document_layout,
             epub_preferences,
@@ -84,6 +99,7 @@ impl DocumentView {
             path: self.path.clone(),
             file_name: self.file_name.clone(),
             format: self.format,
+            password_protected: self.password_protected,
             capabilities: self.capabilities,
             document_layout: self.document_layout,
             epub_preferences: self.epub_preferences,
@@ -108,6 +124,7 @@ impl DocumentView {
             path,
             file_name,
             format,
+            password_protected,
             capabilities,
             document_layout,
             epub_preferences,
@@ -136,6 +153,7 @@ impl DocumentView {
             path,
             file_name,
             format,
+            password_protected,
             capabilities,
             document_layout,
             epub_preferences,
@@ -480,6 +498,7 @@ impl DocumentView {
     fn start_reload(&mut self, generation: u64, cx: &mut Context<Self>) {
         let path = self.path.clone();
         let document_layout = self.document_layout;
+        let password = self.document_snapshot.password().cloned();
         let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
 
         self.reload_task = Some(cx.spawn(async move |this, cx| {
@@ -487,7 +506,7 @@ impl DocumentView {
                 .background_spawn({
                     let path = path.clone();
                     async move {
-                        Self::load_reload_data(&path, document_layout, page_gap)
+                        Self::load_reload_data(&path, document_layout, page_gap, password)
                             .map_err(|error| format!("{error:#}"))
                     }
                 })
@@ -501,9 +520,16 @@ impl DocumentView {
         path: &Path,
         document_layout: DocumentLayout,
         page_gap: f32,
+        password: Option<DocumentPassword>,
     ) -> Result<ReloadData> {
-        let snapshot = Arc::new(DocumentSnapshot::read(path)?);
-        let document = snapshot.open_with_layout(document_layout)?.into_inner();
+        let mut snapshot = DocumentSnapshot::read(path)?;
+        if let Some(password) = password {
+            snapshot = snapshot.with_password(password);
+        }
+        let snapshot = Arc::new(snapshot);
+        let opened_document = snapshot.open_with_layout(document_layout)?;
+        let password_protected = opened_document.is_password_protected();
+        let document = opened_document.into_inner();
         let page_count = document.page_count()?;
         if page_count <= 0 {
             bail!("document has no readable content");
@@ -523,6 +549,7 @@ impl DocumentView {
         Ok(ReloadData {
             snapshot,
             render_session,
+            password_protected,
             page_count,
             loaded,
             toc,
@@ -594,6 +621,7 @@ impl DocumentView {
 
         self.document_snapshot = reload.snapshot;
         self.render_session = reload.render_session;
+        self.password_protected = reload.password_protected;
         self.page_count = reload.page_count;
         self.toc = reload.toc;
         self.toc_collapsed

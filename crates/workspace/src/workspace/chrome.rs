@@ -93,6 +93,7 @@ pub(super) struct WorkspaceTitleBar {
     active_tab_label: Option<SharedString>,
     home_active: bool,
     shell_background: Hsla,
+    window_close_handler: Option<fn(&Entity<Workspace>, &mut Window, &mut gpui::App)>,
 }
 
 impl WorkspaceTitleBar {
@@ -103,6 +104,7 @@ impl WorkspaceTitleBar {
         active_tab_label: Option<SharedString>,
         home_active: bool,
         shell_background: Hsla,
+        window_close_handler: Option<fn(&Entity<Workspace>, &mut Window, &mut gpui::App)>,
     ) -> Self {
         Self {
             workspace,
@@ -111,6 +113,7 @@ impl WorkspaceTitleBar {
             active_tab_label,
             home_active,
             shell_background,
+            window_close_handler,
         }
     }
 
@@ -237,6 +240,7 @@ impl RenderOnce for WorkspaceTitleBar {
                 )
             })
             .into_any_element();
+        let close_workspace = workspace.clone();
         let collapse_workspace = workspace;
 
         TitleBar::new()
@@ -262,5 +266,10 @@ impl RenderOnce for WorkspaceTitleBar {
                             }),
                     ),
             )
+            .when_some(self.window_close_handler, |title_bar, handler| {
+                title_bar.on_close_window(move |_, window, cx| {
+                    handler(&close_workspace, window, cx);
+                })
+            })
     }
 }

@@ -1,15 +1,17 @@
 use std::{fs, path::PathBuf, time::Duration};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{AppContext as _, EntityId, TestAppContext};
 use gpui_component::Root;
 
 use super::{
-    DraggedTab, LoadingDocumentView, Pane, Tab, loading_grid_opacity,
+    DraggedTab, LoadingDocumentStatus, LoadingDocumentView, Pane, Tab, loading_grid_opacity,
     parse_debug_file_open_min_duration, remaining_file_open_min_duration,
 };
 use crate::{
     document_view::RenderCache,
     library::{DocumentPosition, LibraryStore},
+    pdf_password_store::PdfPasswordStore,
     settings::SettingsStore,
     synchronized_tabs::SynchronizedTabRegistry,
 };
@@ -53,6 +55,14 @@ fn write_minimal_pdf(path: &std::path::Path) {
         .as_bytes(),
     );
     fs::write(path, bytes).unwrap();
+}
+
+fn write_encrypted_pdf(path: &std::path::Path) {
+    let encoded = include_str!("../../../pdf/tests/fixtures/dummy-encrypted.pdf.b64")
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    fs::write(path, STANDARD.decode(encoded).unwrap()).unwrap();
 }
 
 #[test]
@@ -192,13 +202,18 @@ fn loading_document_view_switches_from_animated_grid_to_error(cx: &mut TestAppCo
     });
 
     let (root, cx) = cx.add_window_view(|window, cx| {
+        let password_input =
+            cx.new(|cx| gpui_component::input::InputState::new(window, cx).masked(true));
         let loading = cx.new(|cx| LoadingDocumentView {
             path: PathBuf::from("/tmp/example.pdf"),
             initial_position: DocumentPosition::fixed(0.0, 0.0, 1.0, 1),
             restore_tab_id: None,
             focus_handle: cx.focus_handle(),
             job_ids: Vec::new(),
-            error: None,
+            password_input,
+            remember_password: true,
+            status: LoadingDocumentStatus::Loading,
+            pending_open: None,
             _task: None,
         });
         Root::new(loading, window, cx)
@@ -218,7 +233,24 @@ fn loading_document_view_switches_from_animated_grid_to_error(cx: &mut TestAppCo
             .unwrap()
     });
     loading.update(cx, |loading, cx| {
-        loading.error = Some("failed".into());
+        loading.status = LoadingDocumentStatus::PasswordRequired {
+            error: Some("incorrect".into()),
+            keychain_warning: Some("keychain unavailable".into()),
+        };
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    assert!(cx.debug_bounds("document-password-prompt").is_some());
+    assert!(cx.debug_bounds("document-password-error").is_some());
+    assert!(
+        cx.debug_bounds("document-password-keychain-warning")
+            .is_some()
+    );
+
+    loading.update(cx, |loading, cx| {
+        loading.status = LoadingDocumentStatus::Error("failed".into());
         cx.notify();
     });
     cx.update(|window, cx| {
@@ -280,7 +312,10 @@ fn document_open_stages_a_loading_tab_without_blocking_tab_switches(cx: &mut Tes
                 _ => None,
             })
             .unwrap();
-        assert!(loading.read(cx).error.is_some());
+        assert!(matches!(
+            loading.read(cx).status,
+            LoadingDocumentStatus::Error(_)
+        ));
     });
 
     fs::remove_dir(path).unwrap();
@@ -319,6 +354,129 @@ fn successful_document_preparation_replaces_the_loading_tab(cx: &mut TestAppCont
     cx.run_until_parked();
     pane.read_with(cx, |pane, _| {
         assert!(matches!(pane.tabs.as_slice(), [Tab::Document(_)]));
+    });
+
+    fs::remove_file(path).unwrap();
+}
+
+#[gpui::test]
+fn encrypted_document_retries_inline_and_reuses_a_saved_password(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        cx.set_global(SettingsStore::memory());
+        cx.set_global(LibraryStore::memory());
+        cx.set_global(RenderCache::new());
+        cx.set_global(PdfPasswordStore::memory());
+    });
+    let jobs = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+    let path = temporary_pdf_path("encrypted-open");
+    write_encrypted_pdf(&path);
+
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs.clone()));
+        Root::new(pane, window, cx)
+    });
+    let pane = root.read_with(cx, |root, _| {
+        root.view().clone().downcast::<Pane>().unwrap()
+    });
+    pane.update_in(cx, |pane, window, cx| {
+        pane.focus_or_open_document(path.clone(), None, true, window, cx)
+            .unwrap();
+    });
+    cx.run_until_parked();
+
+    let loading = pane.read_with(cx, |pane, cx| {
+        let Tab::LoadingDocument(loading) = &pane.tabs[0] else {
+            panic!("encrypted document should wait for a password");
+        };
+        assert!(matches!(
+            loading.read(cx).status,
+            LoadingDocumentStatus::PasswordRequired { error: None, .. }
+        ));
+        loading.clone()
+    });
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    assert!(cx.debug_bounds("document-password-prompt").is_some());
+
+    loading.update_in(cx, |loading, window, cx| {
+        loading.password_input.update(cx, |input, cx| {
+            input.set_value("wrong-password", window, cx)
+        });
+        loading.submit_password(window, cx);
+    });
+    cx.run_until_parked();
+    loading.read_with(cx, |loading, _| {
+        assert!(matches!(
+            loading.status,
+            LoadingDocumentStatus::PasswordRequired { error: Some(_), .. }
+        ));
+    });
+
+    loading.update_in(cx, |loading, window, cx| {
+        loading
+            .password_input
+            .update(cx, |input, cx| input.set_value("123456", window, cx));
+        loading.submit_password(window, cx);
+    });
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, cx| {
+        let [Tab::Document(document)] = pane.tabs.as_slice() else {
+            panic!("correct password should replace the loading tab");
+        };
+        assert!(document.read(cx).is_password_protected());
+    });
+    assert!(cx.read(|cx| cx.global::<PdfPasswordStore>().is_known_saved(&path)));
+
+    pane.update_in(cx, |pane, window, cx| {
+        assert!(
+            pane.duplicate_document_tab(0, window, cx)
+                .unwrap()
+                .is_some()
+        );
+    });
+    pane.read_with(cx, |pane, cx| {
+        assert_eq!(pane.tabs.len(), 2);
+        assert!(pane.tabs.iter().all(|tab| match tab {
+            Tab::Document(document) => document.read(cx).is_password_protected(),
+            _ => false,
+        }));
+    });
+
+    pane.update_in(cx, |pane, window, cx| {
+        assert!(!pane.close_tab_at(1, cx));
+        assert!(pane.close_tab_at(0, cx));
+        pane.ensure_new_tab(window, cx);
+        pane.focus_or_open_document(path.clone(), None, true, window, cx)
+            .unwrap();
+    });
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, _| {
+        assert!(matches!(pane.tabs.as_slice(), [Tab::Document(_)]));
+    });
+
+    pane.update_in(cx, |pane, window, cx| {
+        pane.forget_saved_document_password(path.clone(), window, cx);
+    });
+    cx.run_until_parked();
+    assert!(!cx.read(|cx| cx.global::<PdfPasswordStore>().is_known_saved(&path)));
+
+    pane.update_in(cx, |pane, window, cx| {
+        assert!(pane.close_tab_at(0, cx));
+        pane.ensure_new_tab(window, cx);
+        pane.focus_or_open_document(path.clone(), None, true, window, cx)
+            .unwrap();
+    });
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, cx| {
+        let [Tab::LoadingDocument(loading)] = pane.tabs.as_slice() else {
+            panic!("forgotten password should require another prompt");
+        };
+        assert!(matches!(
+            loading.read(cx).status,
+            LoadingDocumentStatus::PasswordRequired { .. }
+        ));
     });
 
     fs::remove_file(path).unwrap();

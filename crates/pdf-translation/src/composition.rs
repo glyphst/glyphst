@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use mupdf::device::{DefaultColorspaces, DeviceFlag, Metatext, Structure};
 use mupdf::pdf::{
-    PdfAnnotationType, PdfDocument, PdfGraftMap, PdfLink, PdfObject, PdfWriteOptions,
+    Encryption, PdfAnnotationType, PdfDocument, PdfGraftMap, PdfLink, PdfObject, PdfWriteOptions,
 };
 use mupdf::{
     BlendMode, ColorParams, Colorspace, Device, Document, Function, Image, Matrix, NativeDevice,
@@ -55,8 +55,10 @@ pub fn sanitize_source_pdf(
     }
 
     let output_path = output_path.to_string_lossy().to_string();
+    let mut options = PdfWriteOptions::default();
+    options.set_encryption(Encryption::None);
     document
-        .save(output_path.as_str())
+        .save_with_options(output_path.as_str(), options)
         .map_err(PdfCompositionError::mupdf)
 }
 
@@ -642,6 +644,7 @@ fn restore_pdf_structure(
 fn final_pdf_write_options() -> PdfWriteOptions {
     let mut options = PdfWriteOptions::default();
     options
+        .set_encryption(Encryption::None)
         .set_compress(true)
         .set_compress_fonts(true)
         .set_compress_images(true)
@@ -853,6 +856,15 @@ mod tests {
         .unwrap();
 
         let output = PdfDocument::open(output_path.to_string_lossy().as_ref()).unwrap();
+        assert!(!output.needs_password().unwrap());
+        assert!(
+            output
+                .trailer()
+                .unwrap()
+                .get_dict("Encrypt")
+                .unwrap()
+                .is_none()
+        );
         let page = output.load_pdf_page(0).unwrap();
         let page_resources = required_dict_object(&page.object(), "Resources");
         let page_xobjects = required_dict_object(&page_resources, "XObject");
@@ -868,6 +880,7 @@ mod tests {
         assert_eq!(subtype.as_name().unwrap(), b"Type3");
         assert!(!final_pdf_write_options().clean());
         assert_eq!(final_pdf_write_options().garbage_level(), 3);
+        assert_eq!(final_pdf_write_options().encryption(), Encryption::None);
     }
 
     #[test]

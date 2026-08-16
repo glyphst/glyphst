@@ -55,8 +55,8 @@ use glyphst_core::{
     SelectedPagesReference, SemanticTextAnchor,
 };
 use glyphst_pdf::{
-    DocumentRenderSession, DocumentSnapshot, ReloadCoordinator, ReloadDisposition,
-    RetainedDisplayList,
+    DocumentPassword, DocumentRenderSession, DocumentSnapshot, ReloadCoordinator,
+    ReloadDisposition, RetainedDisplayList,
 };
 use glyphst_pdf_translation_app::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationService,
@@ -358,6 +358,7 @@ struct LoadedText {
 struct ReloadData {
     snapshot: Arc<DocumentSnapshot>,
     render_session: DocumentRenderSession,
+    password_protected: bool,
     page_count: usize,
     loaded: LoadedPages,
     toc: Vec<TocEntry>,
@@ -1165,6 +1166,7 @@ pub struct PreparedDocumentOpen {
     path: PathBuf,
     file_name: SharedString,
     format: DocumentFormat,
+    password_protected: bool,
     capabilities: DocumentCapabilities,
     document_layout: DocumentLayout,
     epub_preferences: EpubReaderPreferences,
@@ -1433,6 +1435,7 @@ pub struct DocumentView {
     path: PathBuf,
     file_name: SharedString,
     format: DocumentFormat,
+    password_protected: bool,
     capabilities: DocumentCapabilities,
     document_layout: DocumentLayout,
     epub_preferences: EpubReaderPreferences,

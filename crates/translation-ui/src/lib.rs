@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::{StreamExt as _, channel::mpsc};
+use glyphst_pdf::DocumentSnapshot;
 use glyphst_pdf_translation_app::{
     CancellationToken, DocumentMetadata, DocumentV1, Page, PdfTranslationError,
     PdfTranslationExportRequest, PdfTranslationPageFailure, PdfTranslationPagePreview,
@@ -319,6 +320,7 @@ struct DocumentTranslationJobRecord {
 
 struct DocumentTranslationSessionRecord {
     snapshot: DocumentTranslationSessionSnapshot,
+    source_snapshot: Arc<DocumentSnapshot>,
     settings: Settings,
     cancellation: CancellationToken,
     task: Option<Task<()>>,
@@ -422,6 +424,7 @@ impl DocumentTranslationJobManager {
         &mut self,
         settings: Settings,
         request: PdfTranslationSessionRequest,
+        source_snapshot: Arc<DocumentSnapshot>,
         mode: DocumentTranslationMode,
         cx: &mut Context<Self>,
     ) -> DocumentTranslationJobId {
@@ -447,6 +450,7 @@ impl DocumentTranslationJobManager {
                 last_export_path: None,
                 last_export_error: None,
             },
+            source_snapshot,
             settings,
             cancellation: CancellationToken::new(),
             task: None,
@@ -476,6 +480,7 @@ impl DocumentTranslationJobManager {
         &mut self,
         settings: Settings,
         request: PdfTranslationSessionRequest,
+        source_snapshot: Arc<DocumentSnapshot>,
         mode: DocumentTranslationMode,
         cache_key: Option<PdfTranslationSessionCacheKey>,
         original_unit_ids: HashSet<String>,
@@ -501,6 +506,7 @@ impl DocumentTranslationJobManager {
                 last_export_path: None,
                 last_export_error: None,
             },
+            source_snapshot,
             settings,
             cancellation: CancellationToken::new(),
             task: None,
@@ -1463,6 +1469,7 @@ impl DocumentTranslationJobManager {
 
         let settings = self.sessions[index].settings.clone();
         let request = self.sessions[index].snapshot.request.clone();
+        let source_snapshot = self.sessions[index].source_snapshot.clone();
         let cancellation = self.sessions[index].cancellation.clone();
         let service = cx.global::<PdfTranslationService>().clone();
         let (update_tx, mut update_rx) =
@@ -1477,9 +1484,10 @@ impl DocumentTranslationJobManager {
 
         let task = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             let result_task = cx.background_spawn(async move {
-                service.run_session(
+                service.run_session_from_snapshot(
                     settings,
                     request,
+                    source_snapshot,
                     cancellation,
                     move |progress| {
                         _ = progress_tx.unbounded_send(
@@ -1536,6 +1544,7 @@ impl DocumentTranslationJobManager {
             return;
         }
         let request = self.sessions[index].snapshot.request.clone();
+        let source_snapshot = self.sessions[index].source_snapshot.clone();
         let original_unit_ids = self.sessions[index]
             .snapshot
             .original_unit_ids
@@ -1555,9 +1564,10 @@ impl DocumentTranslationJobManager {
         self.sync_session_background_task(id, cx);
         let task = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             let result_task = cx.background_spawn(async move {
-                service.restore_cached_session(
+                service.restore_cached_session_from_snapshot(
                     &cache_key,
                     &request,
+                    source_snapshot,
                     &original_unit_ids,
                     cancellation,
                     move |progress| {
@@ -3068,6 +3078,13 @@ mod tests {
         events: Rc<RefCell<Vec<DocumentTranslationJobEvent>>>,
     }
 
+    fn test_source_snapshot() -> Arc<DocumentSnapshot> {
+        Arc::new(DocumentSnapshot::from_pdf_bytes(
+            "/tmp/source.pdf",
+            Arc::<[u8]>::from(&b"%PDF-1.7\n%%EOF\n"[..]),
+        ))
+    }
+
     fn record_job_events(
         manager: &Entity<DocumentTranslationJobManager>,
         cx: &mut TestAppContext,
@@ -3139,6 +3156,7 @@ mod tests {
                 last_export_error: None,
                 cache_key: None,
             },
+            source_snapshot: test_source_snapshot(),
             settings: Settings::default(),
             cancellation: CancellationToken::new(),
             task: None,
@@ -3316,12 +3334,14 @@ mod tests {
             let foreground = manager.submit_session(
                 Settings::default(),
                 request.clone(),
+                test_source_snapshot(),
                 DocumentTranslationMode::Auto,
                 cx,
             );
             let background = manager.submit_session(
                 Settings::default(),
                 request,
+                test_source_snapshot(),
                 DocumentTranslationMode::Background,
                 cx,
             );
@@ -3353,6 +3373,7 @@ mod tests {
                     source_language: Some(LanguageCode::new("en").unwrap()),
                     target_language: LanguageCode::new("zh-hans").unwrap(),
                 },
+                test_source_snapshot(),
                 DocumentTranslationMode::Auto,
                 None,
                 HashSet::from(["unit-1".to_string()]),

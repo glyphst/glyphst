@@ -32,3 +32,6 @@ ztracing.workspace = true
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 tikv-jemallocator = { version = "0.7", features = ["background_threads"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

@@ -307,13 +307,14 @@ impl DocumentView {
                 }
             };
         let mode = settings.translation.document_mode;
+        let source_snapshot = self.document_snapshot.clone();
         let request = PdfTranslationSessionRequest {
             source_path,
             source_language,
             target_language,
         };
         self.document_translation_jobs.update(cx, |jobs, cx| {
-            jobs.submit_session(settings, request, mode, cx)
+            jobs.submit_session(settings, request, source_snapshot, mode, cx)
         });
     }
 
