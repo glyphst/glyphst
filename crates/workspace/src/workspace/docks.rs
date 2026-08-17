@@ -4,14 +4,14 @@ use gpui::{AnyElement, Context, Pixels, Task, Window, deferred, div, prelude::*,
 use gpui_component::{
     ActiveTheme as _, Sizable as _, ThemeColor,
     button::{Button, ButtonVariants as _},
-    status_bar::StatusBar,
 };
 
 use super::*;
 use crate::{
     document_view::{
-        DocumentDockSnapshot, DocumentSidebar, SIDEBAR_MIN_WIDTH, ToggleAiPanel, ToggleNotes,
-        ToggleThumbnailSidebar, ToggleToc, default_sidebar_widths, sanitize_sidebar_widths,
+        DocumentDockSnapshot, DocumentSidebar, SIDEBAR_MIN_WIDTH, ToggleAiPanel,
+        ToggleBookmarkSidebar, ToggleNotes, ToggleThumbnailSidebar, ToggleToc,
+        default_sidebar_widths, sanitize_sidebar_widths,
     },
     icons::IconName,
     library::{LibraryStore, SidebarWidths},
@@ -468,6 +468,7 @@ impl Workspace {
         match sidebar {
             DocumentSidebar::Thumbnails => crate::fl!("pdf-thumbnails-title"),
             DocumentSidebar::Toc => crate::fl!("table-of-contents-title"),
+            DocumentSidebar::Bookmarks => crate::fl!("bookmarks-title"),
             DocumentSidebar::Notes => crate::fl!("notes-title"),
         }
     }
@@ -536,6 +537,9 @@ impl Workspace {
                     window.dispatch_action(Box::new(ToggleThumbnailSidebar), cx)
                 }
                 Some(DocumentSidebar::Toc) => window.dispatch_action(Box::new(ToggleToc), cx),
+                Some(DocumentSidebar::Bookmarks) => {
+                    window.dispatch_action(Box::new(ToggleBookmarkSidebar), cx)
+                }
                 Some(DocumentSidebar::Notes) => window.dispatch_action(Box::new(ToggleNotes), cx),
                 None => window.dispatch_action(Box::new(ToggleAiPanel), cx),
             });
@@ -594,18 +598,6 @@ impl Workspace {
         }
     }
 
-    fn render_workspace_status(theme: ThemeColor, cx: &mut Context<Self>) -> Option<AnyElement> {
-        ActivityCenter::try_global(cx)
-            .and_then(|center| center.read(cx).render_activity())
-            .map(|activity| {
-                StatusBar::new()
-                    .right(activity)
-                    .border_t(px(0.0))
-                    .bg(theme.status_bar)
-                    .into_any_element()
-            })
-    }
-
     fn render_tool_rail(
         &self,
         document_view: &Entity<DocumentView>,
@@ -625,6 +617,9 @@ impl Workspace {
                             window.dispatch_action(Box::new(ToggleThumbnailSidebar), cx)
                         }
                         DocumentSidebar::Toc => window.dispatch_action(Box::new(ToggleToc), cx),
+                        DocumentSidebar::Bookmarks => {
+                            window.dispatch_action(Box::new(ToggleBookmarkSidebar), cx)
+                        }
                         DocumentSidebar::Notes => window.dispatch_action(Box::new(ToggleNotes), cx),
                     }
                 })
@@ -647,6 +642,14 @@ impl Workspace {
                     crate::fl!("table-of-contents-title"),
                 ))
             })
+            .when(supports(DocumentSidebar::Bookmarks), |this| {
+                this.child(button(
+                    "tool-rail-bookmarks",
+                    IconName::Bookmark,
+                    DocumentSidebar::Bookmarks,
+                    crate::fl!("bookmarks-title"),
+                ))
+            })
             .when(supports(DocumentSidebar::Notes), |this| {
                 this.child(button(
                     "tool-rail-notes",
@@ -655,6 +658,19 @@ impl Workspace {
                     crate::fl!("notes-title"),
                 ))
             })
+            .child(div().flex_1())
+            .child(
+                slim_navigation_button(
+                    "tool-rail-ai",
+                    IconName::Bot,
+                    self.docks.ai_panel_open,
+                    crate::fl!("ai-title"),
+                )
+                .on_click(|_, window, cx| {
+                    cx.stop_propagation();
+                    window.dispatch_action(Box::new(ToggleAiPanel), cx);
+                }),
+            )
             .into_any_element()
     }
 
@@ -896,29 +912,6 @@ impl Workspace {
             None
         };
 
-        let footbar = active_document_view
-            .map(|document_view| {
-                document_view.update(cx, |document_view, cx| {
-                    document_view.render_workspace_footbar(theme, snapshot, cx)
-                })
-            })
-            .or_else(|| Self::render_workspace_status(theme, cx));
-
-        let footbar = footbar.map(|footbar| {
-            div()
-                .id("workspace-pane-footbar")
-                .debug_selector(|| "workspace-pane-footbar".to_string())
-                .w_full()
-                .flex_none()
-                .overflow_hidden()
-                .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.status_bar)
-                .child(footbar)
-                .into_any_element()
-        });
-
         let center_column = div()
             .id("workspace-pane-column")
             .debug_selector(|| "workspace-pane-column".to_string())
@@ -927,7 +920,6 @@ impl Workspace {
             .min_h_0()
             .flex()
             .flex_col()
-            .gap(px(SURFACE_GAP))
             .child(
                 div()
                     .id("workspace-dock-center")
@@ -936,8 +928,7 @@ impl Workspace {
                     .min_w_0()
                     .min_h_0()
                     .child(center),
-            )
-            .children(footbar);
+            );
 
         let left_navigation = if main_panels.is_empty() {
             None

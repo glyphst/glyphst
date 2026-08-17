@@ -2,14 +2,16 @@ use super::*;
 
 impl DocumentView {
     pub(super) fn close_all_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.document_toolbar_hovered = false;
         self.close_search_bar(window, cx);
         self.close_toc_palette(window, cx);
         self.close_notes_palette(window, cx);
         self.close_history_palette(window, cx);
         self.close_bookmark_palette(window, cx);
-        self.close_bookmark_prompt(window, cx);
+        self.close_bookmark_title_editor(window, cx);
         self.close_go_to_page_prompt(window, cx);
         self.close_epub_style_panel(cx);
+        self.schedule_document_toolbar_hide(cx);
     }
 
     pub(super) fn toggle_presentation_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -250,44 +252,6 @@ impl DocumentView {
         }
     }
 
-    pub(super) fn toggle_bookmark_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.bookmark_prompt.is_some() {
-            self.close_bookmark_prompt(window, cx);
-            return;
-        }
-
-        self.close_all_overlays(window, cx);
-
-        let previous_focus_handle = self.focus_handle.clone();
-        let default_label = self.default_bookmark_label();
-        let delegate =
-            BookmarkPromptDelegate::new(self.path.clone(), self.current_document_position());
-        let prompt = cx.new(|cx| {
-            Picker::with_content(
-                previous_focus_handle.clone(),
-                delegate,
-                default_label,
-                window,
-                cx,
-            )
-        });
-
-        cx.subscribe_in(&prompt, window, |this, _, _: &PickerEvent, window, cx| {
-            this.close_bookmark_prompt(window, cx);
-        })
-        .detach();
-
-        self.bookmark_prompt = Some(prompt);
-        cx.notify();
-    }
-
-    pub(super) fn close_bookmark_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.bookmark_prompt.take().is_some() {
-            self.focus_handle.focus(window, cx);
-            cx.notify();
-        }
-    }
-
     pub(super) fn toggle_go_to_page_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.capabilities.reflow {
             return;
@@ -328,16 +292,7 @@ impl DocumentView {
         }
     }
 
-    fn default_bookmark_label(&self) -> SharedString {
-        let current_page = self.current_page_index();
-        self.toc
-            .iter()
-            .rfind(|entry| entry.navigable && entry.page_idx <= current_page)
-            .map(|entry| entry.title.clone())
-            .unwrap_or_else(|| crate::fl!("page-title", page = self.current_page() as i64).into())
-    }
-
-    fn toc_palette_entries(&self) -> Vec<TocPaletteEntry> {
+    pub(super) fn toc_palette_entries(&self) -> Vec<TocPaletteEntry> {
         self.toc
             .iter()
             .enumerate()
@@ -347,6 +302,7 @@ impl DocumentView {
                 title: entry.title.clone(),
                 depth: entry.depth,
                 page_number: entry.page_idx + 1,
+                bookmarked: self.is_page_bookmarked(entry.page_idx),
             })
             .collect()
     }

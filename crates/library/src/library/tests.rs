@@ -231,7 +231,7 @@ fn persists_history_bookmarks_and_highlights() {
         store.record_history(document_path, position(4));
         store.save().unwrap();
         bookmark_id = store
-            .add_bookmark(document_path, "Chapter 1", position(5))
+            .add_bookmark(document_path, Some("Chapter 1".to_string()), position(5))
             .unwrap();
         let highlight = store
             .add_highlight(
@@ -353,7 +353,7 @@ fn undo_and_redo_cover_persistent_document_edits() {
     let mut store = LibraryStore::open(database_path.clone()).unwrap();
 
     let bookmark_id = store
-        .add_bookmark(document_path, "Chapter", position(1))
+        .add_bookmark(document_path, Some("Chapter".to_string()), position(1))
         .unwrap();
     let highlight = store
         .add_highlight(
@@ -451,7 +451,7 @@ fn undo_restores_deleted_objects_with_stable_ids() {
     };
     let mut store = LibraryStore::open(database_path.clone()).unwrap();
     let bookmark_id = store
-        .add_bookmark(document_path, "Bookmark", position(1))
+        .add_bookmark(document_path, Some("Bookmark".to_string()), position(1))
         .unwrap();
     let highlight = store
         .add_highlight(
@@ -571,7 +571,7 @@ fn revisions_distinguish_document_content_from_global_bookmarks() {
     let mut store = LibraryStore::open(database_path.clone()).unwrap();
 
     let bookmark_id = store
-        .add_bookmark(document_b, "Bookmark", position(1))
+        .add_bookmark(document_b, Some("Bookmark".to_string()), position(1))
         .unwrap();
     assert_eq!(
         store.document_edit_revision(document_a),
@@ -625,6 +625,48 @@ fn revisions_distinguish_document_content_from_global_bookmarks() {
 }
 
 #[test]
+fn bookmark_titles_are_automatic_customizable_and_undoable() {
+    let database_path = temp_library_path("bookmark-titles");
+    let document_path = Path::new("/tmp/bookmark-titles.pdf");
+    let mut store = LibraryStore::open(database_path.clone()).unwrap();
+
+    let bookmark_id = store
+        .add_bookmark(document_path, None, position(3))
+        .unwrap();
+    assert_eq!(store.bookmarks_for(document_path).len(), 1);
+    assert_eq!(store.bookmarks_for(document_path)[0].title, None);
+
+    assert!(
+        store
+            .update_bookmark_title(bookmark_id, Some("  Useful passage  ".to_string()))
+            .unwrap()
+    );
+    assert_eq!(
+        store.bookmarks_for(document_path)[0].title.as_deref(),
+        Some("Useful passage")
+    );
+    assert!(store.undo_document(document_path).unwrap());
+    assert_eq!(store.bookmarks_for(document_path)[0].title, None);
+    assert!(store.redo_document(document_path).unwrap());
+    assert_eq!(
+        store.bookmarks_for(document_path)[0].title.as_deref(),
+        Some("Useful passage")
+    );
+    assert!(
+        store
+            .update_bookmark_title(bookmark_id, Some("  ".to_string()))
+            .unwrap()
+    );
+    assert_eq!(store.bookmarks_for(document_path)[0].title, None);
+
+    drop(store);
+    let store = LibraryStore::open(database_path.clone()).unwrap();
+    assert_eq!(store.bookmarks_for(document_path)[0].title, None);
+
+    let _ = fs::remove_file(database_path);
+}
+
+#[test]
 fn per_document_history_drops_oldest_edits() {
     let database_path = temp_library_path("document-edit-capacity");
     let document_path = Path::new("/tmp/document-edit-capacity.pdf");
@@ -632,7 +674,11 @@ fn per_document_history_drops_oldest_edits() {
 
     for index in 0..MAX_DOCUMENT_EDIT_HISTORY_ENTRIES + 1 {
         store
-            .add_bookmark(document_path, format!("Bookmark {index}"), position(index))
+            .add_bookmark(
+                document_path,
+                Some(format!("Bookmark {index}")),
+                position(index),
+            )
             .unwrap();
     }
     for _ in 0..MAX_DOCUMENT_EDIT_HISTORY_ENTRIES {
@@ -774,7 +820,7 @@ fn edit_history_is_bounded_and_not_persisted() {
         for index in 0..=MAX_DOCUMENT_EDIT_HISTORIES {
             let path = PathBuf::from(format!("/tmp/bounded-document-{index}.pdf"));
             store
-                .add_bookmark(&path, format!("Bookmark {index}"), position(index))
+                .add_bookmark(&path, Some(format!("Bookmark {index}")), position(index))
                 .unwrap();
         }
         assert!(!store.can_undo_document(&oldest_path));
@@ -1399,11 +1445,62 @@ fn ai_mention_reference_keeps_historical_variant_encoding_compatible() {
 }
 
 #[test]
+fn reader_sidebar_keeps_historical_variant_encoding_compatible() {
+    #[derive(Serialize)]
+    enum HistoricalReaderSidebar {
+        Thumbnails,
+        TableOfContents,
+        Notes,
+    }
+
+    let historical = [
+        (
+            HistoricalReaderSidebar::Thumbnails,
+            ReaderSidebar::Thumbnails,
+        ),
+        (
+            HistoricalReaderSidebar::TableOfContents,
+            ReaderSidebar::TableOfContents,
+        ),
+        (HistoricalReaderSidebar::Notes, ReaderSidebar::Notes),
+    ];
+
+    for (historical, expected) in historical {
+        let bytes = encode(&historical).unwrap();
+        assert_eq!(decode::<ReaderSidebar>(&bytes).unwrap(), expected);
+    }
+}
+
+#[test]
+fn legacy_bookmark_labels_map_to_automatic_or_custom_titles() {
+    let automatic = LegacyBookmark {
+        id: 1,
+        path: PathBuf::from("/tmp/automatic-title.pdf"),
+        label: String::new(),
+        position: StoredDocumentPositionV1::from(&position(2)),
+        created: 1,
+    }
+    .into_domain();
+    let custom = LegacyBookmark {
+        id: 2,
+        path: PathBuf::from("/tmp/custom-title.pdf"),
+        label: "Chapter 3".to_string(),
+        position: StoredDocumentPositionV1::from(&position(3)),
+        created: 2,
+    }
+    .into_domain();
+
+    assert_eq!(automatic.title, None);
+    assert_eq!(custom.title.as_deref(), Some("Chapter 3"));
+}
+
+#[test]
 fn persists_sidebar_widths() {
     let path = temp_library_path("sidebar-widths");
     let widths = SidebarWidths {
         thumbnails: 222.0,
         toc: 333.0,
+        bookmarks: 388.0,
         notes: 444.0,
         ai: 555.0,
     };
@@ -1419,6 +1516,29 @@ fn persists_sidebar_widths() {
     }
 
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn legacy_sidebar_widths_receive_a_bookmarks_default() {
+    let stored = StoredSidebarWidthsV1 {
+        version: STORAGE_SCHEMA_VERSION,
+        widths: LegacySidebarWidthsV1 {
+            thumbnails: 210.0,
+            toc: 275.0,
+            notes: 320.0,
+            ai: 380.0,
+        },
+    };
+    let widths = decode::<StoredSidebarWidthsV1>(&encode(&stored).unwrap())
+        .unwrap()
+        .into_domain()
+        .unwrap();
+
+    assert_eq!(widths.thumbnails, 210.0);
+    assert_eq!(widths.toc, 275.0);
+    assert_eq!(widths.bookmarks, DEFAULT_BOOKMARKS_SIDEBAR_WIDTH);
+    assert_eq!(widths.notes, 320.0);
+    assert_eq!(widths.ai, 380.0);
 }
 
 #[test]
@@ -1575,7 +1695,7 @@ fn persists_reader_session_with_duplicate_document_tabs() {
             },
             active_pane: 1,
             dock_document_tab: Some(2),
-            left_sidebar: Some(ReaderSidebar::Notes),
+            left_sidebar: Some(ReaderSidebar::Bookmarks),
             ai_panel_open: true,
             transparency_enabled: false,
             synchronized_groups: vec![ReaderSynchronizedGroup {
@@ -2236,7 +2356,11 @@ fn persists_epub_positions_annotations_and_preferences() {
         let mut store = LibraryStore::open(database_path.clone()).unwrap();
         store.record_history(&document_path, position.clone());
         store
-            .add_bookmark(&document_path, "Chapter", position.clone())
+            .add_bookmark(
+                &document_path,
+                Some("Chapter".to_string()),
+                position.clone(),
+            )
             .unwrap();
         store
             .add_reflow_highlight(
@@ -2350,7 +2474,7 @@ fn persists_non_utf8_paths_for_all_path_records() {
         store.record_history(&document_path, position(1));
         store.save().unwrap();
         store
-            .add_bookmark(&document_path, "bookmark", position(2))
+            .add_bookmark(&document_path, Some("bookmark".to_string()), position(2))
             .unwrap();
         store
             .add_highlight(
@@ -2593,7 +2717,7 @@ fn relinking_catalog_item_moves_path_backed_reader_data_atomically() {
         let managed_old_path = store.primary_attachment(item_id).unwrap().path.clone();
         store.record_history(&managed_old_path, position(3));
         store
-            .add_bookmark(&managed_old_path, "bookmark", position(4))
+            .add_bookmark(&managed_old_path, Some("bookmark".to_string()), position(4))
             .unwrap();
         store.relink_library_attachment(item_id, &new_path).unwrap();
 

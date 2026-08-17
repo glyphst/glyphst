@@ -1,8 +1,12 @@
 use std::ops::Range;
 
-use crate::document_view::DocumentView;
-use crate::picker::{Picker, PickerDelegate, fuzzy_match, normalize_query};
-use glyphst_ui::tooltip::text_tooltip;
+use crate::{
+    document_view::DocumentView,
+    icons::IconName,
+    picker::{Picker, PickerDelegate, fuzzy_match, normalize_query},
+    settings::ui_rems,
+};
+use glyphst_ui::{icons::Icon, tooltip::text_tooltip};
 use gpui::{
     AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, SharedString, StyledText,
     WeakEntity, Window, div, prelude::*, px,
@@ -24,6 +28,7 @@ pub struct TocPaletteEntry {
     pub title: SharedString,
     pub depth: usize,
     pub page_number: usize,
+    pub bookmarked: bool,
 }
 
 struct TocMatch {
@@ -45,6 +50,10 @@ impl TocPaletteDelegate {
             entries,
             matches: Vec::new(),
         }
+    }
+
+    pub fn replace_entries(&mut self, entries: Vec<TocPaletteEntry>) {
+        self.entries = entries;
     }
 }
 
@@ -145,6 +154,21 @@ impl PickerDelegate for TocPaletteDelegate {
             .justify_between()
             .w_full()
             .child(div().flex_none().w(px(depth as f32 * 14.0)))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(18.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(entry.bookmarked, |this| {
+                        this.child(
+                            Icon::new(IconName::Bookmark)
+                                .size(ui_rems(13.0))
+                                .text_color(theme.primary),
+                        )
+                    }),
+            )
             .child(
                 div()
                     .id(("toc-picker-title", entry.entry_ix))

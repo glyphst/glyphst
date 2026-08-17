@@ -82,8 +82,10 @@ impl DocumentView {
         if self.grid_overview_open || self.is_presentation_mode() {
             return;
         }
+        self.document_toolbar_hovered = false;
         self.zoom_popup_visible = true;
         self.schedule_zoom_popup_hide(cx);
+        self.schedule_document_toolbar_hide(cx);
         cx.notify();
     }
 

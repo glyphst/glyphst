@@ -15,6 +15,7 @@ use crate::{
     icons::IconName,
     pane::{SplitDown, SplitRight},
 };
+use glyphst_ui::activity::ActivityCenter;
 
 use super::Workspace;
 
@@ -240,6 +241,8 @@ impl RenderOnce for WorkspaceTitleBar {
                 )
             })
             .into_any_element();
+        let activity = ActivityCenter::try_global(cx)
+            .and_then(|center| center.read(cx).render_activity(Anchor::TopRight));
         let close_workspace = workspace.clone();
         let collapse_workspace = workspace;
 
@@ -264,7 +267,8 @@ impl RenderOnce for WorkspaceTitleBar {
                                     workspace.set_title_bar_menu_expanded(false, cx);
                                 });
                             }),
-                    ),
+                    )
+                    .children(activity),
             )
             .when_some(self.window_close_handler, |title_bar, handler| {
                 title_bar.on_close_window(move |_, window, cx| {

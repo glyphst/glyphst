@@ -108,7 +108,7 @@ impl DocumentView {
         self.toc_sidebar_entries_dirty = false;
     }
 
-    fn render_footbar_icon_button(
+    fn render_document_toolbar_icon_button(
         id: &'static str,
         icon: IconName,
         open: bool,
@@ -116,23 +116,24 @@ impl DocumentView {
         cx: &mut Context<Self>,
     ) -> Button {
         Button::new(id)
-            .xsmall()
+            .small()
             .compact()
             .ghost()
             .selected(open)
             .icon(icon)
-            .h(ui_rems(FOOTBAR_BUTTON_HEIGHT))
-            .px_2()
+            .w(ui_rems(CONTROL_SIZE))
+            .h(ui_rems(CONTROL_SIZE))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.close_epub_style_panel(cx);
                 handler(this, window, cx);
+                this.show_document_toolbar(cx);
                 cx.stop_propagation();
             }))
     }
 
     pub(super) fn render_grid_overview_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::render_footbar_icon_button(
-            "footbar-grid-overview",
+        Self::render_document_toolbar_icon_button(
+            "document-toolbar-grid-overview",
             IconName::LayoutGrid,
             self.grid_overview_open,
             |this, _, cx| this.toggle_grid_overview(cx),
@@ -141,24 +142,14 @@ impl DocumentView {
     }
 
     pub(super) fn render_two_column_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::render_footbar_icon_button(
-            "footbar-two-column",
+        Self::render_document_toolbar_icon_button(
+            "document-toolbar-two-column",
             IconName::BookOpen,
             self.is_two_column_layout(),
             |this, _, cx| this.toggle_two_column_mode(cx),
             cx,
         )
         .tooltip(crate::fl!("pdf-two-column-tooltip"))
-    }
-
-    pub(super) fn render_ai_button(&self, open: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::render_footbar_icon_button(
-            "footbar-ai",
-            IconName::Bot,
-            open,
-            |_, window, cx| window.dispatch_action(Box::new(ToggleAiPanel), cx),
-            cx,
-        )
     }
 
     pub(super) fn toggle_region_selection(&mut self, cx: &mut Context<Self>) {
@@ -193,8 +184,8 @@ impl DocumentView {
     }
 
     pub(super) fn render_region_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::render_footbar_icon_button(
-            "footbar-region-selection",
+        Self::render_document_toolbar_icon_button(
+            "document-toolbar-region-selection",
             IconName::Scan,
             self.region_tool_active,
             |this, _, cx| this.toggle_region_selection(cx),
@@ -253,7 +244,7 @@ impl DocumentView {
             .ghost()
             .selected(active)
             .label(label)
-            .h(ui_rems(FOOTBAR_BUTTON_HEIGHT))
+            .h(ui_rems(COMPACT_CONTROL_HEIGHT))
             .min_w(px(24.0))
             .px_2()
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -322,14 +313,14 @@ impl DocumentView {
 
     pub(super) fn render_epub_style_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let open = self.epub_style_panel_position.is_some();
-        Button::new("footbar-epub-style")
-            .xsmall()
+        Button::new("document-toolbar-epub-style")
+            .small()
             .compact()
             .ghost()
             .selected(open)
             .icon(IconName::Settings)
-            .h(ui_rems(FOOTBAR_BUTTON_HEIGHT))
-            .px_2()
+            .w(ui_rems(CONTROL_SIZE))
+            .h(ui_rems(CONTROL_SIZE))
             .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
                 this.toggle_epub_style_panel(event.position(), cx);
                 cx.stop_propagation();

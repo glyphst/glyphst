@@ -133,7 +133,7 @@ impl DocumentView {
     pub fn supports_sidebar(&self, sidebar: DocumentSidebar) -> bool {
         match sidebar {
             DocumentSidebar::Thumbnails => self.capabilities.page_overview,
-            DocumentSidebar::Toc | DocumentSidebar::Notes => true,
+            DocumentSidebar::Toc | DocumentSidebar::Bookmarks | DocumentSidebar::Notes => true,
         }
     }
 
@@ -150,6 +150,9 @@ impl DocumentView {
                 .into_any_element(),
             DocumentSidebar::Toc => self
                 .render_toc_sidebar(theme, window, cx)
+                .into_any_element(),
+            DocumentSidebar::Bookmarks => self
+                .render_bookmarks_sidebar(theme, window, cx)
                 .into_any_element(),
             DocumentSidebar::Notes => {
                 self.refresh_notes_sidebar_entries();
@@ -322,6 +325,7 @@ impl DocumentView {
         let depth = entry.depth;
         let has_children = entry.has_children;
         let navigable = entry.navigable;
+        let bookmarked = navigable && self.is_page_bookmarked(entry.page_idx);
         let page_number = entry.page_idx + 1;
         let row_id = if sticky {
             "toc-sidebar-sticky-entry"
@@ -378,6 +382,21 @@ impl DocumentView {
                     )
             })
             .child(div().flex_none().w(px(depth as f32 * 14.0)))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(16.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(bookmarked, |this| {
+                        this.child(
+                            Icon::new(IconName::Bookmark)
+                                .size(ui_rems(13.0))
+                                .text_color(theme.primary),
+                        )
+                    }),
+            )
             .child(
                 div()
                     .id((disclosure_id, entry_ix))
@@ -766,6 +785,165 @@ impl DocumentView {
         let document_view = cx.entity().downgrade();
         Self::render_sidebar_shell(
             crate::fl!("notes-title"),
+            Self::render_sidebar_count(visible_len, theme),
+            content,
+            theme,
+            document_view,
+        )
+    }
+
+    pub(super) fn render_bookmarks_sidebar(
+        &mut self,
+        theme: ThemeColor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let visible_len = self.bookmarks.len();
+        let scroll_handle = self.bookmark_sidebar_scroll.clone();
+        let content = div()
+            .id("bookmarks-sidebar-content")
+            .debug_selector(|| "bookmarks-sidebar-content".to_string())
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .when(visible_len == 0, |this| {
+                this.child(Self::render_sidebar_empty_message(
+                    crate::fl!("bookmarks-document-empty"),
+                    theme,
+                ))
+            })
+            .when(visible_len > 0, |this| {
+                this.child(
+                    uniform_list(
+                        "bookmarks-sidebar-list",
+                        visible_len,
+                        cx.processor(|this, visible_range: Range<usize>, _window, cx| {
+                            let theme = cx.theme().colors;
+                            let bookmarks = this.resolved_document_bookmarks();
+                            visible_range
+                                .filter_map(|visible_ix| {
+                                    let (bookmark, page_idx) = bookmarks.get(visible_ix)?.clone();
+                                    let id = bookmark.id;
+                                    let position = bookmark.position.clone();
+                                    let title = this.effective_bookmark_title(&bookmark, page_idx);
+                                    let current = page_idx == this.current_page_index();
+
+                                    let row = div()
+                                        .id(format!("bookmarks-sidebar-bookmark-{id}"))
+                                        .group("bookmark-sidebar-row")
+                                        .flex()
+                                        .size_full()
+                                        .items_center()
+                                        .gap_2()
+                                        .px_2()
+                                        .rounded(cx.theme().radius)
+                                        .bg(if current {
+                                            theme.list_active
+                                        } else {
+                                            transparent_black()
+                                        })
+                                        .cursor_pointer()
+                                        .hover(move |style| style.bg(theme.list_hover))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _, cx| {
+                                                cx.emit(
+                                                    DocumentViewEvent::SidebarNavigationRequested,
+                                                );
+                                                this.navigate_to_document_position(
+                                                    position.clone(),
+                                                    cx,
+                                                );
+                                                cx.stop_propagation();
+                                            }),
+                                        )
+                                        .child(
+                                            Icon::new(IconName::Bookmark)
+                                                .size(ui_rems(15.0))
+                                                .text_color(theme.primary),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_size(ui_rems(13.0))
+                                                .child(title),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(
+                                                    toolbar_icon_button(
+                                                        format!("bookmark-edit-{id}"),
+                                                        IconName::Pencil,
+                                                    )
+                                                    .xsmall()
+                                                    .tooltip(crate::fl!("bookmark-edit-title"))
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        |_, _, cx| cx.stop_propagation(),
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.open_existing_bookmark_title_editor(
+                                                                id, window, cx,
+                                                            );
+                                                            cx.stop_propagation();
+                                                        },
+                                                    )),
+                                                )
+                                                .child(
+                                                    toolbar_icon_button(
+                                                        format!("bookmark-remove-{id}"),
+                                                        IconName::Trash2,
+                                                    )
+                                                    .xsmall()
+                                                    .tooltip(crate::fl!("bookmark-remove"))
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        |_, _, cx| cx.stop_propagation(),
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            this.remove_bookmark(id, cx);
+                                                            cx.stop_propagation();
+                                                        },
+                                                    )),
+                                                ),
+                                        );
+
+                                    Some(
+                                        div()
+                                            .h(px(BOOKMARKS_SIDEBAR_ROW_HEIGHT))
+                                            .w_full()
+                                            .px_1()
+                                            .py_0p5()
+                                            .child(row),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&scroll_handle)
+                    .size_full(),
+                )
+                .vertical_scrollbar_for_with_id(
+                    &scroll_handle,
+                    "bookmarks-sidebar-scrollbar",
+                    window,
+                    cx,
+                )
+            });
+
+        let document_view = cx.entity().downgrade();
+        Self::render_sidebar_shell(
+            crate::fl!("bookmarks-title"),
             Self::render_sidebar_count(visible_len, theme),
             content,
             theme,

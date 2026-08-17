@@ -321,7 +321,7 @@ impl LibraryStore {
         let write_txn = database.begin_write()?;
         {
             let mut table = write_txn.open_table(UI_STATE_V1_TABLE)?;
-            let encoded = encode(&StoredSidebarWidthsV1::from(widths))?;
+            let encoded = encode(&StoredSidebarWidthsV2::from(widths))?;
             table.insert(SIDEBAR_WIDTHS_KEY, encoded.as_slice())?;
         }
         write_txn.commit()?;

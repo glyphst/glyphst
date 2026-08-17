@@ -7,22 +7,35 @@ use crate::{
     settings::ui_rems,
 };
 use gpui::{
-    AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, SharedString, StyledText,
-    WeakEntity, Window, div, prelude::*,
+    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    HighlightStyle, MouseButton, Render, SharedString, StyledText, WeakEntity, Window, div,
+    prelude::*, px,
 };
-use gpui_component::ThemeColor;
+use gpui_component::{
+    Sizable as _, ThemeColor, ThemeStyled as _,
+    button::{Button, ButtonVariants as _},
+    input::{Escape as ComponentInputEscape, Input, InputEvent, InputState},
+};
 
 const MAX_VISIBLE_MATCHES: usize = 12;
 const MATCH_ROW_HEIGHT: f32 = 46.0;
 
 pub type BookmarkPalette = Picker<BookmarkPaletteDelegate>;
-pub type BookmarkPrompt = Picker<BookmarkPromptDelegate>;
+
+pub enum BookmarkTitleEditorEvent {
+    Save(SharedString),
+    Cancel,
+}
+
+pub struct BookmarkTitleEditor {
+    input: Entity<InputState>,
+}
 
 #[derive(Clone)]
 pub struct BookmarkPaletteEntry {
     id: u64,
     path: PathBuf,
-    label: SharedString,
+    title: SharedString,
     file_name: SharedString,
     page: usize,
     position: DocumentPosition,
@@ -39,11 +52,6 @@ pub struct BookmarkPaletteDelegate {
     document_view: WeakEntity<DocumentView>,
     entries: Vec<BookmarkPaletteEntry>,
     matches: Vec<BookmarkMatch>,
-}
-
-pub struct BookmarkPromptDelegate {
-    path: PathBuf,
-    position: DocumentPosition,
 }
 
 impl BookmarkPaletteDelegate {
@@ -63,11 +71,14 @@ impl BookmarkPaletteDelegate {
                     .map(ToString::to_string)
                     .unwrap_or_else(|| crate::fl!("untitled"))
                     .into();
+                let title = bookmark.title.unwrap_or_else(|| {
+                    crate::fl!("bookmark-page-label", page = bookmark.position.page as i64)
+                });
                 BookmarkPaletteEntry {
                     id: bookmark.id,
                     current_document: bookmark.path == current_path,
                     path: bookmark.path,
-                    label: bookmark.label.into(),
+                    title: title.into(),
                     file_name,
                     page: bookmark.position.page,
                     position: bookmark.position,
@@ -97,9 +108,83 @@ impl BookmarkPaletteDelegate {
     }
 }
 
-impl BookmarkPromptDelegate {
-    pub fn new(path: PathBuf, position: DocumentPosition) -> Self {
-        Self { path, position }
+impl BookmarkTitleEditor {
+    pub fn new(content: SharedString, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let content_len = content.len();
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(content)
+                .placeholder(crate::fl!("bookmark-title-placeholder"))
+        });
+        input.update(cx, |input, cx| {
+            input.set_selected_range(0..content_len, cx);
+        });
+        cx.subscribe(&input, |this, _, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.save(cx);
+            }
+        })
+        .detach();
+
+        let focus = input.read(cx).focus_handle(cx);
+        window.on_next_frame(move |window, cx| {
+            focus.focus(window, cx);
+        });
+
+        Self { input }
+    }
+
+    fn save(&mut self, cx: &mut Context<Self>) {
+        cx.emit(BookmarkTitleEditorEvent::Save(self.input.read(cx).value()));
+    }
+
+    fn cancel(&mut self, _: &ComponentInputEscape, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(BookmarkTitleEditorEvent::Cancel);
+    }
+}
+
+impl EventEmitter<BookmarkTitleEditorEvent> for BookmarkTitleEditor {}
+
+impl Focusable for BookmarkTitleEditor {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.input.focus_handle(cx)
+    }
+}
+
+impl Render for BookmarkTitleEditor {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("bookmark-title-editor")
+            .debug_selector(|| "bookmark-title-editor".to_string())
+            .key_context("BookmarkTitle")
+            .track_focus(&self.focus_handle(cx))
+            .flex()
+            .items_center()
+            .gap_2()
+            .w(px(420.0))
+            .max_w_full()
+            .p_2()
+            .popover_style(cx)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_action(cx.listener(Self::cancel))
+            .child(Input::new(&self.input).small().flex_1().min_w_0())
+            .child(
+                Button::new("bookmark-title-cancel")
+                    .small()
+                    .label(crate::fl!("cancel"))
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(BookmarkTitleEditorEvent::Cancel);
+                    })),
+            )
+            .child(
+                Button::new("bookmark-title-save")
+                    .small()
+                    .primary()
+                    .label(crate::fl!("save"))
+                    .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+            )
     }
 }
 
@@ -147,10 +232,10 @@ impl PickerDelegate for BookmarkPaletteDelegate {
             .iter()
             .enumerate()
             .filter_map(|(entry_ix, entry)| {
-                fuzzy_match(entry.label.as_ref(), &query)
+                fuzzy_match(entry.title.as_ref(), &query)
                     .or_else(|| {
                         fuzzy_match(entry.file_name.as_ref(), &query)
-                            .map(|(_, score)| (Vec::new(), score + entry.label.len()))
+                            .map(|(_, score)| (Vec::new(), score + entry.title.len()))
                     })
                     .map(|(highlights, score)| BookmarkMatch {
                         entry_ix,
@@ -213,7 +298,7 @@ impl PickerDelegate for BookmarkPaletteDelegate {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(StyledText::new(entry.label.clone()).with_highlights(highlights))
+                    .child(StyledText::new(entry.title.clone()).with_highlights(highlights))
                     .child(
                         div()
                             .truncate()
@@ -283,70 +368,6 @@ impl PickerDelegate for BookmarkPaletteDelegate {
             Ok(true) => self.entries.retain(|entry| entry.id != id),
             Ok(false) => {}
             Err(error) => eprintln!("failed to remove bookmark: {error:#}"),
-        }
-    }
-}
-
-impl PickerDelegate for BookmarkPromptDelegate {
-    fn key_context(&self) -> &'static str {
-        "BookmarkPrompt Menu"
-    }
-
-    fn placeholder(&self) -> SharedString {
-        "Bookmark label…".into()
-    }
-
-    fn empty_message(&self) -> SharedString {
-        "Press Enter to save bookmark".into()
-    }
-
-    fn width(&self) -> f32 {
-        460.0
-    }
-
-    fn row_height(&self) -> f32 {
-        MATCH_ROW_HEIGHT
-    }
-
-    fn max_visible_matches(&self) -> usize {
-        1
-    }
-
-    fn match_count(&self) -> usize {
-        0
-    }
-
-    fn update_matches(&mut self, _: &str) {}
-
-    fn render_match(&self, _: usize, _: ThemeColor, _: &FocusHandle, _: &Window) -> AnyElement {
-        div().into_any_element()
-    }
-
-    fn confirm(
-        &mut self,
-        _: usize,
-        _: &FocusHandle,
-        _: &mut Window,
-        _: &mut Context<Picker<Self>>,
-    ) {
-    }
-
-    fn confirm_input(
-        &mut self,
-        input: SharedString,
-        _: &FocusHandle,
-        _: &mut Window,
-        cx: &mut Context<Picker<Self>>,
-    ) {
-        let label = input.as_ref().trim();
-        if label.is_empty() {
-            return;
-        }
-
-        if let Err(error) = cx.update_global::<LibraryStore, _>(|store, _| {
-            store.add_bookmark(&self.path, label, self.position.clone())
-        }) {
-            eprintln!("failed to add bookmark: {error:#}");
         }
     }
 }

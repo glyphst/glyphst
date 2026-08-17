@@ -279,7 +279,7 @@ impl ActivityCenter {
         }
     }
 
-    pub fn render_activity(&self) -> Option<AnyElement> {
+    pub fn render_activity(&self, anchor: Anchor) -> Option<AnyElement> {
         if self.tasks.is_empty() && self.notices.is_empty() {
             return None;
         }
@@ -302,7 +302,7 @@ impl ActivityCenter {
 
         Some(
             Popover::new("background-activity-popover")
-                .anchor(Anchor::BottomRight)
+                .anchor(anchor)
                 .trigger(
                     Button::new("background-activity")
                         .when(!tasks.is_empty(), |button| {

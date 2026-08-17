@@ -48,7 +48,7 @@ fn migrates_legacy_storage_without_replacing_legacy_rows() {
     let bookmark = Bookmark {
         id: 1,
         path: document_path.clone(),
-        label: "legacy bookmark".to_string(),
+        title: Some("legacy bookmark".to_string()),
         position: position(2),
         created: 2,
     };
@@ -90,12 +90,13 @@ fn migrates_legacy_storage_without_replacing_legacy_rows() {
         created: 5,
         updated: 6,
     };
-    let widths = SidebarWidths {
+    let legacy_widths = LegacySidebarWidthsV1 {
         thumbnails: 1.0,
         toc: 2.0,
         notes: 3.0,
         ai: 4.0,
     };
+    let widths = legacy_widths.into_domain();
 
     {
         let database = Database::create(&database_path).unwrap();
@@ -124,7 +125,7 @@ fn migrates_legacy_storage_without_replacing_legacy_rows() {
                     encode(&LegacyBookmark {
                         id: bookmark.id,
                         path: bookmark.path.clone(),
-                        label: bookmark.label.clone(),
+                        label: bookmark.title.clone().unwrap(),
                         position: StoredDocumentPositionV1::from(&bookmark.position),
                         created: bookmark.created,
                     })
@@ -201,7 +202,10 @@ fn migrates_legacy_storage_without_replacing_legacy_rows() {
         {
             let mut table = write_txn.open_table(UI_STATE_TABLE).unwrap();
             table
-                .insert(SIDEBAR_WIDTHS_KEY, encode(&widths).unwrap().as_slice())
+                .insert(
+                    SIDEBAR_WIDTHS_KEY,
+                    encode(&legacy_widths).unwrap().as_slice(),
+                )
                 .unwrap();
         }
         {

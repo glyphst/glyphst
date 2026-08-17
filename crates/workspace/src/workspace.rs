@@ -46,8 +46,9 @@ use crate::{
     document_view::{
         CloseTab, DocumentSidebar, DocumentView, DocumentViewEvent, DuplicateTab, OpenFile,
         OpenKeybindings, OpenNewTab, OpenQuickAsk, OpenSettings, OpenWithSystemPicker, ResetZoom,
-        ToggleAiPanel, ToggleCommandPalette, ToggleHome, ToggleNotes, ToggleThumbnailSidebar,
-        ToggleToc, ToggleTransparency, TranslationViewportAnchor, ZoomIn, ZoomOut,
+        ToggleAiPanel, ToggleBookmarkSidebar, ToggleCommandPalette, ToggleHome, ToggleNotes,
+        ToggleThumbnailSidebar, ToggleToc, ToggleTransparency, TranslationViewportAnchor, ZoomIn,
+        ZoomOut,
     },
     external_drop::{
         ExternalDocumentDropFeedback, classify_external_document_paths,
@@ -357,6 +358,7 @@ impl Workspace {
         workspace.docks.left_sidebar = session.left_sidebar.map(|sidebar| match sidebar {
             ReaderSidebar::Thumbnails => DocumentSidebar::Thumbnails,
             ReaderSidebar::TableOfContents => DocumentSidebar::Toc,
+            ReaderSidebar::Bookmarks => DocumentSidebar::Bookmarks,
             ReaderSidebar::Notes => DocumentSidebar::Notes,
         });
         workspace.docks.ai_panel_open = session.ai_panel_open;
@@ -875,6 +877,7 @@ impl Workspace {
             left_sidebar: self.docks.left_sidebar.map(|sidebar| match sidebar {
                 DocumentSidebar::Thumbnails => ReaderSidebar::Thumbnails,
                 DocumentSidebar::Toc => ReaderSidebar::TableOfContents,
+                DocumentSidebar::Bookmarks => ReaderSidebar::Bookmarks,
                 DocumentSidebar::Notes => ReaderSidebar::Notes,
             }),
             ai_panel_open: self.docks.ai_panel_open,
@@ -4542,6 +4545,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleNotes, window, cx| {
                 this.toggle_left_sidebar(DocumentSidebar::Notes, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleBookmarkSidebar, window, cx| {
+                this.toggle_left_sidebar(DocumentSidebar::Bookmarks, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleThumbnailSidebar, window, cx| {
                 this.toggle_left_sidebar(DocumentSidebar::Thumbnails, window, cx);
             }))
@@ -4718,6 +4724,7 @@ mod tests {
     use crate::{
         document_view::{
             DocumentSidebar, RenderCache, SynchronizedScrollDelta, SynchronizedScrollMode,
+            ToggleBookmarkSidebar,
         },
         library::{
             DocumentPosition, LibraryStore, ReaderNewTabSession, ReaderPaneSession, ReaderPaneTree,
@@ -4768,6 +4775,124 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[gpui::test]
+    fn bookmark_sidebar_action_targets_the_current_document(cx: &mut TestAppContext) {
+        let document_path = temporary_pdf_path("bookmarks");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::keybindings::capture_framework_bindings(cx);
+            crate::keybindings::apply(cx, glyphst_settings::KeymapPreset::Modern, &[]);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            window.dispatch_action(Box::new(ToggleBookmarkSidebar), cx);
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.docks.left_sidebar,
+                Some(DocumentSidebar::Bookmarks)
+            );
+        });
+        assert!(cx.debug_bounds("bookmarks-sidebar-content").is_some());
+
+        fs::remove_file(document_path).unwrap();
+    }
+
+    #[gpui::test]
+    fn pulled_bookmark_ribbon_is_top_anchored_and_opens_the_title_editor(cx: &mut TestAppContext) {
+        let document_path = temporary_pdf_path("bookmark-ribbon");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::keybindings::capture_framework_bindings(cx);
+            crate::keybindings::apply(cx, glyphst_settings::KeymapPreset::Modern, &[]);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (_root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let hover_zone = cx.debug_bounds("document-toolbar-hover-zone").unwrap();
+        assert_eq!(hover_zone.size.height, px(44.0));
+
+        cx.simulate_mouse_move(
+            point(hover_zone.center().x, hover_zone.top() + px(2.0)),
+            None,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let toolbar = cx.debug_bounds("document-hover-toolbar").unwrap();
+        assert_eq!(toolbar, hover_zone);
+
+        let bookmark_button = cx
+            .debug_bounds("document-toolbar-bookmark-control")
+            .unwrap();
+        let pull_end = point(
+            bookmark_button.center().x,
+            bookmark_button.center().y + px(70.0),
+        );
+        cx.simulate_mouse_down(
+            bookmark_button.center(),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(pull_end, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let ribbon = cx.debug_bounds("document-toolbar-bookmark-ribbon").unwrap();
+        assert_eq!(ribbon.top(), toolbar.top());
+        assert!(ribbon.bottom() > toolbar.bottom());
+
+        cx.simulate_mouse_up(pull_end, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("document-toolbar-bookmark-ribbon")
+                .is_none()
+        );
+        assert!(cx.debug_bounds("bookmark-title-editor").is_some());
+
+        fs::remove_file(document_path).unwrap();
     }
 
     fn write_minimal_pdf_with_height(path: &Path, height: u32) {
@@ -5556,6 +5681,7 @@ mod tests {
         assert!(cx.debug_bounds("workspace-left-dock").is_none());
         assert!(cx.debug_bounds("workspace-ai-dock").is_none());
         assert!(cx.debug_bounds("workspace-pane-footbar").is_none());
+        assert!(cx.debug_bounds("document-toolbar-hover-zone").is_some());
         cx.update(|window, _| assert_eq!(window.is_fullscreen(), fullscreen_before));
 
         cx.simulate_keystrokes("tab");
@@ -5627,7 +5753,8 @@ mod tests {
         assert!(cx.debug_bounds("active-pane-surface").is_some());
         assert!(cx.debug_bounds("workspace-left-dock").is_some());
         assert!(cx.debug_bounds("workspace-ai-dock").is_some());
-        assert!(cx.debug_bounds("workspace-pane-footbar").is_some());
+        assert!(cx.debug_bounds("workspace-pane-footbar").is_none());
+        assert!(cx.debug_bounds("document-toolbar-hover-zone").is_some());
 
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.enter_home(window, cx);
@@ -5872,7 +5999,7 @@ mod tests {
             },
             active_pane: 2,
             dock_document_tab: None,
-            left_sidebar: Some(ReaderSidebar::Notes),
+            left_sidebar: Some(ReaderSidebar::Bookmarks),
             ai_panel_open: true,
             transparency_enabled: false,
             synchronized_groups: Vec::new(),
@@ -5892,7 +6019,10 @@ mod tests {
             assert_eq!(workspace.pane_group.panes().len(), 2);
             assert_eq!(workspace.active_pane, workspace.pane_group.panes()[1]);
             assert_eq!(workspace.active_pane.read(cx).active_tab_ix(), 0);
-            assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Notes));
+            assert_eq!(
+                workspace.docks.left_sidebar,
+                Some(DocumentSidebar::Bookmarks)
+            );
             assert!(workspace.docks.ai_panel_open);
             assert!(!workspace.transparency_enabled);
             assert!(!workspace.reader_session_restore_pending());
@@ -5901,7 +6031,7 @@ mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             let snapshot = workspace.reader_window_session(window, cx);
             assert_eq!(snapshot.active_pane, 2);
-            assert_eq!(snapshot.left_sidebar, Some(ReaderSidebar::Notes));
+            assert_eq!(snapshot.left_sidebar, Some(ReaderSidebar::Bookmarks));
             let ReaderPaneTree::Split {
                 axis,
                 ratios,
@@ -7387,14 +7517,13 @@ mod tests {
         let navigation = cx.debug_bounds("workspace-left-navigation").unwrap();
         let pane_column = cx.debug_bounds("workspace-pane-column").unwrap();
         let pane_area = cx.debug_bounds("workspace-dock-center").unwrap();
-        let footbar = cx.debug_bounds("workspace-pane-footbar").unwrap();
         let ai = cx.debug_bounds("workspace-ai-dock").unwrap();
         assert!(cx.debug_bounds("workspace-main-card").is_none());
         assert_eq!(pane_column.left() - navigation.right(), px(4.0));
         assert_eq!(ai.left() - pane_column.right(), px(4.0));
-        assert_eq!(footbar.top() - pane_area.bottom(), px(4.0));
-        assert_eq!(footbar.left(), pane_area.left());
-        assert_eq!(footbar.right(), pane_area.right());
+        assert_eq!(pane_area.top(), pane_column.top());
+        assert_eq!(pane_area.bottom(), pane_column.bottom());
+        assert!(cx.debug_bounds("workspace-pane-footbar").is_none());
 
         cx.simulate_resize(size(px(1_600.0), px(900.0)));
         cx.update(|window, cx| {

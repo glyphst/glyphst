@@ -59,7 +59,7 @@ impl Render for DocumentView {
                 anchored()
                     .snap_to_window_with_margin(px(8.0))
                     .position(position)
-                    .anchor(Anchor::BottomLeft)
+                    .anchor(Anchor::TopLeft)
                     .child(self.render_epub_style_panel(ui_theme, cx)),
             )
             .with_priority(3)
@@ -108,8 +108,12 @@ impl Render for DocumentView {
             let card = self.render_translation_card(state, true, cx.theme().colors, window, cx);
             let mut container = div().absolute().m(px(16.0));
             container = match corner {
-                TranslationBoxCorner::TopLeft => container.top(px(0.0)).left(px(0.0)),
-                TranslationBoxCorner::TopRight => container.top(px(0.0)).right(px(0.0)),
+                TranslationBoxCorner::TopLeft => {
+                    container.top(px(DOCUMENT_TOOLBAR_HEIGHT)).left(px(0.0))
+                }
+                TranslationBoxCorner::TopRight => {
+                    container.top(px(DOCUMENT_TOOLBAR_HEIGHT)).right(px(0.0))
+                }
                 TranslationBoxCorner::BottomLeft => container.bottom(px(0.0)).left(px(0.0)),
                 TranslationBoxCorner::BottomRight => container.bottom(px(0.0)).right(px(0.0)),
             };
@@ -327,8 +331,8 @@ impl Render for DocumentView {
             .on_action(cx.listener(|this, _: &OpenBookmarks, window, cx| {
                 this.toggle_bookmark_palette(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &AddBookmark, window, cx| {
-                this.toggle_bookmark_prompt(window, cx);
+            .on_action(cx.listener(|this, _: &ToggleBookmark, _, cx| {
+                this.toggle_current_bookmark(cx);
             }))
             .when(self.capabilities.publisher_styles, |this| {
                 this.on_action(cx.listener(|this, _: &TogglePublisherStyles, _, cx| {
@@ -442,7 +446,7 @@ impl Render for DocumentView {
                         || this.toc_palette.is_some()
                         || this.history_palette.is_some()
                         || this.bookmark_palette.is_some()
-                        || this.bookmark_prompt.is_some()
+                        || this.bookmark_title_editor.is_some()
                         || this.go_to_page_prompt.is_some()
                         || this.note_editor.is_some()
                     {
@@ -464,6 +468,10 @@ impl Render for DocumentView {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if this.update_bookmark_drag(event.position, event.dragging(), cx) {
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.update_translation_panel_drag(event.position, cx) {
                     cx.stop_propagation();
                     return;
@@ -544,7 +552,11 @@ impl Render for DocumentView {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    if this.finish_bookmark_drag(event.position, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if this.finish_translation_panel_drag(event.position, cx) {
                         cx.stop_propagation();
                         return;
@@ -577,7 +589,11 @@ impl Render for DocumentView {
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    if this.finish_bookmark_drag(event.position, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if this.finish_translation_panel_drag(event.position, cx) {
                         cx.stop_propagation();
                     }
@@ -867,14 +883,6 @@ impl Render for DocumentView {
                     cx,
                 ))
             })
-            .when_some(self.bookmark_prompt.clone(), |this, prompt| {
-                this.child(Self::render_centered_overlay(
-                    prompt,
-                    |this, window, cx| this.close_bookmark_prompt(window, cx),
-                    ui_theme,
-                    cx,
-                ))
-            })
             .when_some(self.go_to_page_prompt.clone(), |this, prompt| {
                 this.child(Self::render_centered_overlay(
                     prompt,
@@ -890,6 +898,52 @@ impl Render for DocumentView {
                     ui_theme,
                     cx,
                 ))
+            })
+            .when(
+                !self.is_presentation_mode()
+                    && self.search_bar.is_none()
+                    && !self.zoom_popup_visible
+                    && self.toc_palette.is_none()
+                    && self.notes_palette.is_none()
+                    && self.history_palette.is_none()
+                    && self.bookmark_palette.is_none()
+                    && self.go_to_page_prompt.is_none()
+                    && self.note_editor.is_none(),
+                |this| {
+                    this.child(
+                        div()
+                            .id("document-toolbar-hover-zone")
+                            .debug_selector(|| "document-toolbar-hover-zone".to_string())
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(DOCUMENT_TOOLBAR_HOVER_HEIGHT))
+                            .flex()
+                            .items_start()
+                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                this.set_document_toolbar_hovered(*hovered, cx);
+                            }))
+                            .when(self.document_toolbar_visible, |this| {
+                                this.child(self.render_document_toolbar(ui_theme, window, cx))
+                            }),
+                    )
+                },
+            )
+            .when_some(self.bookmark_title_editor.clone(), |this, editor| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(DOCUMENT_TOOLBAR_HEIGHT + 8.0))
+                        .left(px(12.0))
+                        .right(px(12.0))
+                        .flex()
+                        .justify_end()
+                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                            this.close_bookmark_title_editor(window, cx);
+                        }))
+                        .child(editor),
+                )
             })
             .children(note_popup)
             .children(context_menu)

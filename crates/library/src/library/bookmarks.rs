@@ -5,16 +5,27 @@ impl LibraryStore {
     pub fn bookmarks(&self) -> &[Bookmark] {
         &self.library.bookmarks
     }
+
+    pub fn bookmarks_for(&self, path: &Path) -> Vec<Bookmark> {
+        let path = normalize_path(path);
+        self.library
+            .bookmarks
+            .iter()
+            .filter(|bookmark| bookmark.path == path)
+            .cloned()
+            .collect()
+    }
+
     pub fn add_bookmark(
         &mut self,
         path: &Path,
-        label: impl Into<String>,
+        title: Option<String>,
         position: DocumentPosition,
     ) -> Result<u64> {
         let mut bookmark = Bookmark {
             id: self.library.next_bookmark_id.max(1),
             path: normalize_path(path),
-            label: label.into(),
+            title,
             position,
             created: current_timestamp(),
         };
@@ -25,6 +36,31 @@ impl LibraryStore {
             after: Some(bookmark.clone()),
         });
         Ok(bookmark.id)
+    }
+
+    pub fn update_bookmark_title(&mut self, id: u64, title: Option<String>) -> Result<bool> {
+        let Some(before) = self
+            .library
+            .bookmarks
+            .iter()
+            .find(|bookmark| bookmark.id == id)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let mut after = before.clone();
+        after.title = title;
+        after.normalize();
+        if after == before {
+            return Ok(false);
+        }
+
+        self.replace_bookmark_snapshot(Some(&before), Some(&after))?;
+        self.record_document_edit(DocumentEdit::Bookmark {
+            before: Some(before),
+            after: Some(after),
+        });
+        Ok(true)
     }
 
     pub fn remove_bookmark(&mut self, id: u64) -> Result<bool> {

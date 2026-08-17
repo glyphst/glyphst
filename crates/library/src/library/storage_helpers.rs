@@ -674,9 +674,12 @@ fn load_document_preferences(
 fn load_shared_v1_storage(read_txn: &redb::ReadTransaction, library: &mut Library) -> Result<()> {
     let table = read_txn.open_table(UI_STATE_V1_TABLE)?;
     if let Some(value) = table.get(SIDEBAR_WIDTHS_KEY)? {
-        match decode::<StoredSidebarWidthsV1>(value.value())
-            .and_then(StoredSidebarWidthsV1::into_domain)
-        {
+        match decode::<StoredSidebarWidthsV2>(value.value())
+            .and_then(StoredSidebarWidthsV2::into_domain)
+            .or_else(|_| {
+                decode::<StoredSidebarWidthsV1>(value.value())
+                    .and_then(StoredSidebarWidthsV1::into_domain)
+            }) {
             Ok(widths) => library.sidebar_widths = Some(widths),
             Err(error) => eprintln!("failed to decode sidebar widths: {error:#}"),
         }
@@ -807,7 +810,10 @@ fn load_legacy_storage(
     {
         let table = read_txn.open_table(UI_STATE_TABLE)?;
         if let Some(value) = table.get(SIDEBAR_WIDTHS_KEY)? {
-            match decode::<SidebarWidths>(value.value()) {
+            match decode::<SidebarWidths>(value.value()).or_else(|_| {
+                decode::<LegacySidebarWidthsV1>(value.value())
+                    .map(LegacySidebarWidthsV1::into_domain)
+            }) {
                 Ok(widths) => library.sidebar_widths = Some(widths),
                 Err(error) => eprintln!("failed to decode sidebar widths: {error:#}"),
             }
@@ -864,7 +870,7 @@ fn migrate_legacy_storage_v1(database: &Database, library: &Library) -> Result<(
     {
         let mut table = write_txn.open_table(UI_STATE_V1_TABLE)?;
         if let Some(widths) = library.sidebar_widths {
-            let encoded = encode(&StoredSidebarWidthsV1::from(widths))?;
+            let encoded = encode(&StoredSidebarWidthsV2::from(widths))?;
             table.insert(SIDEBAR_WIDTHS_KEY, encoded.as_slice())?;
         }
         if let Some(size) = library.document_browser_size {

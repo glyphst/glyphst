@@ -213,7 +213,19 @@ impl DocumentView {
             notes_palette: None,
             history_palette: None,
             bookmark_palette: None,
-            bookmark_prompt: None,
+            bookmark_title_editor: None,
+            bookmark_title_edit: None,
+            bookmarks: Vec::new(),
+            bookmark_sidebar_scroll: UniformListScrollHandle::new(),
+            bookmark_drag: None,
+            bookmark_ribbon_retract: None,
+            bookmark_ribbon_retract_generation: 0,
+            bookmark_ribbon_retract_task: None,
+            suppress_bookmark_click: false,
+            document_toolbar_visible: false,
+            document_toolbar_hovered: false,
+            document_toolbar_hide_generation: 0,
+            document_toolbar_hide_task: None,
             go_to_page_prompt: None,
             note_editor: None,
             note_target: None,
@@ -286,6 +298,7 @@ impl DocumentView {
         let store = cx.global::<LibraryStore>();
         self.document_edit_revision = store.document_edit_revision(&self.path);
         self.bookmarks_revision = store.bookmarks_revision();
+        self.bookmarks = store.bookmarks_for(&self.path);
 
         cx.on_release(|this, cx| {
             if cx.has_global::<RenderCache>() {

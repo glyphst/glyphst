@@ -15,14 +15,14 @@ use std::{
 
 use crate::ai_panel::AI_PANEL_WIDTH;
 use crate::bookmarks::{
-    BookmarkPalette, BookmarkPaletteDelegate, BookmarkPrompt, BookmarkPromptDelegate,
+    BookmarkPalette, BookmarkPaletteDelegate, BookmarkTitleEditor, BookmarkTitleEditorEvent,
 };
 use crate::go_to_page::{GoToPagePrompt, GoToPagePromptDelegate};
 use crate::history::{HistoryPalette, HistoryPaletteDelegate};
 use crate::icons::IconName;
 use crate::library::{
-    DocumentEditRevision, DocumentPosition, Highlight, HighlightColor, HighlightRect, LibraryStore,
-    Note, SemanticTextRange, SidebarWidths, normalize_path,
+    Bookmark, DocumentEditRevision, DocumentPosition, Highlight, HighlightColor, HighlightRect,
+    LibraryStore, Note, SemanticTextRange, SidebarWidths, normalize_path,
 };
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
 use crate::notes::{NotePaletteEntry, NotesPalette, NotesPaletteDelegate};
@@ -69,7 +69,6 @@ use glyphst_translation_ui::{
     LiveTranslationSubmission, TargetLanguageOption, TranslationServices, target_language_options,
 };
 use glyphst_ui::{
-    activity::ActivityCenter,
     icons::{Icon, toolbar_icon_button},
     markdown::{Markdown, MarkdownElement, MarkdownStyle},
     motion::{EASE_OUT, HOVER, LAYOUT, MotionSpec, ScalarTween},
@@ -81,11 +80,11 @@ use gpui::{
     Anchor, AnyElement, AsyncApp, BorderStyle, Bounds, ClickEvent, ClipboardItem, Context, Corners,
     DismissEvent, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point as GpuiPoint, PromptButton, PromptLevel, Render, RenderImage, ScrollDelta,
-    ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement,
-    Task, TextStyle, UniformListScrollHandle, Window, anchored, canvas, deferred, div, fill, hsla,
-    linear_color_stop, linear_gradient, outline, point, prelude::*, px, rgb, rgba, size,
-    transparent_black, uniform_list,
+    PathBuilder, Pixels, Point as GpuiPoint, PromptButton, PromptLevel, Render, RenderImage,
+    ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
+    StatefulInteractiveElement, Task, TextStyle, UniformListScrollHandle, Window, anchored, canvas,
+    deferred, div, fill, hsla, linear_color_stop, linear_gradient, outline, point, prelude::*, px,
+    rgb, rgba, size, transparent_black, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, IndexPath, Selectable as _, Sizable as _,
@@ -124,6 +123,8 @@ const MAX_JUMP_HISTORY: usize = 128;
 const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
 const TOC_SIDEBAR_WIDTH: f32 = 280.0;
 const TOC_SIDEBAR_ROW_HEIGHT: f32 = 30.0;
+const BOOKMARKS_SIDEBAR_WIDTH: f32 = 300.0;
+const BOOKMARKS_SIDEBAR_ROW_HEIGHT: f32 = 40.0;
 const NOTES_SIDEBAR_WIDTH: f32 = 300.0;
 const NOTES_SIDEBAR_ROW_HEIGHT: f32 = 52.0;
 const THUMBNAIL_SIDEBAR_WIDTH: f32 = 200.0;
@@ -157,12 +158,19 @@ const DIFF_FLASH_DURATION: Duration = Duration::from_millis(800);
 const DIFF_FLASH_TILE_SIZE: u32 = 24;
 const DIFF_FLASH_PIXEL_THRESHOLD: u16 = 32;
 const DIFF_FLASH_MAX_RECTS: usize = 64;
-const FOOTBAR_HEIGHT: f32 = 26.0;
-const FOOTBAR_BUTTON_HEIGHT: f32 = 20.0;
+const COMPACT_CONTROL_HEIGHT: f32 = 20.0;
+const DOCUMENT_TOOLBAR_HEIGHT: f32 = 44.0;
+const DOCUMENT_TOOLBAR_HOVER_HEIGHT: f32 = DOCUMENT_TOOLBAR_HEIGHT;
+const BOOKMARK_DRAG_ACTIVATION_PX: f32 = 8.0;
+const BOOKMARK_DRAG_COMMIT_PX: f32 = 56.0;
+const BOOKMARK_DRAG_DAMPING: f32 = 0.35;
+const BOOKMARK_DRAG_MAX_PX: f32 = 84.0;
+const BOOKMARK_RIBBON_NOTCH_PX: f32 = 6.0;
+const BOOKMARK_RIBBON_RETRACT: MotionSpec = MotionSpec::new(180, EASE_OUT);
 const TRANSLATION_PANEL_PREFERRED_WIDTH: f32 = 390.0;
 const TRANSLATION_PANEL_MARGIN: f32 = 8.0;
 const TRANSLATION_PANEL_DEFAULT_RIGHT: f32 = 8.0;
-const TRANSLATION_PANEL_DEFAULT_TOP: f32 = 12.0;
+const TRANSLATION_PANEL_DEFAULT_TOP: f32 = DOCUMENT_TOOLBAR_HEIGHT + 10.0;
 const TRANSLATION_PANEL_COMPACT_BREAKPOINT: f32 = 300.0;
 const TRANSLATION_PANEL_DEFAULT_HEIGHT: f32 = 40.0;
 const TRANSLATION_PANEL_SNAP_ZONE: f32 = 12.0;
@@ -1326,10 +1334,31 @@ struct JumpPosition {
     presentation_page: Option<usize>,
 }
 
+#[derive(Clone)]
+enum BookmarkTitleTarget {
+    New(DocumentPosition),
+    Existing(u64),
+}
+
+#[derive(Clone)]
+struct BookmarkTitleEdit {
+    target: BookmarkTitleTarget,
+    automatic_title: String,
+    initially_automatic: bool,
+}
+
+#[derive(Clone, Copy)]
+struct BookmarkDragState {
+    origin: GpuiPoint<Pixels>,
+    current: GpuiPoint<Pixels>,
+    active: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocumentSidebar {
     Thumbnails,
     Toc,
+    Bookmarks,
     Notes,
 }
 
@@ -1338,6 +1367,7 @@ impl DocumentSidebar {
         match self {
             Self::Thumbnails => widths.thumbnails,
             Self::Toc => widths.toc,
+            Self::Bookmarks => widths.bookmarks,
             Self::Notes => widths.notes,
         }
     }
@@ -1346,6 +1376,7 @@ impl DocumentSidebar {
         match self {
             Self::Thumbnails => widths.thumbnails = width,
             Self::Toc => widths.toc = width,
+            Self::Bookmarks => widths.bookmarks = width,
             Self::Notes => widths.notes = width,
         }
     }
@@ -1395,6 +1426,7 @@ pub fn default_sidebar_widths() -> SidebarWidths {
     SidebarWidths {
         thumbnails: THUMBNAIL_SIDEBAR_WIDTH,
         toc: TOC_SIDEBAR_WIDTH,
+        bookmarks: BOOKMARKS_SIDEBAR_WIDTH,
         notes: NOTES_SIDEBAR_WIDTH,
         ai: AI_PANEL_WIDTH,
     }
@@ -1412,6 +1444,7 @@ pub fn sanitize_sidebar_widths(widths: SidebarWidths) -> SidebarWidths {
     SidebarWidths {
         thumbnails: sanitize(widths.thumbnails, THUMBNAIL_SIDEBAR_WIDTH),
         toc: sanitize(widths.toc, TOC_SIDEBAR_WIDTH),
+        bookmarks: sanitize(widths.bookmarks, BOOKMARKS_SIDEBAR_WIDTH),
         notes: sanitize(widths.notes, NOTES_SIDEBAR_WIDTH),
         ai: sanitize(widths.ai, AI_PANEL_WIDTH),
     }
@@ -1584,7 +1617,19 @@ pub struct DocumentView {
     notes_palette: Option<Entity<NotesPalette>>,
     history_palette: Option<Entity<HistoryPalette>>,
     bookmark_palette: Option<Entity<BookmarkPalette>>,
-    bookmark_prompt: Option<Entity<BookmarkPrompt>>,
+    bookmark_title_editor: Option<Entity<BookmarkTitleEditor>>,
+    bookmark_title_edit: Option<BookmarkTitleEdit>,
+    bookmarks: Vec<Bookmark>,
+    bookmark_sidebar_scroll: UniformListScrollHandle,
+    bookmark_drag: Option<BookmarkDragState>,
+    bookmark_ribbon_retract: Option<ScalarTween>,
+    bookmark_ribbon_retract_generation: u64,
+    bookmark_ribbon_retract_task: Option<Task<()>>,
+    suppress_bookmark_click: bool,
+    document_toolbar_visible: bool,
+    document_toolbar_hovered: bool,
+    document_toolbar_hide_generation: u64,
+    document_toolbar_hide_task: Option<Task<()>>,
     go_to_page_prompt: Option<Entity<GoToPagePrompt>>,
     note_editor: Option<Entity<NoteEditor>>,
     note_target: Option<NoteTarget>,
@@ -1867,6 +1912,7 @@ impl AiContextProvider for DocumentViewAiContextProvider {
 
 mod ai_context;
 mod annotations;
+mod bookmarks;
 mod chrome;
 mod context_menu;
 mod controls;

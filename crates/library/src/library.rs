@@ -196,7 +196,7 @@ impl LegacyBookmark {
         Bookmark {
             id: self.id,
             path: self.path,
-            label: self.label,
+            title: (!self.label.trim().is_empty()).then_some(self.label),
             position: self.position.into_domain(),
             created: self.created,
         }
@@ -331,7 +331,7 @@ impl From<&Bookmark> for StoredBookmarkV1 {
             version: STORAGE_SCHEMA_VERSION,
             id: bookmark.id,
             path: StoredPathV1::from_path(&bookmark.path),
-            label: bookmark.label.clone(),
+            label: bookmark.title.clone().unwrap_or_default(),
             position: StoredDocumentPositionV1::from(&bookmark.position),
             created: bookmark.created,
         }
@@ -344,7 +344,7 @@ impl StoredBookmarkV1 {
         Ok(Bookmark {
             id: self.id,
             path: self.path.into_path()?,
-            label: self.label,
+            title: (!self.label.trim().is_empty()).then_some(self.label),
             position: self.position.into_domain(),
             created: self.created,
         })
@@ -949,17 +949,44 @@ impl StoredAiSessionV6 {
     }
 }
 
+const DEFAULT_BOOKMARKS_SIDEBAR_WIDTH: f32 = 300.0;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct LegacySidebarWidthsV1 {
+    thumbnails: f32,
+    toc: f32,
+    notes: f32,
+    ai: f32,
+}
+
+impl LegacySidebarWidthsV1 {
+    fn into_domain(self) -> SidebarWidths {
+        SidebarWidths {
+            thumbnails: self.thumbnails,
+            toc: self.toc,
+            bookmarks: DEFAULT_BOOKMARKS_SIDEBAR_WIDTH,
+            notes: self.notes,
+            ai: self.ai,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct StoredSidebarWidthsV1 {
     version: u8,
-    widths: SidebarWidths,
+    widths: LegacySidebarWidthsV1,
 }
 
 impl From<SidebarWidths> for StoredSidebarWidthsV1 {
     fn from(widths: SidebarWidths) -> Self {
         Self {
             version: STORAGE_SCHEMA_VERSION,
-            widths,
+            widths: LegacySidebarWidthsV1 {
+                thumbnails: widths.thumbnails,
+                toc: widths.toc,
+                notes: widths.notes,
+                ai: widths.ai,
+            },
         }
     }
 }
@@ -967,6 +994,28 @@ impl From<SidebarWidths> for StoredSidebarWidthsV1 {
 impl StoredSidebarWidthsV1 {
     fn into_domain(self) -> Result<SidebarWidths> {
         require_storage_version(self.version, STORAGE_SCHEMA_VERSION)?;
+        Ok(self.widths.into_domain())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct StoredSidebarWidthsV2 {
+    version: u8,
+    widths: SidebarWidths,
+}
+
+impl From<SidebarWidths> for StoredSidebarWidthsV2 {
+    fn from(widths: SidebarWidths) -> Self {
+        Self {
+            version: STORAGE_V2_VERSION,
+            widths,
+        }
+    }
+}
+
+impl StoredSidebarWidthsV2 {
+    fn into_domain(self) -> Result<SidebarWidths> {
+        require_storage_version(self.version, STORAGE_V2_VERSION)?;
         Ok(self.widths)
     }
 }
@@ -1837,7 +1886,7 @@ impl From<&Bookmark> for StoredBookmarkV2 {
             version: STORAGE_V2_VERSION,
             id: bookmark.id,
             path: StoredPathV1::from_path(&bookmark.path),
-            label: bookmark.label.clone(),
+            label: bookmark.title.clone().unwrap_or_default(),
             position: bookmark.position.clone(),
             created: bookmark.created,
         }
@@ -1850,7 +1899,7 @@ impl StoredBookmarkV2 {
         Ok(Bookmark {
             id: self.id,
             path: self.path.into_path()?,
-            label: self.label,
+            title: (!self.label.trim().is_empty()).then_some(self.label),
             position: self.position,
             created: self.created,
         })
@@ -2118,18 +2167,22 @@ pub struct HistoryEntry {
 pub struct Bookmark {
     pub id: u64,
     pub path: PathBuf,
-    pub label: String,
+    pub title: Option<String>,
     pub position: DocumentPosition,
     pub created: u64,
 }
 
 impl Bookmark {
     fn normalize(&mut self) {
-        self.label = self.label.trim().to_string();
+        self.title = self
+            .title
+            .take()
+            .map(|title| title.trim().to_string())
+            .filter(|title| !title.is_empty());
     }
 
     fn is_valid(&self) -> bool {
-        !self.path.as_os_str().is_empty() && !self.label.is_empty()
+        !self.path.as_os_str().is_empty()
     }
 }
 
@@ -2330,6 +2383,7 @@ pub struct AiSession {
 pub struct SidebarWidths {
     pub thumbnails: f32,
     pub toc: f32,
+    pub bookmarks: f32,
     pub notes: f32,
     pub ai: f32,
 }
@@ -2586,6 +2640,7 @@ pub enum ReaderSidebar {
     Thumbnails,
     TableOfContents,
     Notes,
+    Bookmarks,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -185,6 +185,15 @@ where
     })
 }
 
+pub fn fade_in<E>(id: impl Into<ElementId>, element: E) -> AnimationElement<E>
+where
+    E: Styled + IntoElement + 'static,
+{
+    element.with_animation(id, MENU.animation(), |element, progress| {
+        element.opacity(progress)
+    })
+}
+
 pub fn modal_in<E>(id: impl Into<ElementId>, element: E) -> AnimationElement<E>
 where
     E: Styled + IntoElement + 'static,

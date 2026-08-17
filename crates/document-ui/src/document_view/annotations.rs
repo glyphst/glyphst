@@ -196,18 +196,31 @@ impl DocumentView {
             self.apply_stored_page_layout(page_layout, cx);
         }
 
-        if bookmarks_changed && let Some(palette) = self.bookmark_palette.clone() {
+        if bookmarks_changed {
             visible_state_changed = true;
-            let (bookmarks, current_path) = {
+            let (bookmarks, document_bookmarks, current_path) = {
                 let store = cx.global::<LibraryStore>();
-                (store.bookmarks().to_vec(), self.path.clone())
+                (
+                    store.bookmarks().to_vec(),
+                    store.bookmarks_for(&self.path),
+                    self.path.clone(),
+                )
             };
-            palette.update(cx, |picker, cx| {
-                picker.update_delegate(
-                    move |delegate| delegate.replace_bookmarks(bookmarks, current_path),
-                    cx,
-                );
-            });
+            self.bookmarks = document_bookmarks;
+            if let Some(palette) = self.toc_palette.clone() {
+                let entries = self.toc_palette_entries();
+                palette.update(cx, |picker, cx| {
+                    picker.update_delegate(move |delegate| delegate.replace_entries(entries), cx);
+                });
+            }
+            if let Some(palette) = self.bookmark_palette.clone() {
+                palette.update(cx, |picker, cx| {
+                    picker.update_delegate(
+                        move |delegate| delegate.replace_bookmarks(bookmarks, current_path),
+                        cx,
+                    );
+                });
+            }
         }
 
         if visible_state_changed {
