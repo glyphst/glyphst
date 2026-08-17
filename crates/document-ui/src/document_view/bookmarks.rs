@@ -19,6 +19,22 @@ pub(super) fn bookmark_ribbon_notch_y(height: f32) -> f32 {
     (height - BOOKMARK_RIBBON_NOTCH_PX).max(0.0)
 }
 
+pub(super) fn bookmark_ribbon_height(pull_offset: f32) -> f32 {
+    BOOKMARK_RIBBON_REST_HEIGHT + pull_offset.max(0.0)
+}
+
+pub(super) fn bookmark_ribbon_should_render(
+    toolbar_visible: bool,
+    bookmarked: bool,
+    pull_offset: f32,
+) -> bool {
+    toolbar_visible || bookmarked || pull_offset > 0.0
+}
+
+pub(super) fn bookmark_ribbon_is_filled(bookmarked: bool, drag_armed: bool) -> bool {
+    bookmarked || drag_armed
+}
+
 impl DocumentView {
     pub(super) fn refresh_bookmarks(&mut self, cx: &mut Context<Self>) {
         self.bookmarks = cx.global::<LibraryStore>().bookmarks_for(&self.path);
@@ -454,8 +470,15 @@ impl DocumentView {
     }
 
     pub(super) fn set_document_toolbar_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.document_toolbar_hovered == hovered {
+            return;
+        }
         self.document_toolbar_hovered = hovered;
         if hovered {
+            self.clear_document_content_hover(cx);
+            if self.translation.view_role == TranslationViewRole::Translation {
+                self.clear_translation_hover_state(false, cx);
+            }
             self.show_document_toolbar(cx);
         } else {
             self.schedule_document_toolbar_hide(cx);
@@ -533,5 +556,24 @@ mod tests {
         assert_eq!(bookmark_ribbon_notch_y(36.0), 30.0);
         assert_eq!(bookmark_ribbon_notch_y(96.0), 90.0);
         assert_eq!(bookmark_ribbon_notch_y(4.0), 0.0);
+    }
+
+    #[test]
+    fn bookmark_ribbon_stretches_from_its_resting_height() {
+        assert_eq!(bookmark_ribbon_height(-8.0), 36.0);
+        assert_eq!(bookmark_ribbon_height(0.0), 36.0);
+        assert_eq!(bookmark_ribbon_height(24.0), 60.0);
+    }
+
+    #[test]
+    fn bookmark_ribbon_visibility_and_fill_follow_toolbar_and_bookmark_state() {
+        assert!(!bookmark_ribbon_should_render(false, false, 0.0));
+        assert!(bookmark_ribbon_should_render(true, false, 0.0));
+        assert!(bookmark_ribbon_should_render(false, true, 0.0));
+        assert!(bookmark_ribbon_should_render(false, false, 1.0));
+
+        assert!(!bookmark_ribbon_is_filled(false, false));
+        assert!(bookmark_ribbon_is_filled(true, false));
+        assert!(bookmark_ribbon_is_filled(false, true));
     }
 }

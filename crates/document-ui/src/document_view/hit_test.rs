@@ -1,5 +1,9 @@
 use super::*;
 
+fn should_hit_test_document_content(toolbar_hovered: bool, dragging: bool, panning: bool) -> bool {
+    !toolbar_hovered && !dragging && !panning
+}
+
 impl DocumentView {
     pub(super) fn collect_images(display_list: &DisplayList) -> Result<Vec<CollectedImage>> {
         let collector = Rc::new(RefCell::new(ImageCollector::default()));
@@ -120,15 +124,24 @@ impl DocumentView {
         cx.notify();
     }
 
+    pub(super) fn clear_document_content_hover(&mut self, cx: &mut Context<Self>) {
+        self.set_hovered_link(None, cx);
+        self.set_hovered_note(None, None, cx);
+    }
+
     pub(super) fn update_hovered_link(
         &mut self,
         position: GpuiPoint<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let link_ix = if self.dragging || self.panning.is_some() {
-            None
-        } else {
+        let link_ix = if should_hit_test_document_content(
+            self.document_toolbar_hovered,
+            self.dragging,
+            self.panning.is_some(),
+        ) {
             self.link_at_screen(position)
+        } else {
+            None
         };
         self.set_hovered_link(link_ix, cx);
     }
@@ -138,10 +151,14 @@ impl DocumentView {
         position: GpuiPoint<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let note_id = if self.dragging || self.panning.is_some() {
-            None
-        } else {
+        let note_id = if should_hit_test_document_content(
+            self.document_toolbar_hovered,
+            self.dragging,
+            self.panning.is_some(),
+        ) {
             self.note_at_screen(position)
+        } else {
+            None
         };
         let position = note_id.map(|_| position);
         self.set_hovered_note(note_id, position, cx);
@@ -158,5 +175,18 @@ impl DocumentView {
 
         let (x, y) = inverse.transform_xy(point.x, point.y);
         (-0.001..=1.001).contains(&x) && (-0.001..=1.001).contains(&y)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_hit_test_document_content;
+
+    #[test]
+    fn toolbar_owns_document_content_hover_hit_testing() {
+        assert!(should_hit_test_document_content(false, false, false));
+        assert!(!should_hit_test_document_content(true, false, false));
+        assert!(!should_hit_test_document_content(false, true, false));
+        assert!(!should_hit_test_document_content(false, false, true));
     }
 }

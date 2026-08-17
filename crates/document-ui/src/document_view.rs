@@ -90,7 +90,7 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, IndexPath, Selectable as _, Sizable as _,
     ThemeColor, ThemeStyled as _,
     alert::Alert,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonCustomVariant, ButtonVariants as _},
     checkbox::Checkbox,
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     progress::ProgressCircle,
@@ -165,7 +165,11 @@ const BOOKMARK_DRAG_ACTIVATION_PX: f32 = 8.0;
 const BOOKMARK_DRAG_COMMIT_PX: f32 = 56.0;
 const BOOKMARK_DRAG_DAMPING: f32 = 0.35;
 const BOOKMARK_DRAG_MAX_PX: f32 = 84.0;
+const BOOKMARK_RIBBON_WIDTH: f32 = 20.0;
+const BOOKMARK_RIBBON_REST_HEIGHT: f32 = 36.0;
 const BOOKMARK_RIBBON_NOTCH_PX: f32 = 6.0;
+const BOOKMARK_RIBBON_STROKE_PX: f32 = 2.0;
+const BOOKMARK_RIBBON_RIGHT_INSET: f32 = 8.0;
 const BOOKMARK_RIBBON_RETRACT: MotionSpec = MotionSpec::new(180, EASE_OUT);
 const TRANSLATION_PANEL_PREFERRED_WIDTH: f32 = 390.0;
 const TRANSLATION_PANEL_MARGIN: f32 = 8.0;

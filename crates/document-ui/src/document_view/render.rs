@@ -1,3 +1,4 @@
+use super::bookmarks::bookmark_ribbon_should_render;
 use super::*;
 
 impl Render for DocumentView {
@@ -12,6 +13,11 @@ impl Render for DocumentView {
         let prepaint_view = view.clone();
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let ui_theme = cx.theme().colors;
+        let bookmark_ribbon_visible = bookmark_ribbon_should_render(
+            self.document_toolbar_visible,
+            self.current_bookmark().is_some(),
+            self.bookmark_drag_offset(Instant::now()),
+        );
 
         if !self.diff_flashes.is_empty() {
             window.request_animation_frame();
@@ -505,6 +511,11 @@ impl Render for DocumentView {
                     return;
                 }
 
+                if this.document_toolbar_hovered {
+                    this.clear_document_content_hover(cx);
+                    return;
+                }
+
                 if !this.dragging {
                     this.update_hovered_link(event.position, cx);
                     this.update_hovered_note(event.position, cx);
@@ -914,6 +925,7 @@ impl Render for DocumentView {
                         div()
                             .id("document-toolbar-hover-zone")
                             .debug_selector(|| "document-toolbar-hover-zone".to_string())
+                            .occlude()
                             .absolute()
                             .top_0()
                             .left_0()
@@ -921,11 +933,27 @@ impl Render for DocumentView {
                             .h(px(DOCUMENT_TOOLBAR_HOVER_HEIGHT))
                             .flex()
                             .items_start()
+                            .cursor_default()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_mouse_down(MouseButton::Middle, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_mouse_down(MouseButton::Right, |_, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            })
                             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                                 this.set_document_toolbar_hovered(*hovered, cx);
                             }))
                             .when(self.document_toolbar_visible, |this| {
-                                this.child(self.render_document_toolbar(ui_theme, window, cx))
+                                this.child(self.render_document_toolbar(ui_theme, cx))
+                            })
+                            .when(bookmark_ribbon_visible, |this| {
+                                this.child(
+                                    self.render_document_bookmark_ribbon(ui_theme, window, cx),
+                                )
                             }),
                     )
                 },

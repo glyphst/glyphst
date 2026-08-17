@@ -4862,15 +4862,35 @@ mod tests {
         let toolbar = cx.debug_bounds("document-hover-toolbar").unwrap();
         assert_eq!(toolbar, hover_zone);
 
-        let bookmark_button = cx
+        let bookmark_control = cx
             .debug_bounds("document-toolbar-bookmark-control")
             .unwrap();
+        assert_eq!(bookmark_control.size, size(px(28.0), px(44.0)));
+        let resting_ribbon = cx.debug_bounds("document-toolbar-bookmark-ribbon").unwrap();
+        assert_eq!(resting_ribbon.top(), toolbar.top());
+        assert_eq!(resting_ribbon.size, size(px(20.0), px(36.0)));
+        assert!(
+            cx.debug_bounds("document-toolbar-bookmark-ribbon-outline")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("document-toolbar-bookmark-button")
+                .is_some()
+        );
+
+        cx.simulate_mouse_down(toolbar.center(), MouseButton::Right, Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("popup-menu").is_none());
+        cx.simulate_mouse_up(toolbar.center(), MouseButton::Right, Modifiers::default());
+
         let pull_end = point(
-            bookmark_button.center().x,
-            bookmark_button.center().y + px(70.0),
+            bookmark_control.center().x,
+            bookmark_control.center().y + px(70.0),
         );
         cx.simulate_mouse_down(
-            bookmark_button.center(),
+            bookmark_control.center(),
             MouseButton::Left,
             Modifiers::default(),
         );
@@ -4881,14 +4901,20 @@ mod tests {
         let ribbon = cx.debug_bounds("document-toolbar-bookmark-ribbon").unwrap();
         assert_eq!(ribbon.top(), toolbar.top());
         assert!(ribbon.bottom() > toolbar.bottom());
+        assert!(
+            cx.debug_bounds("document-toolbar-bookmark-ribbon-filled")
+                .is_some()
+        );
 
         cx.simulate_mouse_up(pull_end, MouseButton::Left, Modifiers::default());
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
+        let resting_ribbon = cx.debug_bounds("document-toolbar-bookmark-ribbon").unwrap();
+        assert_eq!(resting_ribbon.size, size(px(20.0), px(36.0)));
         assert!(
-            cx.debug_bounds("document-toolbar-bookmark-ribbon")
-                .is_none()
+            cx.debug_bounds("document-toolbar-bookmark-ribbon-outline")
+                .is_some()
         );
         assert!(cx.debug_bounds("bookmark-title-editor").is_some());
 

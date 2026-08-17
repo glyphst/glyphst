@@ -1,8 +1,10 @@
-use super::bookmarks::bookmark_ribbon_notch_y;
+use super::bookmarks::{
+    bookmark_ribbon_height, bookmark_ribbon_is_filled, bookmark_ribbon_notch_y,
+};
 use super::*;
 
 impl DocumentView {
-    pub(super) fn render_document_toolbar(
+    pub(super) fn render_document_bookmark_ribbon(
         &self,
         theme: ThemeColor,
         window: &mut Window,
@@ -12,19 +14,83 @@ impl DocumentView {
         let now = Instant::now();
         let drag_offset = self.bookmark_drag_offset(now);
         let drag_armed = self.bookmark_drag_armed();
-        let ribbon_visible = drag_offset > 0.0;
         if self.bookmark_ribbon_animating(now) {
             window.request_animation_frame();
         }
 
+        let ribbon_height = bookmark_ribbon_height(drag_offset);
+        let ribbon_filled = bookmark_ribbon_is_filled(current_bookmarked, drag_armed);
+        let ribbon_color = if ribbon_filled {
+            theme.primary
+        } else {
+            theme.foreground.opacity(0.72)
+        };
+        let ribbon_state_selector = if ribbon_filled {
+            "document-toolbar-bookmark-ribbon-filled"
+        } else {
+            "document-toolbar-bookmark-ribbon-outline"
+        };
+
+        let ribbon = div()
+            .id("document-toolbar-bookmark-ribbon")
+            .debug_selector(|| "document-toolbar-bookmark-ribbon".to_string())
+            .absolute()
+            .top_0()
+            .left(px((CONTROL_SIZE - BOOKMARK_RIBBON_WIDTH) / 2.0))
+            .w(px(BOOKMARK_RIBBON_WIDTH))
+            .h(px(ribbon_height))
+            .child(
+                div()
+                    .id(ribbon_state_selector)
+                    .debug_selector(move || ribbon_state_selector.to_string())
+                    .size_full()
+                    .child(
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, _| {
+                                let inset = if ribbon_filled {
+                                    0.0
+                                } else {
+                                    BOOKMARK_RIBBON_STROKE_PX / 2.0
+                                };
+                                let left = bounds.left() + px(inset);
+                                let right = bounds.right() - px(inset);
+                                let top = bounds.top() + px(inset);
+                                let bottom = bounds.bottom() - px(inset);
+                                let center_x = left + (right - left) / 2.0;
+                                let notch_y =
+                                    top + px(bookmark_ribbon_notch_y((bottom - top).as_f32()));
+                                let mut path = if ribbon_filled {
+                                    PathBuilder::fill()
+                                } else {
+                                    PathBuilder::stroke(px(BOOKMARK_RIBBON_STROKE_PX))
+                                };
+                                path.move_to(point(left, top));
+                                path.line_to(point(right, top));
+                                path.line_to(point(right, bottom));
+                                path.line_to(point(center_x, notch_y));
+                                path.line_to(point(left, bottom));
+                                path.close();
+                                if let Ok(path) = path.build() {
+                                    window.paint_path(path, ribbon_color);
+                                }
+                            },
+                        )
+                        .size_full(),
+                    ),
+            );
+
         let bookmark_button = Button::new("document-toolbar-bookmark")
-            .small()
-            .compact()
-            .ghost()
-            .icon(IconName::Bookmark)
-            .w(ui_rems(CONTROL_SIZE))
-            .h(ui_rems(CONTROL_SIZE))
-            .selected(!ribbon_visible && current_bookmarked)
+            .debug_selector(|| "document-toolbar-bookmark-button".to_string())
+            .custom(ButtonCustomVariant::new(cx))
+            .absolute()
+            .top_0()
+            .left_0()
+            .w(px(CONTROL_SIZE))
+            .h(px(DOCUMENT_TOOLBAR_HEIGHT))
+            .p_0()
+            .cursor_pointer()
+            .toggled(current_bookmarked)
             .tooltip(if current_bookmarked {
                 crate::fl!("bookmark-remove-current")
             } else {
@@ -43,66 +109,26 @@ impl DocumentView {
                 }
             }));
 
-        let button_top = (DOCUMENT_TOOLBAR_HEIGHT - CONTROL_SIZE) / 2.0 + drag_offset;
-        let ribbon_height =
-            (DOCUMENT_TOOLBAR_HEIGHT - CONTROL_SIZE) / 2.0 + CONTROL_SIZE + drag_offset;
-        let ribbon_color = if drag_armed {
-            theme.primary.opacity(0.72)
-        } else {
-            theme.primary.opacity(0.28)
-        };
-        let bookmark_control = div()
+        div()
             .id("document-toolbar-bookmark-control")
             .debug_selector(|| "document-toolbar-bookmark-control".to_string())
-            .relative()
-            .flex_none()
-            .w(ui_rems(CONTROL_SIZE))
-            .h_full()
-            .when(ribbon_visible, |this| {
-                this.child(
-                    div()
-                        .id("document-toolbar-bookmark-ribbon")
-                        .debug_selector(|| "document-toolbar-bookmark-ribbon".to_string())
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .w(ui_rems(CONTROL_SIZE))
-                        .h(px(ribbon_height))
-                        .child(
-                            canvas(
-                                |_, _, _| {},
-                                move |bounds, _, window, _| {
-                                    let mut path = PathBuilder::fill();
-                                    let left = bounds.left();
-                                    let right = bounds.right();
-                                    let top = bounds.top();
-                                    let bottom = bounds.bottom();
-                                    let center_x = left + bounds.size.width / 2.0;
-                                    let notch_y = top
-                                        + px(bookmark_ribbon_notch_y(bounds.size.height.as_f32()));
-                                    path.move_to(point(left, top));
-                                    path.line_to(point(right, top));
-                                    path.line_to(point(right, bottom));
-                                    path.line_to(point(center_x, notch_y));
-                                    path.line_to(point(left, bottom));
-                                    path.close();
-                                    if let Ok(path) = path.build() {
-                                        window.paint_path(path, ribbon_color);
-                                    }
-                                },
-                            )
-                            .size_full(),
-                        ),
-                )
+            .absolute()
+            .top_0()
+            .right(px(BOOKMARK_RIBBON_RIGHT_INSET))
+            .w(px(CONTROL_SIZE))
+            .h(px(DOCUMENT_TOOLBAR_HEIGHT))
+            .child(ribbon)
+            .when(self.document_toolbar_visible, |this| {
+                this.child(bookmark_button)
             })
-            .child(
-                div()
-                    .absolute()
-                    .top(px(button_top))
-                    .left_0()
-                    .child(bookmark_button),
-            );
+            .into_any_element()
+    }
 
+    pub(super) fn render_document_toolbar(
+        &self,
+        theme: ThemeColor,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let document_background = rgb(cx.global::<SettingsStore>().resolved_theme.background);
 
         let toolbar = div()
@@ -158,8 +184,7 @@ impl DocumentView {
                     .flex()
                     .h_full()
                     .items_start()
-                    .justify_end()
-                    .child(bookmark_control),
+                    .justify_end(),
             );
 
         if cx.reduce_motion() {
