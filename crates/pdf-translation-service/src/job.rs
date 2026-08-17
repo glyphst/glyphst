@@ -13,7 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, anyhow};
 use glyphst_pdf::DocumentSnapshot;
-use glyphst_settings::{OcrMode, OcrProvider, PdfContentReviewMode, Settings};
+#[cfg(test)]
+use glyphst_settings::Settings;
+use glyphst_settings::{OcrMode, OcrProvider, PdfContentReviewMode};
 use glyphst_translation::{LanguageCode, TranslationService};
 use mupdf::pdf::PdfDocument as MuPdfDocument;
 use mupdf::{
@@ -39,6 +41,7 @@ use glyphst_pdf_translation::{
     translate_document_partial_resuming,
 };
 
+use crate::PdfTranslationConfig;
 use crate::backend::GlyphstTranslationBackend;
 use crate::reviewer::GlyphstPolicyReviewer;
 
@@ -243,8 +246,6 @@ impl Drop for ArtifactRunGuard {
     }
 }
 
-impl gpui::Global for PdfTranslationService {}
-
 impl PdfTranslationService {
     pub fn new(translation: TranslationService) -> Self {
         Self::with_typst_config(
@@ -270,13 +271,12 @@ impl PdfTranslationService {
     }
 
     pub fn clear_translation_data(&self) -> anyhow::Result<()> {
-        self.clear_translation_data_at(&artifact_root(), &legacy_artifact_root(), true)
+        self.clear_translation_data_at(&artifact_root(), true)
     }
 
     fn clear_translation_data_at(
         &self,
         artifact_root: &Path,
-        legacy_artifact_root: &Path,
         clear_provider_cache: bool,
     ) -> anyhow::Result<()> {
         let state = self
@@ -295,16 +295,10 @@ impl PdfTranslationService {
                 "could not clear cached provider responses: {error:#}"
             ));
         }
-        for (label, path) in [
-            ("PDF translation artifacts", artifact_root),
-            (
-                "legacy document translation artifacts",
-                legacy_artifact_root,
-            ),
-        ] {
-            if let Err(error) = remove_artifact_directory(path) {
-                errors.push(format!("could not clear {label}: {error:#}"));
-            }
+        if let Err(error) = remove_artifact_directory(artifact_root) {
+            errors.push(format!(
+                "could not clear PDF translation artifacts: {error:#}"
+            ));
         }
         drop(state);
 
@@ -331,7 +325,7 @@ impl PdfTranslationService {
 
     pub fn run(
         &self,
-        settings: Settings,
+        settings: PdfTranslationConfig,
         request: PdfTranslationRequest,
         cancellation: CancellationToken,
         progress_sink: impl TranslationProgressSink + 'static,
@@ -341,7 +335,7 @@ impl PdfTranslationService {
 
     pub fn run_from_snapshot(
         &self,
-        settings: Settings,
+        settings: PdfTranslationConfig,
         request: PdfTranslationRequest,
         source_snapshot: Arc<DocumentSnapshot>,
         cancellation: CancellationToken,
@@ -358,7 +352,7 @@ impl PdfTranslationService {
 
     fn run_with_snapshot(
         &self,
-        settings: Settings,
+        settings: PdfTranslationConfig,
         request: PdfTranslationRequest,
         source_snapshot: Option<&DocumentSnapshot>,
         cancellation: CancellationToken,
@@ -394,7 +388,7 @@ impl PdfTranslationService {
 
     pub fn run_session(
         &self,
-        settings: Settings,
+        settings: PdfTranslationConfig,
         request: PdfTranslationSessionRequest,
         cancellation: CancellationToken,
         progress_sink: impl TranslationProgressSink + 'static,
@@ -412,7 +406,7 @@ impl PdfTranslationService {
 
     pub fn run_session_from_snapshot(
         &self,
-        settings: Settings,
+        settings: PdfTranslationConfig,
         request: PdfTranslationSessionRequest,
         source_snapshot: Arc<DocumentSnapshot>,
         cancellation: CancellationToken,
@@ -431,7 +425,7 @@ impl PdfTranslationService {
 
     fn run_session_with_snapshot(
         &self,
-        settings: Settings,
+        settings: PdfTranslationConfig,
         request: PdfTranslationSessionRequest,
         source_snapshot: Option<&DocumentSnapshot>,
         cancellation: CancellationToken,
@@ -472,6 +466,7 @@ impl PdfTranslationService {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn restore_cached_session_from_snapshot(
         &self,
         key: &PdfTranslationSessionCacheKey,
@@ -493,6 +488,7 @@ impl PdfTranslationService {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn restore_cached_session_with_snapshot(
         &self,
         key: &PdfTranslationSessionCacheKey,
@@ -694,7 +690,7 @@ impl PdfTranslationService {
 
     pub fn export_session(
         &self,
-        settings: Settings,
+        settings: PdfTranslationConfig,
         session: PdfTranslationSessionResult,
         request: PdfTranslationExportRequest,
         cancellation: CancellationToken,
@@ -731,7 +727,7 @@ impl PdfTranslationService {
 
     fn run_session_inner(
         &self,
-        settings: &Settings,
+        settings: &PdfTranslationConfig,
         session_request: PdfTranslationSessionRequest,
         source_snapshot: Option<&DocumentSnapshot>,
         cancellation: &CancellationToken,
@@ -805,7 +801,7 @@ impl PdfTranslationService {
             .check()
             .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Preparing))?;
         let inspection =
-            inspect_pdf(&pipeline_request.source_path, &cancellation).map_err(|error| {
+            inspect_pdf(&pipeline_request.source_path, cancellation).map_err(|error| {
                 PdfTranslationError::stage(
                     PdfTranslationStage::Preparing,
                     "Could not inspect the source PDF",
@@ -850,7 +846,7 @@ impl PdfTranslationService {
         progress.finish_stage(PdfTranslationStage::Preparing, "Source PDF inspected");
         let backend = GlyphstTranslationBackend::new(
             self.translation.clone(),
-            settings.clone(),
+            settings.translation.clone(),
             request.source_language.clone(),
             request.target_language.clone(),
         );
@@ -946,7 +942,7 @@ impl PdfTranslationService {
         }
         let mut warnings = Vec::new();
         if !reused_prepared_document
-            && let Some(reviewer) = GlyphstPolicyReviewer::from_settings(settings)
+            && let Some(reviewer) = GlyphstPolicyReviewer::from_config(settings)
         {
             let review_errors = review_translation_policies(&mut document, &reviewer);
             if !review_errors.is_empty() {
@@ -1032,7 +1028,7 @@ impl PdfTranslationService {
             Some(1),
         );
         let checkpoint_identity =
-            TranslationCheckpointIdentity::new(&settings, &request, &fingerprint, &document);
+            TranslationCheckpointIdentity::new(settings, &request, &fingerprint, &document);
         let checkpoint_path = job_directory.join("translated-document.partial.json");
         let diagnostics_path = job_directory.join("translation-diagnostics.json");
         let block_locations = translation_block_locations(&document);
@@ -1063,7 +1059,7 @@ impl PdfTranslationService {
                     &pipeline_request.source_path,
                     &inspection,
                     &job_directory,
-                    &cancellation,
+                    cancellation,
                     streamed_preview_units.clone(),
                     streamed_preview_revisions.clone(),
                     preview_rx,
@@ -1073,7 +1069,7 @@ impl PdfTranslationService {
             let result = translate_document_partial_resuming(
                 document.clone(),
                 &backend,
-                &cancellation,
+                cancellation,
                 resumed_units,
                 |snapshot| {
                     let counts = &snapshot.progress;
@@ -1217,8 +1213,6 @@ impl PdfTranslationService {
         if let Ok(mut sink) = update_sink.lock() {
             (**sink)(PdfTranslationSessionUpdate::Finished);
         }
-        drop(update_sink);
-        drop(publish_update);
         if let Some(writer) = cache_writer.as_mut()
             && let Err(error) = writer.finish(&result)
         {
@@ -1229,7 +1223,7 @@ impl PdfTranslationService {
 
     fn export_session_inner(
         &self,
-        settings: &Settings,
+        settings: &PdfTranslationConfig,
         session: &PdfTranslationSessionResult,
         request: PdfTranslationExportRequest,
         cancellation: &CancellationToken,
@@ -1418,6 +1412,7 @@ impl PdfTranslationService {
         Ok(composed_path)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_page_preview(
         &self,
         translated: &TranslatedDocument,
@@ -1525,7 +1520,7 @@ impl PdfTranslationService {
 
     pub fn cached_artifact(
         &self,
-        settings: &Settings,
+        settings: &PdfTranslationConfig,
         request: &PdfTranslationRequest,
     ) -> Option<PdfTranslationResult> {
         let _state = self.artifact_cache_state.lock().ok()?;
@@ -1558,7 +1553,7 @@ impl PdfTranslationService {
 
     pub fn artifact_request(
         &self,
-        settings: &Settings,
+        settings: &PdfTranslationConfig,
         source_path: PathBuf,
         source_language: Option<LanguageCode>,
         target_language: LanguageCode,
@@ -1576,9 +1571,10 @@ impl PdfTranslationService {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_selected_ocr(
         &self,
-        settings: &Settings,
+        settings: &PdfTranslationConfig,
         request: &PdfTranslationRequest,
         target_pages: &[crate::PageGeometry],
         preparation_directory: &Path,
@@ -1625,7 +1621,7 @@ impl PdfTranslationService {
             Some(0),
             Some(selected_pages.len() as u32),
         );
-        let client = PageOcrClient::from_settings(settings)?;
+        let client = PageOcrClient::from_config(settings)?;
         let tasks = selected_pages
             .iter()
             .map(|page_index| PageOcrTask {
@@ -1879,7 +1875,7 @@ enum PageOcrClient {
 }
 
 impl PageOcrClient {
-    fn from_settings(settings: &Settings) -> Result<Self, PdfTranslationError> {
+    fn from_config(settings: &PdfTranslationConfig) -> Result<Self, PdfTranslationError> {
         match settings.ocr.provider {
             OcrProvider::Paddle => PaddleClient::new(
                 PaddleClientConfig {
@@ -2074,6 +2070,7 @@ fn globalize_ocr_page(mut page: Page, page_index: usize) -> Page {
     page
 }
 
+#[allow(clippy::too_many_arguments)]
 fn translate_ready_prefix(
     service: &PdfTranslationService,
     mut document: DocumentV1,
@@ -2247,6 +2244,7 @@ fn reconcile_preview_units(
     (next_units, dirty_pages)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stream_page_previews<U>(
     service: &PdfTranslationService,
     document: &DocumentV1,
@@ -2941,7 +2939,7 @@ struct TranslationCheckpointIdentity {
 
 impl TranslationCheckpointIdentity {
     fn new(
-        settings: &Settings,
+        settings: &PdfTranslationConfig,
         request: &PdfTranslationRequest,
         fingerprint: &str,
         document: &DocumentV1,
@@ -3003,6 +3001,7 @@ fn translation_block_locations(document: &DocumentV1) -> HashMap<String, Transla
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn translation_failure_report(
     request: &PdfTranslationRequest,
     fingerprint: &str,
@@ -3212,8 +3211,9 @@ pub struct ArtifactGeometry {
     pub target_bbox: BoundingBox,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_manifest(
-    settings: &Settings,
+    settings: &PdfTranslationConfig,
     request: &PdfTranslationRequest,
     fingerprint: &str,
     job_directory: &Path,
@@ -3238,7 +3238,7 @@ fn build_manifest(
         } else {
             "mupdf".to_string()
         },
-        translation_provider: settings.translation.active_provider.as_str().to_string(),
+        translation_provider: settings.translation.provider().as_str().to_string(),
         translated_unit_count: translated.units.len(),
         preserved_on_overflow: layout.preserved_on_overflow.clone(),
         warnings: warnings.to_vec(),
@@ -3617,14 +3617,14 @@ fn normalize_searchable_text(text: &str) -> String {
 }
 
 fn request_fingerprint(
-    settings: &Settings,
+    settings: &PdfTranslationConfig,
     request: &PdfTranslationRequest,
 ) -> Result<String, PdfTranslationError> {
     request_fingerprint_with_source(settings, request).map(|(fingerprint, _, _)| fingerprint)
 }
 
 fn request_fingerprint_with_source(
-    settings: &Settings,
+    settings: &PdfTranslationConfig,
     request: &PdfTranslationRequest,
 ) -> Result<(String, String, Vec<u8>), PdfTranslationError> {
     let source_bytes = fs::read(&request.source_path).map_err(|error| {
@@ -3640,7 +3640,7 @@ fn request_fingerprint_with_source(
 }
 
 fn request_fingerprints_for_source(
-    settings: &Settings,
+    settings: &PdfTranslationConfig,
     request: &PdfTranslationRequest,
     source_bytes: &[u8],
 ) -> (String, String) {
@@ -3652,7 +3652,7 @@ fn request_fingerprints_for_source(
     request.target_language.hash(&mut translation_hasher);
     settings
         .translation
-        .active_provider
+        .provider()
         .hash(&mut translation_hasher);
     translation_provider_identity(settings).hash(&mut translation_hasher);
     (
@@ -3676,7 +3676,7 @@ fn cached_source_matches(
     )
 }
 
-fn source_preparation_fingerprint(settings: &Settings, source_bytes: &[u8]) -> String {
+fn source_preparation_fingerprint(settings: &PdfTranslationConfig, source_bytes: &[u8]) -> String {
     let mut hasher = DefaultHasher::new();
     PIPELINE_VERSION.hash(&mut hasher);
     source_bytes.hash(&mut hasher);
@@ -3691,18 +3691,13 @@ fn source_preparation_fingerprint(settings: &Settings, source_bytes: &[u8]) -> S
             settings.ocr.paddle.model.hash(&mut hasher);
         }
     }
-    settings
-        .translation
-        .content_review
-        .mode
-        .as_str()
-        .hash(&mut hasher);
-    if settings.translation.content_review.mode == PdfContentReviewMode::Ambiguous
-        && let Some(model) = &settings.translation.content_review.model
+    settings.content_review.mode.as_str().hash(&mut hasher);
+    if settings.content_review.mode == PdfContentReviewMode::Ambiguous
+        && let Some(model) = &settings.content_review.model
     {
         model.provider.as_str().hash(&mut hasher);
         model.id.hash(&mut hasher);
-        if let Some(review) = settings.ai.resolved_model(model) {
+        if let Some(review) = &settings.content_review.resolved {
             review.base_url.hash(&mut hasher);
             review.api_style.as_str().hash(&mut hasher);
         }
@@ -3710,34 +3705,10 @@ fn source_preparation_fingerprint(settings: &Settings, source_bytes: &[u8]) -> S
     format!("{:016x}", hasher.finish())
 }
 
-fn translation_provider_identity(settings: &Settings) -> String {
-    let provider = settings.translation.active_provider;
-    if provider == glyphst_settings::TranslationProvider::Ai {
-        let resolved = settings.ai.resolved_translation();
-        return format!(
-            "{}|{}|{}",
-            resolved.provider.as_str(),
-            resolved.model.trim(),
-            normalize_endpoint(&resolved.base_url)
-        );
-    }
-    let config = settings.translation.provider_config(provider);
-    format!(
-        "{}|{}|{}",
-        provider.as_str(),
-        normalize_endpoint(
-            config
-                .base_url
-                .as_deref()
-                .or_else(|| provider.default_base_url())
-                .unwrap_or_default()
-        ),
-        config.region.as_deref().unwrap_or_default().trim()
-    )
-}
-
-fn normalize_endpoint(endpoint: &str) -> String {
-    endpoint.trim().trim_end_matches('/').to_string()
+fn translation_provider_identity(settings: &PdfTranslationConfig) -> String {
+    settings
+        .translation
+        .provider_identity(settings.translation.provider())
 }
 
 fn load_normalized_document(path: &Path, fingerprint: &str) -> Option<DocumentV1> {
@@ -3871,11 +3842,7 @@ fn is_unencrypted_pdf(path: &Path) -> bool {
 }
 
 fn artifact_root() -> PathBuf {
-    glyphst_core::paths::state_dir().join("pdf-translations")
-}
-
-fn legacy_artifact_root() -> PathBuf {
-    glyphst_core::paths::state_dir().join("document-translation")
+    glyphst_core::paths::state_dir().join("pdf-translations-v2")
 }
 
 fn remove_artifact_directory(path: &Path) -> anyhow::Result<()> {
@@ -4043,10 +4010,12 @@ mod tests {
             },
             bbox,
             content: glyphst_pdf_translation::BlockContent {
-                text: (kind == BlockKind::Text)
-                    .then_some("Source title")
-                    .unwrap_or_default()
-                    .to_string(),
+                text: if kind == BlockKind::Text {
+                    "Source title"
+                } else {
+                    ""
+                }
+                .to_string(),
                 ..glyphst_pdf_translation::BlockContent::default()
             },
             policy: if kind == BlockKind::Text {
@@ -4367,7 +4336,8 @@ mod tests {
             target_language: LanguageCode::new("zh-hans").unwrap(),
         };
 
-        let fingerprint = request_fingerprint(&settings, &request).unwrap();
+        let fingerprint =
+            request_fingerprint(&PdfTranslationConfig::from(&settings), &request).unwrap();
 
         assert!(!fingerprint.contains("paddle-secret"));
         assert!(!fingerprint.contains("baidu-api-key-secret"));
@@ -4391,20 +4361,25 @@ mod tests {
             target_language: LanguageCode::new("zh-hans").unwrap(),
         };
         let mut settings = Settings::default();
-        let off = request_fingerprint(&settings, &request).unwrap();
+        let off = request_fingerprint(&PdfTranslationConfig::from(&settings), &request).unwrap();
         settings.translation.content_review.model = Some(glyphst_settings::ModelRef::new(
             glyphst_settings::AiProvider::OpenAi,
             "review-a",
         ));
-        assert_eq!(off, request_fingerprint(&settings, &request).unwrap());
+        assert_eq!(
+            off,
+            request_fingerprint(&PdfTranslationConfig::from(&settings), &request).unwrap()
+        );
 
         settings.translation.content_review.mode = PdfContentReviewMode::Ambiguous;
-        let review_a = request_fingerprint(&settings, &request).unwrap();
+        let review_a =
+            request_fingerprint(&PdfTranslationConfig::from(&settings), &request).unwrap();
         settings.translation.content_review.model = Some(glyphst_settings::ModelRef::new(
             glyphst_settings::AiProvider::OpenAi,
             "review-b",
         ));
-        let review_b = request_fingerprint(&settings, &request).unwrap();
+        let review_b =
+            request_fingerprint(&PdfTranslationConfig::from(&settings), &request).unwrap();
 
         assert_ne!(off, review_a);
         assert_ne!(review_a, review_b);
@@ -4421,6 +4396,7 @@ mod tests {
             std::env::temp_dir().join(format!("glyphst-source-fingerprint-{nonce:x}.pdf"));
         fs::write(&source_path, b"same immutable source bytes").unwrap();
         let settings = Settings::default();
+        let config = PdfTranslationConfig::from(&settings);
         let request = |target: &str| PdfTranslationRequest {
             source_path: source_path.clone(),
             output_path: "/tmp/translated.pdf".into(),
@@ -4429,9 +4405,9 @@ mod tests {
         };
 
         let (zh_translation, zh_source, _) =
-            request_fingerprint_with_source(&settings, &request("zh-hans")).unwrap();
+            request_fingerprint_with_source(&config, &request("zh-hans")).unwrap();
         let (ja_translation, ja_source, _) =
-            request_fingerprint_with_source(&settings, &request("ja")).unwrap();
+            request_fingerprint_with_source(&config, &request("ja")).unwrap();
 
         assert_eq!(zh_source, ja_source);
         assert_ne!(zh_translation, ja_translation);
@@ -4684,13 +4660,13 @@ mod tests {
     }
 
     #[test]
-    fn clearing_translation_data_removes_current_and_legacy_artifacts() {
+    fn clearing_translation_data_leaves_legacy_artifacts_untouched() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let directory = std::env::temp_dir().join(format!("glyphst-clear-cache-{nonce:x}"));
-        let artifacts = directory.join("pdf-translations");
+        let artifacts = directory.join("pdf-translations-v2");
         let legacy = directory.join("document-translation");
         fs::create_dir_all(artifacts.join("job")).unwrap();
         fs::create_dir_all(legacy.join("ocr")).unwrap();
@@ -4699,13 +4675,13 @@ mod tests {
         let service = PdfTranslationService::new(TranslationService::new().unwrap());
 
         service
-            .clear_translation_data_at(&artifacts, &legacy, false)
+            .clear_translation_data_at(&artifacts, false)
             .unwrap();
         assert!(!artifacts.exists());
-        assert!(!legacy.exists());
+        assert_eq!(fs::read(legacy.join("ocr/result.json")).unwrap(), b"{}");
 
         service
-            .clear_translation_data_at(&artifacts, &legacy, false)
+            .clear_translation_data_at(&artifacts, false)
             .unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
@@ -4717,22 +4693,21 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let directory = std::env::temp_dir().join(format!("glyphst-active-cache-{nonce:x}"));
-        let artifacts = directory.join("pdf-translations");
-        let legacy = directory.join("document-translation");
+        let artifacts = directory.join("pdf-translations-v2");
         fs::create_dir_all(&artifacts).unwrap();
         fs::write(artifacts.join("checkpoint.json"), b"{}").unwrap();
         let service = PdfTranslationService::new(TranslationService::new().unwrap());
         let run = service.begin_run().unwrap();
 
         let error = service
-            .clear_translation_data_at(&artifacts, &legacy, false)
+            .clear_translation_data_at(&artifacts, false)
             .unwrap_err();
         assert!(error.to_string().contains("PDF translation is active"));
         assert!(artifacts.exists());
 
         drop(run);
         service
-            .clear_translation_data_at(&artifacts, &legacy, false)
+            .clear_translation_data_at(&artifacts, false)
             .unwrap();
         assert!(!artifacts.exists());
         fs::remove_dir_all(directory).unwrap();

@@ -14,6 +14,7 @@ on:
       - "flake.nix"
       - "nix/**"
       - "prek.toml"
+      - "rust-toolchain.toml"
   pull_request:
     paths:
       - ".gitmodules"
@@ -27,6 +28,7 @@ on:
       - "flake.nix"
       - "nix/**"
       - "prek.toml"
+      - "rust-toolchain.toml"
   schedule:
     - cron: "0 7 * * 1"
   workflow_dispatch:
@@ -95,10 +97,10 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Test
-        run: cargo test --workspace --all-targets --all-features
+        run: cargo test --workspace --all-targets --all-features --locked
 
   platform-check:
     name: Platform (${{ matrix.os }})
@@ -120,10 +122,10 @@ jobs:
           cache-workspaces: "."
 
       - name: Compile workspace
-        run: cargo check --workspace --all-targets --all-features
+        run: cargo check --workspace --all-targets --all-features --locked
 
       - name: Test headless crates
-        run: cargo test -p glyphst-core -p glyphst-library -p glyphst-pdf -p glyphst-settings -p glyphst-ai
+        run: cargo test --locked -p glyphst-core -p glyphst-library -p glyphst-pdf -p glyphst-settings -p glyphst-ai
 
   audit:
     runs-on: ubuntu-latest

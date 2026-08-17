@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license = "GPL-3.0-or-later"
 
+[lints]
+workspace = true
+
 [lib]
 path = "src/mermaid_render.rs"
 doctest = false

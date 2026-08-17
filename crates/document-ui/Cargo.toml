@@ -3,6 +3,9 @@ name = "glyphst-document-ui"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 arboard.workspace = true
@@ -14,7 +17,7 @@ glyphst-ai-ui = { path = "../ai-ui" }
 glyphst-core = { path = "../core" }
 glyphst-library = { path = "../library" }
 glyphst-pdf = { path = "../pdf" }
-glyphst-pdf-translation-app = { path = "../pdf-translation-app" }
+glyphst-pdf-translation-service = { path = "../pdf-translation-service" }
 glyphst-settings = { path = "../settings" }
 glyphst-translation = { path = "../translation" }
 glyphst-translation-ui = { path = "../translation-ui" }

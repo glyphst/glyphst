@@ -208,39 +208,40 @@ fn responses_payload_uses_typed_text_and_image_parts() {
 #[test]
 fn responses_stream_events_emit_text_and_finish() {
     let mut deltas = Vec::new();
-    let mut send = |event| {
-        if let AiStreamEvent::Delta(delta) = event {
-            deltas.push(delta);
-        }
-        Ok(())
-    };
-    assert!(
-        !process_sse_line(
-            AiApiStyle::OpenAiResponses,
-            r#"data: {"type":"response.output_text.delta","delta":"hello"}"#,
-            &mut send,
-        )
-        .unwrap()
-    );
-    assert!(
-        process_sse_line(
-            AiApiStyle::OpenAiResponses,
-            r#"data: {"type":"response.completed"}"#,
-            &mut send,
-        )
-        .unwrap()
-    );
-    assert!(
-        process_sse_line(
-            AiApiStyle::OpenAiResponses,
-            r#"data: {"type":"response.failed","response":{"error":{"message":"denied"}}}"#,
-            &mut send,
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("denied")
-    );
-    drop(send);
+    {
+        let mut send = |event| {
+            if let AiStreamEvent::Delta(delta) = event {
+                deltas.push(delta);
+            }
+            Ok(())
+        };
+        assert!(
+            !process_sse_line(
+                AiApiStyle::OpenAiResponses,
+                r#"data: {"type":"response.output_text.delta","delta":"hello"}"#,
+                &mut send,
+            )
+            .unwrap()
+        );
+        assert!(
+            process_sse_line(
+                AiApiStyle::OpenAiResponses,
+                r#"data: {"type":"response.completed"}"#,
+                &mut send,
+            )
+            .unwrap()
+        );
+        assert!(
+            process_sse_line(
+                AiApiStyle::OpenAiResponses,
+                r#"data: {"type":"response.failed","response":{"error":{"message":"denied"}}}"#,
+                &mut send,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("denied")
+        );
+    }
     assert_eq!(deltas, ["hello"]);
 }
 

@@ -45,11 +45,12 @@ impl DocumentView {
         let link_highlights = self.link_highlights();
         let linked_hover_highlights = self.translation_hover_highlights(reduce_motion, window);
         let failed_translation_highlights = if translation_toolbar_enabled(
-            self.translation_view_role,
-            self.translation_pair_active,
-        ) && self.translation_overlay_enabled
+            self.translation.view_role,
+            self.translation.pair_active,
+        ) && self.translation.overlay_enabled
         {
-            self.translation_failed_hover_regions
+            self.translation
+                .failed_hover_regions
                 .iter()
                 .flat_map(|region_id| self.translation_hover_region_highlights(region_id))
                 .collect()
@@ -96,16 +97,16 @@ impl DocumentView {
         window: &mut Window,
     ) -> Option<TranslationHoverHighlight> {
         if !translation_pair_highlights_enabled(
-            self.translation_view_role,
-            self.translation_pair_active,
-            self.translation_overlay_enabled,
+            self.translation.view_role,
+            self.translation.pair_active,
+            self.translation.overlay_enabled,
         ) {
-            self.translation_hover_animation = None;
+            self.translation.hover_animation = None;
             return None;
         }
-        let region_id = match self.translation_view_role {
-            TranslationViewRole::Translation => self.hovered_translation_region.as_ref(),
-            TranslationViewRole::SourceMirror => self.external_hovered_translation_region.as_ref(),
+        let region_id = match self.translation.view_role {
+            TranslationViewRole::Translation => self.translation.hovered_region.as_ref(),
+            TranslationViewRole::SourceMirror => self.translation.external_hovered_region.as_ref(),
             TranslationViewRole::None => None,
         }
         .cloned();
@@ -117,17 +118,18 @@ impl DocumentView {
         let now = Instant::now();
         if let (Some(region_id), Some(target)) = (region_id, target) {
             let animation = self
-                .translation_hover_animation
+                .translation
+                .hover_animation
                 .get_or_insert_with(|| TranslationHoverAnimation::new(region_id.clone(), target));
             animation.retarget(region_id, target, now, reduce_motion);
-        } else if let Some(animation) = self.translation_hover_animation.as_mut() {
+        } else if let Some(animation) = self.translation.hover_animation.as_mut() {
             // Keep the geometry after the fade completes. A later target can
             // then retarget the existing box instead of recreating it at the
             // destination and producing an instant disappear/reappear jump.
             animation.fade_out(now, reduce_motion);
         }
 
-        let animation = self.translation_hover_animation.as_ref()?;
+        let animation = self.translation.hover_animation.as_ref()?;
         if animation.is_animating(now) {
             window.request_animation_frame();
         }
@@ -250,11 +252,11 @@ impl DocumentView {
         } else {
             viewport_width / self.max_page_width.max(1.0)
         };
-        if let (Some(session_id), Some(anchor)) = (self.translation_pair_session_id, resize_anchor)
+        if let (Some(session_id), Some(anchor)) = (self.translation.pair_session_id, resize_anchor)
         {
             self.apply_live_translation_viewport_anchor(session_id, anchor, cx);
         }
-        let pending_anchor = self.pending_translation_viewport_anchor;
+        let pending_anchor = self.translation.pending_viewport_anchor;
         self.apply_pending_live_translation_viewport_anchor(cx);
         let resize_was_clamped = resize_anchor.is_some_and(|previous| {
             self.live_translation_viewport_anchor(SynchronizedScrollMode::Immediate)
@@ -266,7 +268,7 @@ impl DocumentView {
         });
         if self.translation_viewport_geometry_ready()
             && ((!translation_viewport_was_ready
-                && self.translation_view_role == TranslationViewRole::SourceMirror)
+                && self.translation.view_role == TranslationViewRole::SourceMirror)
                 || resize_was_clamped
                 || pending_was_clamped)
         {

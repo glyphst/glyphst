@@ -252,9 +252,9 @@ fn timeline_css(theme: &MermaidTheme) -> String {
             theme.background,
             ACCENT_FILL_OPACITY,
         ));
-        write!(
+        writeln!(
             css,
-            "rect.task-type-{i}, rect.section-type-{i} {{ fill: {fill} !important; stroke: {c} !important; }}\n"
+            "rect.task-type-{i}, rect.section-type-{i} {{ fill: {fill} !important; stroke: {c} !important; }}"
         ).expect("write to String cannot fail");
     }
     for i in 0..4 {
@@ -311,21 +311,21 @@ fn scope_css(raw_css: &str, svg_id: &str) -> String {
     for line in raw_css.lines() {
         let trimmed = line.trim();
 
-        if should_scope_css_line(trimmed) {
-            if let Some(brace) = trimmed.find('{') {
-                let (selectors, rest) = trimmed.split_at(brace);
-                let mut first = true;
-                for selector in selectors.split(',') {
-                    if !first {
-                        result.push_str(", ");
-                    }
-                    first = false;
-                    write!(result, "#{svg_id} {}", selector.trim())
-                        .expect("write to String cannot fail");
+        if should_scope_css_line(trimmed)
+            && let Some(brace) = trimmed.find('{')
+        {
+            let (selectors, rest) = trimmed.split_at(brace);
+            let mut first = true;
+            for selector in selectors.split(',') {
+                if !first {
+                    result.push_str(", ");
                 }
-                writeln!(result, "{rest}").expect("write to String cannot fail");
-                continue;
+                first = false;
+                write!(result, "#{svg_id} {}", selector.trim())
+                    .expect("write to String cannot fail");
             }
+            writeln!(result, "{rest}").expect("write to String cannot fail");
+            continue;
         }
         writeln!(result, "{line}").expect("write to String cannot fail");
     }

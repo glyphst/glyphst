@@ -15,7 +15,7 @@ use crate::{
     settings::SettingsStore,
     synchronized_tabs::SynchronizedTabRegistry,
 };
-use glyphst_translation_ui::DocumentTranslationJobManager;
+use glyphst_translation_ui::DocumentTranslationManager;
 
 fn temporary_pdf_path(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -86,7 +86,7 @@ fn rendered_non_current_group_tab_has_link_marker_and_pause_indicator(cx: &mut T
         cx.set_global(LibraryStore::memory());
         cx.set_global(RenderCache::new());
     });
-    let jobs = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+    let jobs = cx.update(|cx| cx.new(DocumentTranslationManager::new));
 
     let (root, cx) = cx.add_window_view(|window, cx| {
         let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs.clone()));
@@ -270,7 +270,7 @@ fn document_open_stages_a_loading_tab_without_blocking_tab_switches(cx: &mut Tes
         cx.set_global(LibraryStore::memory());
         cx.set_global(RenderCache::new());
     });
-    let jobs = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+    let jobs = cx.update(|cx| cx.new(DocumentTranslationManager::new));
     let path = temporary_pdf_path("loading-tab");
     fs::create_dir(&path).unwrap();
 
@@ -329,7 +329,7 @@ fn successful_document_preparation_replaces_the_loading_tab(cx: &mut TestAppCont
         cx.set_global(LibraryStore::memory());
         cx.set_global(RenderCache::new());
     });
-    let jobs = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+    let jobs = cx.update(|cx| cx.new(DocumentTranslationManager::new));
     let path = temporary_pdf_path("loading-success");
     write_minimal_pdf(&path);
 
@@ -368,7 +368,7 @@ fn encrypted_document_retries_inline_and_reuses_a_saved_password(cx: &mut TestAp
         cx.set_global(RenderCache::new());
         cx.set_global(PdfPasswordStore::memory());
     });
-    let jobs = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+    let jobs = cx.update(|cx| cx.new(DocumentTranslationManager::new));
     let path = temporary_pdf_path("encrypted-open");
     write_encrypted_pdf(&path);
 
@@ -490,7 +490,7 @@ fn no_op_tab_drag_activates_the_dragged_tab(cx: &mut TestAppContext) {
         cx.set_global(LibraryStore::memory());
         cx.set_global(RenderCache::new());
     });
-    let jobs = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+    let jobs = cx.update(|cx| cx.new(DocumentTranslationManager::new));
 
     let (root, cx) = cx.add_window_view(|window, cx| {
         let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs.clone()));

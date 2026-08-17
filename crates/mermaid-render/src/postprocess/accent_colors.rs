@@ -293,7 +293,7 @@ impl<'a, 'theme, I: Iterator<Item = Result<Event<'a>>>> AccentColors<'theme, I> 
                         if accent_count > 0 {
                             let idx = self.quadrant_point_idx % accent_count;
                             self.quadrant_point_idx += 1;
-                            return add_to_event(&event, e, &accent_class_name(idx));
+                            return add_to_event(&event, e, accent_class_name(idx));
                         }
                     }
                 }
@@ -315,9 +315,9 @@ impl<'a, 'theme, I: Iterator<Item = Result<Event<'a>>>> AccentColors<'theme, I> 
                     let class = chart_color_class_name(self.legend_color_idx);
                     self.legend_color_idx += 1;
                     self.in_legend = false;
-                    add_to_event(&event, e, &class)
+                    add_to_event(&event, e, class)
                 } else if self.in_plot {
-                    add_to_event(&event, e, &chart_color_class_name(0))
+                    add_to_event(&event, e, chart_color_class_name(0))
                 } else {
                     Ok(event)
                 }
@@ -332,13 +332,13 @@ impl<'a, 'theme, I: Iterator<Item = Result<Event<'a>>>> AccentColors<'theme, I> 
                 if class_val.as_deref() == Some("pieCircle") {
                     let class = chart_color_class_name(self.pie_color_idx % 8);
                     self.pie_color_idx += 1;
-                    add_to_event(&event, e, &class)
+                    add_to_event(&event, e, class)
                 } else if self.in_plot
                     && !self.plot_path_done
                     && e.try_get_attribute("stroke")?.is_some()
                 {
                     self.plot_path_done = true;
-                    add_to_event(&event, e, &chart_color_class_name(1))
+                    add_to_event(&event, e, chart_color_class_name(1))
                 } else {
                     Ok(event)
                 }
@@ -358,29 +358,28 @@ impl<'a, 'theme, I: Iterator<Item = Result<Event<'a>>>> Iterator for AccentColor
             Err(e) => return Some(Err(e)),
         };
 
-        if matches!(self.handler, Handler::Pending) {
-            if let Event::Start(e) | Event::Empty(e) = &event {
-                if e.name().as_ref() == b"svg" {
-                    let diagram_type = detect_diagram_type(e);
-                    let count = self.theme.accent_colors.len();
-                    self.handler = match diagram_type {
-                        DiagramType::Flowchart => {
-                            Handler::Flowchart(class_diagram::ClassDiagramAccents::new(count))
-                        }
-                        DiagramType::Mindmap => Handler::Mindmap(mindmap::MindmapAccents::new()),
-                        DiagramType::ClassDiagram => {
-                            Handler::ClassDiagram(class_diagram::ClassDiagramAccents::new(count))
-                        }
-                        DiagramType::StateDiagram => {
-                            Handler::StateDiagram(class_diagram::ClassDiagramAccents::new(count))
-                        }
-                        DiagramType::SequenceDiagram => {
-                            Handler::Sequence(sequence_diagram::SequenceDiagramAccents::new(count))
-                        }
-                        DiagramType::Unhandled => Handler::Passthrough,
-                    };
+        if matches!(self.handler, Handler::Pending)
+            && let Event::Start(e) | Event::Empty(e) = &event
+            && e.name().as_ref() == b"svg"
+        {
+            let diagram_type = detect_diagram_type(e);
+            let count = self.theme.accent_colors.len();
+            self.handler = match diagram_type {
+                DiagramType::Flowchart => {
+                    Handler::Flowchart(class_diagram::ClassDiagramAccents::new(count))
                 }
-            }
+                DiagramType::Mindmap => Handler::Mindmap(mindmap::MindmapAccents::new()),
+                DiagramType::ClassDiagram => {
+                    Handler::ClassDiagram(class_diagram::ClassDiagramAccents::new(count))
+                }
+                DiagramType::StateDiagram => {
+                    Handler::StateDiagram(class_diagram::ClassDiagramAccents::new(count))
+                }
+                DiagramType::SequenceDiagram => {
+                    Handler::Sequence(sequence_diagram::SequenceDiagramAccents::new(count))
+                }
+                DiagramType::Unhandled => Handler::Passthrough,
+            };
         }
 
         let event = match &mut self.handler {

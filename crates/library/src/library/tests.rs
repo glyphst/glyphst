@@ -1,6 +1,20 @@
 use super::storage_helpers::*;
 use super::*;
 
+#[test]
+fn memory_store_replaces_history_without_persistence() {
+    let mut store = LibraryStore::memory();
+    let entry = HistoryEntry {
+        path: PathBuf::from("/tmp/in-memory.pdf"),
+        opened: 1,
+        position: position(1),
+    };
+
+    store.replace_history_entries(vec![entry.clone()]).unwrap();
+
+    assert_eq!(store.history_entries(), &[entry]);
+}
+
 fn position(page: usize) -> DocumentPosition {
     DocumentPosition::fixed(page as f32, page as f32 * 10.0, 1.25, page)
 }
@@ -14,6 +28,75 @@ fn temp_library_path(name: &str) -> PathBuf {
         "glyphst-{name}-{}-{nanos}.redb",
         std::process::id()
     ))
+}
+
+#[test]
+fn current_storage_uses_versioned_json_tables() {
+    let database_path = temp_library_path("current-json-storage");
+    let managed_root = database_path.with_extension("library-v2");
+    let document_path = PathBuf::from("/tmp/current-json.pdf");
+    {
+        let mut store =
+            LibraryStore::open_current_with_root(database_path.clone(), managed_root.clone())
+                .unwrap();
+        store
+            .replace_history_entries(vec![HistoryEntry {
+                path: document_path.clone(),
+                opened: 42,
+                position: position(7),
+            }])
+            .unwrap();
+    }
+
+    {
+        let database = Database::open(&database_path).unwrap();
+        let read_txn = database.begin_read().unwrap();
+        {
+            let metadata = read_txn.open_table(STORAGE_METADATA_TABLE).unwrap();
+            assert_eq!(
+                metadata
+                    .get(STORAGE_SCHEMA_VERSION_KEY)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                CURRENT_STORAGE_SCHEMA_VERSION
+            );
+        }
+        {
+            let history = read_txn.open_table(HISTORY_V2_TABLE).unwrap();
+            let encoded = history
+                .get(history_key(&document_path).as_slice())
+                .unwrap()
+                .unwrap();
+            assert_eq!(encoded.value().first(), Some(&b'{'));
+        }
+    }
+
+    let reopened =
+        LibraryStore::open_current_with_root(database_path.clone(), managed_root.clone()).unwrap();
+    assert_eq!(reopened.history_position(&document_path), Some(position(7)));
+    drop(reopened);
+
+    fs::remove_file(database_path).unwrap();
+    fs::remove_dir_all(managed_root).unwrap();
+}
+
+#[test]
+fn current_storage_does_not_touch_a_legacy_database() {
+    let directory = temp_library_path("legacy-store-remains").with_extension("dir");
+    fs::create_dir_all(&directory).unwrap();
+    let legacy = directory.join("library.redb");
+    let legacy_bytes = b"legacy-library-sentinel";
+    fs::write(&legacy, legacy_bytes).unwrap();
+    let current_root = directory.join("library-v2");
+    let current_database = current_root.join("library.redb");
+
+    let store = LibraryStore::open_current_with_root(current_database, current_root).unwrap();
+    assert!(store.history_entries().is_empty());
+    assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
+    drop(store);
+
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

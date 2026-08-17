@@ -277,7 +277,7 @@ impl DocumentView {
     }
 
     fn selected_text_for_copy(&self, semantic: bool) -> Option<String> {
-        if self.view_language == DocumentViewLanguage::Translated || !semantic {
+        if self.translation.view_language == DocumentViewLanguage::Translated || !semantic {
             return self.selected_text();
         }
 
@@ -286,7 +286,7 @@ impl DocumentView {
     }
 
     fn selected_markdown(&self, semantic: bool) -> Option<String> {
-        if self.view_language == DocumentViewLanguage::Translated {
+        if self.translation.view_language == DocumentViewLanguage::Translated {
             return self
                 .selected_text()
                 .map(|text| Self::markdown_for_plain_text(&text));

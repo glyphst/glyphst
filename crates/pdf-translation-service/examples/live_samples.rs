@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use glyphst_pdf_translation_app::{
-    CancellationToken, PdfTranslationExportRequest, PdfTranslationPagePreview,
-    PdfTranslationProgress, PdfTranslationRequest, PdfTranslationService,
-    PdfTranslationSessionRequest, PdfTranslationSessionUpdate,
+use glyphst_pdf_translation_service::{
+    CancellationToken, PdfTranslationConfig, PdfTranslationExportRequest,
+    PdfTranslationPagePreview, PdfTranslationProgress, PdfTranslationRequest,
+    PdfTranslationService, PdfTranslationSessionRequest, PdfTranslationSessionUpdate,
 };
 use glyphst_settings::{
     OcrMode, OcrProvider, Settings, TranslationProvider, app_paths, parse_settings,
@@ -82,6 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings.translation.active_provider = provider;
     }
     settings.sanitize();
+    let translation_config = PdfTranslationConfig::from(&settings);
     let resolved_ai = settings.ai.resolved_translation();
     println!(
         "OCR mode={}, OCR provider={}, translation provider={}, AI model={}",
@@ -119,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sample_for_progress = sample.clone();
         let result = match mode {
             HarnessMode::Batch => service.run(
-                settings.clone(),
+                translation_config.clone(),
                 PdfTranslationRequest {
                     source_path,
                     output_path: output_path.clone(),
@@ -134,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let captured_previews = Arc::clone(&previews);
                 let sample_for_updates = sample_for_progress.clone();
                 let session = service.run_session(
-                    settings.clone(),
+                    translation_config.clone(),
                     PdfTranslationSessionRequest {
                         source_path,
                         source_language: None,
@@ -166,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match session {
                     Ok(session) => {
                         let exported = service.export_session(
-                            settings.clone(),
+                            translation_config.clone(),
                             session,
                             PdfTranslationExportRequest {
                                 output_path: output_path.clone(),
@@ -245,7 +246,7 @@ fn progress_logger(sample: String) -> impl Fn(PdfTranslationProgress) + Send + '
 
 fn compare_live_previews(
     previews: &BTreeMap<usize, PdfTranslationPagePreview>,
-    exported_path: &PathBuf,
+    exported_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if previews.is_empty() {
         return Err("compare mode did not receive any live page previews".into());

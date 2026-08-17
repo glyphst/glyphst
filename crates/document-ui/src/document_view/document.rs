@@ -7,7 +7,7 @@ impl DocumentView {
 
     pub fn set_document_translation_jobs(
         &mut self,
-        jobs: Entity<DocumentTranslationJobManager>,
+        jobs: Entity<DocumentTranslationManager>,
         cx: &mut Context<Self>,
     ) {
         self.document_translation_jobs = jobs;

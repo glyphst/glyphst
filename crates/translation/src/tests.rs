@@ -425,7 +425,13 @@ fn google_semantic_cache_identity_bypasses_pre_html_entries() {
             SemanticProtectedTokenKind::Identifier,
         )],
     );
-    let key = semantic_cache_key(&settings, TranslationProvider::Google, None, &target, &unit);
+    let key = semantic_cache_key(
+        &TranslationExecutionConfig::from_settings(&settings),
+        TranslationProvider::Google,
+        None,
+        &target,
+        &unit,
+    );
     let mut changed_token = unit.clone();
     changed_token.protected_tokens[0].original = "ML".to_string();
 
@@ -433,7 +439,7 @@ fn google_semantic_cache_identity_bypasses_pre_html_entries() {
     assert_ne!(
         key,
         semantic_cache_key(
-            &settings,
+            &TranslationExecutionConfig::from_settings(&settings),
             TranslationProvider::Google,
             None,
             &target,
@@ -518,7 +524,7 @@ fn google_inline_objects_are_reassembled_at_their_source_anchors() {
     let translated = TranslationService::new()
         .unwrap()
         .translate_semantic_batch(
-            &settings,
+            &TranslationExecutionConfig::from_settings(&settings),
             TranslationProvider::Google,
             Some(LanguageCode::new("en").unwrap()),
             LanguageCode::new("zh-hans").unwrap(),
@@ -615,7 +621,7 @@ fn google_semantic_recovery_uses_batch_singleton_then_segmented_html() {
     let translated = TranslationService::new()
         .unwrap()
         .translate_semantic_batch(
-            &settings,
+            &TranslationExecutionConfig::from_settings(&settings),
             TranslationProvider::Google,
             None,
             LanguageCode::new("fr").unwrap(),
@@ -691,7 +697,7 @@ fn clear_removes_memory_and_persistent_cache_entries() {
         .unwrap_or_default()
         .as_nanos();
     let directory = std::env::temp_dir().join(format!("glyphst-translation-cache-{nonce:x}"));
-    let path = directory.join("translations.redb");
+    let path = directory.join("translations-v2.redb");
     let mut cache = TranslationCache::open_at(&path).unwrap();
     let cached = CachedTranslation {
         translations: vec!["bonjour".to_string()],
@@ -723,13 +729,25 @@ fn semantic_cache_keys_separate_protocol_context_model_and_endpoint() {
         context_before: Some("Before".to_string()),
         context_after: Some("After".to_string()),
     };
-    let base_key = semantic_cache_key(&settings, provider, None, &target, &unit);
+    let base_key = semantic_cache_key(
+        &TranslationExecutionConfig::from_settings(&settings),
+        provider,
+        None,
+        &target,
+        &unit,
+    );
 
     let mut changed_context = unit.clone();
     changed_context.context_before = Some("Different".to_string());
     assert_ne!(
         base_key,
-        semantic_cache_key(&settings, provider, None, &target, &changed_context)
+        semantic_cache_key(
+            &TranslationExecutionConfig::from_settings(&settings),
+            provider,
+            None,
+            &target,
+            &changed_context,
+        )
     );
 
     let mut changed_model = settings.clone();
@@ -741,7 +759,13 @@ fn semantic_cache_keys_separate_protocol_context_model_and_endpoint() {
     changed_model.ai.translation_model = Some(ModelRef::new(ai_provider, "other-model"));
     assert_ne!(
         base_key,
-        semantic_cache_key(&changed_model, provider, None, &target, &unit)
+        semantic_cache_key(
+            &TranslationExecutionConfig::from_settings(&changed_model),
+            provider,
+            None,
+            &target,
+            &unit,
+        )
     );
 
     let mut endpoint_base = settings.clone();
@@ -757,7 +781,13 @@ fn semantic_cache_keys_separate_protocol_context_model_and_endpoint() {
         config.ensure_model(AiModel::new("private-model", "Private model", "Test"));
     }
     endpoint_base.ai.translation_model = Some(ModelRef::new(custom_provider, "private-model"));
-    let endpoint_key = semantic_cache_key(&endpoint_base, provider, None, &target, &unit);
+    let endpoint_key = semantic_cache_key(
+        &TranslationExecutionConfig::from_settings(&endpoint_base),
+        provider,
+        None,
+        &target,
+        &unit,
+    );
 
     let mut changed_endpoint = endpoint_base.clone();
     changed_endpoint
@@ -766,7 +796,13 @@ fn semantic_cache_keys_separate_protocol_context_model_and_endpoint() {
         .base_url = Some("https://translation-b.example.test/v1/".to_string());
     assert_ne!(
         endpoint_key,
-        semantic_cache_key(&changed_endpoint, provider, None, &target, &unit)
+        semantic_cache_key(
+            &TranslationExecutionConfig::from_settings(&changed_endpoint),
+            provider,
+            None,
+            &target,
+            &unit,
+        )
     );
     assert!(base_key.starts_with("semantic-v5-"));
 }
@@ -785,14 +821,14 @@ fn semantic_cache_accepts_only_placeholder_validated_items() {
         context_before: None,
         context_after: None,
     };
-    let key = semantic_cache_key(&settings, provider, None, &target, &unit);
+    let config = TranslationExecutionConfig::from_settings(&settings);
+    let key = semantic_cache_key(&config, provider, None, &target, &unit);
 
-    service
-        .cache_validated_semantic_translation(&settings, provider, None, &target, &unit, "Valeur");
+    service.cache_validated_semantic_translation(&config, provider, None, &target, &unit, "Valeur");
     assert!(service.cache.lock().unwrap().get(&key).is_none());
 
     service.cache_validated_semantic_translation(
-        &settings,
+        &config,
         provider,
         None,
         &target,
@@ -837,7 +873,7 @@ fn poisoned_legacy_semantic_cache_is_bypassed() {
         context_after: None,
     };
     let key = semantic_cache_key(
-        &settings,
+        &TranslationExecutionConfig::from_settings(&settings),
         TranslationProvider::Ai,
         None,
         &LanguageCode::new("fr").unwrap(),

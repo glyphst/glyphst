@@ -210,9 +210,9 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "approx"
@@ -2164,11 +2164,10 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
- "concurrent-queue",
  "parking",
  "pin-project-lite",
 ]
@@ -3028,7 +3027,7 @@ dependencies = [
  "glyphst-core",
  "glyphst-library",
  "glyphst-pdf",
- "glyphst-pdf-translation-app",
+ "glyphst-pdf-translation-service",
  "glyphst-settings",
  "glyphst-translation",
  "glyphst-translation-ui",
@@ -3070,11 +3069,11 @@ name = "glyphst-library"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bincode",
  "glyphst-core",
  "gpui",
  "redb",
  "serde",
+ "serde_json",
  "sha2",
  "uuid",
 ]
@@ -3123,7 +3122,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "glyphst-pdf-translation-app"
+name = "glyphst-pdf-translation-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3134,7 +3133,6 @@ dependencies = [
  "glyphst-pdf-translation",
  "glyphst-settings",
  "glyphst-translation",
- "gpui",
  "mupdf",
  "serde",
  "serde_json",
@@ -3153,10 +3151,11 @@ dependencies = [
  "glyphst-document-ui",
  "glyphst-keymap",
  "glyphst-library",
- "glyphst-pdf-translation-app",
+ "glyphst-pdf-translation-service",
  "glyphst-settings",
  "glyphst-settings-ui",
  "glyphst-translation",
+ "glyphst-translation-ui",
  "glyphst-ui",
  "glyphst-workspace",
  "gpui",
@@ -3195,7 +3194,7 @@ dependencies = [
  "glyphst-ai",
  "glyphst-core",
  "glyphst-keymap",
- "glyphst-pdf-translation-app",
+ "glyphst-pdf-translation-service",
  "glyphst-settings",
  "glyphst-translation-ui",
  "glyphst-ui",
@@ -3208,11 +3207,9 @@ name = "glyphst-translation"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bincode",
  "glyphst-ai",
  "glyphst-core",
  "glyphst-settings",
- "gpui",
  "redb",
  "reqwest",
  "serde",
@@ -3226,7 +3223,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "glyphst-pdf",
- "glyphst-pdf-translation-app",
+ "glyphst-pdf-translation-service",
  "glyphst-settings",
  "glyphst-translation",
  "glyphst-ui",
@@ -5420,9 +5417,9 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
 name = "memmap2"
-version = "0.9.10"
+version = "0.9.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
 dependencies = [
  "libc",
 ]

@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 use anyhow::{Result, bail};
 use glyphst_core::DocumentFormat;
 use glyphst_pdf::{DocumentAuthenticationError, DocumentPassword};
-use glyphst_translation_ui::{DocumentTranslationJobId, DocumentTranslationJobManager};
+use glyphst_translation_ui::{DocumentTranslationId, DocumentTranslationManager};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, AppContext, Axis, Bounds, Context,
     DismissEvent, DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle,
@@ -145,7 +145,7 @@ pub(crate) struct LoadingDocumentView {
     initial_position: DocumentPosition,
     restore_tab_id: Option<u64>,
     focus_handle: FocusHandle,
-    job_ids: Vec<DocumentTranslationJobId>,
+    job_ids: Vec<DocumentTranslationId>,
     password_input: Entity<InputState>,
     remember_password: bool,
     status: LoadingDocumentStatus,
@@ -230,7 +230,7 @@ impl LoadingDocumentView {
         initial_position: DocumentPosition,
         restore_tab_id: Option<u64>,
         focus_handle: FocusHandle,
-        job_ids: Vec<DocumentTranslationJobId>,
+        job_ids: Vec<DocumentTranslationId>,
         pending_open: PendingDocumentOpen,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -516,7 +516,7 @@ pub(crate) enum PaneEvent {
     },
     ExternalPathsDropped(Vec<PathBuf>),
     DocumentOpenFinished {
-        job_id: DocumentTranslationJobId,
+        job_id: DocumentTranslationId,
         result: std::result::Result<(), SharedString>,
     },
     RestoredDocumentFinished {
@@ -606,7 +606,7 @@ pub(crate) struct Pane {
     tabs: Vec<Tab>,
     active_tab: usize,
     focus_handle: FocusHandle,
-    document_translation_jobs: Entity<DocumentTranslationJobManager>,
+    document_translation_jobs: Entity<DocumentTranslationManager>,
     tab_focus_handles: HashMap<EntityId, FocusHandle>,
     drag_split_direction: Option<SplitDirection>,
     external_document_drop_feedback: Option<ExternalDocumentDropFeedback>,
@@ -640,7 +640,7 @@ impl Pane {
 
     pub(crate) fn empty(
         focus_handle: FocusHandle,
-        document_translation_jobs: Entity<DocumentTranslationJobManager>,
+        document_translation_jobs: Entity<DocumentTranslationManager>,
     ) -> Self {
         Self {
             tabs: Vec::new(),
@@ -975,7 +975,7 @@ impl Pane {
     pub(crate) fn open_translation_duplicate(
         &mut self,
         source: &Entity<DocumentView>,
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Entity<DocumentView>> {
@@ -1071,7 +1071,7 @@ impl Pane {
         }
     }
 
-    pub(crate) fn translation_sessions(&self, cx: &App) -> Vec<(DocumentTranslationJobId, bool)> {
+    pub(crate) fn translation_sessions(&self, cx: &App) -> Vec<(DocumentTranslationId, bool)> {
         self.tabs
             .iter()
             .filter_map(|tab| match tab {
@@ -1336,7 +1336,7 @@ impl Pane {
     pub(crate) fn associate_open_job(
         &mut self,
         tab_ix: usize,
-        job_id: DocumentTranslationJobId,
+        job_id: DocumentTranslationId,
         cx: &mut Context<Self>,
     ) {
         match self.tabs.get(tab_ix) {
@@ -1371,7 +1371,7 @@ impl Pane {
         path: PathBuf,
         position: Option<DocumentPosition>,
         replace_active_new_tab: bool,
-        job_id: DocumentTranslationJobId,
+        job_id: DocumentTranslationId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
@@ -1390,7 +1390,7 @@ impl Pane {
         path: PathBuf,
         position: Option<DocumentPosition>,
         replace_active_new_tab: bool,
-        job_id: Option<DocumentTranslationJobId>,
+        job_id: Option<DocumentTranslationId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
@@ -3077,7 +3077,7 @@ impl PaneGroup {
 
     pub(crate) fn restore(
         session: &ReaderPaneTree,
-        document_translation_jobs: Entity<DocumentTranslationJobManager>,
+        document_translation_jobs: Entity<DocumentTranslationManager>,
         window: &mut Window,
         cx: &mut App,
     ) -> RestoredPaneGroup {
@@ -3361,7 +3361,7 @@ impl Member {
     #[allow(clippy::too_many_arguments)]
     fn restore(
         session: &ReaderPaneTree,
-        document_translation_jobs: &Entity<DocumentTranslationJobManager>,
+        document_translation_jobs: &Entity<DocumentTranslationManager>,
         panes: &mut Vec<(u64, Entity<Pane>)>,
         tab_ids: &mut Vec<(u64, EntityId, EntityId)>,
         pending_documents: &mut usize,
@@ -3484,6 +3484,7 @@ impl Member {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render(
         &self,
         basis: usize,
@@ -3773,6 +3774,7 @@ impl PaneAxis {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render(
         &self,
         basis: usize,

@@ -58,15 +58,15 @@ use glyphst_pdf::{
     DocumentPassword, DocumentRenderSession, DocumentSnapshot, ReloadCoordinator,
     ReloadDisposition, RetainedDisplayList,
 };
-use glyphst_pdf_translation_app::{
-    BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationService,
-    PdfTranslationSessionRequest, source_text_regions,
+use glyphst_pdf_translation_service::{
+    BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,
+    source_text_regions,
 };
-use glyphst_translation::{LanguageCode, TranslationRequest, TranslationService};
+use glyphst_translation::{LanguageCode, TranslationExecutionConfig, TranslationRequest};
 use glyphst_translation_ui::{
-    DocumentTranslationJobId, DocumentTranslationJobManager, DocumentTranslationOpenMode,
-    DocumentTranslationSessionSnapshot, DocumentTranslationSessionStatus, TargetLanguageOption,
-    target_language_options,
+    DocumentTranslationId, DocumentTranslationManager, DocumentTranslationOpenMode,
+    DocumentTranslationSessionSnapshot, DocumentTranslationSessionStatus,
+    LiveTranslationSubmission, TargetLanguageOption, TranslationServices, target_language_options,
 };
 use glyphst_ui::{
     activity::ActivityCenter,
@@ -183,8 +183,7 @@ fn translation_panel_width(viewport_width: f32) -> f32 {
         return TRANSLATION_PANEL_PREFERRED_WIDTH;
     }
     (viewport_width - TRANSLATION_PANEL_MARGIN - TRANSLATION_PANEL_DEFAULT_RIGHT)
-        .max(1.0)
-        .min(TRANSLATION_PANEL_PREFERRED_WIDTH)
+        .clamp(1.0, TRANSLATION_PANEL_PREFERRED_WIDTH)
 }
 
 fn default_translation_panel_position(viewport_width: f32, panel_width: f32) -> GpuiPoint<Pixels> {
@@ -967,6 +966,7 @@ fn translation_toolbar_enabled(role: TranslationViewRole, pair_active: bool) -> 
     pair_active && role == TranslationViewRole::Translation
 }
 
+#[allow(clippy::too_many_arguments)]
 fn translation_panel_initial_dock_should_run(
     armed: bool,
     role: TranslationViewRole,
@@ -1159,7 +1159,7 @@ pub struct DocumentOpenOptions {
     pub epub_preferences: EpubReaderPreferences,
     pub rotation: DocumentRotation,
     pub page_layout: DocumentPageLayout,
-    pub document_translation_jobs: Entity<DocumentTranslationJobManager>,
+    pub document_translation_jobs: Entity<DocumentTranslationManager>,
 }
 
 pub struct PreparedDocumentOpen {
@@ -1191,15 +1191,15 @@ pub enum DocumentViewEvent {
     /// A canonical content-region id emitted only by the active translated
     /// half of a live session pair.
     TranslationRegionHovered {
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         region_id: Option<String>,
     },
     TranslationOverlayVisibilityChanged {
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         enabled: bool,
     },
     TranslationViewportChanged {
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         anchor: TranslationViewportAnchor,
     },
 }
@@ -1430,6 +1430,95 @@ struct EpubStepperConfig {
     increase_id: &'static str,
 }
 
+struct DocumentTranslationState {
+    view_language: DocumentViewLanguage,
+    view_role: TranslationViewRole,
+    pair_active: bool,
+    overlay_enabled: bool,
+    position_sync_ready: bool,
+    pending_viewport_anchor: Option<TranslationViewportAnchor>,
+    suppress_linked_events: bool,
+    external_hovered_region: Option<String>,
+    hovered_region: Option<String>,
+    popup: Option<TranslationCardState>,
+    pinned: Option<TranslationCardState>,
+    popup_scroll: ScrollHandle,
+    pinned_scroll: ScrollHandle,
+    popup_language_select: Option<TargetLanguageSelect>,
+    pinned_language_select: Option<TargetLanguageSelect>,
+    request_generation: u64,
+    session_id: Option<DocumentTranslationId>,
+    pair_session_id: Option<DocumentTranslationId>,
+    session_snapshot: Option<DocumentTranslationSessionSnapshot>,
+    hover_regions: HashMap<String, TranslationHoverRegionEntry>,
+    failed_hover_regions: HashSet<String>,
+    hover_animation: Option<TranslationHoverAnimation>,
+    hover_clear_generation: u64,
+    hover_clear_task: Option<Task<()>>,
+    hover_tools_hovered: bool,
+    hover_tools_bounds: Option<(String, Bounds<Pixels>)>,
+    panel_placement: TranslationPanelPlacement,
+    panel_drag: Option<TranslationPanelDrag>,
+    panel_size: Size<Pixels>,
+    panel_initial_dock_armed: bool,
+    panel_initial_dock_generation: u64,
+    panel_initial_dock_task: Option<Task<()>>,
+    panel_dock_generation: u64,
+    panel_dock_task: Option<Task<()>>,
+    panel_retract_generation: u64,
+    panel_retract_task: Option<Task<()>>,
+    panel_dock_panel_hovered: bool,
+    panel_dock_edge_hovered: bool,
+}
+
+impl DocumentTranslationState {
+    fn new() -> Self {
+        Self {
+            view_language: DocumentViewLanguage::Original,
+            view_role: TranslationViewRole::None,
+            pair_active: false,
+            overlay_enabled: true,
+            position_sync_ready: false,
+            pending_viewport_anchor: None,
+            suppress_linked_events: false,
+            external_hovered_region: None,
+            hovered_region: None,
+            popup: None,
+            pinned: None,
+            popup_scroll: ScrollHandle::new(),
+            pinned_scroll: ScrollHandle::new(),
+            popup_language_select: None,
+            pinned_language_select: None,
+            request_generation: 0,
+            session_id: None,
+            pair_session_id: None,
+            session_snapshot: None,
+            hover_regions: HashMap::new(),
+            failed_hover_regions: HashSet::new(),
+            hover_animation: None,
+            hover_clear_generation: 0,
+            hover_clear_task: None,
+            hover_tools_hovered: false,
+            hover_tools_bounds: None,
+            panel_placement: TranslationPanelPlacement::Default,
+            panel_drag: None,
+            panel_size: size(
+                px(TRANSLATION_PANEL_PREFERRED_WIDTH),
+                px(TRANSLATION_PANEL_DEFAULT_HEIGHT),
+            ),
+            panel_initial_dock_armed: false,
+            panel_initial_dock_generation: 0,
+            panel_initial_dock_task: None,
+            panel_dock_generation: 0,
+            panel_dock_task: None,
+            panel_retract_generation: 0,
+            panel_retract_task: None,
+            panel_dock_panel_hovered: false,
+            panel_dock_edge_hovered: false,
+        }
+    }
+}
+
 pub struct DocumentView {
     doc_id: u64,
     path: PathBuf,
@@ -1452,15 +1541,7 @@ pub struct DocumentView {
     text_lines: Vec<TextLine>,
     page_line_ranges: Vec<Range<usize>>,
     page_block_ranges: Vec<Range<usize>>,
-    view_language: DocumentViewLanguage,
-    translation_view_role: TranslationViewRole,
-    translation_pair_active: bool,
-    translation_overlay_enabled: bool,
-    translation_position_sync_ready: bool,
-    pending_translation_viewport_anchor: Option<TranslationViewportAnchor>,
-    suppress_linked_events: bool,
-    external_hovered_translation_region: Option<String>,
-    hovered_translation_region: Option<String>,
+    translation: DocumentTranslationState,
     links: Vec<DocumentLink>,
     highlights: Vec<Highlight>,
     notes: Vec<Note>,
@@ -1469,37 +1550,8 @@ pub struct DocumentView {
     region_tool_active: bool,
     region_drag: Option<RegionDragState>,
     selected_region: Option<RegionImageReference>,
-    translation_popup: Option<TranslationCardState>,
-    pinned_translation: Option<TranslationCardState>,
-    translation_popup_scroll: ScrollHandle,
-    pinned_translation_scroll: ScrollHandle,
     target_language: String,
-    translation_popup_language_select: Option<TargetLanguageSelect>,
-    pinned_translation_language_select: Option<TargetLanguageSelect>,
-    translation_request_generation: u64,
-    document_translation_jobs: Entity<DocumentTranslationJobManager>,
-    translation_session_id: Option<DocumentTranslationJobId>,
-    translation_pair_session_id: Option<DocumentTranslationJobId>,
-    translation_session_snapshot: Option<DocumentTranslationSessionSnapshot>,
-    translation_hover_regions: HashMap<String, TranslationHoverRegionEntry>,
-    translation_failed_hover_regions: HashSet<String>,
-    translation_hover_animation: Option<TranslationHoverAnimation>,
-    translation_hover_clear_generation: u64,
-    translation_hover_clear_task: Option<Task<()>>,
-    translation_hover_tools_hovered: bool,
-    translation_hover_tools_bounds: Option<(String, Bounds<Pixels>)>,
-    translation_panel_placement: TranslationPanelPlacement,
-    translation_panel_drag: Option<TranslationPanelDrag>,
-    translation_panel_size: Size<Pixels>,
-    translation_panel_initial_dock_armed: bool,
-    translation_panel_initial_dock_generation: u64,
-    translation_panel_initial_dock_task: Option<Task<()>>,
-    translation_panel_dock_generation: u64,
-    translation_panel_dock_task: Option<Task<()>>,
-    translation_panel_retract_generation: u64,
-    translation_panel_retract_task: Option<Task<()>>,
-    translation_panel_dock_panel_hovered: bool,
-    translation_panel_dock_edge_hovered: bool,
+    document_translation_jobs: Entity<DocumentTranslationManager>,
     pending_selection_anchor: Option<usize>,
     dragging: bool,
     hovered_link: Option<usize>,

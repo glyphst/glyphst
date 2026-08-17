@@ -390,7 +390,7 @@ impl CompletionProvider for MentionCompletionProvider {
                     detail: Some(kind.description()),
                     filter_text: Some(kind.token().to_string()),
                     text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                        range: edit_range.clone(),
+                        range: edit_range,
                         new_text,
                     })),
                     data: Some(serde_json::json!({
@@ -631,42 +631,25 @@ impl AiPanel {
         inserted_range: &Range<usize>,
         cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
-        let Some(data) = item.data.as_ref().and_then(serde_json::Value::as_object) else {
-            return None;
-        };
-        let Some(kind) = data
+        let data = item.data.as_ref().and_then(serde_json::Value::as_object)?;
+        let kind = data
             .get(MENTION_KIND_DATA_KEY)
             .and_then(serde_json::Value::as_str)
-            .and_then(mention_kind_from_token)
-        else {
-            return None;
-        };
-        let Some(relative_start) = data
+            .and_then(mention_kind_from_token)?;
+        let relative_start = data
             .get(MENTION_START_DATA_KEY)
             .and_then(serde_json::Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())
-        else {
-            return None;
-        };
-        let Some(relative_end) = data
+            .and_then(|value| usize::try_from(value).ok())?;
+        let relative_end = data
             .get(MENTION_END_DATA_KEY)
             .and_then(serde_json::Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())
-        else {
-            return None;
-        };
-        let Some(start) = inserted_range.start.checked_add(relative_start) else {
-            return None;
-        };
-        let Some(end) = inserted_range.start.checked_add(relative_end) else {
-            return None;
-        };
+            .and_then(|value| usize::try_from(value).ok())?;
+        let start = inserted_range.start.checked_add(relative_start)?;
+        let end = inserted_range.start.checked_add(relative_end)?;
         if start > end || end > inserted_range.end || end > self.content.len() {
             return None;
         }
-        let Some(captured) = self.capture_mention(kind, cx) else {
-            return None;
-        };
+        let captured = self.capture_mention(kind, cx)?;
         let page = data
             .get(MENTION_PAGE_DATA_KEY)
             .and_then(serde_json::Value::as_u64)

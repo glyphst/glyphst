@@ -26,8 +26,8 @@ impl DocumentView {
         }
         self.target_language = target.as_str().to_string();
         for select in [
-            self.translation_popup_language_select.as_ref(),
-            self.pinned_translation_language_select.as_ref(),
+            self.translation.popup_language_select.as_ref(),
+            self.translation.pinned_language_select.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -45,6 +45,7 @@ fn translation_hover_region_id(page_index: usize, namespace: &str, source_id: &s
     format!("page:{page_index}:{namespace}:{source_id}")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn replace_page_text_data(
     pages: &mut [DocumentPage],
     glyphs: &mut Vec<Glyph>,
@@ -272,7 +273,7 @@ impl DocumentView {
             return;
         }
 
-        if !cx.has_global::<PdfTranslationService>() {
+        if !cx.has_global::<TranslationServices>() {
             self.document_translation_jobs.update(cx, |jobs, cx| {
                 jobs.report_preflight_error(
                     source_path,
@@ -331,12 +332,20 @@ impl DocumentView {
             target_language,
         };
         self.document_translation_jobs.update(cx, |jobs, cx| {
-            jobs.submit_session(settings, request, source_snapshot, mode, cx)
+            jobs.submit_session(
+                LiveTranslationSubmission {
+                    settings,
+                    request,
+                    source_snapshot,
+                    mode,
+                },
+                cx,
+            )
         });
     }
 
     pub(super) fn cancel_document_translation(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.translation_session_id {
+        if let Some(id) = self.translation.session_id {
             self.document_translation_jobs
                 .update(cx, |jobs, cx| jobs.cancel_session(id, cx));
         } else {
@@ -352,28 +361,28 @@ impl DocumentView {
     /// the canonical layout/Typst pipeline.
     pub fn attach_translation_session(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         cx: &mut Context<Self>,
     ) {
-        if self.translation_session_id.is_none() {
+        if self.translation.session_id.is_none() {
             self.file_name = format!("{} — Translation", self.file_name).into();
         }
-        self.translation_session_id = Some(id);
-        self.translation_pair_session_id = Some(id);
-        self.translation_view_role = TranslationViewRole::Translation;
-        self.translation_pair_active = false;
-        self.translation_overlay_enabled = true;
-        self.translation_position_sync_ready = false;
-        self.pending_translation_viewport_anchor = None;
-        self.view_language = DocumentViewLanguage::Translated;
+        self.translation.session_id = Some(id);
+        self.translation.pair_session_id = Some(id);
+        self.translation.view_role = TranslationViewRole::Translation;
+        self.translation.pair_active = false;
+        self.translation.overlay_enabled = true;
+        self.translation.position_sync_ready = false;
+        self.translation.pending_viewport_anchor = None;
+        self.translation.view_language = DocumentViewLanguage::Translated;
         self.cancel_translation_panel_pending_dock();
         self.cancel_translation_panel_retract();
         self.cancel_translation_panel_initial_dock();
-        self.translation_panel_placement = TranslationPanelPlacement::Default;
-        self.translation_panel_drag = None;
-        self.translation_panel_initial_dock_armed = true;
-        self.translation_panel_dock_panel_hovered = false;
-        self.translation_panel_dock_edge_hovered = false;
+        self.translation.panel_placement = TranslationPanelPlacement::Default;
+        self.translation.panel_drag = None;
+        self.translation.panel_initial_dock_armed = true;
+        self.translation.panel_dock_panel_hovered = false;
+        self.translation.panel_dock_edge_hovered = false;
         self.refresh_translation_session(cx);
         self.sync_translation_panel_initial_dock(cx);
         cx.notify();
@@ -384,16 +393,16 @@ impl DocumentView {
     /// initiates hover events.
     pub fn attach_translation_source_mirror(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         cx: &mut Context<Self>,
     ) {
-        self.translation_pair_session_id = Some(id);
-        self.translation_view_role = TranslationViewRole::SourceMirror;
-        self.translation_pair_active = false;
-        self.translation_overlay_enabled = true;
-        self.translation_position_sync_ready = true;
-        self.pending_translation_viewport_anchor = None;
-        self.view_language = DocumentViewLanguage::Original;
+        self.translation.pair_session_id = Some(id);
+        self.translation.view_role = TranslationViewRole::SourceMirror;
+        self.translation.pair_active = false;
+        self.translation.overlay_enabled = true;
+        self.translation.position_sync_ready = true;
+        self.translation.pending_viewport_anchor = None;
+        self.translation.view_language = DocumentViewLanguage::Original;
         self.refresh_translation_session(cx);
         cx.notify();
     }
@@ -403,25 +412,25 @@ impl DocumentView {
     /// inactive so returning to the pair is instantaneous.
     pub fn set_translation_pair_active(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         active: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.translation_pair_session_id != Some(id)
-            || self.translation_view_role == TranslationViewRole::None
-            || self.translation_pair_active == active
+        if self.translation.pair_session_id != Some(id)
+            || self.translation.view_role == TranslationViewRole::None
+            || self.translation.pair_active == active
         {
             return;
         }
-        self.translation_pair_active = active;
+        self.translation.pair_active = active;
         if !active {
             self.clear_translation_hover_state(true, cx);
             self.cancel_translation_panel_pending_dock();
             self.cancel_translation_panel_retract();
             self.cancel_translation_panel_initial_dock();
-            self.translation_panel_drag = None;
-            self.translation_panel_dock_panel_hovered = false;
-            self.translation_panel_dock_edge_hovered = false;
+            self.translation.panel_drag = None;
+            self.translation.panel_dock_panel_hovered = false;
+            self.translation.panel_dock_edge_hovered = false;
         } else {
             self.sync_translation_panel_initial_dock(cx);
         }
@@ -432,77 +441,79 @@ impl DocumentView {
     /// the paired live-translation tab is closed or backgrounded.
     pub fn detach_translation_source_mirror(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         cx: &mut Context<Self>,
     ) {
-        if self.translation_view_role != TranslationViewRole::SourceMirror
-            || self.translation_pair_session_id != Some(id)
+        if self.translation.view_role != TranslationViewRole::SourceMirror
+            || self.translation.pair_session_id != Some(id)
         {
             return;
         }
-        self.translation_pair_session_id = None;
-        self.translation_view_role = TranslationViewRole::None;
-        self.translation_pair_active = false;
-        self.translation_overlay_enabled = true;
-        self.translation_position_sync_ready = false;
-        self.pending_translation_viewport_anchor = None;
-        self.translation_session_snapshot = None;
-        self.translation_hover_regions.clear();
-        self.translation_failed_hover_regions.clear();
+        self.translation.pair_session_id = None;
+        self.translation.view_role = TranslationViewRole::None;
+        self.translation.pair_active = false;
+        self.translation.overlay_enabled = true;
+        self.translation.position_sync_ready = false;
+        self.translation.pending_viewport_anchor = None;
+        self.translation.session_snapshot = None;
+        self.translation.hover_regions.clear();
+        self.translation.failed_hover_regions.clear();
         self.clear_translation_hover_state(true, cx);
         self.cancel_translation_panel_pending_dock();
         self.cancel_translation_panel_retract();
         self.cancel_translation_panel_initial_dock();
-        self.translation_panel_initial_dock_armed = false;
-        self.translation_panel_drag = None;
-        self.translation_panel_dock_panel_hovered = false;
-        self.translation_panel_dock_edge_hovered = false;
+        self.translation.panel_initial_dock_armed = false;
+        self.translation.panel_drag = None;
+        self.translation.panel_dock_panel_hovered = false;
+        self.translation.panel_dock_edge_hovered = false;
         cx.notify();
     }
 
-    pub fn translation_session_id(&self) -> Option<DocumentTranslationJobId> {
-        self.translation_session_id
+    pub fn translation_session_id(&self) -> Option<DocumentTranslationId> {
+        self.translation.session_id
     }
 
     pub fn translation_overlay_enabled(&self) -> bool {
-        self.translation_overlay_enabled
+        self.translation.overlay_enabled
     }
 
     pub fn translation_session_is_running(&self) -> bool {
-        self.translation_session_snapshot
+        self.translation
+            .session_snapshot
             .as_ref()
             .is_some_and(DocumentTranslationSessionSnapshot::is_translating)
     }
 
     pub(super) fn refresh_translation_session(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self
-            .translation_session_id
-            .or(self.translation_pair_session_id)
+            .translation
+            .session_id
+            .or(self.translation.pair_session_id)
         else {
             return;
         };
         let Some(snapshot) = self.document_translation_jobs.read(cx).session_snapshot(id) else {
-            self.translation_session_snapshot = None;
-            self.translation_hover_regions.clear();
-            self.translation_failed_hover_regions.clear();
-            self.translation_pair_active = false;
+            self.translation.session_snapshot = None;
+            self.translation.hover_regions.clear();
+            self.translation.failed_hover_regions.clear();
+            self.translation.pair_active = false;
             self.clear_translation_hover_state(true, cx);
             self.cancel_translation_panel_pending_dock();
             self.cancel_translation_panel_retract();
             self.cancel_translation_panel_initial_dock();
-            self.translation_panel_initial_dock_armed = false;
-            self.translation_panel_drag = None;
-            self.translation_panel_dock_panel_hovered = false;
-            self.translation_panel_dock_edge_hovered = false;
-            if self.translation_view_role == TranslationViewRole::Translation {
+            self.translation.panel_initial_dock_armed = false;
+            self.translation.panel_drag = None;
+            self.translation.panel_dock_panel_hovered = false;
+            self.translation.panel_dock_edge_hovered = false;
+            if self.translation.view_role == TranslationViewRole::Translation {
                 self.clear_translation_page_sources(cx);
             }
             cx.notify();
             return;
         };
         self.target_language = snapshot.request.target_language.as_str().to_string();
-        self.translation_session_snapshot = Some(snapshot);
-        if self.translation_view_role == TranslationViewRole::Translation {
+        self.translation.session_snapshot = Some(snapshot);
+        if self.translation.view_role == TranslationViewRole::Translation {
             self.refresh_translation_page_sources(cx);
         }
         self.rebuild_session_hover_regions();
@@ -533,7 +544,7 @@ impl DocumentView {
     }
 
     fn refresh_translation_page_sources(&mut self, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.translation_session_snapshot.as_ref() else {
+        let Some(snapshot) = self.translation.session_snapshot.as_ref() else {
             return;
         };
         let previews = snapshot.page_previews.clone();
@@ -737,7 +748,7 @@ impl DocumentView {
     }
 
     fn rebuild_session_hover_regions(&mut self) {
-        let Some(snapshot) = self.translation_session_snapshot.as_ref() else {
+        let Some(snapshot) = self.translation.session_snapshot.as_ref() else {
             return;
         };
         let unit_ids = snapshot
@@ -832,12 +843,12 @@ impl DocumentView {
                 failed_regions.insert(region_id.clone());
             }
         }
-        self.translation_hover_regions = regions;
-        self.translation_failed_hover_regions = failed_regions;
+        self.translation.hover_regions = regions;
+        self.translation.failed_hover_regions = failed_regions;
     }
 
     pub(super) fn toggle_translation_unit(&mut self, unit_id: &str, cx: &mut Context<Self>) {
-        let Some(id) = self.translation_session_id else {
+        let Some(id) = self.translation.session_id else {
             return;
         };
         self.document_translation_jobs.update(cx, |manager, cx| {
@@ -846,7 +857,7 @@ impl DocumentView {
     }
 
     pub(super) fn retry_failed_translation_units(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.translation_session_id {
+        if let Some(id) = self.translation.session_id {
             self.document_translation_jobs.update(cx, |manager, cx| {
                 manager.retry_session_failures(id, cx);
             });
@@ -854,7 +865,7 @@ impl DocumentView {
     }
 
     pub(super) fn resume_translation_session(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.translation_session_id {
+        if let Some(id) = self.translation.session_id {
             self.document_translation_jobs.update(cx, |manager, cx| {
                 manager.resume_session(id, cx);
             });
@@ -862,7 +873,7 @@ impl DocumentView {
     }
 
     pub(super) fn request_save_translation_session(&self, cx: &mut Context<Self>) {
-        if let Some(id) = self.translation_session_id {
+        if let Some(id) = self.translation.session_id {
             self.document_translation_jobs.update(cx, |manager, cx| {
                 manager.request_save_session(id, cx);
             });
@@ -883,9 +894,9 @@ impl DocumentView {
 
     pub(super) fn reset_translation_scroll(&self, pinned: bool) {
         let scroll_handle = if pinned {
-            &self.pinned_translation_scroll
+            &self.translation.pinned_scroll
         } else {
-            &self.translation_popup_scroll
+            &self.translation.popup_scroll
         };
         scroll_handle.set_offset(point(px(0.0), px(0.0)));
     }
@@ -927,8 +938,8 @@ impl DocumentView {
                 return;
             }
         };
-        self.translation_request_generation = self.translation_request_generation.wrapping_add(1);
-        let generation = self.translation_request_generation;
+        self.translation.request_generation = self.translation.request_generation.wrapping_add(1);
+        let generation = self.translation.request_generation;
         let state = TranslationCardState::new(
             text.clone(),
             TranslationStatus::Loading,
@@ -937,11 +948,11 @@ impl DocumentView {
         );
         if popup_position.is_some() {
             self.reset_translation_scroll(false);
-            self.translation_popup = Some(state);
+            self.translation.popup = Some(state);
         }
         if update_pinned {
             self.reset_translation_scroll(true);
-            self.pinned_translation = Some(TranslationCardState::new(
+            self.translation.pinned = Some(TranslationCardState::new(
                 text.clone(),
                 TranslationStatus::Loading,
                 None,
@@ -950,7 +961,7 @@ impl DocumentView {
         }
         cx.notify();
 
-        if !cx.has_global::<TranslationService>() {
+        if !cx.has_global::<TranslationServices>() {
             self.finish_translation_request(
                 generation,
                 Err("translation service is unavailable".to_string()),
@@ -959,7 +970,7 @@ impl DocumentView {
             return;
         }
 
-        let service = cx.global::<TranslationService>().clone();
+        let service = cx.global::<TranslationServices>().text().clone();
         let provider = settings.translation.active_provider;
         let source_language = settings
             .translation
@@ -974,12 +985,13 @@ impl DocumentView {
             context_before: None,
             context_after: None,
         };
+        let config = TranslationExecutionConfig::from_settings(&settings);
 
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     service
-                        .translate(&settings, request)
+                        .translate(&config, request)
                         .map(|response| {
                             response.translations.into_iter().next().unwrap_or_default()
                         })
@@ -1001,25 +1013,25 @@ impl DocumentView {
         error: String,
         cx: &mut Context<Self>,
     ) {
-        self.translation_request_generation = self.translation_request_generation.wrapping_add(1);
+        self.translation.request_generation = self.translation.request_generation.wrapping_add(1);
         let error: SharedString = error.into();
         let state = TranslationCardState::new(
             source.clone(),
             TranslationStatus::Error(error.clone()),
             popup_position,
-            self.translation_request_generation,
+            self.translation.request_generation,
         );
         if popup_position.is_some() {
             self.reset_translation_scroll(false);
-            self.translation_popup = Some(state);
+            self.translation.popup = Some(state);
         }
         if update_pinned {
             self.reset_translation_scroll(true);
-            self.pinned_translation = Some(TranslationCardState::new(
+            self.translation.pinned = Some(TranslationCardState::new(
                 source,
                 TranslationStatus::Error(error),
                 None,
-                self.translation_request_generation,
+                self.translation.request_generation,
             ));
         }
         cx.notify();
@@ -1039,12 +1051,12 @@ impl DocumentView {
             Ok(_) => TranslationStatus::Error(crate::fl!("translation-no-result").into()),
             Err(error) => TranslationStatus::Error(error.into()),
         };
-        if let Some(popup) = self.translation_popup.as_mut()
+        if let Some(popup) = self.translation.popup.as_mut()
             && popup.request_generation == generation
         {
             popup.status = status.clone();
         }
-        if let Some(pinned) = self.pinned_translation.as_mut()
+        if let Some(pinned) = self.translation.pinned.as_mut()
             && pinned.request_generation == generation
         {
             pinned.status = status;
@@ -1053,16 +1065,16 @@ impl DocumentView {
     }
 
     pub(super) fn toggle_pinned_translation(&mut self, cx: &mut Context<Self>) {
-        if self.pinned_translation.is_none() {
+        if self.translation.pinned.is_none() {
             self.reset_translation_scroll(true);
-            self.pinned_translation = Some(TranslationCardState::new(
+            self.translation.pinned = Some(TranslationCardState::new(
                 SharedString::default(),
                 TranslationStatus::Idle,
                 None,
-                self.translation_request_generation,
+                self.translation.request_generation,
             ));
         } else {
-            self.pinned_translation = None;
+            self.translation.pinned = None;
         }
         cx.notify();
     }
@@ -1090,7 +1102,7 @@ impl DocumentView {
             }
             return;
         }
-        if self.translation_session_id.is_some() {
+        if self.translation.session_id.is_some() {
             let previous_language = self.target_language.clone();
             let source = source.clone();
             let answer = window.prompt(
@@ -1132,8 +1144,8 @@ impl DocumentView {
     ) {
         self.target_language = target_language.as_str().to_string();
         for select in [
-            self.translation_popup_language_select.as_ref(),
-            self.pinned_translation_language_select.as_ref(),
+            self.translation.popup_language_select.as_ref(),
+            self.translation.pinned_language_select.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -1154,11 +1166,13 @@ impl DocumentView {
         }
 
         let popup = self
-            .translation_popup
+            .translation
+            .popup
             .as_ref()
             .map(|state| (state.source.to_string(), state.position));
         let pinned_source = self
-            .pinned_translation
+            .translation
+            .pinned
             .as_ref()
             .map(|state| state.source.to_string());
 
@@ -1179,7 +1193,7 @@ impl DocumentView {
                 }
             }
         }
-        if let Some(id) = self.translation_session_id {
+        if let Some(id) = self.translation.session_id {
             self.document_translation_jobs.update(cx, |manager, cx| {
                 manager.restart_session_in_language(id, target_language, cx);
             });
@@ -1188,7 +1202,7 @@ impl DocumentView {
     }
 
     fn close_translation_popup(&mut self, cx: &mut Context<Self>) {
-        if self.translation_popup.take().is_some() {
+        if self.translation.popup.take().is_some() {
             cx.notify();
         }
     }
@@ -1204,7 +1218,8 @@ impl DocumentView {
         size(
             px(translation_panel_width(self.viewport_width)),
             px(self
-                .translation_panel_size
+                .translation
+                .panel_size
                 .height
                 .as_f32()
                 .max(TRANSLATION_PANEL_DEFAULT_HEIGHT)),
@@ -1213,7 +1228,7 @@ impl DocumentView {
 
     fn clamp_translation_panel_placement(&mut self) {
         let panel_size = self.translation_panel_effective_size();
-        self.translation_panel_placement = match self.translation_panel_placement {
+        self.translation.panel_placement = match self.translation.panel_placement {
             TranslationPanelPlacement::Default => TranslationPanelPlacement::Default,
             TranslationPanelPlacement::Floating(position) => {
                 TranslationPanelPlacement::Floating(clamp_translation_panel_position(
@@ -1255,44 +1270,46 @@ impl DocumentView {
     }
 
     fn cancel_translation_panel_pending_dock(&mut self) {
-        self.translation_panel_dock_generation =
-            self.translation_panel_dock_generation.wrapping_add(1);
-        self.translation_panel_dock_task = None;
+        self.translation.panel_dock_generation =
+            self.translation.panel_dock_generation.wrapping_add(1);
+        self.translation.panel_dock_task = None;
         if let TranslationPanelPlacement::PendingDock { position, .. } =
-            self.translation_panel_placement
+            self.translation.panel_placement
         {
-            self.translation_panel_placement = TranslationPanelPlacement::Floating(position);
+            self.translation.panel_placement = TranslationPanelPlacement::Floating(position);
         }
     }
 
     fn cancel_translation_panel_initial_dock(&mut self) {
-        if self.translation_panel_initial_dock_task.is_none() {
+        if self.translation.panel_initial_dock_task.is_none() {
             return;
         }
-        self.translation_panel_initial_dock_generation = self
-            .translation_panel_initial_dock_generation
+        self.translation.panel_initial_dock_generation = self
+            .translation
+            .panel_initial_dock_generation
             .wrapping_add(1);
-        self.translation_panel_initial_dock_task = None;
+        self.translation.panel_initial_dock_task = None;
     }
 
     fn translation_panel_initial_dock_eligible(&self, cx: &gpui::App) -> bool {
         translation_panel_initial_dock_should_run(
-            self.translation_panel_initial_dock_armed,
-            self.translation_view_role,
-            self.translation_pair_active,
-            self.translation_session_snapshot.is_some(),
+            self.translation.panel_initial_dock_armed,
+            self.translation.view_role,
+            self.translation.pair_active,
+            self.translation.session_snapshot.is_some(),
             matches!(
-                self.translation_panel_placement,
+                self.translation.panel_placement,
                 TranslationPanelPlacement::Default
             ),
-            self.translation_panel_drag.is_some(),
-            self.translation_panel_dock_panel_hovered,
+            self.translation.panel_drag.is_some(),
+            self.translation.panel_dock_panel_hovered,
             self.translation_panel_owned_surface_active(cx),
         )
     }
 
     fn translation_panel_owned_surface_active(&self, cx: &gpui::App) -> bool {
-        self.pinned_translation_language_select
+        self.translation
+            .pinned_language_select
             .as_ref()
             .is_some_and(|select| select.is_open(cx))
     }
@@ -1302,22 +1319,23 @@ impl DocumentView {
             self.cancel_translation_panel_initial_dock();
             return;
         }
-        if self.translation_panel_initial_dock_task.is_some() {
+        if self.translation.panel_initial_dock_task.is_some() {
             return;
         }
-        self.translation_panel_initial_dock_generation = self
-            .translation_panel_initial_dock_generation
+        self.translation.panel_initial_dock_generation = self
+            .translation
+            .panel_initial_dock_generation
             .wrapping_add(1);
-        let generation = self.translation_panel_initial_dock_generation;
-        self.translation_panel_initial_dock_task = Some(cx.spawn(async move |this, cx| {
+        let generation = self.translation.panel_initial_dock_generation;
+        self.translation.panel_initial_dock_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(TRANSLATION_PANEL_INITIAL_DOCK_DELAY)
                 .await;
             _ = this.update(cx, |this, cx| {
-                if this.translation_panel_initial_dock_generation != generation {
+                if this.translation.panel_initial_dock_generation != generation {
                     return;
                 }
-                this.translation_panel_initial_dock_task = None;
+                this.translation.panel_initial_dock_task = None;
                 if !this.translation_panel_initial_dock_eligible(cx) {
                     return;
                 }
@@ -1325,40 +1343,40 @@ impl DocumentView {
                 let reduce_motion = cx.global::<SettingsStore>().settings.behavior.reduce_motion;
                 let mut reveal = ScalarTween::new(1.0, LAYOUT);
                 reveal.retarget(0.0, now, reduce_motion);
-                this.translation_panel_placement = TranslationPanelPlacement::Docked {
+                this.translation.panel_placement = TranslationPanelPlacement::Docked {
                     side: TranslationPanelSide::Right,
                     y: px(TRANSLATION_PANEL_DEFAULT_TOP),
                     reveal,
                 };
-                this.translation_panel_initial_dock_armed = false;
-                this.translation_panel_dock_panel_hovered = false;
-                this.translation_panel_dock_edge_hovered = false;
+                this.translation.panel_initial_dock_armed = false;
+                this.translation.panel_dock_panel_hovered = false;
+                this.translation.panel_dock_edge_hovered = false;
                 cx.notify();
             });
         }));
     }
 
     fn cancel_translation_panel_retract(&mut self) {
-        self.translation_panel_retract_generation =
-            self.translation_panel_retract_generation.wrapping_add(1);
-        self.translation_panel_retract_task = None;
+        self.translation.panel_retract_generation =
+            self.translation.panel_retract_generation.wrapping_add(1);
+        self.translation.panel_retract_task = None;
     }
 
     fn schedule_translation_panel_dock(&mut self, cx: &mut Context<Self>) {
-        self.translation_panel_dock_generation =
-            self.translation_panel_dock_generation.wrapping_add(1);
-        self.translation_panel_dock_task = None;
-        let generation = self.translation_panel_dock_generation;
-        self.translation_panel_dock_task = Some(cx.spawn(async move |this, cx| {
+        self.translation.panel_dock_generation =
+            self.translation.panel_dock_generation.wrapping_add(1);
+        self.translation.panel_dock_task = None;
+        let generation = self.translation.panel_dock_generation;
+        self.translation.panel_dock_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(TRANSLATION_PANEL_DOCK_DELAY)
                 .await;
             _ = this.update(cx, |this, cx| {
-                if this.translation_panel_dock_generation != generation {
+                if this.translation.panel_dock_generation != generation {
                     return;
                 }
                 let TranslationPanelPlacement::PendingDock { side, y, .. } =
-                    this.translation_panel_placement
+                    this.translation.panel_placement
                 else {
                     return;
                 };
@@ -1368,11 +1386,11 @@ impl DocumentView {
                 if !this.translation_panel_owned_surface_active(cx) {
                     reveal.retarget(0.0, now, reduce_motion);
                 }
-                this.translation_panel_placement =
+                this.translation.panel_placement =
                     TranslationPanelPlacement::Docked { side, y, reveal };
-                this.translation_panel_dock_task = None;
-                this.translation_panel_dock_panel_hovered = false;
-                this.translation_panel_dock_edge_hovered = false;
+                this.translation.panel_dock_task = None;
+                this.translation.panel_dock_panel_hovered = false;
+                this.translation.panel_dock_edge_hovered = false;
                 cx.notify();
             });
         }));
@@ -1380,8 +1398,8 @@ impl DocumentView {
 
     fn translation_panel_should_stay_expanded(&self, cx: &gpui::App) -> bool {
         translation_panel_should_retain_expanded(
-            self.translation_panel_dock_panel_hovered,
-            self.translation_panel_dock_edge_hovered,
+            self.translation.panel_dock_panel_hovered,
+            self.translation.panel_dock_edge_hovered,
             self.translation_panel_owned_surface_active(cx),
         )
     }
@@ -1389,7 +1407,7 @@ impl DocumentView {
     fn expand_translation_panel_dock(&mut self, cx: &mut Context<Self>) {
         self.cancel_translation_panel_retract();
         if let TranslationPanelPlacement::Docked { reveal, .. } =
-            &mut self.translation_panel_placement
+            &mut self.translation.panel_placement
         {
             reveal.retarget(
                 1.0,
@@ -1401,33 +1419,33 @@ impl DocumentView {
     }
 
     fn schedule_translation_panel_retract(&mut self, cx: &mut Context<Self>) {
-        if self.translation_panel_retract_task.is_some()
+        if self.translation.panel_retract_task.is_some()
             || self.translation_panel_should_stay_expanded(cx)
         {
             return;
         }
-        self.translation_panel_retract_generation =
-            self.translation_panel_retract_generation.wrapping_add(1);
-        let generation = self.translation_panel_retract_generation;
-        self.translation_panel_retract_task = Some(cx.spawn(async move |this, cx| {
+        self.translation.panel_retract_generation =
+            self.translation.panel_retract_generation.wrapping_add(1);
+        let generation = self.translation.panel_retract_generation;
+        self.translation.panel_retract_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(TRANSLATION_PANEL_RETRACT_DELAY)
                 .await;
             _ = this.update(cx, |this, cx| {
-                if this.translation_panel_retract_generation != generation
+                if this.translation.panel_retract_generation != generation
                     || this.translation_panel_should_stay_expanded(cx)
                 {
                     return;
                 }
                 if let TranslationPanelPlacement::Docked { reveal, .. } =
-                    &mut this.translation_panel_placement
+                    &mut this.translation.panel_placement
                 {
                     reveal.retarget(
                         0.0,
                         Instant::now(),
                         cx.global::<SettingsStore>().settings.behavior.reduce_motion,
                     );
-                    this.translation_panel_retract_task = None;
+                    this.translation.panel_retract_task = None;
                     cx.notify();
                 }
             });
@@ -1437,7 +1455,7 @@ impl DocumentView {
     pub(super) fn sync_translation_panel_owned_surfaces(&mut self, cx: &mut Context<Self>) {
         self.sync_translation_panel_initial_dock(cx);
         if !matches!(
-            self.translation_panel_placement,
+            self.translation.panel_placement,
             TranslationPanelPlacement::Docked { .. }
         ) {
             return;
@@ -1456,19 +1474,19 @@ impl DocumentView {
         cx: &mut Context<Self>,
     ) {
         let current = match surface {
-            TranslationPanelDockSurface::Panel => &mut self.translation_panel_dock_panel_hovered,
-            TranslationPanelDockSurface::Edge => &mut self.translation_panel_dock_edge_hovered,
+            TranslationPanelDockSurface::Panel => &mut self.translation.panel_dock_panel_hovered,
+            TranslationPanelDockSurface::Edge => &mut self.translation.panel_dock_edge_hovered,
         };
         if *current == hovered {
             return;
         }
         *current = hovered;
         if !matches!(
-            self.translation_panel_placement,
+            self.translation.panel_placement,
             TranslationPanelPlacement::Docked { .. }
         ) {
             if surface == TranslationPanelDockSurface::Edge {
-                self.translation_panel_dock_edge_hovered = false;
+                self.translation.panel_dock_edge_hovered = false;
             }
             self.sync_translation_panel_initial_dock(cx);
             return;
@@ -1487,18 +1505,18 @@ impl DocumentView {
     }
 
     fn record_translation_panel_size(&mut self, measured: Size<Pixels>, cx: &mut Context<Self>) {
-        let changed = (self.translation_panel_size.width - measured.width)
+        let changed = (self.translation.panel_size.width - measured.width)
             .as_f32()
             .abs()
             > 0.5
-            || (self.translation_panel_size.height - measured.height)
+            || (self.translation.panel_size.height - measured.height)
                 .as_f32()
                 .abs()
                 > 0.5;
         if !changed {
             return;
         }
-        self.translation_panel_size = measured;
+        self.translation.panel_size = measured;
         self.clamp_translation_panel_placement();
         cx.notify();
     }
@@ -1509,11 +1527,11 @@ impl DocumentView {
         cx: &mut Context<Self>,
     ) {
         let pointer = self.translation_panel_local_pointer(pointer);
-        self.translation_panel_initial_dock_armed = false;
+        self.translation.panel_initial_dock_armed = false;
         self.cancel_translation_panel_initial_dock();
         let panel_size = self.translation_panel_effective_size();
         let now = Instant::now();
-        let origin = match self.translation_panel_placement {
+        let origin = match self.translation.panel_placement {
             TranslationPanelPlacement::Default => {
                 default_translation_panel_position(self.viewport_width, panel_size.width.as_f32())
             }
@@ -1539,12 +1557,12 @@ impl DocumentView {
             self.viewport_height,
             panel_size,
         );
-        self.translation_panel_placement = TranslationPanelPlacement::Floating(origin);
-        self.translation_panel_drag = Some(TranslationPanelDrag::Floating {
+        self.translation.panel_placement = TranslationPanelPlacement::Floating(origin);
+        self.translation.panel_drag = Some(TranslationPanelDrag::Floating {
             pointer_offset: point(pointer.x - origin.x, pointer.y - origin.y),
         });
-        self.translation_panel_dock_panel_hovered = false;
-        self.translation_panel_dock_edge_hovered = false;
+        self.translation.panel_dock_panel_hovered = false;
+        self.translation.panel_dock_edge_hovered = false;
         cx.notify();
     }
 
@@ -1553,7 +1571,7 @@ impl DocumentView {
         pointer: GpuiPoint<Pixels>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(drag) = self.translation_panel_drag else {
+        let Some(drag) = self.translation.panel_drag else {
             return false;
         };
         let pointer = self.translation_panel_local_pointer(pointer);
@@ -1565,7 +1583,7 @@ impl DocumentView {
             self.viewport_height,
             panel_size,
         );
-        self.translation_panel_placement = TranslationPanelPlacement::Floating(position);
+        self.translation.panel_placement = TranslationPanelPlacement::Floating(position);
         cx.notify();
         true
     }
@@ -1575,12 +1593,12 @@ impl DocumentView {
         _pointer: GpuiPoint<Pixels>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(drag) = self.translation_panel_drag.take() else {
+        let Some(drag) = self.translation.panel_drag.take() else {
             return false;
         };
         let TranslationPanelDrag::Floating { .. } = drag;
         let panel_size = self.translation_panel_effective_size();
-        if let TranslationPanelPlacement::Floating(position) = self.translation_panel_placement
+        if let TranslationPanelPlacement::Floating(position) = self.translation.panel_placement
             && let Some(side) = translation_panel_snap_side(
                 position,
                 panel_size.width.as_f32(),
@@ -1592,7 +1610,7 @@ impl DocumentView {
                 self.viewport_height,
                 panel_size.height.as_f32(),
             );
-            self.translation_panel_placement =
+            self.translation.panel_placement =
                 TranslationPanelPlacement::PendingDock { position, side, y };
             self.schedule_translation_panel_dock(cx);
         } else {
@@ -1607,14 +1625,14 @@ impl DocumentView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !translation_toolbar_enabled(self.translation_view_role, self.translation_pair_active) {
+        if !translation_toolbar_enabled(self.translation.view_role, self.translation.pair_active) {
             return None;
         }
-        let session_id = self.translation_session_id?;
-        if self.translation_pair_session_id != Some(session_id) {
+        let session_id = self.translation.session_id?;
+        if self.translation.pair_session_id != Some(session_id) {
             return None;
         }
-        let snapshot = self.translation_session_snapshot.clone()?;
+        let snapshot = self.translation.session_snapshot.clone()?;
         if snapshot.id != session_id {
             return None;
         }
@@ -1629,18 +1647,22 @@ impl DocumentView {
             DocumentTranslationSessionStatus::Running { progress, units } => {
                 if let Some(progress) = progress {
                     let status = match progress.stage {
-                        glyphst_pdf_translation_app::PdfTranslationStage::Preparing => "Preparing",
-                        glyphst_pdf_translation_app::PdfTranslationStage::Ocr => "OCR",
-                        glyphst_pdf_translation_app::PdfTranslationStage::Normalizing => {
+                        glyphst_pdf_translation_service::PdfTranslationStage::Preparing => {
+                            "Preparing"
+                        }
+                        glyphst_pdf_translation_service::PdfTranslationStage::Ocr => "OCR",
+                        glyphst_pdf_translation_service::PdfTranslationStage::Normalizing => {
                             "Preparing pages"
                         }
-                        glyphst_pdf_translation_app::PdfTranslationStage::Translating => {
+                        glyphst_pdf_translation_service::PdfTranslationStage::Translating => {
                             "Translating"
                         }
-                        glyphst_pdf_translation_app::PdfTranslationStage::Layout
-                        | glyphst_pdf_translation_app::PdfTranslationStage::Compiling
-                        | glyphst_pdf_translation_app::PdfTranslationStage::Composing => "Preview",
-                        glyphst_pdf_translation_app::PdfTranslationStage::Validating => {
+                        glyphst_pdf_translation_service::PdfTranslationStage::Layout
+                        | glyphst_pdf_translation_service::PdfTranslationStage::Compiling
+                        | glyphst_pdf_translation_service::PdfTranslationStage::Composing => {
+                            "Preview"
+                        }
+                        glyphst_pdf_translation_service::PdfTranslationStage::Validating => {
                             "Validating"
                         }
                     };
@@ -1729,7 +1751,7 @@ impl DocumentView {
                 ("Failed".to_string(), message.to_string())
             }
         };
-        let language_select = self.pinned_translation_language_select.clone();
+        let language_select = self.translation.pinned_language_select.clone();
         let can_save = snapshot.can_save();
         let can_resume = snapshot.can_resume();
         let can_retry = snapshot.has_failures() && !snapshot.is_translating() && !can_resume;
@@ -1855,8 +1877,8 @@ impl DocumentView {
                     IconName::Scan,
                 )
                 .debug_selector(|| "translation-session-toggle-overlays".to_string())
-                .selected(self.translation_overlay_enabled)
-                .tooltip(if self.translation_overlay_enabled {
+                .selected(self.translation.overlay_enabled)
+                .tooltip(if self.translation.overlay_enabled {
                     "Hide paired block overlays"
                 } else {
                     "Show paired block overlays"
@@ -2009,7 +2031,7 @@ impl DocumentView {
                 }
             });
         if let TranslationPanelPlacement::Docked { side, y, reveal } =
-            self.translation_panel_placement
+            self.translation.panel_placement
         {
             let now = Instant::now();
             if reveal.is_animating(now) {
@@ -2055,7 +2077,7 @@ impl DocumentView {
                 .into_any_element(),
             );
         }
-        let dragged_position = match self.translation_panel_placement {
+        let dragged_position = match self.translation.panel_placement {
             TranslationPanelPlacement::Floating(position) => Some(position),
             TranslationPanelPlacement::PendingDock { position, .. } => Some(position),
             TranslationPanelPlacement::Default => None,
@@ -2081,7 +2103,7 @@ impl DocumentView {
                 .flex()
                 .justify_end()
         };
-        let overlay_priority = if self.translation_panel_drag.is_some() {
+        let overlay_priority = if self.translation.panel_drag.is_some() {
             // The settled panel belongs below root notifications. During a
             // drag, temporarily lift the source surface so a notification at
             // the default top-right position cannot swallow move or mouse-up
@@ -2108,22 +2130,23 @@ impl DocumentView {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !translation_toolbar_enabled(self.translation_view_role, self.translation_pair_active)
-            || !self.translation_overlay_enabled
+        if !translation_toolbar_enabled(self.translation.view_role, self.translation.pair_active)
+            || !self.translation.overlay_enabled
         {
             return None;
         }
-        let snapshot = self.translation_session_snapshot.as_ref()?;
-        let region_id = self.hovered_translation_region.as_ref()?.clone();
-        let region = self.translation_hover_regions.get(&region_id)?;
+        let snapshot = self.translation.session_snapshot.as_ref()?;
+        let region_id = self.translation.hovered_region.as_ref()?.clone();
+        let region = self.translation.hover_regions.get(&region_id)?;
         let unit_id = region.unit_id.clone();
-        let failed = self.translation_failed_hover_regions.contains(&region_id);
+        let failed = self.translation.failed_hover_regions.contains(&region_id);
         if unit_id.is_none() && !failed {
             return None;
         }
         let now = Instant::now();
         let bounds = self
-            .translation_hover_animation
+            .translation
+            .hover_animation
             .as_ref()
             .filter(|animation| animation.region_id == region_id)
             .map(|animation| animation.bounds(now))
@@ -2223,7 +2246,7 @@ impl DocumentView {
         &self,
         region_id: &str,
     ) -> Vec<Bounds<Pixels>> {
-        let Some(region) = self.translation_hover_regions.get(region_id) else {
+        let Some(region) = self.translation.hover_regions.get(region_id) else {
             return Vec::new();
         };
         let Some(image_bounds) = self
@@ -2234,7 +2257,7 @@ impl DocumentView {
         else {
             return Vec::new();
         };
-        let bounds = match self.translation_view_role {
+        let bounds = match self.translation.view_role {
             TranslationViewRole::Translation => std::slice::from_ref(&region.target_bounds),
             TranslationViewRole::SourceMirror => region.source_regions.as_slice(),
             TranslationViewRole::None => &[],
@@ -2255,12 +2278,13 @@ impl DocumentView {
         &self,
         position: GpuiPoint<Pixels>,
     ) -> Option<String> {
-        if self.translation_view_role != TranslationViewRole::Translation
-            || !self.translation_overlay_enabled
+        if self.translation.view_role != TranslationViewRole::Translation
+            || !self.translation.overlay_enabled
         {
             return None;
         }
-        self.translation_hover_regions
+        self.translation
+            .hover_regions
             .keys()
             .filter_map(|region_id| {
                 self.translation_hover_region_highlights(region_id)
@@ -2292,9 +2316,9 @@ impl DocumentView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let language_select = if pinned {
-            self.pinned_translation_language_select.clone()
+            self.translation.pinned_language_select.clone()
         } else {
-            self.translation_popup_language_select.clone()
+            self.translation.popup_language_select.clone()
         };
         let language_select_open = language_select
             .as_ref()
@@ -2342,9 +2366,9 @@ impl DocumentView {
             TranslationStatus::Ready { .. } | TranslationStatus::Error(_)
         );
         let scroll_handle = if pinned {
-            &self.pinned_translation_scroll
+            &self.translation.pinned_scroll
         } else {
-            &self.translation_popup_scroll
+            &self.translation.popup_scroll
         };
         let scrollbar_id = if pinned {
             "pinned-translation-scrollbar"

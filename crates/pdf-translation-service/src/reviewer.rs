@@ -1,7 +1,9 @@
 use glyphst_pdf_translation::{
     PolicyReviewDecision, PolicyReviewError, PolicyReviewRequest, TranslationPolicyReviewer,
 };
-use glyphst_settings::{PdfContentReviewMode, ResolvedAiConfig, Settings};
+use glyphst_settings::{PdfContentReviewMode, ResolvedAiConfig};
+
+use crate::PdfTranslationConfig;
 
 pub(crate) struct GlyphstPolicyReviewer {
     settings: Option<ResolvedAiConfig>,
@@ -9,16 +11,11 @@ pub(crate) struct GlyphstPolicyReviewer {
 }
 
 impl GlyphstPolicyReviewer {
-    pub(crate) fn from_settings(settings: &Settings) -> Option<Self> {
-        if settings.translation.content_review.mode == PdfContentReviewMode::Off {
+    pub(crate) fn from_config(config: &PdfTranslationConfig) -> Option<Self> {
+        if config.content_review.mode == PdfContentReviewMode::Off {
             return None;
         }
-        let resolved = settings
-            .translation
-            .content_review
-            .model
-            .as_ref()
-            .and_then(|model| settings.ai.resolved_model(model));
+        let resolved = config.content_review.resolved.clone();
         let configuration_error = match &resolved {
             Some(resolved) if resolved.can_request() => None,
             Some(resolved) => Some(resolved.missing_credentials_message()),

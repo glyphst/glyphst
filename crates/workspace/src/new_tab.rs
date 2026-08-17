@@ -405,47 +405,28 @@ struct LibraryImportScan {
     failed: usize,
 }
 
-pub struct NewTab {
-    host: LibraryBrowserHost,
-    entries: Vec<NewTabEntry>,
-    filtered_entries: Vec<usize>,
-    thumbnails: HashMap<PathBuf, ThumbnailState>,
-    search_input: Entity<InputState>,
-    focus_handle: FocusHandle,
-    scroll: UniformListScrollHandle,
-    cols: usize,
-    viewport_width: f32,
-    viewport_height: f32,
-    browser_viewport_width: f32,
-    layout_class: NewTabLayoutClass,
-    session: LibraryBrowserSession,
-    quick_session: Option<ReaderNewTabSession>,
+#[derive(Default)]
+struct LibraryTreeState {
     current_collection: Option<LibraryCollectionId>,
     expanded_collections: BTreeSet<LibraryCollectionId>,
-    library_tree_rows: Vec<LibraryTreeRow>,
-    tree_active: Option<LibraryNodeId>,
-    tree_marked: BTreeSet<LibraryNodeId>,
-    tree_anchor: Option<LibraryNodeId>,
-    dragging_library_nodes: BTreeSet<LibraryNodeId>,
-    library_drop_target: Option<LibraryDropTarget>,
-    external_document_drop_feedback: Option<ExternalDocumentDropFeedback>,
+    rows: Vec<LibraryTreeRow>,
+    active: Option<LibraryNodeId>,
+    marked: BTreeSet<LibraryNodeId>,
+    anchor: Option<LibraryNodeId>,
+    dragging_nodes: BTreeSet<LibraryNodeId>,
+    drop_target: Option<LibraryDropTarget>,
     hover_expand_task: Option<Task<()>>,
     hover_scroll_task: Option<Task<()>>,
-    import_cancel: Option<Arc<AtomicBool>>,
-    import_progress: Option<LibraryImportProgress>,
-    import_message: Option<SharedString>,
-    folder_editor: Option<FolderEditor>,
+}
+
+struct LibraryEditorState {
+    folder: Option<FolderEditor>,
     folder_delete_prompt_pending: bool,
-    kind_filter: Option<LibraryItemKind>,
-    status_filter: Option<ReadingStatus>,
-    observed_catalog_revision: u64,
-    nav_menu_open: bool,
-    inspector_open: bool,
     note_expanded: bool,
-    metadata_editor_open: bool,
+    metadata_open: bool,
     metadata_kind: LibraryItemKind,
-    saved_view_editor_open: bool,
-    tag_editor_id: Option<LibraryTagId>,
+    saved_view_open: bool,
+    tag_id: Option<LibraryTagId>,
     permanent_delete_prompt_pending: bool,
     work_note_input: Entity<TextareaState>,
     tag_input: Entity<InputState>,
@@ -461,9 +442,37 @@ pub struct NewTab {
     metadata_language_input: Entity<InputState>,
     metadata_abstract_input: Entity<TextareaState>,
     saved_view_name_input: Entity<InputState>,
-    tag_editor_name_input: Entity<InputState>,
+    tag_name_input: Entity<InputState>,
     folder_name_input: Entity<InputState>,
     note_item_id: Option<DocumentId>,
+}
+
+pub struct NewTab {
+    host: LibraryBrowserHost,
+    entries: Vec<NewTabEntry>,
+    filtered_entries: Vec<usize>,
+    thumbnails: HashMap<PathBuf, ThumbnailState>,
+    search_input: Entity<InputState>,
+    focus_handle: FocusHandle,
+    scroll: UniformListScrollHandle,
+    cols: usize,
+    viewport_width: f32,
+    viewport_height: f32,
+    browser_viewport_width: f32,
+    layout_class: NewTabLayoutClass,
+    session: LibraryBrowserSession,
+    quick_session: Option<ReaderNewTabSession>,
+    tree: LibraryTreeState,
+    external_document_drop_feedback: Option<ExternalDocumentDropFeedback>,
+    import_cancel: Option<Arc<AtomicBool>>,
+    import_progress: Option<LibraryImportProgress>,
+    import_message: Option<SharedString>,
+    editors: LibraryEditorState,
+    kind_filter: Option<LibraryItemKind>,
+    status_filter: Option<ReadingStatus>,
+    observed_catalog_revision: u64,
+    nav_menu_open: bool,
+    inspector_open: bool,
     selecting: bool,
     selection: BTreeSet<PathBuf>,
     focused_item: NewTabItemKey,
@@ -552,7 +561,7 @@ impl NewTab {
                 let target_collection = if self.session.view_mode == LibraryViewMode::Table {
                     None
                 } else {
-                    self.current_collection
+                    self.tree.current_collection
                 };
                 let (title, description) = if target_collection.is_some() {
                     (
@@ -766,50 +775,43 @@ impl NewTab {
             layout_class: NewTabLayoutClass::default(),
             session,
             quick_session,
-            current_collection: None,
-            expanded_collections: BTreeSet::new(),
-            library_tree_rows: Vec::new(),
-            tree_active: None,
-            tree_marked: BTreeSet::new(),
-            tree_anchor: None,
-            dragging_library_nodes: BTreeSet::new(),
-            library_drop_target: None,
+            tree: LibraryTreeState::default(),
             external_document_drop_feedback: None,
-            hover_expand_task: None,
-            hover_scroll_task: None,
             import_cancel: None,
             import_progress: None,
             import_message: None,
-            folder_editor: None,
-            folder_delete_prompt_pending: false,
+            editors: LibraryEditorState {
+                folder: None,
+                folder_delete_prompt_pending: false,
+                note_expanded: false,
+                metadata_open: false,
+                metadata_kind: LibraryItemKind::Paper,
+                saved_view_open: false,
+                tag_id: None,
+                permanent_delete_prompt_pending: false,
+                work_note_input,
+                tag_input,
+                metadata_title_input,
+                metadata_creators_input,
+                metadata_year_input,
+                metadata_publication_input,
+                metadata_publisher_input,
+                metadata_doi_input,
+                metadata_isbn_input,
+                metadata_arxiv_input,
+                metadata_subject_input,
+                metadata_language_input,
+                metadata_abstract_input,
+                saved_view_name_input,
+                tag_name_input: tag_editor_name_input,
+                folder_name_input,
+                note_item_id: None,
+            },
             kind_filter: None,
             status_filter: None,
             observed_catalog_revision,
             nav_menu_open: false,
             inspector_open: false,
-            note_expanded: false,
-            metadata_editor_open: false,
-            metadata_kind: LibraryItemKind::Paper,
-            saved_view_editor_open: false,
-            tag_editor_id: None,
-            permanent_delete_prompt_pending: false,
-            work_note_input,
-            tag_input,
-            metadata_title_input,
-            metadata_creators_input,
-            metadata_year_input,
-            metadata_publication_input,
-            metadata_publisher_input,
-            metadata_doi_input,
-            metadata_isbn_input,
-            metadata_arxiv_input,
-            metadata_subject_input,
-            metadata_language_input,
-            metadata_abstract_input,
-            saved_view_name_input,
-            tag_editor_name_input,
-            folder_name_input,
-            note_item_id: None,
             selecting: false,
             selection: BTreeSet::new(),
             focused_item,
@@ -1165,6 +1167,7 @@ impl NewTab {
         cx.refresh_windows();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_collection_tree_rows(
         store: &LibraryStore,
         parent_id: Option<LibraryCollectionId>,
@@ -1223,19 +1226,20 @@ impl NewTab {
             .map(|(entry_ix, _)| entry_ix)
             .collect::<Vec<_>>();
 
-        self.library_tree_rows.clear();
+        self.tree.rows.clear();
         if self.session.destination == ReaderNewTabDestination::Library {
             let store = cx.global::<LibraryStore>();
             if self
+                .tree
                 .current_collection
                 .is_some_and(|id| store.library_collection(id).is_none())
             {
-                self.current_collection = None;
+                self.tree.current_collection = None;
             }
             match self.session.view_mode {
                 LibraryViewMode::Grid | LibraryViewMode::Grouped => {
                     let direct_ids = store
-                        .direct_collection_items(self.current_collection)
+                        .direct_collection_items(self.tree.current_collection)
                         .into_iter()
                         .collect::<HashSet<_>>();
                     filtered_entries.retain(|entry_ix| {
@@ -1288,11 +1292,12 @@ impl NewTab {
                         &entries_by_id,
                         &visible_items,
                         included_collections.as_ref(),
-                        &self.expanded_collections,
-                        &mut self.library_tree_rows,
+                        &self.tree.expanded_collections,
+                        &mut self.tree.rows,
                     );
                     filtered_entries = self
-                        .library_tree_rows
+                        .tree
+                        .rows
                         .iter()
                         .filter_map(|row| match row {
                             LibraryTreeRow::Document { entry_ix, .. } => Some(*entry_ix),
@@ -1308,25 +1313,28 @@ impl NewTab {
             && self.session.view_mode == LibraryViewMode::Table
         {
             let visible_nodes = self
-                .library_tree_rows
+                .tree
+                .rows
                 .iter()
                 .filter_map(|row| row.node_id(&self.entries))
                 .collect::<HashSet<_>>();
-            self.tree_marked.retain(|node| visible_nodes.contains(node));
-            self.tree_anchor = self.tree_anchor.filter(|node| visible_nodes.contains(node));
+            self.tree.marked.retain(|node| visible_nodes.contains(node));
+            self.tree.anchor = self.tree.anchor.filter(|node| visible_nodes.contains(node));
             if self
-                .tree_active
+                .tree
+                .active
                 .is_none_or(|node| !visible_nodes.contains(&node))
             {
-                self.tree_active = if self.host == LibraryBrowserHost::Home {
-                    self.library_tree_rows
+                self.tree.active = if self.host == LibraryBrowserHost::Home {
+                    self.tree
+                        .rows
                         .first()
                         .and_then(|row| row.node_id(&self.entries))
                 } else {
                     None
                 };
             }
-            if let Some(node) = self.tree_active {
+            if let Some(node) = self.tree.active {
                 self.focused_item = self.new_tab_key_for_library_node(node);
             } else if self.host == LibraryBrowserHost::QuickOpen {
                 self.focused_item = NewTabItemKey::OpenFile;
@@ -1450,9 +1458,9 @@ impl NewTab {
         }
         self.selecting = true;
         if self.is_library_tree() {
-            if let Some(active) = self.tree_active {
-                self.tree_marked.insert(active);
-                self.tree_anchor = Some(active);
+            if let Some(active) = self.tree.active {
+                self.tree.marked.insert(active);
+                self.tree.anchor = Some(active);
             }
             cx.notify();
             return;
@@ -1466,12 +1474,12 @@ impl NewTab {
     }
 
     fn cancel_select(&mut self, cx: &mut Context<Self>) {
-        let changed = self.selecting || !self.selection.is_empty() || !self.tree_marked.is_empty();
+        let changed = self.selecting || !self.selection.is_empty() || !self.tree.marked.is_empty();
         self.selecting = false;
         self.selection.clear();
         self.selection_anchor = None;
-        self.tree_marked.clear();
-        self.tree_anchor = self.tree_active;
+        self.tree.marked.clear();
+        self.tree.anchor = self.tree.active;
         if changed {
             cx.notify();
         }
@@ -1587,7 +1595,8 @@ impl NewTab {
     }
 
     fn tree_node_index(&self, node: LibraryNodeId) -> Option<usize> {
-        self.library_tree_rows
+        self.tree
+            .rows
             .iter()
             .position(|row| row.node_id(&self.entries) == Some(node))
     }
@@ -1614,31 +1623,31 @@ impl NewTab {
 
         if modifiers.shift {
             self.selecting = true;
-            let anchor = self.tree_anchor.or(self.tree_active).unwrap_or(node);
+            let anchor = self.tree.anchor.or(self.tree.active).unwrap_or(node);
             if let Some((anchor_ix, target_ix)) =
                 self.tree_node_index(anchor).zip(self.tree_node_index(node))
             {
                 let start = anchor_ix.min(target_ix);
                 let end = anchor_ix.max(target_ix);
-                for row in &self.library_tree_rows[start..=end] {
+                for row in &self.tree.rows[start..=end] {
                     if let Some(node) = row.node_id(&self.entries) {
-                        self.tree_marked.insert(node);
+                        self.tree.marked.insert(node);
                     }
                 }
             }
-            self.tree_active = Some(node);
+            self.tree.active = Some(node);
         } else if modifiers.secondary() {
             self.selecting = true;
-            self.tree_active = Some(node);
-            if !self.tree_marked.remove(&node) {
-                self.tree_marked.insert(node);
+            self.tree.active = Some(node);
+            if !self.tree.marked.remove(&node) {
+                self.tree.marked.insert(node);
             }
-            self.tree_anchor = Some(node);
+            self.tree.anchor = Some(node);
         } else {
             self.selecting = false;
-            self.tree_active = Some(node);
-            self.tree_anchor = Some(node);
-            self.tree_marked.clear();
+            self.tree.active = Some(node);
+            self.tree.anchor = Some(node);
+            self.tree.marked.clear();
         }
 
         self.focused_item = self.new_tab_key_for_library_node(node);
@@ -1675,7 +1684,7 @@ impl NewTab {
     ) -> DraggedLibrarySelection {
         DraggedLibrarySelection {
             active,
-            marked: self.tree_marked.iter().copied().collect::<Vec<_>>().into(),
+            marked: self.tree.marked.iter().copied().collect::<Vec<_>>().into(),
             label,
         }
     }
@@ -1705,53 +1714,54 @@ impl NewTab {
     }
 
     fn effective_tree_selection(&self) -> Vec<LibraryNodeId> {
-        let Some(active) = self.tree_active else {
+        let Some(active) = self.tree.active else {
             return Vec::new();
         };
-        if self.tree_marked.contains(&active) {
-            self.tree_marked.iter().copied().collect()
+        if self.tree.marked.contains(&active) {
+            self.tree.marked.iter().copied().collect()
         } else {
             vec![active]
         }
     }
 
     fn move_tree_cursor(&mut self, movement: CursorMove, extend: bool, cx: &mut Context<Self>) {
-        if self.library_tree_rows.is_empty() {
+        if self.tree.rows.is_empty() {
             return;
         }
         if self.host == LibraryBrowserHost::QuickOpen
-            && self.tree_active.is_none()
+            && self.tree.active.is_none()
             && matches!(
                 movement,
                 CursorMove::Up | CursorMove::Down | CursorMove::Left | CursorMove::Right
             )
         {
-            let Some(node) = self.library_tree_rows[0].node_id(&self.entries) else {
+            let Some(node) = self.tree.rows[0].node_id(&self.entries) else {
                 return;
             };
-            self.tree_active = Some(node);
-            self.tree_anchor = Some(node);
+            self.tree.active = Some(node);
+            self.tree.anchor = Some(node);
             self.focused_item = self.new_tab_key_for_library_node(node);
             if extend {
                 self.selecting = true;
-                self.tree_marked.insert(node);
+                self.tree.marked.insert(node);
             }
             self.scroll.scroll_to_item(0, ScrollStrategy::Center);
             cx.notify();
             return;
         }
         let current = self
-            .tree_active
+            .tree
+            .active
             .and_then(|node| self.tree_node_index(node))
             .unwrap_or(0);
-        let current_row = self.library_tree_rows[current].clone();
+        let current_row = self.tree.rows[current].clone();
         if let LibraryTreeRow::Collection { id, .. } = current_row {
             match movement {
-                CursorMove::Left if self.expanded_collections.contains(&id) => {
+                CursorMove::Left if self.tree.expanded_collections.contains(&id) => {
                     self.toggle_collection_expanded(id, cx);
                     return;
                 }
-                CursorMove::Right if !self.expanded_collections.contains(&id) => {
+                CursorMove::Right if !self.tree.expanded_collections.contains(&id) => {
                     self.toggle_collection_expanded(id, cx);
                     return;
                 }
@@ -1759,7 +1769,7 @@ impl NewTab {
             }
         }
 
-        let last = self.library_tree_rows.len().saturating_sub(1);
+        let last = self.tree.rows.len().saturating_sub(1);
         let target = match movement {
             CursorMove::First => 0,
             CursorMove::Last => last,
@@ -1772,37 +1782,37 @@ impl NewTab {
                 } else {
                     (0..current)
                         .rev()
-                        .find(|index| self.library_tree_rows[*index].depth() + 1 == depth)
+                        .find(|index| self.tree.rows[*index].depth() + 1 == depth)
                         .unwrap_or(current)
                 }
             }
             CursorMove::Right => {
                 let depth = current_row.depth();
-                if current < last && self.library_tree_rows[current + 1].depth() > depth {
+                if current < last && self.tree.rows[current + 1].depth() > depth {
                     current + 1
                 } else {
                     current
                 }
             }
         };
-        let Some(node) = self.library_tree_rows[target].node_id(&self.entries) else {
+        let Some(node) = self.tree.rows[target].node_id(&self.entries) else {
             return;
         };
         if extend {
             self.selecting = true;
-            let anchor = self.tree_anchor.or(self.tree_active).unwrap_or(node);
-            self.tree_marked.clear();
+            let anchor = self.tree.anchor.or(self.tree.active).unwrap_or(node);
+            self.tree.marked.clear();
             if let Some(anchor_ix) = self.tree_node_index(anchor) {
-                for row in &self.library_tree_rows[anchor_ix.min(target)..=anchor_ix.max(target)] {
+                for row in &self.tree.rows[anchor_ix.min(target)..=anchor_ix.max(target)] {
                     if let Some(node) = row.node_id(&self.entries) {
-                        self.tree_marked.insert(node);
+                        self.tree.marked.insert(node);
                     }
                 }
             }
         } else {
-            self.tree_anchor = Some(node);
+            self.tree.anchor = Some(node);
         }
-        self.tree_active = Some(node);
+        self.tree.active = Some(node);
         self.focused_item = self.new_tab_key_for_library_node(node);
         self.scroll.scroll_to_item(target, ScrollStrategy::Center);
         cx.notify();
@@ -1865,14 +1875,14 @@ impl NewTab {
 
     fn toggle_focused(&mut self, cx: &mut Context<Self>) {
         if self.is_library_tree() {
-            let Some(node) = self.tree_active else {
+            let Some(node) = self.tree.active else {
                 return;
             };
             self.selecting = true;
-            if !self.tree_marked.remove(&node) {
-                self.tree_marked.insert(node);
+            if !self.tree.marked.remove(&node) {
+                self.tree.marked.insert(node);
             }
-            self.tree_anchor = Some(node);
+            self.tree.anchor = Some(node);
             cx.notify();
             return;
         }
@@ -1880,9 +1890,9 @@ impl NewTab {
             NewTabItemKey::Document(path) => path,
             NewTabItemKey::Collection(id) => {
                 let node = LibraryNodeId::Collection(id);
-                self.tree_active = Some(node);
-                if !self.tree_marked.remove(&node) {
-                    self.tree_marked.insert(node);
+                self.tree.active = Some(node);
+                if !self.tree.marked.remove(&node) {
+                    self.tree.marked.insert(node);
                 }
                 cx.notify();
                 return;
@@ -1901,13 +1911,14 @@ impl NewTab {
     fn select_all(&mut self, cx: &mut Context<Self>) {
         if self.is_library_tree() {
             self.selecting = true;
-            self.tree_marked = self
-                .library_tree_rows
+            self.tree.marked = self
+                .tree
+                .rows
                 .iter()
                 .filter_map(|row| row.node_id(&self.entries))
                 .collect();
-            if self.tree_active.is_none() {
-                self.tree_active = self.tree_marked.iter().next().copied();
+            if self.tree.active.is_none() {
+                self.tree.active = self.tree.marked.iter().next().copied();
             }
             cx.notify();
             return;
@@ -1947,7 +1958,7 @@ impl NewTab {
                 .iter()
                 .any(|node| matches!(node, LibraryNodeId::Collection(_)))
             {
-                if self.folder_delete_prompt_pending {
+                if self.editors.folder_delete_prompt_pending {
                     return;
                 }
                 let confirmation = window.prompt(
@@ -1962,11 +1973,11 @@ impl NewTab {
                     ],
                     cx,
                 );
-                self.folder_delete_prompt_pending = true;
+                self.editors.folder_delete_prompt_pending = true;
                 cx.spawn_in(window, async move |this, cx| {
                     let confirmed = confirmation.await == Ok(0);
                     _ = this.update_in(cx, |this, _, cx| {
-                        this.folder_delete_prompt_pending = false;
+                        this.editors.folder_delete_prompt_pending = false;
                         if confirmed {
                             this.delete_tree_nodes_now(nodes, cx);
                         } else {
@@ -1985,7 +1996,7 @@ impl NewTab {
         }
 
         if matches!(self.session.destination, ReaderNewTabDestination::Trash) {
-            if self.permanent_delete_prompt_pending {
+            if self.editors.permanent_delete_prompt_pending {
                 return;
             }
             let count = self.selection.len();
@@ -2003,11 +2014,11 @@ impl NewTab {
                 ],
                 cx,
             );
-            self.permanent_delete_prompt_pending = true;
+            self.editors.permanent_delete_prompt_pending = true;
             cx.spawn_in(window, async move |this, cx| {
                 let confirmed = confirmation.await == Ok(0);
                 _ = this.update_in(cx, |this, _, cx| {
-                    this.permanent_delete_prompt_pending = false;
+                    this.editors.permanent_delete_prompt_pending = false;
                     if confirmed {
                         this.delete_selected_now(cx);
                     } else {
@@ -2048,15 +2059,15 @@ impl NewTab {
             self.import_message =
                 Some(format!("Could not delete Library entries: {error:#}").into());
         }
-        self.tree_active = None;
-        self.tree_marked.clear();
-        self.tree_anchor = None;
+        self.tree.active = None;
+        self.tree.marked.clear();
+        self.tree.anchor = None;
         self.selection.clear();
         self.selection_anchor = None;
         self.selecting = false;
         self.inspector_open = false;
         self.focused_item = NewTabItemKey::OpenFile;
-        self.expanded_collections.retain(|collection_id| {
+        self.tree.expanded_collections.retain(|collection_id| {
             cx.global::<LibraryStore>()
                 .library_collection(*collection_id)
                 .is_some()
@@ -2190,15 +2201,15 @@ impl NewTab {
         self.persist_current_presentation(cx);
         self.nav_menu_open = false;
         self.inspector_open = false;
-        self.note_expanded = false;
+        self.editors.note_expanded = false;
         self.selecting = false;
         self.selection.clear();
         self.selection_anchor = None;
         if self.host == LibraryBrowserHost::QuickOpen {
             self.focused_item = NewTabItemKey::OpenFile;
-            self.tree_active = None;
-            self.tree_marked.clear();
-            self.tree_anchor = None;
+            self.tree.active = None;
+            self.tree.marked.clear();
+            self.tree.anchor = None;
         }
         let search_placeholder = Self::search_placeholder(&self.session.destination);
         self.search_input.update(cx, |input, cx| {
@@ -2312,15 +2323,16 @@ impl NewTab {
 
     fn sync_work_note_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let item_id = self.selected_item_id();
-        if item_id == self.note_item_id {
+        if item_id == self.editors.note_item_id {
             return;
         }
-        self.note_item_id = item_id;
+        self.editors.note_item_id = item_id;
         let note = item_id
             .and_then(|id| cx.global::<LibraryStore>().library_item(id))
             .map(|item| item.work_note.clone())
             .unwrap_or_default();
-        self.work_note_input
+        self.editors
+            .work_note_input
             .update(cx, |input, cx| input.set_value(note, window, cx));
     }
 
@@ -2334,7 +2346,7 @@ impl NewTab {
         if !matches!(event, InputEvent::Change) {
             return;
         }
-        let Some(item_id) = self.note_item_id else {
+        let Some(item_id) = self.editors.note_item_id else {
             return;
         };
         let note = input.read(cx).value().to_string();
@@ -2352,7 +2364,7 @@ impl NewTab {
         if cx.global::<LibraryStore>().library_collection(id).is_none() {
             return;
         }
-        self.current_collection = Some(id);
+        self.tree.current_collection = Some(id);
         self.selection.clear();
         self.selection_anchor = None;
         self.inspector_open = false;
@@ -2361,7 +2373,7 @@ impl NewTab {
     }
 
     fn enter_collection_parent(&mut self, id: Option<LibraryCollectionId>, cx: &mut Context<Self>) {
-        self.current_collection = id.filter(|id| {
+        self.tree.current_collection = id.filter(|id| {
             cx.global::<LibraryStore>()
                 .library_collection(*id)
                 .is_some()
@@ -2374,8 +2386,8 @@ impl NewTab {
     }
 
     fn toggle_collection_expanded(&mut self, id: LibraryCollectionId, cx: &mut Context<Self>) {
-        if !self.expanded_collections.insert(id) {
-            self.expanded_collections.remove(&id);
+        if !self.tree.expanded_collections.insert(id) {
+            self.tree.expanded_collections.remove(&id);
         }
         self.update_filter(cx);
         cx.notify();
@@ -2390,13 +2402,14 @@ impl NewTab {
         if self.host != LibraryBrowserHost::Home {
             return;
         }
-        self.folder_name_input
+        self.editors
+            .folder_name_input
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.folder_editor = Some(FolderEditor {
+        self.editors.folder = Some(FolderEditor {
             collection_id: None,
             parent_id,
         });
-        let input = self.folder_name_input.clone();
+        let input = self.editors.folder_name_input.clone();
         window.defer(cx, move |window, cx| {
             input.update(cx, |input, cx| input.focus(window, cx));
         });
@@ -2417,13 +2430,14 @@ impl NewTab {
         };
         let name = collection.name.clone();
         let parent_id = collection.parent_id;
-        self.folder_name_input
+        self.editors
+            .folder_name_input
             .update(cx, |input, cx| input.set_value(name, window, cx));
-        self.folder_editor = Some(FolderEditor {
+        self.editors.folder = Some(FolderEditor {
             collection_id: Some(id),
             parent_id,
         });
-        let input = self.folder_name_input.clone();
+        let input = self.editors.folder_name_input.clone();
         window.defer(cx, move |window, cx| {
             input.update(cx, |input, cx| input.focus(window, cx));
         });
@@ -2431,10 +2445,10 @@ impl NewTab {
     }
 
     fn save_folder_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.folder_editor else {
+        let Some(editor) = self.editors.folder else {
             return;
         };
-        let name = self.folder_name_input.read(cx).value().to_string();
+        let name = self.editors.folder_name_input.read(cx).value().to_string();
         let result = if let Some(id) = editor.collection_id {
             cx.global_mut::<LibraryStore>()
                 .rename_library_collection(id, &name)
@@ -2445,12 +2459,12 @@ impl NewTab {
         };
         match result {
             Ok(id) => {
-                self.folder_editor = None;
-                if editor.parent_id.is_some() {
-                    self.expanded_collections.insert(editor.parent_id.unwrap());
+                self.editors.folder = None;
+                if let Some(parent_id) = editor.parent_id {
+                    self.tree.expanded_collections.insert(parent_id);
                 }
                 if editor.collection_id.is_none() {
-                    self.expanded_collections.insert(id);
+                    self.tree.expanded_collections.insert(id);
                 }
                 self.refresh_entries(cx);
             }
@@ -2465,7 +2479,7 @@ impl NewTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.host != LibraryBrowserHost::Home || self.folder_delete_prompt_pending {
+        if self.host != LibraryBrowserHost::Home || self.editors.folder_delete_prompt_pending {
             return;
         }
         let Some(collection) = cx.global::<LibraryStore>().library_collection(id) else {
@@ -2484,27 +2498,27 @@ impl NewTab {
             ],
             cx,
         );
-        self.folder_delete_prompt_pending = true;
+        self.editors.folder_delete_prompt_pending = true;
         cx.spawn_in(window, async move |this, cx| {
             let confirmed = confirmation.await == Ok(0);
             _ = this.update_in(cx, |this, _, cx| {
-                this.folder_delete_prompt_pending = false;
+                this.editors.folder_delete_prompt_pending = false;
                 if confirmed {
                     match cx
                         .global_mut::<LibraryStore>()
                         .delete_library_collection(id)
                     {
                         Ok(_) => {
-                            if this.current_collection == Some(id)
-                                || this.current_collection.is_some_and(|current| {
+                            if this.tree.current_collection == Some(id)
+                                || this.tree.current_collection.is_some_and(|current| {
                                     cx.global::<LibraryStore>()
                                         .library_collection(current)
                                         .is_none()
                                 })
                             {
-                                this.current_collection = None;
+                                this.tree.current_collection = None;
                             }
-                            this.expanded_collections.retain(|collection_id| {
+                            this.tree.expanded_collections.retain(|collection_id| {
                                 cx.global::<LibraryStore>()
                                     .library_collection(*collection_id)
                                     .is_some()
@@ -2554,25 +2568,25 @@ impl NewTab {
     }
 
     fn begin_library_drag(&mut self, dragged: &DraggedLibrarySelection, cx: &mut Context<Self>) {
-        self.dragging_library_nodes = dragged.items().into_iter().collect();
+        self.tree.dragging_nodes = dragged.items().into_iter().collect();
         cx.notify();
     }
 
     fn clear_library_drag_state(&mut self, cx: &mut Context<Self>) {
-        let changed = self.library_drop_target.take().is_some()
-            | self.hover_expand_task.take().is_some()
-            | self.hover_scroll_task.take().is_some()
-            | !self.dragging_library_nodes.is_empty();
-        self.dragging_library_nodes.clear();
+        let changed = self.tree.drop_target.take().is_some()
+            | self.tree.hover_expand_task.take().is_some()
+            | self.tree.hover_scroll_task.take().is_some()
+            | !self.tree.dragging_nodes.is_empty();
+        self.tree.dragging_nodes.clear();
         if changed {
             cx.notify();
         }
     }
 
     fn clear_library_drop_feedback(&mut self, cx: &mut Context<Self>) {
-        let changed = self.library_drop_target.take().is_some()
-            | self.hover_expand_task.take().is_some()
-            | self.hover_scroll_task.take().is_some();
+        let changed = self.tree.drop_target.take().is_some()
+            | self.tree.hover_expand_task.take().is_some()
+            | self.tree.hover_scroll_task.take().is_some();
         if changed {
             cx.notify();
         }
@@ -2588,11 +2602,11 @@ impl NewTab {
     ) {
         if !bounds_contains_pointer {
             if matches!(
-                self.library_drop_target,
+                self.tree.drop_target,
                 Some(LibraryDropTarget::Entry { hovered, .. }) if hovered == node
             ) {
-                self.library_drop_target = None;
-                self.hover_expand_task.take();
+                self.tree.drop_target = None;
+                self.tree.hover_expand_task.take();
                 cx.notify();
             }
             return;
@@ -2605,7 +2619,7 @@ impl NewTab {
             hovered: node,
             parent,
         };
-        if self.library_drop_target == Some(target) {
+        if self.tree.drop_target == Some(target) {
             return;
         }
         let valid = cx
@@ -2613,28 +2627,28 @@ impl NewTab {
             .validate_library_move(&dragged.items(), parent)
             .unwrap_or(false);
         if !valid {
-            self.library_drop_target = None;
-            self.hover_expand_task.take();
+            self.tree.drop_target = None;
+            self.tree.hover_expand_task.take();
             cx.notify();
             return;
         }
-        self.library_drop_target = Some(target);
-        self.hover_expand_task.take();
+        self.tree.drop_target = Some(target);
+        self.tree.hover_expand_task.take();
         if let LibraryNodeId::Collection(id) = node
-            && !self.expanded_collections.contains(&id)
+            && !self.tree.expanded_collections.contains(&id)
         {
-            self.hover_expand_task = Some(cx.spawn_in(window, async move |this, cx| {
+            self.tree.hover_expand_task = Some(cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor()
                     .timer(Duration::from_millis(500))
                     .await;
                 _ = this.update(cx, |this, cx| {
-                    this.hover_expand_task.take();
+                    this.tree.hover_expand_task.take();
                     if matches!(
-                        this.library_drop_target,
+                        this.tree.drop_target,
                         Some(LibraryDropTarget::Entry { hovered, .. })
                             if hovered == LibraryNodeId::Collection(id)
                     ) {
-                        this.expanded_collections.insert(id);
+                        this.tree.expanded_collections.insert(id);
                         this.update_filter(cx);
                     }
                     cx.notify();
@@ -2645,7 +2659,7 @@ impl NewTab {
     }
 
     fn library_node_is_drop_highlighted(&self, node: LibraryNodeId, cx: &Context<Self>) -> bool {
-        let parent = match self.library_drop_target {
+        let parent = match self.tree.drop_target {
             Some(LibraryDropTarget::Root) => return true,
             Some(LibraryDropTarget::Entry { parent, .. }) => parent,
             None => return false,
@@ -2679,13 +2693,13 @@ impl NewTab {
         cx: &mut Context<Self>,
     ) {
         if !active {
-            if self.library_drop_target == Some(LibraryDropTarget::Root) {
-                self.library_drop_target = None;
+            if self.tree.drop_target == Some(LibraryDropTarget::Root) {
+                self.tree.drop_target = None;
                 cx.notify();
             }
             return;
         }
-        if self.library_drop_target == Some(LibraryDropTarget::Root) {
+        if self.tree.drop_target == Some(LibraryDropTarget::Root) {
             return;
         }
         if cx
@@ -2693,11 +2707,11 @@ impl NewTab {
             .validate_library_move(&dragged.items(), None)
             .unwrap_or(false)
         {
-            self.library_drop_target = Some(LibraryDropTarget::Root);
+            self.tree.drop_target = Some(LibraryDropTarget::Root);
         } else {
-            self.library_drop_target = None;
+            self.tree.drop_target = None;
         }
-        self.hover_expand_task.take();
+        self.tree.hover_expand_task.take();
         cx.notify();
     }
 
@@ -2710,11 +2724,11 @@ impl NewTab {
     ) {
         if !active {
             if matches!(
-                self.library_drop_target,
+                self.tree.drop_target,
                 Some(LibraryDropTarget::Entry { hovered, .. }) if hovered == node
             ) {
-                self.library_drop_target = None;
-                self.hover_expand_task.take();
+                self.tree.drop_target = None;
+                self.tree.hover_expand_task.take();
                 cx.notify();
             }
             return;
@@ -2727,26 +2741,26 @@ impl NewTab {
             hovered: node,
             parent,
         };
-        if self.library_drop_target == Some(target) {
+        if self.tree.drop_target == Some(target) {
             return;
         }
-        self.library_drop_target = Some(target);
-        self.hover_expand_task.take();
+        self.tree.drop_target = Some(target);
+        self.tree.hover_expand_task.take();
         if let LibraryNodeId::Collection(id) = node
-            && !self.expanded_collections.contains(&id)
+            && !self.tree.expanded_collections.contains(&id)
         {
-            self.hover_expand_task = Some(cx.spawn_in(window, async move |this, cx| {
+            self.tree.hover_expand_task = Some(cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor()
                     .timer(Duration::from_millis(500))
                     .await;
                 _ = this.update(cx, |this, cx| {
-                    this.hover_expand_task.take();
+                    this.tree.hover_expand_task.take();
                     if matches!(
-                        this.library_drop_target,
+                        this.tree.drop_target,
                         Some(LibraryDropTarget::Entry { hovered, .. })
                             if hovered == LibraryNodeId::Collection(id)
                     ) {
-                        this.expanded_collections.insert(id);
+                        this.tree.expanded_collections.insert(id);
                         this.update_filter(cx);
                     }
                     cx.notify();
@@ -2758,10 +2772,10 @@ impl NewTab {
 
     fn set_external_library_root_drag_target(&mut self, active: bool, cx: &mut Context<Self>) {
         if active {
-            self.library_drop_target = Some(LibraryDropTarget::Root);
-            self.hover_expand_task.take();
-        } else if self.library_drop_target == Some(LibraryDropTarget::Root) {
-            self.library_drop_target = None;
+            self.tree.drop_target = Some(LibraryDropTarget::Root);
+            self.tree.hover_expand_task.take();
+        } else if self.tree.drop_target == Some(LibraryDropTarget::Root) {
+            self.tree.drop_target = None;
         }
         cx.notify();
     }
@@ -2804,7 +2818,7 @@ impl NewTab {
             self.clear_library_drop_feedback(cx);
             return;
         }
-        self.hover_scroll_task.take();
+        self.tree.hover_scroll_task.take();
         let height = event.bounds.size.height;
         if height <= px(0.) {
             return;
@@ -2821,14 +2835,14 @@ impl NewTab {
         } else {
             return;
         };
-        self.hover_scroll_task = Some(cx.spawn(async move |this, cx| {
+        self.tree.hover_scroll_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(16))
                     .await;
                 let continuing = this
                     .update(cx, |this, cx| {
-                        if this.hover_scroll_task.is_none() {
+                        if this.tree.hover_scroll_task.is_none() {
                             return false;
                         }
                         let handle = this.scroll.0.borrow_mut();
@@ -2849,13 +2863,13 @@ impl NewTab {
 
     fn library_import_target(&self, cx: &Context<Self>) -> Option<LibraryCollectionId> {
         if self.is_library_tree() {
-            return match self.tree_active {
+            return match self.tree.active {
                 Some(LibraryNodeId::Collection(id)) => Some(id),
                 Some(LibraryNodeId::Item(id)) => cx.global::<LibraryStore>().item_parent(id),
                 None => None,
             };
         }
-        self.current_collection
+        self.tree.current_collection
     }
 
     fn cancel_library_import(&mut self, cx: &mut Context<Self>) {
@@ -3169,7 +3183,7 @@ impl NewTab {
         let Some(item_id) = self.selected_item_id() else {
             return;
         };
-        let name = self.tag_input.read(cx).value().trim().to_string();
+        let name = self.editors.tag_input.read(cx).value().trim().to_string();
         if name.is_empty() {
             return;
         }
@@ -3180,7 +3194,8 @@ impl NewTab {
             eprintln!("failed to add library tag: {error:#}");
             return;
         }
-        self.tag_input
+        self.editors
+            .tag_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.refresh_entries(cx);
         cx.notify();
@@ -3233,10 +3248,11 @@ impl NewTab {
             ReaderNewTabDestination::SavedView(_) => "Copy of saved view",
             _ => "Research view",
         };
-        self.saved_view_name_input
+        self.editors
+            .saved_view_name_input
             .update(cx, |input, cx| input.set_value(suggested, window, cx));
-        self.saved_view_editor_open = true;
-        let input = self.saved_view_name_input.clone();
+        self.editors.saved_view_open = true;
+        let input = self.editors.saved_view_name_input.clone();
         window.defer(cx, move |window, cx| {
             input.update(cx, |input, cx| input.focus(window, cx));
         });
@@ -3245,6 +3261,7 @@ impl NewTab {
 
     fn save_current_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self
+            .editors
             .saved_view_name_input
             .read(cx)
             .value()
@@ -3267,7 +3284,7 @@ impl NewTab {
         );
         match result {
             Ok(view_id) => {
-                self.saved_view_editor_open = false;
+                self.editors.saved_view_open = false;
                 self.set_destination(ReaderNewTabDestination::SavedView(view_id), window, cx);
             }
             Err(error) => eprintln!("failed to save library view: {error:#}"),
@@ -3311,10 +3328,11 @@ impl NewTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tag_editor_id = Some(tag_id);
-        self.tag_editor_name_input
+        self.editors.tag_id = Some(tag_id);
+        self.editors
+            .tag_name_input
             .update(cx, |input, cx| input.set_value(name, window, cx));
-        let input = self.tag_editor_name_input.clone();
+        let input = self.editors.tag_name_input.clone();
         window.defer(cx, move |window, cx| {
             input.update(cx, |input, cx| input.focus(window, cx));
         });
@@ -3322,11 +3340,12 @@ impl NewTab {
     }
 
     fn save_tag_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(tag_id) = self.tag_editor_id else {
+        let Some(tag_id) = self.editors.tag_id else {
             return;
         };
         let name = self
-            .tag_editor_name_input
+            .editors
+            .tag_name_input
             .read(cx)
             .value()
             .trim()
@@ -3342,7 +3361,7 @@ impl NewTab {
                 if self.session.destination == ReaderNewTabDestination::Tag(tag_id) {
                     self.session.destination = ReaderNewTabDestination::Tag(result_id);
                 }
-                self.tag_editor_id = None;
+                self.editors.tag_id = None;
                 self.refresh_entries(cx);
             }
             Err(error) => eprintln!("failed to rename library tag: {error:#}"),
@@ -3351,7 +3370,7 @@ impl NewTab {
     }
 
     fn delete_edited_tag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tag_id) = self.tag_editor_id else {
+        let Some(tag_id) = self.editors.tag_id else {
             return;
         };
         let confirmation = window.prompt(
@@ -3373,7 +3392,7 @@ impl NewTab {
                     eprintln!("failed to delete library tag: {error:#}");
                     return;
                 }
-                this.tag_editor_id = None;
+                this.editors.tag_id = None;
                 if this.session.destination == ReaderNewTabDestination::Tag(tag_id) {
                     this.set_destination(ReaderNewTabDestination::Tags, window, cx);
                 } else {
@@ -3401,34 +3420,36 @@ impl NewTab {
         let mut set = |input: &Entity<InputState>, value: String| {
             input.update(cx, |input, cx| input.set_value(value, window, cx));
         };
-        self.metadata_kind = item.kind;
-        set(&self.metadata_title_input, item.title);
-        set(&self.metadata_creators_input, creators);
+        self.editors.metadata_kind = item.kind;
+        set(&self.editors.metadata_title_input, item.title);
+        set(&self.editors.metadata_creators_input, creators);
         set(
-            &self.metadata_year_input,
+            &self.editors.metadata_year_input,
             item.year.map(|year| year.to_string()).unwrap_or_default(),
         );
-        set(&self.metadata_publication_input, item.publication);
-        set(&self.metadata_publisher_input, item.publisher);
+        set(&self.editors.metadata_publication_input, item.publication);
+        set(&self.editors.metadata_publisher_input, item.publisher);
         set(
-            &self.metadata_doi_input,
+            &self.editors.metadata_doi_input,
             item.identifiers.doi.unwrap_or_default(),
         );
         set(
-            &self.metadata_isbn_input,
+            &self.editors.metadata_isbn_input,
             item.identifiers.isbn.unwrap_or_default(),
         );
         set(
-            &self.metadata_arxiv_input,
+            &self.editors.metadata_arxiv_input,
             item.identifiers.arxiv.unwrap_or_default(),
         );
-        set(&self.metadata_subject_input, item.subject);
-        set(&self.metadata_language_input, item.language);
-        self.metadata_abstract_input.update(cx, |input, cx| {
-            input.set_value(item.abstract_text, window, cx)
-        });
-        self.metadata_editor_open = true;
-        let input = self.metadata_title_input.clone();
+        set(&self.editors.metadata_subject_input, item.subject);
+        set(&self.editors.metadata_language_input, item.language);
+        self.editors
+            .metadata_abstract_input
+            .update(cx, |input, cx| {
+                input.set_value(item.abstract_text, window, cx)
+            });
+        self.editors.metadata_open = true;
+        let input = self.editors.metadata_title_input.clone();
         window.defer(cx, move |window, cx| {
             input.update(cx, |input, cx| input.focus(window, cx));
         });
@@ -3442,9 +3463,15 @@ impl NewTab {
         let Some(mut item) = cx.global::<LibraryStore>().library_item(item_id).cloned() else {
             return;
         };
-        item.kind = self.metadata_kind;
-        item.title = self.metadata_title_input.read(cx).value().to_string();
+        item.kind = self.editors.metadata_kind;
+        item.title = self
+            .editors
+            .metadata_title_input
+            .read(cx)
+            .value()
+            .to_string();
         item.creators = self
+            .editors
             .metadata_creators_input
             .read(cx)
             .value()
@@ -3457,27 +3484,53 @@ impl NewTab {
             })
             .collect();
         item.year = self
+            .editors
             .metadata_year_input
             .read(cx)
             .value()
             .trim()
             .parse::<i32>()
             .ok();
-        item.publication = self.metadata_publication_input.read(cx).value().to_string();
-        item.publisher = self.metadata_publisher_input.read(cx).value().to_string();
+        item.publication = self
+            .editors
+            .metadata_publication_input
+            .read(cx)
+            .value()
+            .to_string();
+        item.publisher = self
+            .editors
+            .metadata_publisher_input
+            .read(cx)
+            .value()
+            .to_string();
         let optional_value = |input: &Entity<InputState>, cx: &App| {
             let value = input.read(cx).value().trim().to_string();
             (!value.is_empty()).then_some(value)
         };
-        item.identifiers.doi = optional_value(&self.metadata_doi_input, cx);
-        item.identifiers.isbn = optional_value(&self.metadata_isbn_input, cx);
-        item.identifiers.arxiv = optional_value(&self.metadata_arxiv_input, cx);
-        item.subject = self.metadata_subject_input.read(cx).value().to_string();
-        item.language = self.metadata_language_input.read(cx).value().to_string();
-        item.abstract_text = self.metadata_abstract_input.read(cx).value().to_string();
+        item.identifiers.doi = optional_value(&self.editors.metadata_doi_input, cx);
+        item.identifiers.isbn = optional_value(&self.editors.metadata_isbn_input, cx);
+        item.identifiers.arxiv = optional_value(&self.editors.metadata_arxiv_input, cx);
+        item.subject = self
+            .editors
+            .metadata_subject_input
+            .read(cx)
+            .value()
+            .to_string();
+        item.language = self
+            .editors
+            .metadata_language_input
+            .read(cx)
+            .value()
+            .to_string();
+        item.abstract_text = self
+            .editors
+            .metadata_abstract_input
+            .read(cx)
+            .value()
+            .to_string();
         match cx.global_mut::<LibraryStore>().update_library_item(item) {
             Ok(()) => {
-                self.metadata_editor_open = false;
+                self.editors.metadata_open = false;
                 self.refresh_entries(cx);
             }
             Err(error) => eprintln!("failed to update library metadata: {error:#}"),
@@ -4087,11 +4140,7 @@ impl NewTab {
             .filter(|tag| query.is_empty() || tag.name.to_lowercase().contains(&query))
             .cloned()
             .collect::<Vec<_>>();
-        let relations = cx
-            .global::<LibraryStore>()
-            .library
-            .library_item_tags
-            .clone();
+        let relations = cx.global::<LibraryStore>().library_item_tags().to_vec();
         if tags.is_empty() {
             return div()
                 .id("new-tab-tags-content")
@@ -4404,7 +4453,11 @@ impl NewTab {
                                 .border_1()
                                 .border_color(theme.border)
                                 .bg(theme.background)
-                                .child(Input::new(&self.tag_input).small().appearance(false)),
+                                .child(
+                                    Input::new(&self.editors.tag_input)
+                                        .small()
+                                        .appearance(false),
+                                ),
                         )
                         .child(
                             Button::new("new-tab-inspector-add-tag")
@@ -4432,8 +4485,8 @@ impl NewTab {
                                 .icon(IconName::ArrowUpRight)
                                 .label("Expand")
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.note_expanded = true;
-                                    let input = this.work_note_input.clone();
+                                    this.editors.note_expanded = true;
+                                    let input = this.editors.work_note_input.clone();
                                     window.defer(cx, move |window, cx| {
                                         input.update(cx, |input, cx| input.focus(window, cx));
                                     });
@@ -4449,7 +4502,7 @@ impl NewTab {
                         .border_1()
                         .border_color(theme.border)
                         .bg(theme.background)
-                        .child(Textarea::new(&self.work_note_input).appearance(false)),
+                        .child(Textarea::new(&self.editors.work_note_input).appearance(false)),
                 )
                 .when(item.trashed_at.is_none(), |this| {
                     this.child(
@@ -4498,20 +4551,20 @@ impl NewTab {
     }
 
     fn cancel_topmost_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let cancelled = if self.folder_editor.is_some() {
-            self.folder_editor = None;
+        let cancelled = if self.editors.folder.is_some() {
+            self.editors.folder = None;
             true
-        } else if self.tag_editor_id.is_some() {
-            self.tag_editor_id = None;
+        } else if self.editors.tag_id.is_some() {
+            self.editors.tag_id = None;
             true
-        } else if self.saved_view_editor_open {
-            self.saved_view_editor_open = false;
+        } else if self.editors.saved_view_open {
+            self.editors.saved_view_open = false;
             true
-        } else if self.metadata_editor_open {
-            self.metadata_editor_open = false;
+        } else if self.editors.metadata_open {
+            self.editors.metadata_open = false;
             true
-        } else if self.note_expanded {
-            self.note_expanded = false;
+        } else if self.editors.note_expanded {
+            self.editors.note_expanded = false;
             true
         } else {
             false
@@ -4576,7 +4629,7 @@ impl NewTab {
                             .flex_1()
                             .min_h_0()
                             .p_3()
-                            .child(Textarea::new(&self.work_note_input).appearance(false)),
+                            .child(Textarea::new(&self.editors.work_note_input).appearance(false)),
                     ),
             )
             .into_any_element()
@@ -4679,10 +4732,10 @@ impl NewTab {
                                             Button::new(("new-tab-metadata-kind", index))
                                                 .small()
                                                 .outline()
-                                                .selected(self.metadata_kind == kind)
+                                                .selected(self.editors.metadata_kind == kind)
                                                 .label(label)
                                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.metadata_kind = kind;
+                                                    this.editors.metadata_kind = kind;
                                                     cx.stop_propagation();
                                                     cx.notify();
                                                 }))
@@ -4691,8 +4744,8 @@ impl NewTab {
                                 ),
                             ),
                     )
-                    .child(field("Title", &self.metadata_title_input))
-                    .child(field("Creators", &self.metadata_creators_input))
+                    .child(field("Title", &self.editors.metadata_title_input))
+                    .child(field("Creators", &self.editors.metadata_creators_input))
                     .child(
                         div()
                             .flex()
@@ -4700,20 +4753,21 @@ impl NewTab {
                             .child(
                                 div()
                                     .flex_1()
-                                    .child(field("Year", &self.metadata_year_input)),
+                                    .child(field("Year", &self.editors.metadata_year_input)),
                             )
                             .child(
-                                div()
-                                    .flex_1()
-                                    .child(field("Language", &self.metadata_language_input)),
+                                div().flex_1().child(field(
+                                    "Language",
+                                    &self.editors.metadata_language_input,
+                                )),
                             ),
                     )
                     .child(field(
                         "Publication or venue",
-                        &self.metadata_publication_input,
+                        &self.editors.metadata_publication_input,
                     ))
-                    .child(field("Publisher", &self.metadata_publisher_input))
-                    .child(field("DOI", &self.metadata_doi_input))
+                    .child(field("Publisher", &self.editors.metadata_publisher_input))
+                    .child(field("DOI", &self.editors.metadata_doi_input))
                     .child(
                         div()
                             .flex()
@@ -4721,15 +4775,15 @@ impl NewTab {
                             .child(
                                 div()
                                     .flex_1()
-                                    .child(field("ISBN", &self.metadata_isbn_input)),
+                                    .child(field("ISBN", &self.editors.metadata_isbn_input)),
                             )
                             .child(
                                 div()
                                     .flex_1()
-                                    .child(field("arXiv", &self.metadata_arxiv_input)),
+                                    .child(field("arXiv", &self.editors.metadata_arxiv_input)),
                             ),
                     )
-                    .child(field("Subject", &self.metadata_subject_input))
+                    .child(field("Subject", &self.editors.metadata_subject_input))
                     .child(
                         div()
                             .flex()
@@ -4749,7 +4803,7 @@ impl NewTab {
                                     .border_color(theme.border)
                                     .bg(theme.background)
                                     .child(
-                                        Textarea::new(&self.metadata_abstract_input)
+                                        Textarea::new(&self.editors.metadata_abstract_input)
                                             .appearance(false),
                                     ),
                             ),
@@ -4832,7 +4886,7 @@ impl NewTab {
                             .border_color(theme.border)
                             .bg(theme.background)
                             .child(
-                                Input::new(&self.saved_view_name_input)
+                                Input::new(&self.editors.saved_view_name_input)
                                     .small()
                                     .appearance(false),
                             ),
@@ -4915,7 +4969,7 @@ impl NewTab {
                             .border_color(theme.border)
                             .bg(theme.background)
                             .child(
-                                Input::new(&self.tag_editor_name_input)
+                                Input::new(&self.editors.tag_name_input)
                                     .small()
                                     .appearance(false),
                             ),
@@ -4989,7 +5043,7 @@ impl NewTab {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_root_target = self.host == LibraryBrowserHost::Home && self.is_library_tree();
-        let highlighted = self.library_drop_target == Some(LibraryDropTarget::Root);
+        let highlighted = self.tree.drop_target == Some(LibraryDropTarget::Root);
         let mut heading = div()
             .id("library-destination-heading")
             .px_1()
@@ -5082,7 +5136,7 @@ impl NewTab {
             return Vec::new();
         }
         cx.global::<LibraryStore>()
-            .child_collections(self.current_collection)
+            .child_collections(self.tree.current_collection)
             .into_iter()
             .map(|collection| (collection.id, collection.name.clone().into()))
             .collect()
@@ -5226,7 +5280,7 @@ impl NewTab {
             return None;
         }
         let mut crumbs = vec![(None, "Library".to_string())];
-        if let Some(id) = self.current_collection {
+        if let Some(id) = self.tree.current_collection {
             crumbs.extend(
                 cx.global::<LibraryStore>()
                     .collection_ancestors(id)
@@ -5284,7 +5338,7 @@ impl NewTab {
         theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let editor = self.folder_editor?;
+        let editor = self.editors.folder?;
         let title = if editor.collection_id.is_some() {
             "Rename Folder"
         } else {
@@ -5316,7 +5370,7 @@ impl NewTab {
                         .bg(theme.popover)
                         .shadow_lg()
                         .child(div().text_size(ui_rems(14.0)).child(title))
-                        .child(Input::new(&self.folder_name_input).small())
+                        .child(Input::new(&self.editors.folder_name_input).small())
                         .child(
                             div()
                                 .flex()
@@ -5812,7 +5866,7 @@ impl NewTab {
             action,
         } = state;
         let highlighted = matches!(action, BrowserEmptyAction::AddFiles(_))
-            && self.library_drop_target == Some(LibraryDropTarget::Root);
+            && self.tree.drop_target == Some(LibraryDropTarget::Root);
         let mut empty = div()
             .id("new-tab-empty-state")
             .debug_selector(|| "new-tab-empty-state".to_string())
@@ -6228,9 +6282,9 @@ impl NewTab {
         let node = LibraryNodeId::Item(item_id);
         let label = entry.file_name.clone();
         let icon = entry.icon();
-        let selected = self.tree_active == Some(node) || self.tree_marked.contains(&node);
+        let selected = self.tree.active == Some(node) || self.tree.marked.contains(&node);
         let drop_highlighted = self.library_node_is_drop_highlighted(node, cx);
-        let drag_dimmed = cx.has_active_drag() && self.dragging_library_nodes.contains(&node);
+        let drag_dimmed = cx.has_active_drag() && self.tree.dragging_nodes.contains(&node);
         let dragged = self.dragged_library_selection(node, label.clone());
         let mut row = div()
             .id(("library-document-tree-row", item_id.0 as usize))
@@ -6323,11 +6377,11 @@ impl NewTab {
             return div().h(px(LIST_ROW_HEIGHT)).into_any_element();
         };
         let name = collection.name.clone();
-        let expanded = self.expanded_collections.contains(&id);
+        let expanded = self.tree.expanded_collections.contains(&id);
         let node = LibraryNodeId::Collection(id);
-        let selected = self.tree_active == Some(node) || self.tree_marked.contains(&node);
+        let selected = self.tree.active == Some(node) || self.tree.marked.contains(&node);
         let drop_highlighted = self.library_node_is_drop_highlighted(node, cx);
-        let drag_dimmed = cx.has_active_drag() && self.dragging_library_nodes.contains(&node);
+        let drag_dimmed = cx.has_active_drag() && self.tree.dragging_nodes.contains(&node);
         let mut row = div()
             .id(("library-folder-tree-row", id.0 as usize))
             .debug_selector(move || format!("library-folder-tree-row-{}", id.0))
@@ -6430,7 +6484,7 @@ impl NewTab {
         empty_state: Option<BrowserEmptyState>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let highlighted = self.library_drop_target == Some(LibraryDropTarget::Root);
+        let highlighted = self.tree.drop_target == Some(LibraryDropTarget::Root);
         let mut area = div()
             .id("library-tree-root-area")
             .debug_selector(|| "library-tree-root-area".to_string())
@@ -6480,12 +6534,12 @@ impl NewTab {
 
     fn render_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !cx.has_active_drag() {
-            self.dragging_library_nodes.clear();
+            self.tree.dragging_nodes.clear();
         }
         let filtering = !self.search_input.read(cx).value().trim().is_empty();
         let tree_mode = self.session.destination == ReaderNewTabDestination::Library;
         let item_count = if tree_mode {
-            self.library_tree_rows.len()
+            self.tree.rows.len()
         } else {
             self.item_count()
         };
@@ -6520,7 +6574,7 @@ impl NewTab {
                 visible_range
                     .map(|item_ix| {
                         if tree_mode {
-                            match this.library_tree_rows[item_ix].clone() {
+                            match this.tree.rows[item_ix].clone() {
                                 LibraryTreeRow::Collection { id, depth } => {
                                     this.render_collection_tree_row(id, depth, theme, cx)
                                 }
@@ -6903,7 +6957,7 @@ impl Render for NewTab {
 
         let tree_selection = self.effective_tree_selection();
         let selecting = if self.is_library_tree() {
-            self.selecting || !self.tree_marked.is_empty()
+            self.selecting || !self.tree.marked.is_empty()
         } else {
             self.selecting
         };
@@ -7058,7 +7112,7 @@ impl Render for NewTab {
                                 let parent_id = if view_mode == NewTabViewMode::Table {
                                     self.library_import_target(cx)
                                 } else {
-                                    self.current_collection
+                                    self.tree.current_collection
                                 };
                                 actions = actions.child(
                                     Button::new("home-library-new-folder")
@@ -7359,24 +7413,24 @@ impl Render for NewTab {
         } else {
             main_column.into_any_element()
         };
-        let note_overlay =
-            (management_host && self.note_expanded).then(|| self.render_note_overlay(theme, cx));
-        let metadata_overlay = (management_host && self.metadata_editor_open)
+        let note_overlay = (management_host && self.editors.note_expanded)
+            .then(|| self.render_note_overlay(theme, cx));
+        let metadata_overlay = (management_host && self.editors.metadata_open)
             .then(|| self.render_metadata_overlay(theme, cx));
-        let saved_view_overlay = (management_host && self.saved_view_editor_open)
+        let saved_view_overlay = (management_host && self.editors.saved_view_open)
             .then(|| self.render_saved_view_overlay(theme, cx));
-        let tag_editor_overlay = (management_host && self.tag_editor_id.is_some())
+        let tag_editor_overlay = (management_host && self.editors.tag_id.is_some())
             .then(|| self.render_tag_editor_overlay(theme, cx));
         let folder_editor_overlay = management_host
             .then(|| self.render_folder_editor_overlay(theme, cx))
             .flatten();
         let editor_overlay_open = management_host
-            && (self.note_expanded
-                || self.metadata_editor_open
-                || self.saved_view_editor_open
-                || self.tag_editor_id.is_some()
-                || self.folder_editor.is_some());
-        let external_drop_overlay = (management_host && self.library_drop_target.is_none())
+            && (self.editors.note_expanded
+                || self.editors.metadata_open
+                || self.editors.saved_view_open
+                || self.editors.tag_id.is_some()
+                || self.editors.folder.is_some());
+        let external_drop_overlay = (management_host && self.tree.drop_target.is_none())
             .then(|| {
                 self.external_document_drop_feedback
                     .map(|feedback| render_external_document_drop_overlay(feedback, theme))
@@ -7938,11 +7992,15 @@ mod tests {
             gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
             let mut library = LibraryStore::memory();
-            library.library.history = paths
-                .iter()
-                .enumerate()
-                .map(|(index, path)| history_entry(path.clone(), (10 - index) as u64))
-                .collect();
+            library
+                .replace_history_entries(
+                    paths
+                        .iter()
+                        .enumerate()
+                        .map(|(index, path)| history_entry(path.clone(), (10 - index) as u64))
+                        .collect(),
+                )
+                .unwrap();
             cx.set_global(library);
         });
 
@@ -8025,7 +8083,9 @@ mod tests {
             gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
             let mut library = LibraryStore::memory();
-            library.library.history = vec![history_entry(path.clone(), 1)];
+            library
+                .replace_history_entries(vec![history_entry(path.clone(), 1)])
+                .unwrap();
             cx.set_global(library);
         });
         let (root, cx) = cx.add_window_view(|window, cx| {
@@ -8115,7 +8175,7 @@ mod tests {
 
         view.update_in(cx, |this, _, cx| {
             assert!(this.is_library_tree());
-            assert_eq!(this.tree_active, None);
+            assert_eq!(this.tree.active, None);
             assert_eq!(this.focused_item, NewTabItemKey::OpenFile);
             for movement in [
                 CursorMove::Up,
@@ -8123,13 +8183,13 @@ mod tests {
                 CursorMove::Left,
                 CursorMove::Right,
             ] {
-                this.tree_active = None;
+                this.tree.active = None;
                 this.focused_item = NewTabItemKey::OpenFile;
                 this.move_cursor(movement, false, cx);
-                assert_eq!(this.tree_active, Some(LibraryNodeId::Item(item_id)));
+                assert_eq!(this.tree.active, Some(LibraryNodeId::Item(item_id)));
                 assert_eq!(this.focused_item, NewTabItemKey::Document(path.clone()));
             }
-            this.tree_active = None;
+            this.tree.active = None;
             this.focused_item = NewTabItemKey::OpenFile;
             this.handle_tree_pointer(
                 LibraryNodeId::Item(item_id),
@@ -8467,11 +8527,15 @@ mod tests {
             gpui_component::init(cx);
             cx.set_global(SettingsStore::memory());
             let mut library = LibraryStore::memory();
-            library.library.history = paths
-                .iter()
-                .enumerate()
-                .map(|(ix, path)| history_entry(path.clone(), ix as u64 + 1))
-                .collect();
+            library
+                .replace_history_entries(
+                    paths
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, path)| history_entry(path.clone(), ix as u64 + 1))
+                        .collect(),
+                )
+                .unwrap();
             cx.set_global(library);
         });
         let (root, cx) = cx.add_window_view(|window, cx| {
@@ -8570,6 +8634,7 @@ mod tests {
         });
         assert_eq!(
             view.read_with(cx, |this, cx| this
+                .editors
                 .folder_name_input
                 .read(cx)
                 .value()
@@ -8638,7 +8703,10 @@ mod tests {
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
-        assert_eq!(view.read_with(cx, |this, _| this.current_collection), None);
+        assert_eq!(
+            view.read_with(cx, |this, _| this.tree.current_collection),
+            None
+        );
         cx.simulate_keystrokes("down enter");
         cx.run_until_parked();
         cx.update(|window, cx| {
@@ -8646,7 +8714,7 @@ mod tests {
         });
         assert!(cx.debug_bounds("library-folder-editor-overlay").is_some());
         view.update_in(cx, |this, _, cx| {
-            this.folder_editor = None;
+            this.editors.folder = None;
             cx.notify();
         });
         cx.update(|window, cx| {
@@ -8658,7 +8726,7 @@ mod tests {
             _ = window.draw(cx);
         });
         assert_eq!(
-            view.read_with(cx, |this, _| this.current_collection),
+            view.read_with(cx, |this, _| this.tree.current_collection),
             Some(papers_id)
         );
         assert!(cx.debug_bounds("library-folder-item").is_some());
@@ -8674,7 +8742,7 @@ mod tests {
         });
         assert!(cx.debug_bounds("library-folder-item").is_none());
         assert_eq!(
-            view.read_with(cx, |this, _| this.current_collection),
+            view.read_with(cx, |this, _| this.tree.current_collection),
             Some(papers_id)
         );
 
@@ -8714,12 +8782,12 @@ mod tests {
         assert!(root_area.top() >= theory_row.bottom());
         assert!(root_area.bottom() <= tree_viewport.bottom());
         assert!(view.read_with(cx, |this, _| {
-            this.library_tree_rows.iter().any(|row| {
+            this.tree.rows.iter().any(|row| {
                 matches!(
                     row,
                     super::LibraryTreeRow::Collection { id, depth: 0 } if *id == papers_id
                 )
-            }) && this.library_tree_rows.iter().any(|row| {
+            }) && this.tree.rows.iter().any(|row| {
                 matches!(
                     row,
                     super::LibraryTreeRow::Collection { id, depth: 1 } if *id == theory_id
@@ -8742,7 +8810,8 @@ mod tests {
             _ = window.draw(cx);
         });
         assert!(view.read_with(cx, |this, _| {
-            this.dragging_library_nodes
+            this.tree
+                .dragging_nodes
                 .contains(&crate::library::LibraryNodeId::Collection(theory_id))
         }));
         cx.simulate_mouse_move(
@@ -8839,7 +8908,9 @@ mod tests {
             cx.set_global(settings_store);
 
             let mut library = LibraryStore::memory();
-            library.library.history = vec![history_entry(path.clone(), 1)];
+            library
+                .replace_history_entries(vec![history_entry(path.clone(), 1)])
+                .unwrap();
             cx.set_global(library);
         });
 
@@ -8906,11 +8977,15 @@ mod tests {
             cx.set_global(settings_store);
 
             let mut library = LibraryStore::memory();
-            library.library.history = paths
-                .iter()
-                .enumerate()
-                .map(|(ix, path)| history_entry(path.clone(), (10 - ix) as u64))
-                .collect();
+            library
+                .replace_history_entries(
+                    paths
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, path)| history_entry(path.clone(), (10 - ix) as u64))
+                        .collect(),
+                )
+                .unwrap();
             cx.set_global(library);
         });
 

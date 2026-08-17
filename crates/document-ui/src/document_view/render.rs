@@ -80,7 +80,7 @@ impl Render for DocumentView {
         } else {
             None
         };
-        let translation_popup = self.translation_popup.clone().and_then(|state| {
+        let translation_popup = self.translation.popup.clone().and_then(|state| {
             state.position.map(|position| {
                 deferred(
                     anchored()
@@ -98,7 +98,7 @@ impl Render for DocumentView {
                 .with_priority(2)
             })
         });
-        let pinned_translation = self.pinned_translation.clone().map(|state| {
+        let pinned_translation = self.translation.pinned.clone().map(|state| {
             let corner = cx
                 .global::<SettingsStore>()
                 .settings
@@ -154,9 +154,9 @@ impl Render for DocumentView {
             .track_focus(&self.focus_handle)
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !*hovered
-                    && this.translation_view_role == TranslationViewRole::Translation
-                    && this.translation_pair_active
-                    && this.translation_overlay_enabled
+                    && this.translation.view_role == TranslationViewRole::Translation
+                    && this.translation.pair_active
+                    && this.translation.overlay_enabled
                 {
                     this.schedule_translation_hover_clear(cx);
                 }
@@ -500,9 +500,9 @@ impl Render for DocumentView {
                 if !this.dragging {
                     this.update_hovered_link(event.position, cx);
                     this.update_hovered_note(event.position, cx);
-                    if this.translation_view_role == TranslationViewRole::Translation
-                        && this.translation_pair_active
-                        && this.translation_overlay_enabled
+                    if this.translation.view_role == TranslationViewRole::Translation
+                        && this.translation.pair_active
+                        && this.translation.overlay_enabled
                     {
                         if this.translation_hover_interaction_contains(event.position) {
                             this.cancel_translation_hover_clear();
@@ -522,9 +522,9 @@ impl Render for DocumentView {
                     this.pending_selection_anchor = None;
                     this.update_hovered_link(event.position, cx);
                     this.update_hovered_note(event.position, cx);
-                    if this.translation_view_role == TranslationViewRole::Translation
-                        && this.translation_pair_active
-                        && this.translation_overlay_enabled
+                    if this.translation.view_role == TranslationViewRole::Translation
+                        && this.translation.pair_active
+                        && this.translation.overlay_enabled
                     {
                         this.schedule_translation_hover_clear(cx);
                     }
@@ -570,7 +570,7 @@ impl Render for DocumentView {
                         }
                         cx.notify();
                     }
-                    if this.pinned_translation.is_some() && this.selected_text().is_some() {
+                    if this.translation.pinned.is_some() && this.selected_text().is_some() {
                         this.translate_selection(None, true, cx);
                     }
                 }),

@@ -286,34 +286,34 @@ impl DocumentView {
             self.scroll_to_active_search_match(cx);
         }
 
-        if self.view_language == DocumentViewLanguage::Translated {
-            if self.translation_session_id.is_some() {
-                self.refresh_translation_session(cx);
-            }
+        if self.translation.view_language == DocumentViewLanguage::Translated
+            && self.translation.session_id.is_some()
+        {
+            self.refresh_translation_session(cx);
         }
         cx.notify();
     }
 
     fn invalidate_translation_document(&mut self) {
-        self.hovered_translation_region = None;
-        self.external_hovered_translation_region = None;
-        self.translation_hover_animation = None;
-        self.translation_hover_clear_generation =
-            self.translation_hover_clear_generation.wrapping_add(1);
-        self.translation_hover_clear_task = None;
-        self.translation_hover_tools_hovered = false;
-        self.translation_hover_tools_bounds = None;
+        self.translation.hovered_region = None;
+        self.translation.external_hovered_region = None;
+        self.translation.hover_animation = None;
+        self.translation.hover_clear_generation =
+            self.translation.hover_clear_generation.wrapping_add(1);
+        self.translation.hover_clear_task = None;
+        self.translation.hover_tools_hovered = false;
+        self.translation.hover_tools_bounds = None;
     }
 
     pub(super) fn replace_translation_document(&mut self) {
         self.invalidate_translation_document();
-        self.translation_request_generation = self.translation_request_generation.wrapping_add(1);
+        self.translation.request_generation = self.translation.request_generation.wrapping_add(1);
         self.reset_translation_scroll(false);
         self.reset_translation_scroll(true);
         reset_translation_cards_for_document_replacement(
-            &mut self.translation_popup,
-            &mut self.pinned_translation,
-            self.translation_request_generation,
+            &mut self.translation.popup,
+            &mut self.translation.pinned,
+            self.translation.request_generation,
         );
     }
 

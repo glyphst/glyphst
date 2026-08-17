@@ -42,10 +42,7 @@ impl LibraryStore {
 
     pub fn load() -> Self {
         let path = library_path();
-        if let Err(error) = migrate_legacy_library_database(&path) {
-            eprintln!("failed to migrate document library database: {error:#}");
-        }
-        match Self::open_with_root(path, managed_library_root()) {
+        match Self::open_current_with_root(path, managed_library_root()) {
             Ok(store) => store,
             Err(error) => {
                 eprintln!("failed to open document library database: {error:#}");
@@ -80,6 +77,45 @@ impl LibraryStore {
         initialize_managed_catalog(&database)?;
         ensure_managed_library_directories(&managed_library_root)?;
         let library = load_library(&database, &managed_library_root)?;
+
+        let store = Self {
+            library,
+            database: Some(Arc::new(database)),
+            managed_library_root: Some(managed_library_root),
+            ai_image_memory: HashMap::new(),
+            startup_error: None,
+            document_edit_histories: HashMap::new(),
+            next_document_edit_sequence: 0,
+            bookmarks_revision: 0,
+            history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
+            catalog_revision: 0,
+        };
+        if let Err(error) = store.prune_ai_session_rows() {
+            eprintln!("failed to prune expired AI sessions: {error:#}");
+        }
+        Ok(store)
+    }
+
+    pub(super) fn open_current_with_root(
+        path: PathBuf,
+        managed_library_root: PathBuf,
+    ) -> Result<Self> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            create_private_directory(parent)?;
+        }
+
+        let database = if path.exists() {
+            Database::open(&path).with_context(|| format!("failed to open {}", path.display()))?
+        } else {
+            Database::create(&path)
+                .with_context(|| format!("failed to create {}", path.display()))?
+        };
+        restrict_library_file(&path)?;
+        ensure_current_tables(&database)?;
+        ensure_managed_library_directories(&managed_library_root)?;
+        let library = load_current_library(&database, &managed_library_root)?;
 
         let store = Self {
             library,

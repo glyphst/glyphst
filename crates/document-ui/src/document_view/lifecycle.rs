@@ -170,15 +170,7 @@ impl DocumentView {
             text_lines: Vec::new(),
             page_line_ranges: vec![0..0; page_count],
             page_block_ranges: vec![0..0; page_count],
-            view_language: DocumentViewLanguage::Original,
-            translation_view_role: TranslationViewRole::None,
-            translation_pair_active: false,
-            translation_overlay_enabled: true,
-            translation_position_sync_ready: false,
-            pending_translation_viewport_anchor: None,
-            suppress_linked_events: false,
-            external_hovered_translation_region: None,
-            hovered_translation_region: None,
+            translation: DocumentTranslationState::new(),
             links: Vec::new(),
             highlights: options.annotations.highlights,
             notes: options.annotations.notes,
@@ -187,40 +179,8 @@ impl DocumentView {
             region_tool_active: false,
             region_drag: None,
             selected_region: None,
-            translation_popup: None,
-            pinned_translation: None,
-            translation_popup_scroll: ScrollHandle::new(),
-            pinned_translation_scroll: ScrollHandle::new(),
             target_language: options.target_language,
-            translation_popup_language_select: None,
-            pinned_translation_language_select: None,
-            translation_request_generation: 0,
             document_translation_jobs: options.document_translation_jobs,
-            translation_session_id: None,
-            translation_pair_session_id: None,
-            translation_session_snapshot: None,
-            translation_hover_regions: HashMap::new(),
-            translation_failed_hover_regions: HashSet::new(),
-            translation_hover_animation: None,
-            translation_hover_clear_generation: 0,
-            translation_hover_clear_task: None,
-            translation_hover_tools_hovered: false,
-            translation_hover_tools_bounds: None,
-            translation_panel_placement: TranslationPanelPlacement::Default,
-            translation_panel_drag: None,
-            translation_panel_size: size(
-                px(TRANSLATION_PANEL_PREFERRED_WIDTH),
-                px(TRANSLATION_PANEL_DEFAULT_HEIGHT),
-            ),
-            translation_panel_initial_dock_armed: false,
-            translation_panel_initial_dock_generation: 0,
-            translation_panel_initial_dock_task: None,
-            translation_panel_dock_generation: 0,
-            translation_panel_dock_task: None,
-            translation_panel_retract_generation: 0,
-            translation_panel_retract_task: None,
-            translation_panel_dock_panel_hovered: false,
-            translation_panel_dock_edge_hovered: false,
             pending_selection_anchor: None,
             dragging: false,
             hovered_link: None,
@@ -364,7 +324,7 @@ impl DocumentView {
     }
 
     fn initialize_translation_selects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.translation_popup_language_select.is_some() {
+        if self.translation.popup_language_select.is_some() {
             return;
         }
         let selected = self.target_language.clone();
@@ -417,8 +377,8 @@ impl DocumentView {
             cx.notify();
         })
         .detach();
-        self.translation_popup_language_select = Some(popup);
-        self.pinned_translation_language_select = Some(pinned);
+        self.translation.popup_language_select = Some(popup);
+        self.translation.pinned_language_select = Some(pinned);
     }
 
     pub fn initialize_runtime(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -486,8 +486,8 @@ fn defaults_to_only_the_supported_model_providers_in_display_order() {
             provider == AiProvider::OpenAi
         );
     }
-    assert!(AiProvider::from_str("groq").is_none());
-    assert!(AiProvider::from_str("ollama").is_none());
+    assert!(AiProvider::parse("groq").is_none());
+    assert!(AiProvider::parse("ollama").is_none());
 }
 
 #[test]

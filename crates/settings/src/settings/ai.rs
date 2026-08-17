@@ -307,7 +307,7 @@ impl AiProvider {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         let provider = match value {
             "openai" | "open-ai" | "open_ai" => Some(Self::OpenAi),
             "openai-subscribed"
@@ -705,7 +705,7 @@ impl ModelRef {
     pub(super) fn from_node(node: &KdlNode) -> Option<Self> {
         let provider = node.get(0).and_then(KdlValue::as_string)?;
         let model = node.get(1).and_then(KdlValue::as_string)?;
-        Some(Self::new(AiProvider::from_str(provider)?, model))
+        Some(Self::new(AiProvider::parse(provider)?, model))
     }
 
     pub(super) fn write_to_document(&self, document: &mut KdlDocument, name: &str) {
@@ -995,7 +995,7 @@ impl QuickAskPosition {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "top" => Some(Self::Top),
             "bottom" => Some(Self::Bottom),

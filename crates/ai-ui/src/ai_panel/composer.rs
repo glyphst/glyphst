@@ -302,7 +302,7 @@ impl AiPanel {
                                 .iter()
                                 .find(|mention| mention.range == *range)
                                 .cloned()
-                                .map(|mention| (bounds.clone(), mention))
+                                .map(|mention| (*bounds, mention))
                         });
                 self.update_mention_preview(hovered, window, cx);
             }

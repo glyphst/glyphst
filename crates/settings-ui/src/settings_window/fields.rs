@@ -514,7 +514,6 @@ impl SettingsWindow {
 
         let manual_tags = manual
             .iter()
-            .cloned()
             .map(|model_id| {
                 let remove_view = view.clone();
                 let remove_id = model_id.clone();

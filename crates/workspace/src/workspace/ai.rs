@@ -214,9 +214,11 @@ impl WorkspaceAgentTools {
             .iter()
             .map(|document| {
                 let format = document.format.as_deref().unwrap_or("document");
-                let pages = (document.page_count > 0)
-                    .then(|| format!(", {} pages", document.page_count))
-                    .unwrap_or_default();
+                let pages = if document.page_count > 0 {
+                    format!(", {} pages", document.page_count)
+                } else {
+                    String::new()
+                };
                 let current = if document.current {
                     ", current context"
                 } else {

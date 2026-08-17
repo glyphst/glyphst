@@ -3,6 +3,9 @@ name = "glyphst-reader"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 tracy = ["ztracing/tracy"]
 
@@ -14,11 +17,12 @@ glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
 glyphst-keymap = { path = "../keymap" }
 glyphst-library = { path = "../library" }
-glyphst-pdf-translation-app = { path = "../pdf-translation-app" }
+glyphst-pdf-translation-service = { path = "../pdf-translation-service" }
 glyphst-document-ui = { path = "../document-ui" }
 glyphst-settings = { path = "../settings" }
 glyphst-settings-ui = { path = "../settings-ui" }
 glyphst-translation = { path = "../translation" }
+glyphst-translation-ui = { path = "../translation-ui" }
 glyphst-ui = { path = "../ui" }
 glyphst-workspace = { path = "../workspace" }
 gpui.workspace = true

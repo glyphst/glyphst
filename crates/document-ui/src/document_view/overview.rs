@@ -238,6 +238,7 @@ impl DocumentView {
         (page_width * scale, page_height * scale)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_page_thumbnail(
         thumbnail_view: Entity<DocumentView>,
         surface: PageOverviewSurface,

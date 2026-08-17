@@ -3,13 +3,14 @@ name = "glyphst-translation"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
-bincode.workspace = true
 glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
 glyphst-settings = { path = "../settings" }
-gpui.workspace = true
 redb.workspace = true
 reqwest.workspace = true
 serde.workspace = true

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     hash::{DefaultHasher, Hash, Hasher},
     sync::{Arc, Mutex},
     time::Duration,
@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow};
 use glyphst_settings::{
-    AiApiStyle, Settings, TranslationProvider, TranslationProviderConfig, TranslationSettings,
+    AiApiStyle, ResolvedAiConfig, Settings, TranslationProvider, TranslationProviderConfig,
 };
 use reqwest::{StatusCode, blocking::Client};
 use serde::{Deserialize, Serialize};
@@ -216,6 +216,45 @@ pub struct TranslationResponse {
     pub detected_source_language: Option<LanguageCode>,
 }
 
+/// Immutable provider configuration captured when a translation is submitted.
+///
+/// Keeping this snapshot separate from [`Settings`] prevents background work from
+/// depending on unrelated application preferences or observing later mutations.
+#[derive(Clone, Debug)]
+pub struct TranslationExecutionConfig {
+    provider: TranslationProvider,
+    providers: BTreeMap<TranslationProvider, TranslationProviderConfig>,
+    ai: ResolvedAiConfig,
+}
+
+impl TranslationExecutionConfig {
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            provider: settings.translation.active_provider,
+            providers: settings.translation.providers.clone(),
+            ai: settings.ai.resolved_translation(),
+        }
+    }
+
+    pub fn provider(&self) -> TranslationProvider {
+        self.provider
+    }
+
+    pub fn provider_config(&self, provider: TranslationProvider) -> TranslationProviderConfig {
+        self.providers.get(&provider).cloned().unwrap_or_default()
+    }
+
+    pub fn provider_identity(&self, provider: TranslationProvider) -> String {
+        semantic_provider_identity(self, provider)
+    }
+}
+
+impl From<&Settings> for TranslationExecutionConfig {
+    fn from(settings: &Settings) -> Self {
+        Self::from_settings(settings)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SemanticTranslationUnit {
     pub id: String,
@@ -317,8 +356,6 @@ pub struct TranslationService {
     cache: Arc<Mutex<TranslationCache>>,
 }
 
-impl gpui::Global for TranslationService {}
-
 impl TranslationService {
     pub fn new() -> Result<Self> {
         let client = Client::builder()
@@ -363,11 +400,11 @@ impl TranslationService {
 
     pub fn translate(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         request: TranslationRequest,
     ) -> std::result::Result<TranslationResponse, TranslationError> {
         let request = sanitize_request(request).map_err(|error| TranslationError {
-            provider: settings.translation.active_provider,
+            provider: config.provider(),
             category: TranslationErrorCategory::InvalidRequest,
             message: error.to_string(),
             status: None,
@@ -396,7 +433,7 @@ impl TranslationService {
             });
         }
 
-        let response = self.request_provider(settings, &request)?;
+        let response = self.request_provider(config, &request)?;
         let cached = CachedTranslation {
             translations: response.translations.clone(),
             detected_source_language: response
@@ -415,7 +452,7 @@ impl TranslationService {
 
     pub fn translate_batches(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         provider: TranslationProvider,
         source_language: Option<LanguageCode>,
         target_language: LanguageCode,
@@ -425,7 +462,7 @@ impl TranslationService {
         for texts in split_batches(texts) {
             let batch = texts.clone();
             let response = self.translate(
-                settings,
+                config,
                 TranslationRequest {
                     provider,
                     source_language: source_language.clone(),
@@ -440,7 +477,7 @@ impl TranslationService {
                 Err(error) if error.retryable && texts.len() > 1 => {
                     for text in texts {
                         let response = self.translate(
-                            settings,
+                            config,
                             TranslationRequest {
                                 provider,
                                 source_language: source_language.clone(),
@@ -461,7 +498,7 @@ impl TranslationService {
 
     pub fn translate_semantic_batch(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         provider: TranslationProvider,
         source_language: Option<LanguageCode>,
         target_language: LanguageCode,
@@ -496,7 +533,7 @@ impl TranslationService {
             })?;
             for unit in &units {
                 let key = semantic_cache_key(
-                    settings,
+                    config,
                     provider,
                     source_language.as_ref(),
                     &target_language,
@@ -523,13 +560,13 @@ impl TranslationService {
 
         let requested = match provider {
             TranslationProvider::Ai => self.translate_semantic_with_ai(
-                settings,
+                config,
                 source_language.as_ref(),
                 &target_language,
                 &missing,
             )?,
             TranslationProvider::Google => self.translate_semantic_with_google(
-                settings,
+                config,
                 source_language.as_ref(),
                 &target_language,
                 &missing,
@@ -543,7 +580,7 @@ impl TranslationService {
                     context_before: missing.first().and_then(|unit| unit.context_before.clone()),
                     context_after: missing.last().and_then(|unit| unit.context_after.clone()),
                 };
-                let response = self.request_provider(settings, &request)?;
+                let response = self.request_provider(config, &request)?;
                 missing
                     .iter()
                     .zip(response.translations)
@@ -562,7 +599,7 @@ impl TranslationService {
 
     pub fn cache_validated_semantic_translation(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         provider: TranslationProvider,
         source_language: Option<&LanguageCode>,
         target_language: &LanguageCode,
@@ -570,7 +607,7 @@ impl TranslationService {
         translated_text: &str,
     ) {
         self.cache_validated_semantic_translations(
-            settings,
+            config,
             provider,
             source_language,
             target_language,
@@ -580,7 +617,7 @@ impl TranslationService {
 
     pub fn cache_validated_semantic_translations(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         provider: TranslationProvider,
         source_language: Option<&LanguageCode>,
         target_language: &LanguageCode,
@@ -594,7 +631,7 @@ impl TranslationService {
             .filter(|(unit, translated)| validate_semantic_cache_entry(unit, translated))
             .map(|(unit, translated)| {
                 (
-                    semantic_cache_key(settings, provider, source_language, target_language, unit),
+                    semantic_cache_key(config, provider, source_language, target_language, unit),
                     CachedTranslation {
                         translations: vec![translated.clone()],
                         detected_source_language: detected_source_language.clone(),
@@ -615,12 +652,12 @@ impl TranslationService {
 
     pub fn translate_semantic_single_recovery(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         source_language: Option<&LanguageCode>,
         target_language: &LanguageCode,
         unit: SemanticTranslationUnit,
     ) -> std::result::Result<SemanticTranslation, TranslationError> {
-        let resolved = settings.ai.resolved_translation();
+        let resolved = config.ai.clone();
         let input = glyphst_ai::translation::SemanticTranslationInput {
             id: unit.id,
             role: unit.role,
@@ -646,25 +683,25 @@ impl TranslationService {
 
     fn request_provider(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         request: &TranslationRequest,
     ) -> std::result::Result<TranslationResponse, TranslationError> {
         match request.provider {
-            TranslationProvider::Ai => self.translate_with_ai(settings, request),
-            TranslationProvider::DeepL => self.translate_with_deepl(settings, request),
-            TranslationProvider::Google => self.translate_with_google(settings, request),
-            TranslationProvider::Microsoft => self.translate_with_microsoft(settings, request),
+            TranslationProvider::Ai => self.translate_with_ai(config, request),
+            TranslationProvider::DeepL => self.translate_with_deepl(config, request),
+            TranslationProvider::Google => self.translate_with_google(config, request),
+            TranslationProvider::Microsoft => self.translate_with_microsoft(config, request),
         }
     }
 
     fn translate_semantic_with_ai(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         source_language: Option<&LanguageCode>,
         target_language: &LanguageCode,
         units: &[SemanticTranslationUnit],
     ) -> std::result::Result<Vec<SemanticTranslation>, TranslationError> {
-        let resolved = settings.ai.resolved_translation();
+        let resolved = config.ai.clone();
         if !resolved.can_request() {
             return Err(TranslationError {
                 provider: TranslationProvider::Ai,
@@ -712,7 +749,7 @@ impl TranslationService {
 
     fn translate_semantic_with_google(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         source_language: Option<&LanguageCode>,
         target_language: &LanguageCode,
         units: &[SemanticTranslationUnit],
@@ -724,14 +761,14 @@ impl TranslationService {
                     .any(|token| token.kind == SemanticProtectedTokenKind::InlineObject)
             });
         let mut translations = self.translate_google_semantic_units(
-            settings,
+            config,
             source_language,
             target_language,
             &ordinary,
         )?;
         for unit in &inline_anchored {
             translations.push(self.translate_google_inline_anchored_unit(
-                settings,
+                config,
                 source_language,
                 target_language,
                 unit,
@@ -742,7 +779,7 @@ impl TranslationService {
 
     fn translate_google_semantic_units(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         source_language: Option<&LanguageCode>,
         target_language: &LanguageCode,
         units: &[SemanticTranslationUnit],
@@ -763,7 +800,7 @@ impl TranslationService {
                 retry_after: None,
             })?;
         let batch = self.request_google(
-            settings,
+            config,
             source_language,
             target_language,
             prepared
@@ -807,7 +844,7 @@ impl TranslationService {
             let unit = &units[index];
             let prepared = &prepared[index];
             let singleton = self.request_google(
-                settings,
+                config,
                 source_language,
                 target_language,
                 vec![prepared.html.clone()],
@@ -849,7 +886,7 @@ impl TranslationService {
             };
 
             match self.translate_google_semantic_segments(
-                settings,
+                config,
                 source_language,
                 target_language,
                 prepared,
@@ -912,7 +949,7 @@ impl TranslationService {
 
     fn translate_google_inline_anchored_unit(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         source_language: Option<&LanguageCode>,
         target_language: &LanguageCode,
         unit: &SemanticTranslationUnit,
@@ -941,7 +978,7 @@ impl TranslationService {
                     || batch_chars + chunk.text.len() > MAX_BATCH_CHARS)
             {
                 translated_chunks.extend(self.translate_google_semantic_units(
-                    settings,
+                    config,
                     source_language,
                     target_language,
                     &batch,
@@ -954,7 +991,7 @@ impl TranslationService {
         }
         if !batch.is_empty() {
             translated_chunks.extend(self.translate_google_semantic_units(
-                settings,
+                config,
                 source_language,
                 target_language,
                 &batch,
@@ -1026,7 +1063,7 @@ impl TranslationService {
 
     fn translate_google_semantic_segments(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         source_language: Option<&LanguageCode>,
         target_language: &LanguageCode,
         prepared: &PreparedGoogleSemanticUnit,
@@ -1047,7 +1084,7 @@ impl TranslationService {
             return Ok(reassemble_google_segments(prepared, &[]));
         }
         let response = self.request_google(
-            settings,
+            config,
             source_language,
             target_language,
             translatable,
@@ -1063,10 +1100,10 @@ impl TranslationService {
 
     fn translate_with_ai(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         request: &TranslationRequest,
     ) -> std::result::Result<TranslationResponse, TranslationError> {
-        let resolved = settings.ai.resolved_translation();
+        let resolved = config.ai.clone();
         if !resolved.can_request() {
             return Err(TranslationError {
                 provider: TranslationProvider::Ai,
@@ -1093,10 +1130,10 @@ impl TranslationService {
 
     fn translate_with_deepl(
         &self,
-        settings: &Settings,
+        execution: &TranslationExecutionConfig,
         request: &TranslationRequest,
     ) -> std::result::Result<TranslationResponse, TranslationError> {
-        let config = provider_config(&settings.translation, TranslationProvider::DeepL)?;
+        let config = provider_config(execution, TranslationProvider::DeepL)?;
         let url = endpoint(&config, TranslationProvider::DeepL, "/v2/translate")?;
         let mut body = json!({
             "text": request.texts,
@@ -1146,11 +1183,11 @@ impl TranslationService {
 
     fn translate_with_google(
         &self,
-        settings: &Settings,
+        config: &TranslationExecutionConfig,
         request: &TranslationRequest,
     ) -> std::result::Result<TranslationResponse, TranslationError> {
         let mut response = self.request_google(
-            settings,
+            config,
             request.source_language.as_ref(),
             &request.target_language,
             request.texts.clone(),
@@ -1166,13 +1203,13 @@ impl TranslationService {
 
     fn request_google(
         &self,
-        settings: &Settings,
+        execution: &TranslationExecutionConfig,
         source_language: Option<&LanguageCode>,
         target_language: &LanguageCode,
         texts: Vec<String>,
         format: &str,
     ) -> std::result::Result<TranslationResponse, TranslationError> {
-        let config = provider_config(&settings.translation, TranslationProvider::Google)?;
+        let config = provider_config(execution, TranslationProvider::Google)?;
         let url = endpoint(
             &config,
             TranslationProvider::Google,
@@ -1220,10 +1257,10 @@ impl TranslationService {
 
     fn translate_with_microsoft(
         &self,
-        settings: &Settings,
+        execution: &TranslationExecutionConfig,
         request: &TranslationRequest,
     ) -> std::result::Result<TranslationResponse, TranslationError> {
-        let config = provider_config(&settings.translation, TranslationProvider::Microsoft)?;
+        let config = provider_config(execution, TranslationProvider::Microsoft)?;
         let url = endpoint(&config, TranslationProvider::Microsoft, "/translate")?;
         let mut query = vec![
             ("api-version", "3.0".to_string()),
@@ -1282,10 +1319,10 @@ impl TranslationService {
 }
 
 fn provider_config(
-    settings: &TranslationSettings,
+    config: &TranslationExecutionConfig,
     provider: TranslationProvider,
 ) -> std::result::Result<TranslationProviderConfig, TranslationError> {
-    let config = settings.provider_config(provider);
+    let config = config.provider_config(provider);
     if config.api_key.is_empty() {
         return Err(TranslationError {
             provider,
@@ -2122,7 +2159,7 @@ fn cache_key(request: &TranslationRequest) -> String {
 }
 
 fn semantic_cache_key(
-    settings: &Settings,
+    config: &TranslationExecutionConfig,
     provider: TranslationProvider,
     source_language: Option<&LanguageCode>,
     target_language: &LanguageCode,
@@ -2135,7 +2172,7 @@ fn semantic_cache_key(
         SEMANTIC_PROTOCOL_VERSION.hash(&mut hasher);
     }
     provider.hash(&mut hasher);
-    semantic_provider_identity(settings, provider).hash(&mut hasher);
+    semantic_provider_identity(config, provider).hash(&mut hasher);
     source_language.hash(&mut hasher);
     target_language.hash(&mut hasher);
     unit.role.hash(&mut hasher);
@@ -2151,17 +2188,20 @@ fn semantic_cache_key(
     format!("{prefix}-{:016x}", hasher.finish())
 }
 
-fn semantic_provider_identity(settings: &Settings, provider: TranslationProvider) -> String {
+fn semantic_provider_identity(
+    config: &TranslationExecutionConfig,
+    provider: TranslationProvider,
+) -> String {
     if provider == TranslationProvider::Ai {
-        let resolved = settings.ai.resolved_translation();
+        let resolved = &config.ai;
         return format!(
             "{}|{}|{}",
             resolved.provider.as_str(),
             resolved.model.trim(),
-            normalized_ai_endpoint(&resolved)
+            normalized_ai_endpoint(resolved)
         );
     }
-    let config = settings.translation.provider_config(provider);
+    let config = config.provider_config(provider);
     format!(
         "{}|{}|{}",
         provider.as_str(),

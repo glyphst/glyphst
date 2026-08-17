@@ -1110,6 +1110,10 @@ impl LibraryStore {
         &self.library.library_tags
     }
 
+    pub fn library_item_tags(&self) -> &[LibraryItemTag] {
+        &self.library.library_item_tags
+    }
+
     pub fn library_saved_views(&self) -> &[LibrarySavedView] {
         &self.library.library_saved_views
     }
@@ -2423,12 +2427,12 @@ impl LibraryStore {
             return Err(anyhow!("staged replacement has no filename"));
         };
         let had_item_directory = item_directory.exists();
-        if had_item_directory {
-            if let Err(error) = fs::rename(&item_directory, &quarantined_directory) {
-                cleanup_prepared_import(&prepared);
-                return Err(error)
-                    .with_context(|| format!("failed to quarantine {}", item_directory.display()));
-            }
+        if had_item_directory
+            && let Err(error) = fs::rename(&item_directory, &quarantined_directory)
+        {
+            cleanup_prepared_import(&prepared);
+            return Err(error)
+                .with_context(|| format!("failed to quarantine {}", item_directory.display()));
         }
         if let Err(error) = fs::rename(&prepared.staged_directory, &item_directory) {
             if had_item_directory {

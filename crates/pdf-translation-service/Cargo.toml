@@ -1,7 +1,10 @@
 [package]
-name = "glyphst-pdf-translation-app"
+name = "glyphst-pdf-translation-service"
 version.workspace = true
 edition.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -11,7 +14,6 @@ glyphst-pdf = { path = "../pdf" }
 glyphst-pdf-translation = { path = "../pdf-translation" }
 glyphst-settings = { path = "../settings" }
 glyphst-translation = { path = "../translation" }
-gpui.workspace = true
 mupdf.workspace = true
 serde.workspace = true
 serde_json.workspace = true

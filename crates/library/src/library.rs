@@ -25,6 +25,9 @@ use uuid::Uuid;
 const MAX_HISTORY_ENTRIES: usize = 100;
 const MAX_DOCUMENT_EDIT_HISTORY_ENTRIES: usize = 100;
 const MAX_DOCUMENT_EDIT_HISTORIES: usize = 32;
+const CURRENT_STORAGE_SCHEMA_VERSION: u64 = 1;
+const STORAGE_SCHEMA_VERSION_KEY: &str = "schema_version";
+const STORAGE_METADATA_TABLE: TableDefinition<&str, u64> = TableDefinition::new("metadata");
 // Legacy tables are retained so pre-v1 databases remain readable.
 const HISTORY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("history");
 const BOOKMARKS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("bookmarks");
@@ -1188,8 +1191,10 @@ impl StoredReaderNewTabSessionV3 {
             | ReaderNewTabDestination::Tag(_)
             | ReaderNewTabDestination::SavedView(_) => QuickOpenSource::Library,
         };
-        let mut session = ReaderNewTabSession::default();
-        session.source = source;
+        let mut session = ReaderNewTabSession {
+            source,
+            ..ReaderNewTabSession::default()
+        };
         session.set_presentation(
             source,
             BrowserPresentation {
@@ -2660,7 +2665,7 @@ pub struct Library {
 }
 
 pub struct LibraryStore {
-    pub library: Library,
+    library: Library,
     database: Option<Arc<Database>>,
     managed_library_root: Option<PathBuf>,
     ai_image_memory: HashMap<String, Vec<u8>>,

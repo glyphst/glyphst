@@ -130,7 +130,7 @@ impl DocumentView {
         mode: SynchronizedScrollMode,
         cx: &mut Context<Self>,
     ) {
-        if self.suppress_linked_events {
+        if self.translation.suppress_linked_events {
             return;
         }
         let scale = self.effective_scale();
@@ -153,7 +153,7 @@ impl DocumentView {
             return;
         }
         let scale = self.effective_scale().max(0.001);
-        self.suppress_linked_events = true;
+        self.translation.suppress_linked_events = true;
         match delta.mode {
             SynchronizedScrollMode::Immediate => {
                 self.set_scroll_doc(
@@ -172,7 +172,7 @@ impl DocumentView {
                 );
             }
         }
-        self.suppress_linked_events = false;
+        self.translation.suppress_linked_events = false;
     }
 
     pub(super) fn step_scroll_animation(&mut self, window: &mut Window, cx: &mut Context<Self>) {

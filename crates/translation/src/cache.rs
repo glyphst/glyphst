@@ -8,7 +8,7 @@ use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 use super::*;
 
-const CACHE_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("translations_v1");
+const CACHE_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("translations");
 const MAX_CACHE_ENTRIES: usize = 10_000;
 
 pub(super) struct TranslationCache {
@@ -25,7 +25,7 @@ impl TranslationCache {
     }
 
     pub(super) fn open() -> Result<Self> {
-        let path = glyphst_core::paths::state_dir().join("translations.redb");
+        let path = glyphst_core::paths::state_dir().join("translations-v2.redb");
         Self::open_at(&path)
     }
 
@@ -79,7 +79,7 @@ impl TranslationCache {
         let read_txn = database.begin_read().ok()?;
         let table = read_txn.open_table(CACHE_TABLE).ok()?;
         let value = table.get(key).ok()??;
-        let cached = bincode::deserialize::<CachedTranslation>(value.value()).ok()?;
+        let cached = serde_json::from_slice::<CachedTranslation>(value.value()).ok()?;
         self.memory.insert(
             key.to_string(),
             CachedTranslation {
@@ -122,7 +122,7 @@ impl TranslationCache {
         {
             let mut table = write_txn.open_table(CACHE_TABLE)?;
             for (key, value) in entries {
-                let encoded = bincode::serialize(&value)?;
+                let encoded = serde_json::to_vec(&value)?;
                 table.insert(key.as_str(), encoded.as_slice())?;
             }
             if table.len()? > MAX_CACHE_ENTRIES as u64 {
@@ -194,7 +194,7 @@ pub(super) fn prune_cache_table(table: &mut redb::Table<'_, &str, &[u8]>) -> Res
         .iter()?
         .filter_map(|entry| {
             let (key, value) = entry.ok()?;
-            let cached = bincode::deserialize::<CachedTranslation>(value.value()).ok()?;
+            let cached = serde_json::from_slice::<CachedTranslation>(value.value()).ok()?;
             Some((key.value().to_string(), cached.updated_at))
         })
         .collect::<Vec<_>>();

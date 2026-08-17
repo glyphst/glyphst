@@ -137,13 +137,14 @@ impl<'a, I: Iterator<Item = Result<Event<'a>>>> Iterator for StripForeignObject<
 
             // Start buffering a fallback group so we can decide whether it is a
             // duplicate of a native label once we have seen its text.
-            if let Event::Start(e) = &event {
-                if e.name().as_ref() == b"g" && is_fallback_group(e) {
-                    self.fallback_depth = 1;
-                    self.buffered_text.clear();
-                    self.buffer.push(event);
-                    continue;
-                }
+            if let Event::Start(e) = &event
+                && e.name().as_ref() == b"g"
+                && is_fallback_group(e)
+            {
+                self.fallback_depth = 1;
+                self.buffered_text.clear();
+                self.buffer.push(event);
+                continue;
             }
 
             return Some(Ok(event));

@@ -45,10 +45,10 @@ impl MindmapAccents {
             }
 
             Event::End(e) if e.name().as_ref() == b"g" => {
-                if let Some(entry) = self.section_g_stack.pop() {
-                    if entry.tracks_node() {
-                        self.nodes.maybe_finish_node();
-                    }
+                if let Some(entry) = self.section_g_stack.pop()
+                    && entry.tracks_node()
+                {
+                    self.nodes.maybe_finish_node();
                 }
                 Ok(event)
             }
@@ -82,10 +82,10 @@ impl MindmapAccents {
 
                 let idx = section_idx.or(self.current_text_section);
 
-                if let Some(idx) = idx {
-                    if let Some(class_name) = self.section_class_name(idx) {
-                        return super::add_to_event(&event, e, class_name);
-                    }
+                if let Some(idx) = idx
+                    && let Some(class_name) = self.section_class_name(idx)
+                {
+                    return super::add_to_event(&event, e, class_name);
                 }
 
                 Ok(event)
@@ -109,17 +109,17 @@ impl MindmapAccents {
         let is_root = class.split_whitespace().any(|t| t == "section-root");
 
         for token in class.split_whitespace() {
-            if let Some(rest) = token.strip_prefix("section-") {
-                if rest == "-1" || rest.parse::<u32>().is_ok() {
-                    let class_name = if is_root {
-                        "section-root section--1".to_string()
-                    } else {
-                        format!("section-{rest}")
-                    };
-                    let idx = self.section_classes.len();
-                    self.section_classes.push(class_name);
-                    return Ok(Some(idx));
-                }
+            if let Some(rest) = token.strip_prefix("section-")
+                && (rest == "-1" || rest.parse::<u32>().is_ok())
+            {
+                let class_name = if is_root {
+                    "section-root section--1".to_string()
+                } else {
+                    format!("section-{rest}")
+                };
+                let idx = self.section_classes.len();
+                self.section_classes.push(class_name);
+                return Ok(Some(idx));
             }
         }
         Ok(None)

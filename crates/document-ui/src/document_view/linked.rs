@@ -15,8 +15,8 @@ impl DocumentView {
     ) -> Option<TranslationViewportAnchor> {
         if self.format != DocumentFormat::Pdf
             || self.capabilities.reflow
-            || self.translation_view_role == TranslationViewRole::None
-            || !self.translation_position_sync_ready
+            || self.translation.view_role == TranslationViewRole::None
+            || !self.translation.position_sync_ready
             || !self.translation_viewport_geometry_ready()
             || self.pages.is_empty()
         {
@@ -77,10 +77,10 @@ impl DocumentView {
         mode: SynchronizedScrollMode,
         cx: &mut Context<Self>,
     ) {
-        if self.suppress_linked_events {
+        if self.translation.suppress_linked_events {
             return;
         }
-        let Some(session_id) = self.translation_pair_session_id else {
+        let Some(session_id) = self.translation.pair_session_id else {
             return;
         };
         let Some(anchor) = self.live_translation_viewport_anchor(mode) else {
@@ -91,24 +91,24 @@ impl DocumentView {
 
     pub fn apply_live_translation_viewport_anchor(
         &mut self,
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         anchor: TranslationViewportAnchor,
         cx: &mut Context<Self>,
     ) {
-        if self.translation_pair_session_id != Some(session_id)
-            || self.translation_view_role == TranslationViewRole::None
+        if self.translation.pair_session_id != Some(session_id)
+            || self.translation.view_role == TranslationViewRole::None
             || self.format != DocumentFormat::Pdf
             || self.capabilities.reflow
             || self.pages.get(anchor.page_index).is_none()
         {
             return;
         }
-        self.translation_position_sync_ready = true;
+        self.translation.position_sync_ready = true;
         if !self.translation_viewport_geometry_ready() {
-            self.pending_translation_viewport_anchor = Some(anchor);
+            self.translation.pending_viewport_anchor = Some(anchor);
             return;
         }
-        self.pending_translation_viewport_anchor = None;
+        self.translation.pending_viewport_anchor = None;
         let page = &self.pages[anchor.page_index];
         let point = Self::pdf_point_to_view(
             page.bounds,
@@ -122,8 +122,8 @@ impl DocumentView {
         let viewport_y_fraction = anchor.viewport_y_fraction.clamp(0.0, 1.0);
         let scroll_y_doc = page.offset_y + point.y
             - self.viewport_height / self.effective_scale() * viewport_y_fraction;
-        let was_suppressed = self.suppress_linked_events;
-        self.suppress_linked_events = true;
+        let was_suppressed = self.translation.suppress_linked_events;
+        self.translation.suppress_linked_events = true;
         if self.is_presentation_mode() {
             self.set_presentation_page(anchor.page_index, cx);
         } else {
@@ -136,18 +136,18 @@ impl DocumentView {
                 }
             }
         }
-        self.suppress_linked_events = was_suppressed;
+        self.translation.suppress_linked_events = was_suppressed;
     }
 
     pub(super) fn apply_pending_live_translation_viewport_anchor(
         &mut self,
         cx: &mut Context<Self>,
     ) {
-        let Some(session_id) = self.translation_pair_session_id else {
-            self.pending_translation_viewport_anchor = None;
+        let Some(session_id) = self.translation.pair_session_id else {
+            self.translation.pending_viewport_anchor = None;
             return;
         };
-        let Some(anchor) = self.pending_translation_viewport_anchor.take() else {
+        let Some(anchor) = self.translation.pending_viewport_anchor.take() else {
             return;
         };
         self.apply_live_translation_viewport_anchor(session_id, anchor, cx);
@@ -246,19 +246,19 @@ impl DocumentView {
 
     pub fn apply_live_translation_hover(
         &mut self,
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         region_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if self.translation_view_role != TranslationViewRole::SourceMirror
-            || self.translation_pair_session_id != Some(session_id)
-            || !self.translation_pair_active
-            || (!self.translation_overlay_enabled && region_id.is_some())
+        if self.translation.view_role != TranslationViewRole::SourceMirror
+            || self.translation.pair_session_id != Some(session_id)
+            || !self.translation.pair_active
+            || (!self.translation.overlay_enabled && region_id.is_some())
         {
             return;
         }
-        if self.external_hovered_translation_region != region_id {
-            self.external_hovered_translation_region = region_id;
+        if self.translation.external_hovered_region != region_id {
+            self.translation.external_hovered_region = region_id;
             cx.notify();
         }
     }
@@ -268,17 +268,17 @@ impl DocumentView {
         region_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if self.translation_view_role != TranslationViewRole::Translation
-            || !self.translation_pair_active
-            || (!self.translation_overlay_enabled && region_id.is_some())
-            || self.hovered_translation_region == region_id
+        if self.translation.view_role != TranslationViewRole::Translation
+            || !self.translation.pair_active
+            || (!self.translation.overlay_enabled && region_id.is_some())
+            || self.translation.hovered_region == region_id
         {
             return;
         }
-        self.translation_hover_tools_bounds = None;
-        self.hovered_translation_region = region_id.clone();
-        if !self.suppress_linked_events
-            && let Some(session_id) = self.translation_pair_session_id
+        self.translation.hover_tools_bounds = None;
+        self.translation.hovered_region = region_id.clone();
+        if !self.translation.suppress_linked_events
+            && let Some(session_id) = self.translation.pair_session_id
         {
             cx.emit(DocumentViewEvent::TranslationRegionHovered {
                 session_id,
@@ -289,17 +289,17 @@ impl DocumentView {
     }
 
     pub(super) fn toggle_translation_overlay(&mut self, cx: &mut Context<Self>) {
-        if self.translation_view_role != TranslationViewRole::Translation {
+        if self.translation.view_role != TranslationViewRole::Translation {
             return;
         }
-        self.translation_overlay_enabled = !self.translation_overlay_enabled;
-        if !self.translation_overlay_enabled {
+        self.translation.overlay_enabled = !self.translation.overlay_enabled;
+        if !self.translation.overlay_enabled {
             self.clear_translation_hover_state(true, cx);
         }
-        if let Some(session_id) = self.translation_pair_session_id {
+        if let Some(session_id) = self.translation.pair_session_id {
             cx.emit(DocumentViewEvent::TranslationOverlayVisibilityChanged {
                 session_id,
-                enabled: self.translation_overlay_enabled,
+                enabled: self.translation.overlay_enabled,
             });
         }
         cx.notify();
@@ -307,17 +307,17 @@ impl DocumentView {
 
     pub fn apply_live_translation_overlay_visibility(
         &mut self,
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         enabled: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.translation_view_role != TranslationViewRole::SourceMirror
-            || self.translation_pair_session_id != Some(session_id)
-            || self.translation_overlay_enabled == enabled
+        if self.translation.view_role != TranslationViewRole::SourceMirror
+            || self.translation.pair_session_id != Some(session_id)
+            || self.translation.overlay_enabled == enabled
         {
             return;
         }
-        self.translation_overlay_enabled = enabled;
+        self.translation.overlay_enabled = enabled;
         if !enabled {
             self.clear_translation_hover_state(true, cx);
         }
@@ -325,9 +325,9 @@ impl DocumentView {
     }
 
     pub(super) fn cancel_translation_hover_clear(&mut self) {
-        self.translation_hover_clear_generation =
-            self.translation_hover_clear_generation.wrapping_add(1);
-        self.translation_hover_clear_task = None;
+        self.translation.hover_clear_generation =
+            self.translation.hover_clear_generation.wrapping_add(1);
+        self.translation.hover_clear_task = None;
     }
 
     pub(super) fn set_hovered_translation_region(
@@ -340,28 +340,28 @@ impl DocumentView {
     }
 
     pub(super) fn schedule_translation_hover_clear(&mut self, cx: &mut Context<Self>) {
-        if self.translation_view_role != TranslationViewRole::Translation
-            || !self.translation_pair_active
-            || self.translation_hover_tools_hovered
-            || self.hovered_translation_region.is_none()
-            || self.translation_hover_clear_task.is_some()
+        if self.translation.view_role != TranslationViewRole::Translation
+            || !self.translation.pair_active
+            || self.translation.hover_tools_hovered
+            || self.translation.hovered_region.is_none()
+            || self.translation.hover_clear_task.is_some()
         {
             return;
         }
-        self.translation_hover_clear_generation =
-            self.translation_hover_clear_generation.wrapping_add(1);
-        let generation = self.translation_hover_clear_generation;
-        self.translation_hover_clear_task = Some(cx.spawn(async move |this, cx| {
+        self.translation.hover_clear_generation =
+            self.translation.hover_clear_generation.wrapping_add(1);
+        let generation = self.translation.hover_clear_generation;
+        self.translation.hover_clear_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(TRANSLATION_HOVER_CLEAR_GRACE)
                 .await;
             _ = this.update(cx, |this, cx| {
-                if this.translation_hover_clear_generation != generation
-                    || this.translation_hover_tools_hovered
+                if this.translation.hover_clear_generation != generation
+                    || this.translation.hover_tools_hovered
                 {
                     return;
                 }
-                this.translation_hover_clear_task = None;
+                this.translation.hover_clear_task = None;
                 this.publish_hovered_translation_region(None, cx);
             });
         }));
@@ -372,10 +372,10 @@ impl DocumentView {
         hovered: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.translation_hover_tools_hovered == hovered {
+        if self.translation.hover_tools_hovered == hovered {
             return;
         }
-        self.translation_hover_tools_hovered = hovered;
+        self.translation.hover_tools_hovered = hovered;
         if hovered {
             self.cancel_translation_hover_clear();
         } else {
@@ -388,8 +388,8 @@ impl DocumentView {
         region_id: String,
         bounds: Bounds<Pixels>,
     ) {
-        if self.hovered_translation_region.as_deref() == Some(region_id.as_str()) {
-            self.translation_hover_tools_bounds = Some((region_id, bounds));
+        if self.translation.hovered_region.as_deref() == Some(region_id.as_str()) {
+            self.translation.hover_tools_bounds = Some((region_id, bounds));
         }
     }
 
@@ -397,10 +397,10 @@ impl DocumentView {
         &self,
         position: GpuiPoint<Pixels>,
     ) -> bool {
-        let Some(region_id) = self.hovered_translation_region.as_deref() else {
+        let Some(region_id) = self.translation.hovered_region.as_deref() else {
             return false;
         };
-        let Some((tools_region_id, tools_bounds)) = self.translation_hover_tools_bounds.as_ref()
+        let Some((tools_region_id, tools_bounds)) = self.translation.hover_tools_bounds.as_ref()
         else {
             return false;
         };
@@ -409,7 +409,8 @@ impl DocumentView {
         }
         let now = Instant::now();
         let highlight_bounds = self
-            .translation_hover_animation
+            .translation
+            .hover_animation
             .as_ref()
             .filter(|animation| animation.region_id == region_id)
             .map(|animation| animation.bounds(now))
@@ -427,12 +428,12 @@ impl DocumentView {
         cx: &mut Context<Self>,
     ) {
         self.cancel_translation_hover_clear();
-        self.translation_hover_tools_hovered = false;
-        self.translation_hover_tools_bounds = None;
+        self.translation.hover_tools_hovered = false;
+        self.translation.hover_tools_bounds = None;
         self.publish_hovered_translation_region(None, cx);
-        self.external_hovered_translation_region = None;
+        self.translation.external_hovered_region = None;
         if reset_animation {
-            self.translation_hover_animation = None;
+            self.translation.hover_animation = None;
         }
     }
 }

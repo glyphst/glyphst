@@ -73,10 +73,10 @@ fn is_bad_rect(e: &BytesStart) -> Result<bool> {
                 if trimmed.is_empty() {
                     return Ok(true);
                 }
-                if let Ok(n) = trimmed.parse::<f64>() {
-                    if !n.is_finite() || n <= 0.0 {
-                        return Ok(true);
-                    }
+                if let Ok(n) = trimmed.parse::<f64>()
+                    && (!n.is_finite() || n <= 0.0)
+                {
+                    return Ok(true);
                 }
             }
         }

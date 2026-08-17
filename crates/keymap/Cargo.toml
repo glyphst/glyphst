@@ -3,6 +3,9 @@ name = "glyphst-keymap"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 glyphst-actions = { path = "../actions" }
 glyphst-core = { path = "../core" }

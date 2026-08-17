@@ -3,6 +3,9 @@ name = "glyphst-files"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true

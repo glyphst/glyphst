@@ -42,7 +42,7 @@ pub(super) fn library_path() -> PathBuf {
 }
 
 pub(super) fn managed_library_root() -> PathBuf {
-    glyphst_core::paths::data_dir().join("library")
+    glyphst_core::paths::data_dir().join("library-v2")
 }
 
 pub(super) fn ensure_managed_library_directories(root: &Path) -> Result<()> {
@@ -51,40 +51,6 @@ pub(super) fn ensure_managed_library_directories(root: &Path) -> Result<()> {
     create_private_directory(&root.join("ai-images"))?;
     create_private_directory(&root.join(".staging"))?;
     create_private_directory(&root.join(".deleting"))?;
-    Ok(())
-}
-
-pub(super) fn migrate_legacy_library_database(target: &Path) -> Result<()> {
-    if target.exists() {
-        return Ok(());
-    }
-    let legacy = glyphst_core::paths::state_dir().join("library.redb");
-    if !legacy.is_file() {
-        return Ok(());
-    }
-    let parent = target
-        .parent()
-        .ok_or_else(|| anyhow!("library database path has no parent"))?;
-    create_private_directory(parent)?;
-    let staging = parent.join("library.redb.migrating");
-    if staging.exists() {
-        fs::remove_file(&staging)
-            .with_context(|| format!("failed to remove stale {}", staging.display()))?;
-    }
-    fs::copy(&legacy, &staging).with_context(|| {
-        format!(
-            "failed to copy legacy library database from {} to {}",
-            legacy.display(),
-            staging.display()
-        )
-    })?;
-    restrict_library_file(&staging)?;
-    fs::rename(&staging, target).with_context(|| {
-        format!(
-            "failed to install migrated database at {}",
-            target.display()
-        )
-    })?;
     Ok(())
 }
 
@@ -191,6 +157,73 @@ pub(super) fn ensure_tables(database: &Database) -> Result<()> {
     }
     {
         write_txn.open_table(LIBRARY_ITEM_COLLECTIONS_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_ITEM_LOCATIONS_V2_TABLE)?;
+    }
+    write_txn.commit()?;
+    Ok(())
+}
+
+pub(super) fn ensure_current_tables(database: &Database) -> Result<()> {
+    let write_txn = database.begin_write()?;
+    {
+        let mut metadata = write_txn.open_table(STORAGE_METADATA_TABLE)?;
+        let stored_version = metadata
+            .get(STORAGE_SCHEMA_VERSION_KEY)?
+            .map(|version| version.value());
+        match stored_version {
+            Some(version) if version != CURRENT_STORAGE_SCHEMA_VERSION => {
+                return Err(anyhow!(
+                    "unsupported library schema version: expected {}, found {}",
+                    CURRENT_STORAGE_SCHEMA_VERSION,
+                    version
+                ));
+            }
+            Some(_) => {}
+            None => {
+                metadata.insert(STORAGE_SCHEMA_VERSION_KEY, CURRENT_STORAGE_SCHEMA_VERSION)?;
+            }
+        }
+    }
+    {
+        write_txn.open_table(HISTORY_V2_TABLE)?;
+    }
+    {
+        write_txn.open_table(BOOKMARKS_V2_TABLE)?;
+    }
+    {
+        write_txn.open_table(HIGHLIGHTS_V2_TABLE)?;
+    }
+    {
+        write_txn.open_table(NOTES_V2_TABLE)?;
+    }
+    {
+        write_txn.open_table(AI_SESSIONS_V6_TABLE)?;
+    }
+    {
+        write_txn.open_table(UI_STATE_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(DOCUMENT_PREFERENCES_V4_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_ITEMS_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_ATTACHMENTS_V2_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_TAGS_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_ITEM_TAGS_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_SAVED_VIEWS_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_COLLECTIONS_V1_TABLE)?;
     }
     {
         write_txn.open_table(LIBRARY_ITEM_LOCATIONS_V2_TABLE)?;
@@ -319,6 +352,17 @@ pub(super) fn load_library(database: &Database, managed_root: &Path) -> Result<L
         // per-document rows remain available for downgrade but are not copied.
         migrate_ai_sessions_v6(database)?;
     }
+    Ok(library)
+}
+
+pub(super) fn load_current_library(database: &Database, managed_root: &Path) -> Result<Library> {
+    let mut library = Library::default();
+    let read_txn = database.begin_read()?;
+    load_storage_v2(&read_txn, &mut library, true)?;
+    load_document_preferences(&read_txn, &mut library, true, false, false, false)?;
+    load_catalog(&read_txn, &mut library, managed_root)?;
+    drop(read_txn);
+    library.sanitize();
     Ok(library)
 }
 
@@ -1095,11 +1139,11 @@ fn migrate_ai_sessions_v6(database: &Database) -> Result<()> {
 }
 
 pub(super) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    bincode::serialize(value).context("failed to encode library value")
+    serde_json::to_vec(value).context("failed to encode library value as JSON")
 }
 
 pub(super) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    bincode::deserialize(bytes).context("failed to decode library value")
+    serde_json::from_slice(bytes).context("failed to decode library JSON value")
 }
 
 pub(super) fn require_storage_version(version: u8, expected: u8) -> Result<()> {

@@ -4,6 +4,14 @@ impl LibraryStore {
     pub fn history_entries(&self) -> &[HistoryEntry] {
         &self.library.history
     }
+
+    pub fn replace_history_entries(&mut self, history: Vec<HistoryEntry>) -> Result<()> {
+        if self.database.is_some() {
+            self.write_history_entries(&history)?;
+        }
+        self.library.history = history;
+        Ok(())
+    }
     pub fn remove_missing_history_entries(&mut self) -> Result<bool> {
         let mut history = self.library.history.clone();
         history.retain(|entry| entry.path.exists());

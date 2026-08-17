@@ -901,7 +901,7 @@ impl SettingsWindow {
                 {
                     let view = view.clone();
                     move |value: SharedString, cx: &mut App| {
-                        let Some(position) = QuickAskPosition::from_str(&value) else {
+                        let Some(position) = QuickAskPosition::parse(&value) else {
                             return;
                         };
                         Self::update_settings(&view, cx, move |settings| {

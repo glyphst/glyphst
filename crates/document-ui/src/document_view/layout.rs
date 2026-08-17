@@ -95,8 +95,8 @@ impl DocumentView {
                 .map(|page| Self::page_dimensions_for(page, rotation).1)
                 .fold(0.0_f32, f32::max);
 
-            for page_idx in row_start..row_end {
-                let page = &mut pages[page_idx];
+            for (row_offset, page) in pages[row_start..row_end].iter_mut().enumerate() {
+                let page_idx = row_start + row_offset;
                 let width = Self::page_dimensions_for(page, rotation).0;
                 page.offset_x = if page_idx % 2 == 0 {
                     (left_width - width) / 2.0

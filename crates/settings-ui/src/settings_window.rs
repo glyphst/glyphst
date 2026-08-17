@@ -4,15 +4,16 @@ mod pages;
 use glyphst_actions::settings_panel::PanelClose;
 use glyphst_ai::ai_client::{AiModelInfo, list_ai_models, test_ai_connection};
 use glyphst_keymap::keybindings;
-use glyphst_pdf_translation_app::{
-    CancellationToken, PaddleClient, PaddleClientConfig, PaddleErrorCategory,
-    PdfTranslationService, UnlimitedClient, UnlimitedClientConfig, UnlimitedErrorCategory,
+use glyphst_pdf_translation_service::{
+    CancellationToken, PaddleClient, PaddleClientConfig, PaddleErrorCategory, UnlimitedClient,
+    UnlimitedClientConfig, UnlimitedErrorCategory,
 };
 use glyphst_settings::{
     AiModel, AiProvider, AiThinkingLevel, ModelRef, OcrProvider, OcrSettings, ProviderSecretId,
     ResolvedAiConfig, Settings, SettingsStore, WindowSettings, localize, setup_ui_font,
     sync_component_theme, ui_rems,
 };
+use glyphst_translation_ui::TranslationServices;
 use glyphst_ui::{
     activity::{ActivityCenter, ActivityNoticeEntry, ActivityNoticeLevel, BackgroundTaskEntry},
     root::{RootWindowHandle, render_overlays},
@@ -275,7 +276,7 @@ impl SettingsWindow {
 
     pub(super) fn parse_model_ref(value: &str) -> Option<ModelRef> {
         let (provider, id) = value.split_once("::")?;
-        let provider = AiProvider::from_str(provider)?;
+        let provider = AiProvider::parse(provider)?;
         (!id.trim().is_empty()).then(|| ModelRef::new(provider, id))
     }
 
@@ -795,14 +796,14 @@ impl SettingsWindow {
         if self.translation_data_clear_pending {
             return;
         }
-        if !cx.has_global::<PdfTranslationService>() || ActivityCenter::try_global(cx).is_none() {
+        if !cx.has_global::<TranslationServices>() || ActivityCenter::try_global(cx).is_none() {
             self.status = None;
             self.save_error = Some("Translation data service is unavailable.".into());
             cx.notify();
             return;
         }
 
-        let service = cx.global::<PdfTranslationService>().clone();
+        let service = cx.global::<TranslationServices>().pdf().clone();
         let activity_center = ActivityCenter::global(cx);
         let confirmation = window.prompt(
             PromptLevel::Warning,
@@ -1428,7 +1429,7 @@ mod tests {
             settings.update(cx, |this, cx| {
                 this.set_model_picker_open(provider, true, cx);
                 assert!(this.model_catalog_operation.provider.is_none());
-                assert!(this.model_catalogs.get(&provider).is_none());
+                assert!(!this.model_catalogs.contains_key(&provider));
                 assert!(this.stage_manual_model_id(provider, "manual-model".to_string()));
                 assert!(!this.stage_manual_model_id(provider, "manual-model".to_string()));
             });

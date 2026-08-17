@@ -2,17 +2,17 @@ use glyphst_pdf_translation::{
     ProtectedTokenKind, TranslationBackend, TranslationBackendError, TranslationErrorCategory,
     TranslationUnit, TranslationUnitOutput,
 };
-use glyphst_settings::{Settings, TranslationProvider};
+use glyphst_settings::TranslationProvider;
 use glyphst_translation::{
     LanguageCode, SemanticProtectedToken, SemanticProtectedTokenKind, SemanticTranslationUnit,
     TranslationError, TranslationErrorCategory as GlyphstTranslationErrorCategory,
-    TranslationService,
+    TranslationExecutionConfig, TranslationService,
 };
 
 #[derive(Clone)]
 pub(crate) struct GlyphstTranslationBackend {
     service: TranslationService,
-    settings: Settings,
+    config: TranslationExecutionConfig,
     provider: TranslationProvider,
     source_language: Option<LanguageCode>,
     target_language: LanguageCode,
@@ -21,14 +21,14 @@ pub(crate) struct GlyphstTranslationBackend {
 impl GlyphstTranslationBackend {
     pub(crate) fn new(
         service: TranslationService,
-        settings: Settings,
+        config: TranslationExecutionConfig,
         source_language: Option<LanguageCode>,
         target_language: LanguageCode,
     ) -> Self {
-        let provider = settings.translation.active_provider;
+        let provider = config.provider();
         Self {
             service,
-            settings,
+            config,
             provider,
             source_language,
             target_language,
@@ -44,7 +44,7 @@ impl TranslationBackend for GlyphstTranslationBackend {
         let semantic_units = units.iter().map(semantic_unit).collect();
         self.service
             .translate_semantic_batch(
-                &self.settings,
+                &self.config,
                 self.provider,
                 self.source_language.clone(),
                 self.target_language.clone(),
@@ -94,7 +94,7 @@ impl TranslationBackend for GlyphstTranslationBackend {
 
     fn cache_validated_translation(&self, unit: &TranslationUnit, translated: &str) {
         self.service.cache_validated_semantic_translation(
-            &self.settings,
+            &self.config,
             self.provider,
             self.source_language.as_ref(),
             &self.target_language,
@@ -109,7 +109,7 @@ impl TranslationBackend for GlyphstTranslationBackend {
             .map(|(unit, translated)| (semantic_unit(unit), translated.clone()))
             .collect::<Vec<_>>();
         self.service.cache_validated_semantic_translations(
-            &self.settings,
+            &self.config,
             self.provider,
             self.source_language.as_ref(),
             &self.target_language,
@@ -127,7 +127,7 @@ impl TranslationBackend for GlyphstTranslationBackend {
     ) -> Result<TranslationUnitOutput, TranslationBackendError> {
         self.service
             .translate_semantic_single_recovery(
-                &self.settings,
+                &self.config,
                 self.source_language.as_ref(),
                 &self.target_language,
                 semantic_unit(unit),

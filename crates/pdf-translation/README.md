@@ -8,7 +8,7 @@
 - source-derived layout, overflow policy, Typst rendering, and PDF composition.
 
 It intentionally does not depend on GPUI, Glyphst Reader settings, or Glyphst Reader's provider
-service. The `glyphst-pdf-translation-app` crate is the thin application adapter for those
+service. The `glyphst-pdf-translation-service` crate is the thin application adapter for those
 concerns.
 
 ## Local sample gate

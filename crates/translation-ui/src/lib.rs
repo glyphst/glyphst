@@ -1,4 +1,4 @@
-pub use glyphst_pdf_translation_app::{
+pub use glyphst_pdf_translation_service::{
     PdfTranslationSessionCacheKey, PdfTranslationSessionRequest,
 };
 pub use glyphst_translation as service;
@@ -10,18 +10,19 @@ use std::time::Duration;
 
 use futures::{StreamExt as _, channel::mpsc};
 use glyphst_pdf::DocumentSnapshot;
-use glyphst_pdf_translation_app::{
-    CancellationToken, DocumentMetadata, DocumentV1, Page, PdfTranslationError,
-    PdfTranslationExportRequest, PdfTranslationPageFailure, PdfTranslationPagePreview,
-    PdfTranslationProgress, PdfTranslationRequest, PdfTranslationRestoredSession,
-    PdfTranslationResult, PdfTranslationService, PdfTranslationSessionResult,
-    PdfTranslationSessionUpdate, PdfTranslationStage, PdfTranslationWarning, TranslatedUnit,
-    TranslationFailureDiagnostic, TranslationFailurePhase, TranslationRunProgress,
+use glyphst_pdf_translation_service::{
+    CancellationToken, DocumentMetadata, DocumentV1, Page, PdfTranslationConfig,
+    PdfTranslationError, PdfTranslationExportRequest, PdfTranslationPageFailure,
+    PdfTranslationPagePreview, PdfTranslationProgress, PdfTranslationRequest,
+    PdfTranslationRestoredSession, PdfTranslationResult, PdfTranslationService,
+    PdfTranslationSessionResult, PdfTranslationSessionUpdate, PdfTranslationStage,
+    PdfTranslationWarning, TranslatedUnit, TranslationFailureDiagnostic, TranslationFailurePhase,
+    TranslationRunProgress,
 };
 use glyphst_settings::{
     DocumentTranslationMode, Settings, SettingsStore, TranslationTargetLanguage,
 };
-use glyphst_translation::{LanguageCode, TARGET_LANGUAGES};
+use glyphst_translation::{LanguageCode, TARGET_LANGUAGES, TranslationService};
 use glyphst_ui::activity::{
     ActivityCenter, ActivityNoticeEntry, ActivityNoticeId, ActivityNoticeLevel,
     BackgroundTaskEntry, BackgroundTaskId, CenterAction, TaskProgress,
@@ -37,6 +38,33 @@ use gpui_component::{
     searchable_list::SearchableListItem,
     v_flex,
 };
+
+/// Application-owned translation services. Domain crates remain independent of
+/// GPUI; only this UI composition root participates in the global registry.
+#[derive(Clone)]
+pub struct TranslationServices {
+    text: TranslationService,
+    pdf: PdfTranslationService,
+}
+
+impl TranslationServices {
+    pub fn new(text: TranslationService) -> Self {
+        Self {
+            pdf: PdfTranslationService::new(text.clone()),
+            text,
+        }
+    }
+
+    pub fn text(&self) -> &TranslationService {
+        &self.text
+    }
+
+    pub fn pdf(&self) -> &PdfTranslationService {
+        &self.pdf
+    }
+}
+
+impl gpui::Global for TranslationServices {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DocumentTranslationJobAction {
@@ -73,7 +101,7 @@ impl DocumentTranslationJobAction {
     }
 }
 
-pub type DocumentTranslationJobId = u64;
+pub type DocumentTranslationId = u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocumentTranslationOpenMode {
@@ -141,7 +169,7 @@ fn job_actions(status: &DocumentTranslationJobStatus) -> Vec<DocumentTranslation
 
 #[derive(Clone, Debug)]
 pub struct DocumentTranslationJobSnapshot {
-    pub id: DocumentTranslationJobId,
+    pub id: DocumentTranslationId,
     pub request: PdfTranslationRequest,
     pub open_mode: DocumentTranslationOpenMode,
     pub status: DocumentTranslationJobStatus,
@@ -154,7 +182,7 @@ pub struct DocumentTranslationJobSnapshot {
 /// manager while it is processing a worker message.
 #[derive(Clone, Debug)]
 pub struct DocumentTranslationSessionSnapshot {
-    pub id: DocumentTranslationJobId,
+    pub id: DocumentTranslationId,
     pub request: PdfTranslationSessionRequest,
     pub mode: DocumentTranslationMode,
     pub status: DocumentTranslationSessionStatus,
@@ -274,11 +302,11 @@ impl DocumentTranslationJobSnapshot {
 #[derive(Clone, Debug)]
 pub enum DocumentTranslationJobEvent {
     OpenDocument {
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         path: PathBuf,
     },
     OpenSplit {
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         source_path: PathBuf,
         translated_path: PathBuf,
     },
@@ -286,14 +314,14 @@ pub enum DocumentTranslationJobEvent {
         snapshot: DocumentTranslationJobSnapshot,
     },
     RemoveNotification {
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
     },
     OpenSession {
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         source_path: PathBuf,
     },
     SaveSession {
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
     },
     OpenSessionExport {
         path: PathBuf,
@@ -302,7 +330,7 @@ pub enum DocumentTranslationJobEvent {
         snapshot: DocumentTranslationSessionSnapshot,
     },
     RemoveSessionNotification {
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
     },
 }
 
@@ -311,6 +339,31 @@ pub struct DocumentTranslationNotification;
 
 /// Stable notification kind for terminal in-memory translation sessions.
 pub struct DocumentTranslationSessionNotification;
+
+#[derive(Clone)]
+pub struct BatchTranslationSubmission {
+    pub settings: Settings,
+    pub request: PdfTranslationRequest,
+    pub open_mode: DocumentTranslationOpenMode,
+}
+
+#[derive(Clone)]
+pub struct LiveTranslationSubmission {
+    pub settings: Settings,
+    pub request: PdfTranslationSessionRequest,
+    pub source_snapshot: Arc<DocumentSnapshot>,
+    pub mode: DocumentTranslationMode,
+}
+
+#[derive(Clone)]
+pub struct RestoredTranslationSubmission {
+    pub settings: Settings,
+    pub request: PdfTranslationSessionRequest,
+    pub source_snapshot: Arc<DocumentSnapshot>,
+    pub mode: DocumentTranslationMode,
+    pub cache_key: Option<PdfTranslationSessionCacheKey>,
+    pub original_unit_ids: HashSet<String>,
+}
 
 struct DocumentTranslationJobRecord {
     snapshot: DocumentTranslationJobSnapshot,
@@ -347,50 +400,54 @@ enum DocumentTranslationSessionWorkerUpdate {
     Pipeline(PdfTranslationSessionUpdate),
 }
 
-pub struct DocumentTranslationJobManager {
-    jobs: VecDeque<DocumentTranslationJobRecord>,
-    next_id: DocumentTranslationJobId,
-    active_job_id: Option<DocumentTranslationJobId>,
-    background_tasks: HashMap<DocumentTranslationJobId, BackgroundTaskId>,
-    activity_notices: HashMap<DocumentTranslationJobId, ActivityNoticeId>,
-    sessions: VecDeque<DocumentTranslationSessionRecord>,
-    active_session_id: Option<DocumentTranslationJobId>,
-    session_background_tasks: HashMap<DocumentTranslationJobId, BackgroundTaskId>,
-    session_activity_notices: HashMap<DocumentTranslationJobId, ActivityNoticeId>,
+#[derive(Default)]
+struct BatchTranslationState {
+    records: VecDeque<DocumentTranslationJobRecord>,
+    active_id: Option<DocumentTranslationId>,
+    background_tasks: HashMap<DocumentTranslationId, BackgroundTaskId>,
+    activity_notices: HashMap<DocumentTranslationId, ActivityNoticeId>,
+}
+
+#[derive(Default)]
+struct LiveTranslationState {
+    records: VecDeque<DocumentTranslationSessionRecord>,
+    active_id: Option<DocumentTranslationId>,
+    background_tasks: HashMap<DocumentTranslationId, BackgroundTaskId>,
+    activity_notices: HashMap<DocumentTranslationId, ActivityNoticeId>,
+}
+
+pub struct DocumentTranslationManager {
+    batch: BatchTranslationState,
+    live: LiveTranslationState,
+    next_id: DocumentTranslationId,
     credential_wait_task: Option<Task<()>>,
 }
 
-impl EventEmitter<DocumentTranslationJobEvent> for DocumentTranslationJobManager {}
+impl EventEmitter<DocumentTranslationJobEvent> for DocumentTranslationManager {}
 
-impl DocumentTranslationJobManager {
+impl DocumentTranslationManager {
     pub fn new(cx: &mut Context<Self>) -> Self {
         cx.on_release(|this, cx| {
-            for job in &this.jobs {
+            for job in &this.batch.records {
                 job.cancellation.cancel();
             }
-            for session in &this.sessions {
+            for session in &this.live.records {
                 session.cancellation.cancel();
             }
             if let Some(center) = ActivityCenter::try_global(cx) {
-                for task_id in this.background_tasks.values().copied() {
+                for task_id in this.batch.background_tasks.values().copied() {
                     center.update(cx, |center, cx| center.remove_task(task_id, cx));
                 }
-                for task_id in this.session_background_tasks.values().copied() {
+                for task_id in this.live.background_tasks.values().copied() {
                     center.update(cx, |center, cx| center.remove_task(task_id, cx));
                 }
             }
         })
         .detach();
         Self {
-            jobs: VecDeque::new(),
+            batch: BatchTranslationState::default(),
+            live: LiveTranslationState::default(),
             next_id: 1,
-            active_job_id: None,
-            background_tasks: HashMap::new(),
-            activity_notices: HashMap::new(),
-            sessions: VecDeque::new(),
-            active_session_id: None,
-            session_background_tasks: HashMap::new(),
-            session_activity_notices: HashMap::new(),
             credential_wait_task: None,
         }
     }
@@ -430,14 +487,17 @@ impl DocumentTranslationJobManager {
 
     pub fn submit(
         &mut self,
-        settings: Settings,
-        request: PdfTranslationRequest,
-        open_mode: DocumentTranslationOpenMode,
+        submission: BatchTranslationSubmission,
         cx: &mut Context<Self>,
-    ) -> DocumentTranslationJobId {
+    ) -> DocumentTranslationId {
+        let BatchTranslationSubmission {
+            settings,
+            request,
+            open_mode,
+        } = submission;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        self.jobs.push_back(DocumentTranslationJobRecord {
+        self.batch.records.push_back(DocumentTranslationJobRecord {
             snapshot: DocumentTranslationJobSnapshot {
                 id,
                 request,
@@ -458,48 +518,53 @@ impl DocumentTranslationJobManager {
     /// user explicitly saves it.
     pub fn submit_session(
         &mut self,
-        settings: Settings,
-        request: PdfTranslationSessionRequest,
-        source_snapshot: Arc<DocumentSnapshot>,
-        mode: DocumentTranslationMode,
+        submission: LiveTranslationSubmission,
         cx: &mut Context<Self>,
-    ) -> DocumentTranslationJobId {
+    ) -> DocumentTranslationId {
+        let LiveTranslationSubmission {
+            settings,
+            request,
+            source_snapshot,
+            mode,
+        } = submission;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
         let foreground = mode != DocumentTranslationMode::Background;
         let source_path = request.source_path.clone();
-        self.sessions.push_back(DocumentTranslationSessionRecord {
-            snapshot: DocumentTranslationSessionSnapshot {
-                id,
-                request,
-                mode,
-                status: DocumentTranslationSessionStatus::Queued,
-                prepared_document: None,
-                resolved_units: Arc::new(Vec::new()),
-                failures: Arc::new(Vec::new()),
-                page_previews: Arc::new(BTreeMap::new()),
-                page_failures: Arc::new(Vec::new()),
-                ready_prefix: 0,
-                original_unit_ids: Arc::new(HashSet::new()),
-                cache_key: None,
-                attached_views: usize::from(foreground),
-                last_export_path: None,
-                last_export_error: None,
-            },
-            source_snapshot,
-            settings,
-            cancellation: CancellationToken::new(),
-            task: None,
-            result: None,
-            pending_restart: None,
-            pending_export: None,
-            notify_when_finished: !foreground,
-            prepared_metadata: None,
-            prepared_pages: BTreeMap::new(),
-            prepared_page_count: 0,
-            preview_generation: 0,
-            pending_cache_restore: false,
-        });
+        self.live
+            .records
+            .push_back(DocumentTranslationSessionRecord {
+                snapshot: DocumentTranslationSessionSnapshot {
+                    id,
+                    request,
+                    mode,
+                    status: DocumentTranslationSessionStatus::Queued,
+                    prepared_document: None,
+                    resolved_units: Arc::new(Vec::new()),
+                    failures: Arc::new(Vec::new()),
+                    page_previews: Arc::new(BTreeMap::new()),
+                    page_failures: Arc::new(Vec::new()),
+                    ready_prefix: 0,
+                    original_unit_ids: Arc::new(HashSet::new()),
+                    cache_key: None,
+                    attached_views: usize::from(foreground),
+                    last_export_path: None,
+                    last_export_error: None,
+                },
+                source_snapshot,
+                settings,
+                cancellation: CancellationToken::new(),
+                task: None,
+                result: None,
+                pending_restart: None,
+                pending_export: None,
+                notify_when_finished: !foreground,
+                prepared_metadata: None,
+                prepared_pages: BTreeMap::new(),
+                prepared_page_count: 0,
+                preview_generation: 0,
+                pending_cache_restore: false,
+            });
         self.register_session_background_task(id, cx);
         self.start_next_session(cx);
         if foreground {
@@ -514,48 +579,53 @@ impl DocumentTranslationJobManager {
     /// left paused unless its durable manifest says it had completed.
     pub fn restore_session(
         &mut self,
-        settings: Settings,
-        request: PdfTranslationSessionRequest,
-        source_snapshot: Arc<DocumentSnapshot>,
-        mode: DocumentTranslationMode,
-        cache_key: Option<PdfTranslationSessionCacheKey>,
-        original_unit_ids: HashSet<String>,
+        submission: RestoredTranslationSubmission,
         cx: &mut Context<Self>,
-    ) -> DocumentTranslationJobId {
+    ) -> DocumentTranslationId {
+        let RestoredTranslationSubmission {
+            settings,
+            request,
+            source_snapshot,
+            mode,
+            cache_key,
+            original_unit_ids,
+        } = submission;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        self.sessions.push_back(DocumentTranslationSessionRecord {
-            snapshot: DocumentTranslationSessionSnapshot {
-                id,
-                request,
-                mode,
-                status: DocumentTranslationSessionStatus::Queued,
-                prepared_document: None,
-                resolved_units: Arc::new(Vec::new()),
-                failures: Arc::new(Vec::new()),
-                page_previews: Arc::new(BTreeMap::new()),
-                page_failures: Arc::new(Vec::new()),
-                ready_prefix: 0,
-                original_unit_ids: Arc::new(original_unit_ids),
-                cache_key,
-                attached_views: 1,
-                last_export_path: None,
-                last_export_error: None,
-            },
-            source_snapshot,
-            settings,
-            cancellation: CancellationToken::new(),
-            task: None,
-            result: None,
-            pending_restart: None,
-            pending_export: None,
-            notify_when_finished: false,
-            prepared_metadata: None,
-            prepared_pages: BTreeMap::new(),
-            prepared_page_count: 0,
-            preview_generation: 0,
-            pending_cache_restore: true,
-        });
+        self.live
+            .records
+            .push_back(DocumentTranslationSessionRecord {
+                snapshot: DocumentTranslationSessionSnapshot {
+                    id,
+                    request,
+                    mode,
+                    status: DocumentTranslationSessionStatus::Queued,
+                    prepared_document: None,
+                    resolved_units: Arc::new(Vec::new()),
+                    failures: Arc::new(Vec::new()),
+                    page_previews: Arc::new(BTreeMap::new()),
+                    page_failures: Arc::new(Vec::new()),
+                    ready_prefix: 0,
+                    original_unit_ids: Arc::new(original_unit_ids),
+                    cache_key,
+                    attached_views: 1,
+                    last_export_path: None,
+                    last_export_error: None,
+                },
+                source_snapshot,
+                settings,
+                cancellation: CancellationToken::new(),
+                task: None,
+                result: None,
+                pending_restart: None,
+                pending_export: None,
+                notify_when_finished: false,
+                prepared_metadata: None,
+                prepared_pages: BTreeMap::new(),
+                prepared_page_count: 0,
+                preview_generation: 0,
+                pending_cache_restore: true,
+            });
         self.register_session_background_task(id, cx);
         self.start_next_session(cx);
         cx.notify();
@@ -563,26 +633,26 @@ impl DocumentTranslationJobManager {
     }
 
     pub fn has_active_session_for_source(&self, source_path: &std::path::Path) -> bool {
-        self.sessions.iter().any(|session| {
+        self.live.records.iter().any(|session| {
             session.snapshot.request.source_path == source_path && session.snapshot.is_translating()
         })
     }
 
     pub fn session_snapshot(
         &self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
     ) -> Option<DocumentTranslationSessionSnapshot> {
         self.session(id).map(|session| session.snapshot.clone())
     }
 
     pub fn session_result(
         &self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
     ) -> Option<Arc<PdfTranslationSessionResult>> {
         self.session(id).and_then(|session| session.result.clone())
     }
 
-    pub fn request_open_session(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    pub fn request_open_session(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let Some(source_path) = self
             .session(id)
             .map(|session| session.snapshot.request.source_path.clone())
@@ -599,7 +669,7 @@ impl DocumentTranslationJobManager {
         cx.notify();
     }
 
-    pub fn request_save_session(&self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    pub fn request_save_session(&self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         if self
             .session(id)
             .is_some_and(|session| session.result.is_some())
@@ -608,11 +678,7 @@ impl DocumentTranslationJobManager {
         }
     }
 
-    pub fn request_open_session_export(
-        &self,
-        id: DocumentTranslationJobId,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn request_open_session_export(&self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         if let Some(path) = self
             .session(id)
             .and_then(|session| session.snapshot.last_export_path.clone())
@@ -621,11 +687,7 @@ impl DocumentTranslationJobManager {
         }
     }
 
-    pub fn set_session_backgrounded(
-        &mut self,
-        id: DocumentTranslationJobId,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_session_backgrounded(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let Some(session) = self.session_mut(id) else {
             return;
         };
@@ -635,10 +697,10 @@ impl DocumentTranslationJobManager {
         cx.notify();
     }
 
-    pub fn cancel_session(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    pub fn cancel_session(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let mut remove_queued = false;
         let mut settle_without_worker = false;
-        let is_active = self.active_session_id == Some(id);
+        let is_active = self.live.active_id == Some(id);
         {
             let Some(session) = self.session_mut(id) else {
                 return;
@@ -676,7 +738,9 @@ impl DocumentTranslationJobManager {
             }
         }
         if remove_queued {
-            self.sessions.retain(|session| session.snapshot.id != id);
+            self.live
+                .records
+                .retain(|session| session.snapshot.id != id);
             self.remove_session_background_task(id, cx);
             self.start_next_session(cx);
         } else if settle_without_worker {
@@ -688,11 +752,11 @@ impl DocumentTranslationJobManager {
         cx.notify();
     }
 
-    pub fn discard_session(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    pub fn discard_session(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         if let Some(session) = self.session(id) {
             session.cancellation.cancel();
         }
-        if self.active_session_id == Some(id) {
+        if self.live.active_id == Some(id) {
             if let Some(session) = self.session_mut(id) {
                 session.snapshot.attached_views = 0;
                 session.notify_when_finished = false;
@@ -700,7 +764,9 @@ impl DocumentTranslationJobManager {
                     DocumentTranslationSessionStatus::Cancelling { progress: None };
             }
         } else {
-            self.sessions.retain(|session| session.snapshot.id != id);
+            self.live
+                .records
+                .retain(|session| session.snapshot.id != id);
             self.remove_session_background_task(id, cx);
             self.remove_session_activity_notice(id, cx);
         }
@@ -710,7 +776,7 @@ impl DocumentTranslationJobManager {
 
     pub fn toggle_session_unit_original(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         unit_id: &str,
         cx: &mut Context<Self>,
     ) {
@@ -729,11 +795,11 @@ impl DocumentTranslationJobManager {
 
     fn rebuild_session_original_previews(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         changed_unit_id: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        if !cx.has_global::<PdfTranslationService>() {
+        if !cx.has_global::<TranslationServices>() {
             return;
         }
         let Some(session) = self.session_mut(id) else {
@@ -797,7 +863,7 @@ impl DocumentTranslationJobManager {
                 (*page_index, revision)
             })
             .collect::<Vec<_>>();
-        let service = cx.global::<PdfTranslationService>().clone();
+        let service = cx.global::<TranslationServices>().pdf().clone();
         let cancellation = CancellationToken::new();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let rendered = cx
@@ -873,11 +939,11 @@ impl DocumentTranslationJobManager {
 
     /// Retry terminal failed units. The pipeline checkpoint supplies all
     /// successful units, so only unresolved work is sent to the provider.
-    pub fn retry_session_failures(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    pub fn retry_session_failures(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let can_retry = self.session(id).is_some_and(|session| {
             session.snapshot.has_failures()
                 && !session.snapshot.is_translating()
-                && self.active_session_id != Some(id)
+                && self.live.active_id != Some(id)
         });
         if !can_retry {
             return;
@@ -890,12 +956,12 @@ impl DocumentTranslationJobManager {
         cx.notify();
     }
 
-    pub fn resume_session(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    pub fn resume_session(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let can_resume = self.session(id).is_some_and(|session| {
             matches!(
                 session.snapshot.status,
                 DocumentTranslationSessionStatus::Paused { .. }
-            ) && self.active_session_id != Some(id)
+            ) && self.live.active_id != Some(id)
         });
         if !can_resume {
             return;
@@ -916,11 +982,11 @@ impl DocumentTranslationJobManager {
 
     pub fn restart_session_in_language(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         target_language: LanguageCode,
         cx: &mut Context<Self>,
     ) {
-        if self.active_session_id == Some(id) {
+        if self.live.active_id == Some(id) {
             let Some(session) = self.session_mut(id) else {
                 return;
             };
@@ -942,7 +1008,7 @@ impl DocumentTranslationJobManager {
 
     pub fn export_session(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         output_path: PathBuf,
         cx: &mut Context<Self>,
     ) {
@@ -963,7 +1029,7 @@ impl DocumentTranslationJobManager {
         cx.notify();
     }
 
-    fn start_session_export(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    fn start_session_export(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let Some((settings, result, output_path, original_unit_ids)) =
             self.session_mut(id).and_then(|session| {
                 Some((
@@ -981,23 +1047,24 @@ impl DocumentTranslationJobManager {
         else {
             return;
         };
-        if !cx.has_global::<PdfTranslationService>() {
+        if !cx.has_global::<TranslationServices>() {
             return;
         }
         let cancellation = CancellationToken::new();
-        let service = cx.global::<PdfTranslationService>().clone();
+        let service = cx.global::<TranslationServices>().pdf().clone();
         let request = PdfTranslationExportRequest {
             output_path,
             original_unit_ids,
         };
+        let config = PdfTranslationConfig::from(&settings);
         if let Some(session) = self.session_mut(id) {
             session.cancellation = cancellation.clone();
         }
-        self.active_session_id = Some(id);
+        self.live.active_id = Some(id);
         let (progress_tx, mut progress_rx) = mpsc::unbounded::<PdfTranslationProgress>();
         let task = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             let result_task = cx.background_spawn(async move {
-                service.export_session(settings, result, request, cancellation, move |progress| {
+                service.export_session(config, result, request, cancellation, move |progress| {
                     _ = progress_tx.unbounded_send(progress);
                 })
             });
@@ -1025,13 +1092,13 @@ impl DocumentTranslationJobManager {
         open_mode: DocumentTranslationOpenMode,
         message: impl Into<SharedString>,
         cx: &mut Context<Self>,
-    ) -> DocumentTranslationJobId {
+    ) -> DocumentTranslationId {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
         let message = message.into();
         let target_language =
             glyphst_translation::LanguageCode::new("und").expect("und is a valid language code");
-        self.jobs.push_back(DocumentTranslationJobRecord {
+        self.batch.records.push_back(DocumentTranslationJobRecord {
             snapshot: DocumentTranslationJobSnapshot {
                 id,
                 request: PdfTranslationRequest {
@@ -1064,11 +1131,11 @@ impl DocumentTranslationJobManager {
         open_mode: DocumentTranslationOpenMode,
         result: PdfTranslationResult,
         cx: &mut Context<Self>,
-    ) -> DocumentTranslationJobId {
+    ) -> DocumentTranslationId {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
         let has_warnings = !result.warnings.is_empty();
-        self.jobs.push_back(DocumentTranslationJobRecord {
+        self.batch.records.push_back(DocumentTranslationJobRecord {
             snapshot: DocumentTranslationJobSnapshot {
                 id,
                 request,
@@ -1092,14 +1159,16 @@ impl DocumentTranslationJobManager {
     }
 
     pub fn has_job_for_source(&self, source_path: &std::path::Path) -> bool {
-        self.jobs
+        self.batch
+            .records
             .iter()
             .any(|job| job.snapshot.request.source_path == source_path && job.snapshot.is_active())
     }
 
     pub fn cancel_for_source(&mut self, source_path: &std::path::Path, cx: &mut Context<Self>) {
         let Some(id) = self
-            .jobs
+            .batch
+            .records
             .iter()
             .rev()
             .find(|job| job.snapshot.request.source_path == source_path && job.snapshot.is_active())
@@ -1111,10 +1180,14 @@ impl DocumentTranslationJobManager {
     }
 
     pub fn snapshots(&self) -> Vec<DocumentTranslationJobSnapshot> {
-        self.jobs.iter().map(|job| job.snapshot.clone()).collect()
+        self.batch
+            .records
+            .iter()
+            .map(|job| job.snapshot.clone())
+            .collect()
     }
 
-    pub fn cancel(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    pub fn cancel(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let mut remove_job = false;
         {
             let Some(job) = self.job_mut(id) else {
@@ -1136,7 +1209,7 @@ impl DocumentTranslationJobManager {
             }
         }
         if remove_job {
-            self.jobs.retain(|job| job.snapshot.id != id);
+            self.batch.records.retain(|job| job.snapshot.id != id);
             self.remove_background_task(id, cx);
             self.start_next(cx);
         } else {
@@ -1145,7 +1218,7 @@ impl DocumentTranslationJobManager {
         cx.notify();
     }
 
-    pub fn retry(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    pub fn retry(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let latest_settings = cx
             .has_global::<SettingsStore>()
             .then(|| cx.global::<SettingsStore>().settings.clone());
@@ -1213,7 +1286,7 @@ impl DocumentTranslationJobManager {
         cx.notify();
     }
 
-    pub fn open(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    pub fn open(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let Some((open_mode, source_path, output_path, warnings)) = self.job(id).and_then(|job| {
             let DocumentTranslationJobStatus::Succeeded {
                 output_path,
@@ -1258,7 +1331,7 @@ impl DocumentTranslationJobManager {
         cx.notify();
     }
 
-    fn copy_error(&self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    fn copy_error(&self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let Some(message) = self.job(id).and_then(|job| match &job.snapshot.status {
             DocumentTranslationJobStatus::Failed {
                 detailed_message, ..
@@ -1296,7 +1369,7 @@ impl DocumentTranslationJobManager {
 
     pub fn finish_open(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         result: Result<(), SharedString>,
         cx: &mut Context<Self>,
     ) {
@@ -1304,7 +1377,7 @@ impl DocumentTranslationJobManager {
         match result {
             Ok(()) => {
                 self.remove_background_task(id, cx);
-                self.jobs.retain(|job| job.snapshot.id != id);
+                self.batch.records.retain(|job| job.snapshot.id != id);
             }
             Err(message) => {
                 let Some(job) = self.job_mut(id) else {
@@ -1334,13 +1407,13 @@ impl DocumentTranslationJobManager {
     }
 
     fn start_next(&mut self, cx: &mut Context<Self>) {
-        if self.active_job_id.is_some() {
+        if self.batch.active_id.is_some() {
             return;
         }
-        let Some(index) = self
-            .jobs
-            .iter()
-            .position(|job| matches!(job.snapshot.status, DocumentTranslationJobStatus::Queued))
+        let Some(index) =
+            self.batch.records.iter().position(|job| {
+                matches!(job.snapshot.status, DocumentTranslationJobStatus::Queued)
+            })
         else {
             return;
         };
@@ -1352,9 +1425,9 @@ impl DocumentTranslationJobManager {
             self.wait_for_provider_credentials(cx);
             return;
         }
-        if !cx.has_global::<PdfTranslationService>() {
-            let id = self.jobs[index].snapshot.id;
-            self.jobs[index].snapshot.status = DocumentTranslationJobStatus::Failed {
+        if !cx.has_global::<TranslationServices>() {
+            let id = self.batch.records[index].snapshot.id;
+            self.batch.records[index].snapshot.status = DocumentTranslationJobStatus::Failed {
                 stage: PdfTranslationStage::Preparing,
                 message: "Document translation is unavailable.".into(),
                 detailed_message: "Document translation is unavailable.".into(),
@@ -1364,20 +1437,22 @@ impl DocumentTranslationJobManager {
             return;
         }
 
-        Self::refresh_provider_secrets(&mut self.jobs[index].settings, cx);
-        let id = self.jobs[index].snapshot.id;
-        let settings = self.jobs[index].settings.clone();
-        let request = self.jobs[index].snapshot.request.clone();
-        let cancellation = self.jobs[index].cancellation.clone();
-        let service = cx.global::<PdfTranslationService>().clone();
+        Self::refresh_provider_secrets(&mut self.batch.records[index].settings, cx);
+        let id = self.batch.records[index].snapshot.id;
+        let settings = self.batch.records[index].settings.clone();
+        let config = PdfTranslationConfig::from(&settings);
+        let request = self.batch.records[index].snapshot.request.clone();
+        let cancellation = self.batch.records[index].cancellation.clone();
+        let service = cx.global::<TranslationServices>().pdf().clone();
         let (progress_tx, mut progress_rx) = mpsc::unbounded::<PdfTranslationProgress>();
-        self.jobs[index].snapshot.status = DocumentTranslationJobStatus::Running { progress: None };
-        self.active_job_id = Some(id);
+        self.batch.records[index].snapshot.status =
+            DocumentTranslationJobStatus::Running { progress: None };
+        self.batch.active_id = Some(id);
         self.sync_background_task(id, cx);
 
         let task = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             let result_task = cx.background_spawn(async move {
-                service.run(settings, request, cancellation, move |progress| {
+                service.run(config, request, cancellation, move |progress| {
                     _ = progress_tx.unbounded_send(progress);
                 })
             });
@@ -1394,13 +1469,13 @@ impl DocumentTranslationJobManager {
             let result = result_task.await;
             _ = this.update(cx, |this, cx| this.finish(id, result, cx));
         });
-        self.jobs[index].task = Some(task);
+        self.batch.records[index].task = Some(task);
         cx.notify();
     }
 
     fn update_progress(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         progress: PdfTranslationProgress,
         cx: &mut Context<Self>,
     ) {
@@ -1420,14 +1495,14 @@ impl DocumentTranslationJobManager {
 
     fn finish(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         result: Result<PdfTranslationResult, PdfTranslationError>,
         cx: &mut Context<Self>,
     ) {
-        if self.active_job_id != Some(id) {
+        if self.batch.active_id != Some(id) {
             return;
         }
-        self.active_job_id = None;
+        self.batch.active_id = None;
         let was_cancelled = self.job(id).is_some_and(|job| {
             job.cancellation.is_cancelled()
                 || matches!(
@@ -1437,7 +1512,7 @@ impl DocumentTranslationJobManager {
         });
         if was_cancelled {
             self.remove_background_task(id, cx);
-            self.jobs.retain(|job| job.snapshot.id != id);
+            self.batch.records.retain(|job| job.snapshot.id != id);
             self.start_next(cx);
             cx.notify();
             return;
@@ -1476,11 +1551,12 @@ impl DocumentTranslationJobManager {
     }
 
     fn start_next_session(&mut self, cx: &mut Context<Self>) {
-        if self.active_session_id.is_some() {
+        if self.live.active_id.is_some() {
             return;
         }
         if let Some(id) = self
-            .sessions
+            .live
+            .records
             .iter()
             .find(|session| session.pending_export.is_some())
             .map(|session| session.snapshot.id)
@@ -1488,7 +1564,7 @@ impl DocumentTranslationJobManager {
             self.start_session_export(id, cx);
             return;
         }
-        let Some(index) = self.sessions.iter().position(|session| {
+        let Some(index) = self.live.records.iter().position(|session| {
             matches!(
                 session.snapshot.status,
                 DocumentTranslationSessionStatus::Queued
@@ -1496,8 +1572,8 @@ impl DocumentTranslationJobManager {
         }) else {
             return;
         };
-        let id = self.sessions[index].snapshot.id;
-        if self.sessions[index].pending_cache_restore {
+        let id = self.live.records[index].snapshot.id;
+        if self.live.records[index].pending_cache_restore {
             self.start_cached_session_restore(index, cx);
             return;
         }
@@ -1509,8 +1585,8 @@ impl DocumentTranslationJobManager {
             self.wait_for_provider_credentials(cx);
             return;
         }
-        if !cx.has_global::<PdfTranslationService>() {
-            self.sessions[index].snapshot.status = DocumentTranslationSessionStatus::Failed {
+        if !cx.has_global::<TranslationServices>() {
+            self.live.records[index].snapshot.status = DocumentTranslationSessionStatus::Failed {
                 stage: PdfTranslationStage::Preparing,
                 message: "Document translation is unavailable.".into(),
                 detailed_message: "Document translation is unavailable.".into(),
@@ -1520,26 +1596,27 @@ impl DocumentTranslationJobManager {
             return;
         }
 
-        Self::refresh_provider_secrets(&mut self.sessions[index].settings, cx);
-        let settings = self.sessions[index].settings.clone();
-        let request = self.sessions[index].snapshot.request.clone();
-        let source_snapshot = self.sessions[index].source_snapshot.clone();
-        let cancellation = self.sessions[index].cancellation.clone();
-        let service = cx.global::<PdfTranslationService>().clone();
+        Self::refresh_provider_secrets(&mut self.live.records[index].settings, cx);
+        let settings = self.live.records[index].settings.clone();
+        let config = PdfTranslationConfig::from(&settings);
+        let request = self.live.records[index].snapshot.request.clone();
+        let source_snapshot = self.live.records[index].source_snapshot.clone();
+        let cancellation = self.live.records[index].cancellation.clone();
+        let service = cx.global::<TranslationServices>().pdf().clone();
         let (update_tx, mut update_rx) =
             mpsc::unbounded::<DocumentTranslationSessionWorkerUpdate>();
         let progress_tx = update_tx.clone();
-        self.sessions[index].snapshot.status = DocumentTranslationSessionStatus::Running {
+        self.live.records[index].snapshot.status = DocumentTranslationSessionStatus::Running {
             progress: None,
             units: TranslationRunProgress::default(),
         };
-        self.active_session_id = Some(id);
+        self.live.active_id = Some(id);
         self.sync_session_background_task(id, cx);
 
         let task = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             let result_task = cx.background_spawn(async move {
                 service.run_session_from_snapshot(
-                    settings,
+                    config,
                     request,
                     source_snapshot,
                     cancellation,
@@ -1567,15 +1644,15 @@ impl DocumentTranslationJobManager {
             let result = result_task.await;
             _ = this.update(cx, |this, cx| this.finish_session(id, result, cx));
         });
-        self.sessions[index].task = Some(task);
+        self.live.records[index].task = Some(task);
         cx.notify();
     }
 
     fn start_cached_session_restore(&mut self, index: usize, cx: &mut Context<Self>) {
-        let id = self.sessions[index].snapshot.id;
-        let Some(cache_key) = self.sessions[index].snapshot.cache_key.clone() else {
-            self.sessions[index].pending_cache_restore = false;
-            self.sessions[index].snapshot.status = DocumentTranslationSessionStatus::Paused {
+        let id = self.live.records[index].snapshot.id;
+        let Some(cache_key) = self.live.records[index].snapshot.cache_key.clone() else {
+            self.live.records[index].pending_cache_restore = false;
+            self.live.records[index].snapshot.status = DocumentTranslationSessionStatus::Paused {
                 progress: None,
                 units: TranslationRunProgress::default(),
                 cache_available: false,
@@ -1585,9 +1662,9 @@ impl DocumentTranslationJobManager {
             cx.notify();
             return;
         };
-        if !cx.has_global::<PdfTranslationService>() {
-            self.sessions[index].pending_cache_restore = false;
-            self.sessions[index].snapshot.status = DocumentTranslationSessionStatus::Paused {
+        if !cx.has_global::<TranslationServices>() {
+            self.live.records[index].pending_cache_restore = false;
+            self.live.records[index].snapshot.status = DocumentTranslationSessionStatus::Paused {
                 progress: None,
                 units: TranslationRunProgress::default(),
                 cache_available: false,
@@ -1597,24 +1674,24 @@ impl DocumentTranslationJobManager {
             cx.notify();
             return;
         }
-        let request = self.sessions[index].snapshot.request.clone();
-        let source_snapshot = self.sessions[index].source_snapshot.clone();
-        let original_unit_ids = self.sessions[index]
+        let request = self.live.records[index].snapshot.request.clone();
+        let source_snapshot = self.live.records[index].source_snapshot.clone();
+        let original_unit_ids = self.live.records[index]
             .snapshot
             .original_unit_ids
             .iter()
             .cloned()
             .collect::<Vec<_>>();
-        let cancellation = self.sessions[index].cancellation.clone();
-        let service = cx.global::<PdfTranslationService>().clone();
+        let cancellation = self.live.records[index].cancellation.clone();
+        let service = cx.global::<TranslationServices>().pdf().clone();
         let (update_tx, mut update_rx) =
             mpsc::unbounded::<DocumentTranslationSessionWorkerUpdate>();
         let progress_tx = update_tx.clone();
-        self.sessions[index].snapshot.status = DocumentTranslationSessionStatus::Running {
+        self.live.records[index].snapshot.status = DocumentTranslationSessionStatus::Running {
             progress: None,
             units: TranslationRunProgress::default(),
         };
-        self.active_session_id = Some(id);
+        self.live.active_id = Some(id);
         self.sync_session_background_task(id, cx);
         let task = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             let result_task = cx.background_spawn(async move {
@@ -1649,13 +1726,13 @@ impl DocumentTranslationJobManager {
                 this.finish_cached_session_restore(id, result, cx)
             });
         });
-        self.sessions[index].task = Some(task);
+        self.live.records[index].task = Some(task);
         cx.notify();
     }
 
     fn update_session(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         update: DocumentTranslationSessionWorkerUpdate,
         cx: &mut Context<Self>,
     ) {
@@ -1807,7 +1884,7 @@ impl DocumentTranslationJobManager {
 
     fn update_session_progress(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         progress: PdfTranslationProgress,
         cx: &mut Context<Self>,
     ) {
@@ -1820,12 +1897,12 @@ impl DocumentTranslationJobManager {
 
     fn finish_cached_session_restore(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         restored: Result<Option<PdfTranslationRestoredSession>, PdfTranslationError>,
         cx: &mut Context<Self>,
     ) {
-        if self.active_session_id == Some(id) {
-            self.active_session_id = None;
+        if self.live.active_id == Some(id) {
+            self.live.active_id = None;
         }
         let Some(session) = self.session_mut(id) else {
             self.start_next_session(cx);
@@ -1910,14 +1987,14 @@ impl DocumentTranslationJobManager {
 
     fn finish_session(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         result: Result<PdfTranslationSessionResult, PdfTranslationError>,
         cx: &mut Context<Self>,
     ) {
-        if self.active_session_id != Some(id) {
+        if self.live.active_id != Some(id) {
             return;
         }
-        self.active_session_id = None;
+        self.live.active_id = None;
         let pending_restart = self
             .session_mut(id)
             .and_then(|session| session.pending_restart.take());
@@ -1941,7 +2018,9 @@ impl DocumentTranslationJobManager {
                 session.snapshot.attached_views == 0 && !session.notify_when_finished
             });
             if remove {
-                self.sessions.retain(|session| session.snapshot.id != id);
+                self.live
+                    .records
+                    .retain(|session| session.snapshot.id != id);
             } else if let Some(session) = self.session_mut(id) {
                 session.task = None;
                 session.snapshot.status = DocumentTranslationSessionStatus::Cancelled;
@@ -1998,12 +2077,12 @@ impl DocumentTranslationJobManager {
 
     fn finish_session_export(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         result: Result<PdfTranslationResult, PdfTranslationError>,
         cx: &mut Context<Self>,
     ) {
-        if self.active_session_id == Some(id) {
-            self.active_session_id = None;
+        if self.live.active_id == Some(id) {
+            self.live.active_id = None;
         }
         let pending_restart = self
             .session_mut(id)
@@ -2062,7 +2141,7 @@ impl DocumentTranslationJobManager {
 
     fn reset_session_for_retry(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         target_language: Option<LanguageCode>,
     ) {
         let Some(session) = self.session_mut(id) else {
@@ -2095,34 +2174,36 @@ impl DocumentTranslationJobManager {
         session.pending_cache_restore = false;
     }
 
-    fn session(&self, id: DocumentTranslationJobId) -> Option<&DocumentTranslationSessionRecord> {
-        self.sessions
+    fn session(&self, id: DocumentTranslationId) -> Option<&DocumentTranslationSessionRecord> {
+        self.live
+            .records
             .iter()
             .find(|session| session.snapshot.id == id)
     }
 
     fn session_mut(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
     ) -> Option<&mut DocumentTranslationSessionRecord> {
-        self.sessions
+        self.live
+            .records
             .iter_mut()
             .find(|session| session.snapshot.id == id)
     }
 
-    fn job(&self, id: DocumentTranslationJobId) -> Option<&DocumentTranslationJobRecord> {
-        self.jobs.iter().find(|job| job.snapshot.id == id)
+    fn job(&self, id: DocumentTranslationId) -> Option<&DocumentTranslationJobRecord> {
+        self.batch.records.iter().find(|job| job.snapshot.id == id)
     }
 
-    fn job_mut(
-        &mut self,
-        id: DocumentTranslationJobId,
-    ) -> Option<&mut DocumentTranslationJobRecord> {
-        self.jobs.iter_mut().find(|job| job.snapshot.id == id)
+    fn job_mut(&mut self, id: DocumentTranslationId) -> Option<&mut DocumentTranslationJobRecord> {
+        self.batch
+            .records
+            .iter_mut()
+            .find(|job| job.snapshot.id == id)
     }
 
-    fn register_background_task(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
-        if self.background_tasks.contains_key(&id) {
+    fn register_background_task(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
+        if self.batch.background_tasks.contains_key(&id) {
             self.sync_background_task(id, cx);
             return;
         }
@@ -2140,11 +2221,11 @@ impl DocumentTranslationJobManager {
             })),
         );
         let task_id = center.update(cx, |center, cx| center.add_task(entry, cx));
-        self.background_tasks.insert(id, task_id);
+        self.batch.background_tasks.insert(id, task_id);
     }
 
-    fn sync_background_task(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
-        let Some(task_id) = self.background_tasks.get(&id).copied() else {
+    fn sync_background_task(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
+        let Some(task_id) = self.batch.background_tasks.get(&id).copied() else {
             self.register_background_task(id, cx);
             return;
         };
@@ -2171,8 +2252,8 @@ impl DocumentTranslationJobManager {
         });
     }
 
-    fn remove_background_task(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
-        let Some(task_id) = self.background_tasks.remove(&id) else {
+    fn remove_background_task(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
+        let Some(task_id) = self.batch.background_tasks.remove(&id) else {
             return;
         };
         if let Some(center) = ActivityCenter::try_global(cx) {
@@ -2180,12 +2261,12 @@ impl DocumentTranslationJobManager {
         }
     }
 
-    fn remove_job_notification(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    fn remove_job_notification(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         cx.emit(DocumentTranslationJobEvent::RemoveNotification { id });
     }
 
-    fn remove_activity_notice(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
-        let Some(notice_id) = self.activity_notices.remove(&id) else {
+    fn remove_activity_notice(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
+        let Some(notice_id) = self.batch.activity_notices.remove(&id) else {
             return;
         };
         if let Some(center) = ActivityCenter::try_global(cx) {
@@ -2195,54 +2276,50 @@ impl DocumentTranslationJobManager {
         }
     }
 
-    fn activity_notice_removed(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
-        if self.activity_notices.remove(&id).is_none() {
+    fn activity_notice_removed(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
+        if self.batch.activity_notices.remove(&id).is_none() {
             return;
         }
         if self.job(id).is_some_and(|job| !job.snapshot.is_active()) {
-            self.jobs.retain(|job| job.snapshot.id != id);
+            self.batch.records.retain(|job| job.snapshot.id != id);
             cx.notify();
         }
     }
 
-    fn publish_terminal_notification(
-        &mut self,
-        id: DocumentTranslationJobId,
-        cx: &mut Context<Self>,
-    ) {
+    fn publish_terminal_notification(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let Some(snapshot) = self.job(id).map(|job| job.snapshot.clone()) else {
             return;
         };
         self.remove_activity_notice(id, cx);
-        let task_id = self.background_tasks.remove(&id);
+        let task_id = self.batch.background_tasks.remove(&id);
         if let Some(center) = ActivityCenter::try_global(cx) {
             let notice = document_translation_activity_notice(&snapshot, cx.weak_entity());
             let notice_id = center.update(cx, |center, cx| match task_id {
                 Some(task_id) => center.finish_task(task_id, notice, cx),
                 None => center.add_notice(notice, cx),
             });
-            self.activity_notices.insert(id, notice_id);
+            self.batch.activity_notices.insert(id, notice_id);
         }
         cx.emit(DocumentTranslationJobEvent::ShowNotification { snapshot });
     }
 
-    fn notification_closed(&mut self, id: DocumentTranslationJobId, cx: &mut Context<Self>) {
+    fn notification_closed(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let Some(job) = self.job(id) else {
             return;
         };
-        if !job.snapshot.is_active() && !self.activity_notices.contains_key(&id) {
+        if !job.snapshot.is_active() && !self.batch.activity_notices.contains_key(&id) {
             self.remove_background_task(id, cx);
-            self.jobs.retain(|job| job.snapshot.id != id);
+            self.batch.records.retain(|job| job.snapshot.id != id);
             cx.notify();
         }
     }
 
     fn register_session_background_task(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         cx: &mut Context<Self>,
     ) {
-        if self.session_background_tasks.contains_key(&id) {
+        if self.live.background_tasks.contains_key(&id) {
             self.sync_session_background_task(id, cx);
             return;
         }
@@ -2260,15 +2337,11 @@ impl DocumentTranslationJobManager {
             })),
         );
         let task_id = center.update(cx, |center, cx| center.add_task(entry, cx));
-        self.session_background_tasks.insert(id, task_id);
+        self.live.background_tasks.insert(id, task_id);
     }
 
-    fn sync_session_background_task(
-        &mut self,
-        id: DocumentTranslationJobId,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(task_id) = self.session_background_tasks.get(&id).copied() else {
+    fn sync_session_background_task(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
+        let Some(task_id) = self.live.background_tasks.get(&id).copied() else {
             self.register_session_background_task(id, cx);
             return;
         };
@@ -2299,10 +2372,10 @@ impl DocumentTranslationJobManager {
 
     fn remove_session_background_task(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         cx: &mut Context<Self>,
     ) {
-        let Some(task_id) = self.session_background_tasks.remove(&id) else {
+        let Some(task_id) = self.live.background_tasks.remove(&id) else {
             return;
         };
         if let Some(center) = ActivityCenter::try_global(cx) {
@@ -2312,10 +2385,10 @@ impl DocumentTranslationJobManager {
 
     fn remove_session_activity_notice(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         cx: &mut Context<Self>,
     ) {
-        let Some(notice_id) = self.session_activity_notices.remove(&id) else {
+        let Some(notice_id) = self.live.activity_notices.remove(&id) else {
             return;
         };
         if let Some(center) = ActivityCenter::try_global(cx) {
@@ -2327,52 +2400,52 @@ impl DocumentTranslationJobManager {
 
     fn session_activity_notice_removed(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         cx: &mut Context<Self>,
     ) {
-        self.session_activity_notices.remove(&id);
+        self.live.activity_notices.remove(&id);
         let remove = self.session(id).is_some_and(|session| {
             session.snapshot.attached_views == 0 && !session.snapshot.is_translating()
         });
         if remove {
-            self.sessions.retain(|session| session.snapshot.id != id);
+            self.live
+                .records
+                .retain(|session| session.snapshot.id != id);
         }
         cx.notify();
     }
 
     fn publish_session_terminal_notification(
         &mut self,
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         cx: &mut Context<Self>,
     ) {
         let Some(snapshot) = self.session_snapshot(id) else {
             return;
         };
         self.remove_session_activity_notice(id, cx);
-        let task_id = self.session_background_tasks.remove(&id);
+        let task_id = self.live.background_tasks.remove(&id);
         if let Some(center) = ActivityCenter::try_global(cx) {
             let notice = document_translation_session_activity_notice(&snapshot, cx.weak_entity());
             let notice_id = center.update(cx, |center, cx| match task_id {
                 Some(task_id) => center.finish_task(task_id, notice, cx),
                 None => center.add_notice(notice, cx),
             });
-            self.session_activity_notices.insert(id, notice_id);
+            self.live.activity_notices.insert(id, notice_id);
         }
         cx.emit(DocumentTranslationJobEvent::ShowSessionNotification { snapshot });
     }
 
-    fn session_notification_closed(
-        &mut self,
-        id: DocumentTranslationJobId,
-        cx: &mut Context<Self>,
-    ) {
+    fn session_notification_closed(&mut self, id: DocumentTranslationId, cx: &mut Context<Self>) {
         let remove = self.session(id).is_some_and(|session| {
             session.snapshot.attached_views == 0
                 && !session.snapshot.is_translating()
-                && !self.session_activity_notices.contains_key(&id)
+                && !self.live.activity_notices.contains_key(&id)
         });
         if remove {
-            self.sessions.retain(|session| session.snapshot.id != id);
+            self.live
+                .records
+                .retain(|session| session.snapshot.id != id);
             cx.notify();
         }
     }
@@ -2380,7 +2453,7 @@ impl DocumentTranslationJobManager {
 
 fn document_translation_activity_notice(
     snapshot: &DocumentTranslationJobSnapshot,
-    manager: WeakEntity<DocumentTranslationJobManager>,
+    manager: WeakEntity<DocumentTranslationManager>,
 ) -> ActivityNoticeEntry {
     let id = snapshot.id;
     let level = match &snapshot.status {
@@ -2439,7 +2512,7 @@ fn document_translation_activity_notice(
 
 fn document_translation_session_activity_notice(
     snapshot: &DocumentTranslationSessionSnapshot,
-    manager: WeakEntity<DocumentTranslationJobManager>,
+    manager: WeakEntity<DocumentTranslationManager>,
 ) -> ActivityNoticeEntry {
     let id = snapshot.id;
     let level = match snapshot.status {
@@ -2504,7 +2577,7 @@ fn document_translation_session_activity_notice(
 /// Build the window notification for an in-memory translation session.
 pub fn document_translation_session_notification(
     snapshot: DocumentTranslationSessionSnapshot,
-    manager: WeakEntity<DocumentTranslationJobManager>,
+    manager: WeakEntity<DocumentTranslationManager>,
 ) -> Notification {
     let id = snapshot.id;
     let type_ = match snapshot.status {
@@ -2608,8 +2681,8 @@ enum SessionNotificationAction {
 }
 
 fn session_notification_button(
-    manager: WeakEntity<DocumentTranslationJobManager>,
-    id: DocumentTranslationJobId,
+    manager: WeakEntity<DocumentTranslationManager>,
+    id: DocumentTranslationId,
     action_id: &'static str,
     label: &'static str,
     action: SessionNotificationAction,
@@ -2640,7 +2713,7 @@ fn session_notification_button(
 /// translation result.
 pub fn document_translation_notification(
     snapshot: DocumentTranslationJobSnapshot,
-    manager: WeakEntity<DocumentTranslationJobManager>,
+    manager: WeakEntity<DocumentTranslationManager>,
 ) -> Notification {
     let id = snapshot.id;
     let type_ = match &snapshot.status {
@@ -2739,8 +2812,8 @@ pub fn document_translation_notification(
 }
 
 fn document_translation_action_button(
-    manager: WeakEntity<DocumentTranslationJobManager>,
-    id: DocumentTranslationJobId,
+    manager: WeakEntity<DocumentTranslationManager>,
+    id: DocumentTranslationId,
     open_mode: DocumentTranslationOpenMode,
     action: DocumentTranslationJobAction,
     open_error: bool,
@@ -3140,7 +3213,7 @@ mod tests {
     }
 
     fn record_job_events(
-        manager: &Entity<DocumentTranslationJobManager>,
+        manager: &Entity<DocumentTranslationManager>,
         cx: &mut TestAppContext,
     ) -> (
         Entity<JobEventRecorder>,
@@ -3181,7 +3254,7 @@ mod tests {
     }
 
     fn exporting_session_record(
-        id: DocumentTranslationJobId,
+        id: DocumentTranslationId,
         attached_views: usize,
         notify_when_finished: bool,
     ) -> DocumentTranslationSessionRecord {
@@ -3317,7 +3390,7 @@ mod tests {
         assert_eq!(entry.title, "Translate source.pdf");
     }
 
-    fn running_record(id: DocumentTranslationJobId) -> DocumentTranslationJobRecord {
+    fn running_record(id: DocumentTranslationId) -> DocumentTranslationJobRecord {
         DocumentTranslationJobRecord {
             snapshot: DocumentTranslationJobSnapshot {
                 id,
@@ -3340,7 +3413,7 @@ mod tests {
     fn preflight_errors_remain_until_activity_notice_is_dismissed(cx: &mut TestAppContext) {
         cx.update(glyphst_ui::activity::init);
         let center = cx.update(|cx| ActivityCenter::global(cx));
-        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let manager = cx.update(|cx| cx.new(DocumentTranslationManager::new));
         let (_recorder, events) = record_job_events(&manager, cx);
 
         let (id, notice_id) = manager.update(cx, |manager, cx| {
@@ -3351,7 +3424,7 @@ mod tests {
                 cx,
             );
 
-            assert_eq!(manager.jobs.len(), 1);
+            assert_eq!(manager.batch.records.len(), 1);
             manager.retry(id, cx);
             assert!(matches!(
                 manager.job(id).map(|job| &job.snapshot.status),
@@ -3362,10 +3435,10 @@ mod tests {
             ));
 
             manager.notification_closed(id, cx);
-            assert_eq!(manager.jobs.len(), 1);
+            assert_eq!(manager.batch.records.len(), 1);
             assert_eq!(center.read(cx).active_task_count(), 0);
             assert_eq!(center.read(cx).notice_count(), 1);
-            (id, manager.activity_notices[&id])
+            (id, manager.batch.activity_notices[&id])
         });
         center.update(cx, |center, cx| center.dismiss_notice(notice_id, cx));
         assert!(cx.update(|cx| manager.read(cx).job(id).is_none()));
@@ -3376,7 +3449,7 @@ mod tests {
     #[gpui::test]
     fn live_session_opens_only_for_split_modes(cx: &mut TestAppContext) {
         cx.update(glyphst_ui::activity::init);
-        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let manager = cx.update(|cx| cx.new(DocumentTranslationManager::new));
         let (_recorder, events) = record_job_events(&manager, cx);
         let request = PdfTranslationSessionRequest {
             source_path: "/tmp/source.pdf".into(),
@@ -3386,17 +3459,21 @@ mod tests {
 
         let (foreground, background) = manager.update(cx, |manager, cx| {
             let foreground = manager.submit_session(
-                Settings::default(),
-                request.clone(),
-                test_source_snapshot(),
-                DocumentTranslationMode::Auto,
+                LiveTranslationSubmission {
+                    settings: Settings::default(),
+                    request: request.clone(),
+                    source_snapshot: test_source_snapshot(),
+                    mode: DocumentTranslationMode::Auto,
+                },
                 cx,
             );
             let background = manager.submit_session(
-                Settings::default(),
-                request,
-                test_source_snapshot(),
-                DocumentTranslationMode::Background,
+                LiveTranslationSubmission {
+                    settings: Settings::default(),
+                    request,
+                    source_snapshot: test_source_snapshot(),
+                    mode: DocumentTranslationMode::Background,
+                },
                 cx,
             );
             (foreground, background)
@@ -3417,20 +3494,22 @@ mod tests {
     #[gpui::test]
     fn restored_session_without_cache_waits_paused_for_explicit_resume(cx: &mut TestAppContext) {
         cx.update(glyphst_ui::activity::init);
-        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let manager = cx.update(|cx| cx.new(DocumentTranslationManager::new));
         let (_recorder, events) = record_job_events(&manager, cx);
         let id = manager.update(cx, |manager, cx| {
             manager.restore_session(
-                Settings::default(),
-                PdfTranslationSessionRequest {
-                    source_path: "/tmp/source.pdf".into(),
-                    source_language: Some(LanguageCode::new("en").unwrap()),
-                    target_language: LanguageCode::new("zh-hans").unwrap(),
+                RestoredTranslationSubmission {
+                    settings: Settings::default(),
+                    request: PdfTranslationSessionRequest {
+                        source_path: "/tmp/source.pdf".into(),
+                        source_language: Some(LanguageCode::new("en").unwrap()),
+                        target_language: LanguageCode::new("zh-hans").unwrap(),
+                    },
+                    source_snapshot: test_source_snapshot(),
+                    mode: DocumentTranslationMode::Auto,
+                    cache_key: None,
+                    original_unit_ids: HashSet::from(["unit-1".to_string()]),
                 },
-                test_source_snapshot(),
-                DocumentTranslationMode::Auto,
-                None,
-                HashSet::from(["unit-1".to_string()]),
                 cx,
             )
         });
@@ -3447,7 +3526,7 @@ mod tests {
             ));
             assert!(session.can_resume());
             assert!(session.original_unit_ids.contains("unit-1"));
-            assert_eq!(manager.active_session_id, None);
+            assert_eq!(manager.live.active_id, None);
         });
         assert!(!events.borrow().iter().any(|event| matches!(
             event,
@@ -3459,13 +3538,13 @@ mod tests {
     fn progress_stays_in_activity_center_and_success_notifies_once(cx: &mut TestAppContext) {
         cx.update(glyphst_ui::activity::init);
         let center = cx.update(|cx| ActivityCenter::global(cx));
-        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let manager = cx.update(|cx| cx.new(DocumentTranslationManager::new));
         let (_recorder, events) = record_job_events(&manager, cx);
 
         manager.update(cx, |manager, cx| {
             let id = 13;
-            manager.jobs.push_back(running_record(id));
-            manager.active_job_id = Some(id);
+            manager.batch.records.push_back(running_record(id));
+            manager.batch.active_id = Some(id);
             manager.register_background_task(id, cx);
             manager.update_progress(
                 id,
@@ -3527,17 +3606,17 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         cx.update(glyphst_ui::activity::init);
-        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let manager = cx.update(|cx| cx.new(DocumentTranslationManager::new));
         let (_recorder, events) = record_job_events(&manager, cx);
 
         manager.update(cx, |manager, cx| {
             for (id, attached_views, notify_when_finished) in [(31, 1, false), (32, 0, true)] {
-                manager.sessions.push_back(exporting_session_record(
+                manager.live.records.push_back(exporting_session_record(
                     id,
                     attached_views,
                     notify_when_finished,
                 ));
-                manager.active_session_id = Some(id);
+                manager.live.active_id = Some(id);
                 manager.finish_session_export(
                     id,
                     Ok(PdfTranslationResult {
@@ -3568,7 +3647,7 @@ mod tests {
     #[gpui::test]
     fn failed_output_open_returns_to_terminal_notification(cx: &mut TestAppContext) {
         cx.update(glyphst_ui::activity::init);
-        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let manager = cx.update(|cx| cx.new(DocumentTranslationManager::new));
         let (_recorder, events) = record_job_events(&manager, cx);
 
         manager.update(cx, |manager, cx| {
@@ -3579,7 +3658,7 @@ mod tests {
                 open_error: None,
                 warnings: Vec::new(),
             };
-            manager.jobs.push_back(record);
+            manager.batch.records.push_back(record);
 
             manager.publish_terminal_notification(id, cx);
             assert_eq!(ActivityCenter::global(cx).read(cx).notice_count(), 1);
@@ -3607,14 +3686,14 @@ mod tests {
     fn queued_cancellation_removes_job_without_notification(cx: &mut TestAppContext) {
         cx.update(glyphst_ui::activity::init);
         let center = cx.update(|cx| ActivityCenter::global(cx));
-        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let manager = cx.update(|cx| cx.new(DocumentTranslationManager::new));
         let (_recorder, events) = record_job_events(&manager, cx);
 
         manager.update(cx, |manager, cx| {
             let id = 19;
             let mut record = running_record(id);
             record.snapshot.status = DocumentTranslationJobStatus::Queued;
-            manager.jobs.push_back(record);
+            manager.batch.records.push_back(record);
             manager.register_background_task(id, cx);
 
             manager.cancel(id, cx);
@@ -3630,13 +3709,13 @@ mod tests {
     fn running_cancellation_finishes_silently(cx: &mut TestAppContext) {
         cx.update(glyphst_ui::activity::init);
         let center = cx.update(|cx| ActivityCenter::global(cx));
-        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let manager = cx.update(|cx| cx.new(DocumentTranslationManager::new));
         let (_recorder, events) = record_job_events(&manager, cx);
 
         manager.update(cx, |manager, cx| {
             let id = 21;
-            manager.jobs.push_back(running_record(id));
-            manager.active_job_id = Some(id);
+            manager.batch.records.push_back(running_record(id));
+            manager.batch.active_id = Some(id);
             manager.register_background_task(id, cx);
 
             manager.cancel(id, cx);
@@ -3715,7 +3794,7 @@ mod tests {
 
     #[gpui::test]
     fn copy_error_uses_detailed_failure_message(cx: &mut TestAppContext) {
-        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let manager = cx.update(|cx| cx.new(DocumentTranslationManager::new));
 
         manager.update(cx, |manager, cx| {
             let id = 22;
@@ -3726,7 +3805,7 @@ mod tests {
                 detailed_message: "unit-p015-b0002 · page 15 · source excerpt".into(),
                 retryable: true,
             };
-            manager.jobs.push_back(record);
+            manager.batch.records.push_back(record);
             manager.copy_error(id, cx);
         });
 
@@ -3745,7 +3824,7 @@ mod tests {
                 glyphst_settings::TranslationTargetLanguage::Explicit("de".to_string());
             cx.set_global(settings);
         });
-        let manager = cx.update(|cx| cx.new(DocumentTranslationJobManager::new));
+        let manager = cx.update(|cx| cx.new(DocumentTranslationManager::new));
 
         manager.update(cx, |manager, cx| {
             let id = 23;
@@ -3756,7 +3835,7 @@ mod tests {
                 detailed_message: "temporary failure".into(),
                 retryable: true,
             };
-            manager.jobs.push_back(record);
+            manager.batch.records.push_back(record);
 
             manager.retry(id, cx);
 

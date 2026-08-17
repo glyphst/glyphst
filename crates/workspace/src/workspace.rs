@@ -8,10 +8,10 @@ use anyhow::Result;
 use glyphst_ai_ui::{AiContextProvider as _, AiPanel, AiPanelEvent};
 use glyphst_translation_ui::service::LanguageCode;
 use glyphst_translation_ui::{
-    DocumentTranslationJobEvent, DocumentTranslationJobId, DocumentTranslationJobManager,
+    DocumentTranslationId, DocumentTranslationJobEvent, DocumentTranslationManager,
     DocumentTranslationNotification, DocumentTranslationSessionNotification,
-    PdfTranslationSessionCacheKey, PdfTranslationSessionRequest, document_translation_notification,
-    document_translation_session_notification,
+    PdfTranslationSessionCacheKey, PdfTranslationSessionRequest, RestoredTranslationSubmission,
+    document_translation_notification, document_translation_session_notification,
 };
 use glyphst_ui::{
     activity::ActivityCenter,
@@ -85,6 +85,22 @@ pub enum WorkspaceSurfaceMode {
     Panes,
 }
 
+struct WorkspaceTranslationState {
+    manager: Entity<DocumentTranslationManager>,
+    pending_splits: Vec<PendingTranslationSplit>,
+    live_pairs: HashMap<DocumentTranslationId, LiveTranslationPair>,
+}
+
+#[derive(Default)]
+struct WorkspaceRestoreState {
+    tab_ids: HashMap<u64, (EntityId, EntityId)>,
+    pending_documents: usize,
+    dock_document_tab: Option<u64>,
+    synchronized_groups: Vec<ReaderSynchronizedGroup>,
+    translation_sessions: Vec<ReaderTranslationSession>,
+    missing_documents: usize,
+}
+
 pub struct Workspace {
     pane_group: PaneGroup,
     active_pane: Entity<Pane>,
@@ -95,9 +111,7 @@ pub struct Workspace {
     callbacks: WorkspaceCallbacks,
     window_close_handler: Option<fn(&Entity<Workspace>, &mut Window, &mut App)>,
     focus_handle: FocusHandle,
-    document_translation_jobs: Entity<DocumentTranslationJobManager>,
-    pending_translation_splits: Vec<PendingTranslationSplit>,
-    live_translation_pairs: HashMap<DocumentTranslationJobId, LiveTranslationPair>,
+    translations: WorkspaceTranslationState,
     command_palette: Option<Entity<CommandPalette>>,
     command_palette_previous_focus_handle: Option<FocusHandle>,
     document_browser: Option<Entity<DocumentBrowser>>,
@@ -110,12 +124,7 @@ pub struct Workspace {
     dragged_tab_outside_window: Option<DraggedTab>,
     external_document_drop_feedback: Option<ExternalDocumentDropFeedback>,
     synchronized_tabs: SynchronizedTabRegistry,
-    restored_tab_ids: HashMap<u64, (EntityId, EntityId)>,
-    pending_restored_documents: usize,
-    pending_dock_document_tab: Option<u64>,
-    pending_synchronized_groups: Vec<ReaderSynchronizedGroup>,
-    pending_restored_translation_sessions: Vec<ReaderTranslationSession>,
-    restored_missing_documents: usize,
+    restore: WorkspaceRestoreState,
     synchronized_connection: Option<SynchronizedConnection>,
     fading_synchronized_connection: Option<FadingSynchronizedConnection>,
     document_context_mru: Vec<EntityId>,
@@ -197,7 +206,7 @@ const SYNCHRONIZED_HANDLE_OUTLINE_DIAMETER: f32 = 9.0;
 pub type WorkspaceWindowHandle = glyphst_ui::root::RootWindowHandle<Workspace>;
 
 struct PendingTranslationSplit {
-    job_id: DocumentTranslationJobId,
+    job_id: DocumentTranslationId,
     stage: PendingTranslationSplitStage,
 }
 
@@ -258,7 +267,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let document_translation_jobs = cx.new(DocumentTranslationJobManager::new);
+        let document_translation_jobs = cx.new(DocumentTranslationManager::new);
         let jobs = document_translation_jobs.clone();
         let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs));
         let mut workspace = Self::with_pane(
@@ -290,7 +299,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let document_translation_jobs = cx.new(DocumentTranslationJobManager::new);
+        let document_translation_jobs = cx.new(DocumentTranslationManager::new);
         let jobs = document_translation_jobs.clone();
         let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs));
         Self::with_pane(pane, document_translation_jobs, callbacks, window, cx)
@@ -302,7 +311,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let document_translation_jobs = cx.new(DocumentTranslationJobManager::new);
+        let document_translation_jobs = cx.new(DocumentTranslationManager::new);
         let restored = PaneGroup::restore(
             &session.pane_tree,
             document_translation_jobs.clone(),
@@ -335,16 +344,16 @@ impl Workspace {
         {
             workspace.subscribe_to_pane(pane, window, cx);
         }
-        workspace.restored_tab_ids = restored
+        workspace.restore.tab_ids = restored
             .tab_ids
             .into_iter()
             .map(|(session_id, tab_id, pane_id)| (session_id, (tab_id, pane_id)))
             .collect();
-        workspace.pending_restored_documents = restored.pending_documents;
-        workspace.pending_dock_document_tab = session.dock_document_tab;
-        workspace.pending_synchronized_groups = session.synchronized_groups;
-        workspace.pending_restored_translation_sessions = session.translation_sessions;
-        workspace.restored_missing_documents = restored.missing_documents;
+        workspace.restore.pending_documents = restored.pending_documents;
+        workspace.restore.dock_document_tab = session.dock_document_tab;
+        workspace.restore.synchronized_groups = session.synchronized_groups;
+        workspace.restore.translation_sessions = session.translation_sessions;
+        workspace.restore.missing_documents = restored.missing_documents;
         workspace.docks.left_sidebar = session.left_sidebar.map(|sidebar| match sidebar {
             ReaderSidebar::Thumbnails => DocumentSidebar::Thumbnails,
             ReaderSidebar::TableOfContents => DocumentSidebar::Toc,
@@ -357,7 +366,7 @@ impl Workspace {
             workspace.window_settings,
             workspace.transparency_enabled,
         );
-        if workspace.pending_restored_documents == 0 {
+        if workspace.restore.pending_documents == 0 {
             workspace.finish_reader_session_restore(window, cx);
         }
         workspace.sync_tab_bar_visibility(cx);
@@ -367,7 +376,7 @@ impl Workspace {
 
     fn with_pane(
         pane: Entity<Pane>,
-        document_translation_jobs: Entity<DocumentTranslationJobManager>,
+        document_translation_jobs: Entity<DocumentTranslationManager>,
         callbacks: WorkspaceCallbacks,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -407,9 +416,11 @@ impl Workspace {
             callbacks,
             window_close_handler: None,
             focus_handle,
-            document_translation_jobs: document_translation_jobs.clone(),
-            pending_translation_splits: Vec::new(),
-            live_translation_pairs: HashMap::new(),
+            translations: WorkspaceTranslationState {
+                manager: document_translation_jobs.clone(),
+                pending_splits: Vec::new(),
+                live_pairs: HashMap::new(),
+            },
             command_palette: None,
             command_palette_previous_focus_handle: None,
             document_browser: None,
@@ -422,12 +433,7 @@ impl Workspace {
             dragged_tab_outside_window: None,
             external_document_drop_feedback: None,
             synchronized_tabs: SynchronizedTabRegistry::default(),
-            restored_tab_ids: HashMap::new(),
-            pending_restored_documents: 0,
-            pending_dock_document_tab: None,
-            pending_synchronized_groups: Vec::new(),
-            pending_restored_translation_sessions: Vec::new(),
-            restored_missing_documents: 0,
+            restore: WorkspaceRestoreState::default(),
             synchronized_connection: None,
             fading_synchronized_connection: None,
             document_context_mru: Vec::new(),
@@ -495,7 +501,7 @@ impl Workspace {
                                 window,
                                 cx,
                             ) {
-                                this.document_translation_jobs.update(cx, |jobs, cx| {
+                                this.translations.manager.update(cx, |jobs, cx| {
                                     jobs.finish_open(id, Err(format!("{error:#}").into()), cx);
                                 });
                             }
@@ -520,7 +526,7 @@ impl Workspace {
                                 window,
                                 cx,
                             ) {
-                                this.document_translation_jobs.update(cx, |jobs, cx| {
+                                this.translations.manager.update(cx, |jobs, cx| {
                                     jobs.finish_open(id, Err(format!("{error:#}").into()), cx);
                                 });
                             }
@@ -535,7 +541,7 @@ impl Workspace {
                             window.push_notification(
                                 document_translation_notification(
                                     snapshot,
-                                    this.document_translation_jobs.downgrade(),
+                                    this.translations.manager.downgrade(),
                                 ),
                                 cx,
                             );
@@ -561,7 +567,7 @@ impl Workspace {
                                 this.open_translation_session(id, &source_path, window, cx)
                             {
                                 eprintln!("failed to open live translation split: {error:#}");
-                                this.document_translation_jobs.update(cx, |manager, cx| {
+                                this.translations.manager.update(cx, |manager, cx| {
                                     manager.set_session_backgrounded(id, cx);
                                 });
                             }
@@ -604,7 +610,7 @@ impl Workspace {
                             window.push_notification(
                                 document_translation_session_notification(
                                     snapshot,
-                                    this.document_translation_jobs.downgrade(),
+                                    this.translations.manager.downgrade(),
                                 ),
                                 cx,
                             );
@@ -782,7 +788,7 @@ impl Workspace {
     }
 
     pub fn reader_session_restore_pending(&self) -> bool {
-        self.pending_restored_documents > 0
+        self.restore.pending_documents > 0
     }
 
     /// Install host-specific work that must run before the custom Linux title
@@ -795,7 +801,7 @@ impl Workspace {
     }
 
     pub fn restored_missing_document_count(&self) -> usize {
-        self.restored_missing_documents
+        self.restore.missing_documents
     }
 
     pub fn reader_window_session(
@@ -812,13 +818,15 @@ impl Workspace {
         };
         let bounds = window_bounds.get_bounds();
         let mut translation_sessions = self
-            .live_translation_pairs
+            .translations
+            .live_pairs
             .iter()
             .filter_map(|(session_id, pair)| {
                 let source_tab = panes.runtime_tab_ids.get(&pair.source_id).copied()?;
                 let translated_tab = panes.runtime_tab_ids.get(&pair.translated_id).copied()?;
                 let snapshot = self
-                    .document_translation_jobs
+                    .translations
+                    .manager
                     .read(cx)
                     .session_snapshot(*session_id)?;
                 let mut original_unit_ids = snapshot
@@ -879,13 +887,13 @@ impl Workspace {
     }
 
     fn finish_reader_session_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let groups = std::mem::take(&mut self.pending_synchronized_groups);
+        let groups = std::mem::take(&mut self.restore.synchronized_groups);
         for group in groups {
             let members = group
                 .tabs
                 .iter()
                 .filter_map(|session_id| {
-                    let (tab_id, pane_id) = self.restored_tab_ids.get(session_id).copied()?;
+                    let (tab_id, pane_id) = self.restore.tab_ids.get(session_id).copied()?;
                     let is_document = self
                         .pane_group
                         .panes()
@@ -913,20 +921,20 @@ impl Workspace {
                 self.synchronized_tabs.add_member(group_id, tab_id, pane_id);
             }
             for paused_session_id in &group.paused_tabs {
-                if let Some((tab_id, _)) = self.restored_tab_ids.get(paused_session_id) {
+                if let Some((tab_id, _)) = self.restore.tab_ids.get(paused_session_id) {
                     self.synchronized_tabs.set_paused(*tab_id, true);
                 }
             }
         }
-        let translation_sessions = std::mem::take(&mut self.pending_restored_translation_sessions);
+        let translation_sessions = std::mem::take(&mut self.restore.translation_sessions);
         for session in translation_sessions {
             let Some((source_tab_id, source_pane_id)) =
-                self.restored_tab_ids.get(&session.source_tab).copied()
+                self.restore.tab_ids.get(&session.source_tab).copied()
             else {
                 continue;
             };
             let Some((translated_tab_id, translated_pane_id)) =
-                self.restored_tab_ids.get(&session.translated_tab).copied()
+                self.restore.tab_ids.get(&session.translated_tab).copied()
             else {
                 continue;
             };
@@ -981,14 +989,16 @@ impl Workspace {
             };
             let source_snapshot = source.read(cx).document_snapshot();
             let settings = cx.global::<SettingsStore>().settings.clone();
-            let session_id = self.document_translation_jobs.update(cx, |manager, cx| {
+            let session_id = self.translations.manager.update(cx, |manager, cx| {
                 manager.restore_session(
-                    settings,
-                    request,
-                    source_snapshot,
-                    mode,
-                    cache_key,
-                    session.original_unit_ids.into_iter().collect(),
+                    RestoredTranslationSubmission {
+                        settings,
+                        request,
+                        source_snapshot,
+                        mode,
+                        cache_key,
+                        original_unit_ids: session.original_unit_ids.into_iter().collect(),
+                    },
                     cx,
                 )
             });
@@ -1016,8 +1026,8 @@ impl Workspace {
             }
             self.register_live_translation_pair(session_id, source, translated, window, cx);
         }
-        if let Some(session_tab_id) = self.pending_dock_document_tab.take()
-            && let Some((tab_id, _)) = self.restored_tab_ids.get(&session_tab_id).copied()
+        if let Some(session_tab_id) = self.restore.dock_document_tab.take()
+            && let Some((tab_id, _)) = self.restore.tab_ids.get(&session_tab_id).copied()
             && self.document_target_for_id(tab_id, cx).is_some()
         {
             self.document_context_mru
@@ -1028,7 +1038,7 @@ impl Workspace {
             self.record_document_context(&active_pane, cx);
         }
         self.prune_document_context(cx);
-        self.restored_tab_ids.clear();
+        self.restore.tab_ids.clear();
         self.refresh_synchronized_tab_presentation(cx);
         cx.notify();
     }
@@ -1088,7 +1098,7 @@ impl Workspace {
                 }
                 PaneEvent::DocumentOpenFinished { job_id, result } => {
                     if !this.continue_translation_split_open(*job_id, result.clone(), window, cx) {
-                        this.document_translation_jobs.update(cx, |jobs, cx| {
+                        this.translations.manager.update(cx, |jobs, cx| {
                             jobs.finish_open(*job_id, result.clone(), cx);
                         });
                     }
@@ -1098,16 +1108,16 @@ impl Workspace {
                     document_tab_id,
                 } => {
                     if let Some(document_tab_id) = document_tab_id {
-                        this.restored_tab_ids.insert(
+                        this.restore.tab_ids.insert(
                             *session_tab_id,
                             (*document_tab_id, pane_for_events.entity_id()),
                         );
                     } else {
-                        this.restored_tab_ids.remove(session_tab_id);
+                        this.restore.tab_ids.remove(session_tab_id);
                     }
-                    this.pending_restored_documents =
-                        this.pending_restored_documents.saturating_sub(1);
-                    if this.pending_restored_documents == 0 {
+                    this.restore.pending_documents =
+                        this.restore.pending_documents.saturating_sub(1);
+                    if this.restore.pending_documents == 0 {
                         this.finish_reader_session_restore(window, cx);
                     } else {
                         cx.notify();
@@ -1653,7 +1663,8 @@ impl Workspace {
         }
         self.repair_synchronized_connection_edges(cx);
         let pause_locked_tabs = self
-            .live_translation_pairs
+            .translations
+            .live_pairs
             .values()
             .flat_map(|pair| [pair.source_id, pair.translated_id])
             .collect::<HashSet<_>>();
@@ -1882,8 +1893,9 @@ impl Workspace {
     fn live_translation_pair_for_tab(
         &self,
         tab_id: EntityId,
-    ) -> Option<(DocumentTranslationJobId, EntityId, EntityId)> {
-        self.live_translation_pairs
+    ) -> Option<(DocumentTranslationId, EntityId, EntityId)> {
+        self.translations
+            .live_pairs
             .iter()
             .find_map(|(session_id, pair)| {
                 (pair.source_id == tab_id || pair.translated_id == tab_id).then_some((
@@ -1925,7 +1937,7 @@ impl Workspace {
 
     fn synchronize_live_translation_viewport_anchor(
         &self,
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         changed_tab: EntityId,
         anchor: TranslationViewportAnchor,
         cx: &mut Context<Self>,
@@ -2546,7 +2558,7 @@ impl Workspace {
     }
 
     fn create_empty_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Pane> {
-        let document_translation_jobs = self.document_translation_jobs.clone();
+        let document_translation_jobs = self.translations.manager.clone();
         let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), document_translation_jobs));
         self.subscribe_to_pane(&pane, window, cx);
         pane
@@ -2710,7 +2722,7 @@ impl Workspace {
         path: PathBuf,
         position: Option<DocumentPosition>,
         replace_active_new_tab: bool,
-        job_id: DocumentTranslationJobId,
+        job_id: DocumentTranslationId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
@@ -2842,10 +2854,11 @@ impl Workspace {
                     }
                     _ = this.update_in(cx, |this, window, cx| {
                         if choice == 0 {
-                            this.document_translation_jobs
+                            this.translations
+                                .manager
                                 .update(cx, |manager, cx| manager.discard_session(session_id, cx));
                         } else {
-                            this.document_translation_jobs.update(cx, |manager, cx| {
+                            this.translations.manager.update(cx, |manager, cx| {
                                 manager.set_session_backgrounded(session_id, cx)
                             });
                         }
@@ -2858,7 +2871,8 @@ impl Workspace {
                 .detach();
                 return;
             }
-            self.document_translation_jobs
+            self.translations
+                .manager
                 .update(cx, |manager, cx| manager.discard_session(session_id, cx));
             self.unregister_live_translation_pair(session_id, cx);
         }
@@ -2971,7 +2985,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let mut cancelled = Vec::new();
-        self.pending_translation_splits.retain(|pending| {
+        self.translations.pending_splits.retain(|pending| {
             let matches = match &pending.stage {
                 PendingTranslationSplitStage::OpeningSource { source_pane, .. } => {
                     source_pane == pane
@@ -2986,7 +3000,7 @@ impl Workspace {
             !matches
         });
         for job_id in cancelled {
-            self.document_translation_jobs.update(cx, |jobs, cx| {
+            self.translations.manager.update(cx, |jobs, cx| {
                 jobs.finish_open(
                     job_id,
                     Err("Opening the translated document was cancelled.".into()),
@@ -3032,7 +3046,7 @@ impl Workspace {
 
     fn open_translation_session(
         &mut self,
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         source_path: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -3051,7 +3065,8 @@ impl Workspace {
             return Err(anyhow::anyhow!("translation source is still opening"));
         };
         let snapshot = self
-            .document_translation_jobs
+            .translations
+            .manager
             .read(cx)
             .session_snapshot(session_id)
             .ok_or_else(|| anyhow::anyhow!("translation session is no longer available"))?;
@@ -3101,12 +3116,13 @@ impl Workspace {
 
     fn save_translation_session(
         &mut self,
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(snapshot) = self
-            .document_translation_jobs
+            .translations
+            .manager
             .read(cx)
             .session_snapshot(session_id)
         else {
@@ -3144,11 +3160,12 @@ impl Workspace {
 
     fn choose_translation_export_path(
         &mut self,
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         cx: &mut Context<Self>,
     ) {
         let Some(snapshot) = self
-            .document_translation_jobs
+            .translations
+            .manager
             .read(cx)
             .session_snapshot(session_id)
         else {
@@ -3166,7 +3183,7 @@ impl Workspace {
             .map(Path::to_path_buf)
             .unwrap_or_default();
         let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
-        let manager = self.document_translation_jobs.clone();
+        let manager = self.translations.manager.clone();
         cx.spawn(async move |_, cx| match dialog.await {
             Ok(Ok(Some(output_path))) => {
                 manager.update(cx, |manager, cx| {
@@ -3183,7 +3200,7 @@ impl Workspace {
 
     fn begin_translation_split_open(
         &mut self,
-        job_id: DocumentTranslationJobId,
+        job_id: DocumentTranslationId,
         source_path: PathBuf,
         translated_path: PathBuf,
         window: &mut Window,
@@ -3211,7 +3228,8 @@ impl Workspace {
         }
 
         let source_pane = self.active_pane.clone();
-        self.pending_translation_splits
+        self.translations
+            .pending_splits
             .push(PendingTranslationSplit {
                 job_id,
                 stage: PendingTranslationSplitStage::OpeningSource {
@@ -3231,7 +3249,8 @@ impl Workspace {
                 cx,
             )
         }) {
-            self.pending_translation_splits
+            self.translations
+                .pending_splits
                 .retain(|pending| pending.job_id != job_id);
             return Err(error);
         }
@@ -3240,7 +3259,7 @@ impl Workspace {
 
     fn start_translated_split_open(
         &mut self,
-        job_id: DocumentTranslationJobId,
+        job_id: DocumentTranslationId,
         original: Entity<DocumentView>,
         translated_path: PathBuf,
         source_pane: Entity<Pane>,
@@ -3255,7 +3274,8 @@ impl Workspace {
         self.sync_tab_bar_visibility(cx);
 
         let position = original.read(cx).current_document_position();
-        self.pending_translation_splits
+        self.translations
+            .pending_splits
             .push(PendingTranslationSplit {
                 job_id,
                 stage: PendingTranslationSplitStage::OpeningTranslated {
@@ -3273,7 +3293,8 @@ impl Workspace {
                 cx,
             )
         }) {
-            self.pending_translation_splits
+            self.translations
+                .pending_splits
                 .retain(|pending| pending.job_id != job_id);
             self.remove_pane(&translated_pane, window, cx);
             return Err(error);
@@ -3284,19 +3305,20 @@ impl Workspace {
 
     fn continue_translation_split_open(
         &mut self,
-        job_id: DocumentTranslationJobId,
+        job_id: DocumentTranslationId,
         result: std::result::Result<(), SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(index) = self
-            .pending_translation_splits
+            .translations
+            .pending_splits
             .iter()
             .position(|pending| pending.job_id == job_id)
         else {
             return false;
         };
-        let pending = self.pending_translation_splits.remove(index);
+        let pending = self.translations.pending_splits.remove(index);
         if let Err(error) = result {
             if let PendingTranslationSplitStage::OpeningTranslated {
                 translated_pane, ..
@@ -3304,7 +3326,7 @@ impl Workspace {
             {
                 self.remove_pane(&translated_pane, window, cx);
             }
-            self.document_translation_jobs.update(cx, |jobs, cx| {
+            self.translations.manager.update(cx, |jobs, cx| {
                 jobs.finish_open(job_id, Err(error), cx);
             });
             return true;
@@ -3339,7 +3361,7 @@ impl Workspace {
                         )
                     });
                 if let Err(error) = result {
-                    self.document_translation_jobs.update(cx, |jobs, cx| {
+                    self.translations.manager.update(cx, |jobs, cx| {
                         jobs.finish_open(job_id, Err(format!("{error:#}").into()), cx);
                     });
                 }
@@ -3350,7 +3372,7 @@ impl Workspace {
             } => {
                 let Some(translated) = translated_pane.read(cx).active_document_view() else {
                     self.remove_pane(&translated_pane, window, cx);
-                    self.document_translation_jobs.update(cx, |jobs, cx| {
+                    self.translations.manager.update(cx, |jobs, cx| {
                         jobs.finish_open(
                             job_id,
                             Err("translated document did not finish opening".into()),
@@ -3373,7 +3395,7 @@ impl Workspace {
                     );
                 }
                 translated_pane.update(cx, |pane, cx| pane.focus(window, cx));
-                self.document_translation_jobs.update(cx, |jobs, cx| {
+                self.translations.manager.update(cx, |jobs, cx| {
                     jobs.finish_open(job_id, Ok(()), cx);
                 });
                 self.refresh_synchronized_tab_presentation(cx);
@@ -3385,7 +3407,7 @@ impl Workspace {
 
     fn register_live_translation_pair(
         &mut self,
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         original: Entity<DocumentView>,
         translated: Entity<DocumentView>,
         window: &mut Window,
@@ -3394,7 +3416,8 @@ impl Workspace {
         let source_id = original.entity_id();
         let translated_id = translated.entity_id();
         let conflicts = self
-            .live_translation_pairs
+            .translations
+            .live_pairs
             .iter()
             .filter_map(|(id, pair)| {
                 (*id != session_id
@@ -3408,7 +3431,7 @@ impl Workspace {
         for conflict in conflicts {
             self.unregister_live_translation_pair(conflict, cx);
         }
-        if self.live_translation_pairs.contains_key(&session_id) {
+        if self.translations.live_pairs.contains_key(&session_id) {
             self.unregister_live_translation_pair(session_id, cx);
         }
 
@@ -3480,7 +3503,7 @@ impl Workspace {
         )
         .detach();
 
-        self.live_translation_pairs.insert(
+        self.translations.live_pairs.insert(
             session_id,
             LiveTranslationPair {
                 source_id,
@@ -3503,10 +3526,10 @@ impl Workspace {
 
     fn unregister_live_translation_pair(
         &mut self,
-        session_id: DocumentTranslationJobId,
+        session_id: DocumentTranslationId,
         cx: &mut Context<Self>,
     ) {
-        if let Some(pair) = self.live_translation_pairs.remove(&session_id) {
+        if let Some(pair) = self.translations.live_pairs.remove(&session_id) {
             if let Some(source) = pair.source.upgrade() {
                 source.update(cx, |view, cx| {
                     view.set_translation_pair_active(session_id, false, cx);
@@ -3539,7 +3562,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let session_ids = self
-            .live_translation_pairs
+            .translations
+            .live_pairs
             .iter()
             .filter_map(|(session_id, pair)| {
                 (pair.source_id == tab_id || pair.translated_id == tab_id).then_some(*session_id)
@@ -3551,7 +3575,7 @@ impl Workspace {
     }
 
     fn refresh_live_translation_pair_activity(&mut self, cx: &mut Context<Self>) {
-        if self.live_translation_pairs.is_empty() {
+        if self.translations.live_pairs.is_empty() {
             return;
         }
         let active_tabs = self
@@ -3565,7 +3589,8 @@ impl Workspace {
             })
             .collect::<HashSet<_>>();
         let stale = self
-            .live_translation_pairs
+            .translations
+            .live_pairs
             .iter()
             .filter_map(|(session_id, pair)| {
                 (pair.source.upgrade().is_none() || pair.translated.upgrade().is_none())
@@ -3577,7 +3602,7 @@ impl Workspace {
         }
 
         let mut updates = Vec::new();
-        for (session_id, pair) in &mut self.live_translation_pairs {
+        for (session_id, pair) in &mut self.translations.live_pairs {
             let active =
                 live_translation_pair_is_active(pair.source_id, pair.translated_id, &active_tabs);
             if pair.active == active {
@@ -3734,7 +3759,7 @@ impl Workspace {
 
     fn dispose_translation_sessions_for_close(
         &mut self,
-        sessions: &[(DocumentTranslationJobId, bool)],
+        sessions: &[(DocumentTranslationId, bool)],
         keep_running_in_background: bool,
         cx: &mut Context<Self>,
     ) {
@@ -3743,7 +3768,7 @@ impl Workspace {
             if !seen.insert(session_id) {
                 continue;
             }
-            self.document_translation_jobs.update(cx, |manager, cx| {
+            self.translations.manager.update(cx, |manager, cx| {
                 if running && keep_running_in_background {
                     manager.set_session_backgrounded(session_id, cx);
                 } else {
@@ -5920,7 +5945,7 @@ mod tests {
 
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.reader_session_restore_pending());
-            assert!(workspace.live_translation_pairs.is_empty());
+            assert!(workspace.translations.live_pairs.is_empty());
             assert!(
                 workspace
                     .pane_group
@@ -5944,7 +5969,7 @@ mod tests {
         cx.run_until_parked();
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.reader_session_restore_pending());
-            assert!(workspace.live_translation_pairs.is_empty());
+            assert!(workspace.translations.live_pairs.is_empty());
             assert!(
                 workspace
                     .pane_group
@@ -5971,13 +5996,13 @@ mod tests {
 
         workspace.read_with(cx, |workspace, cx| {
             assert!(!workspace.reader_session_restore_pending());
-            assert_eq!(workspace.live_translation_pairs.len(), 1);
+            assert_eq!(workspace.translations.live_pairs.len(), 1);
             let panes = workspace.pane_group.panes();
             let source = panes[0].read(cx).document_views()[0].clone();
             let translated = panes[1].read(cx).document_views()[0].clone();
             assert!(source.read(cx).is_password_protected());
             assert!(translated.read(cx).is_password_protected());
-            let (&session_id, pair) = workspace.live_translation_pairs.iter().next().unwrap();
+            let (&session_id, pair) = workspace.translations.live_pairs.iter().next().unwrap();
             assert_eq!(pair.source_id, source.entity_id());
             assert_eq!(pair.translated_id, translated.entity_id());
             assert_eq!(
@@ -6056,7 +6081,7 @@ mod tests {
 
         workspace.read_with(cx, |workspace, cx| {
             assert!(!workspace.reader_session_restore_pending());
-            assert_eq!(workspace.live_translation_pairs.len(), 1);
+            assert_eq!(workspace.translations.live_pairs.len(), 1);
             assert!(
                 workspace.pane_group.panes().iter().all(|pane| pane
                     .read(cx)
@@ -6185,8 +6210,8 @@ mod tests {
             );
             assert!(right.synchronized_pause_locked(right_views[0].entity_id()));
             assert!(left.synchronized_pause_locked(left_views[1].entity_id()));
-            assert_eq!(workspace.live_translation_pairs.len(), 1);
-            let (&session_id, pair) = workspace.live_translation_pairs.iter().next().unwrap();
+            assert_eq!(workspace.translations.live_pairs.len(), 1);
+            let (&session_id, pair) = workspace.translations.live_pairs.iter().next().unwrap();
             assert_eq!(pair.source_id, left_views[1].entity_id());
             assert_eq!(pair.translated_id, right_views[0].entity_id());
             assert_eq!(
@@ -6195,7 +6220,8 @@ mod tests {
             );
             assert_eq!(left_views[1].read(cx).translation_session_id(), None);
             let translation = workspace
-                .document_translation_jobs
+                .translations
+                .manager
                 .read(cx)
                 .session_snapshot(session_id)
                 .unwrap();
@@ -6231,7 +6257,7 @@ mod tests {
         });
 
         let (source, translated) = workspace.read_with(cx, |workspace, _| {
-            let pair = workspace.live_translation_pairs.values().next().unwrap();
+            let pair = workspace.translations.live_pairs.values().next().unwrap();
             (
                 pair.source.upgrade().unwrap(),
                 pair.translated.upgrade().unwrap(),
@@ -6356,7 +6382,7 @@ mod tests {
 
         let (source, translated, translated_pane, translated_id, before) =
             workspace.update_in(cx, |workspace, window, cx| {
-                let pair = workspace.live_translation_pairs.values().next().unwrap();
+                let pair = workspace.translations.live_pairs.values().next().unwrap();
                 let source = pair.source.upgrade().unwrap();
                 let translated = pair.translated.upgrade().unwrap();
                 let translated_id = translated.entity_id();
@@ -7609,7 +7635,7 @@ mod tests {
         });
 
         workspace.update_in(cx, |workspace, _, cx| {
-            workspace.document_translation_jobs.update(cx, |jobs, cx| {
+            workspace.translations.manager.update(cx, |jobs, cx| {
                 jobs.report_preflight_error(
                     "/tmp/source.pdf".into(),
                     DocumentTranslationOpenMode::Document,

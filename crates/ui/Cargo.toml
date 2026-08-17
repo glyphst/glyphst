@@ -3,6 +3,9 @@ name = "glyphst-ui"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 glyphst-actions = { path = "../actions" }

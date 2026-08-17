@@ -927,13 +927,16 @@ fn translation_panel_wall_geometry_is_symmetric_and_delayed() {
 
 #[test]
 fn root_notifications_are_above_translation_overlays() {
-    assert!(TRANSLATION_PANEL_POPOVER_PRIORITY > TRANSLATION_PANEL_OVERLAY_PRIORITY);
-    assert!(glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY > TRANSLATION_PANEL_POPOVER_PRIORITY);
-    assert!(glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY > TRANSLATION_PANEL_OVERLAY_PRIORITY);
-    assert!(
-        glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY > TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY
-    );
-    assert!(TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY > glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY);
+    let popover = std::hint::black_box(TRANSLATION_PANEL_POPOVER_PRIORITY);
+    let overlay = std::hint::black_box(TRANSLATION_PANEL_OVERLAY_PRIORITY);
+    let notification = std::hint::black_box(glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY);
+    let hover_tools = std::hint::black_box(TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY);
+    let drag = std::hint::black_box(TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY);
+    assert!(popover > overlay);
+    assert!(notification > popover);
+    assert!(notification > overlay);
+    assert!(notification > hover_tools);
+    assert!(drag > notification);
 }
 
 #[test]

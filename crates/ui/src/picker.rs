@@ -403,7 +403,7 @@ impl<D: PickerDelegate> ListDelegate for PickerListDelegate<D> {
                 .mx_1()
                 .rounded(cx.theme().radius)
                 .on_mouse_enter(move |_, window, cx| {
-                    _ = picker.update(cx, |picker, cx| {
+                    picker.update(cx, |picker, cx| {
                         picker.select_hovered(match_ix, window, cx);
                     });
                 })

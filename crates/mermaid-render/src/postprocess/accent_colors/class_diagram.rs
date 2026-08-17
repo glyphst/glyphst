@@ -59,7 +59,7 @@ impl ClassDiagramAccents {
 
                     self.accent_g_stack
                         .push(AccentStackEntry::accent(accent_idx, tracks_node));
-                    let new_elem = add_class(e, &accent_class_name(accent_idx))?;
+                    let new_elem = add_class(e, accent_class_name(accent_idx))?;
                     return Ok(Event::Start(new_elem));
                 }
 
@@ -68,10 +68,10 @@ impl ClassDiagramAccents {
             }
 
             Event::End(e) if e.name().as_ref() == b"g" => {
-                if let Some(entry) = self.accent_g_stack.pop() {
-                    if entry.tracks_node() {
-                        self.nodes.maybe_finish_node();
-                    }
+                if let Some(entry) = self.accent_g_stack.pop()
+                    && entry.tracks_node()
+                {
+                    self.nodes.maybe_finish_node();
                 }
                 Ok(event)
             }
@@ -107,7 +107,7 @@ impl ClassDiagramAccents {
                     if is_text && is_start {
                         self.current_text_accent = Some(idx);
                     }
-                    return add_to_event(&event, e, &accent_class_name(idx));
+                    return add_to_event(&event, e, accent_class_name(idx));
                 }
 
                 Ok(event)

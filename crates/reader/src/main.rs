@@ -23,9 +23,10 @@ use glyphst_library::{
     DocumentPosition, LibraryStore, ReaderSessionSnapshot, ReaderWindowBounds, ReaderWindowSession,
     ReaderWindowState,
 };
-use glyphst_pdf_translation_app::{PdfTranslationService, run_typst_worker_if_requested};
+use glyphst_pdf_translation_service::run_typst_worker_if_requested;
 use glyphst_settings::{RestoreOnStartup, SettingsStore, localize, sync_component_theme};
 use glyphst_translation::TranslationService;
+use glyphst_translation_ui::TranslationServices;
 use glyphst_ui::{
     activity::{ActivityCenter, ActivityNoticeEntry, ActivityNoticeLevel},
     assets,
@@ -143,8 +144,7 @@ fn main() {
             cx.set_global(ReaderSessionPersistence(session_persistence));
             match TranslationService::new() {
                 Ok(service) => {
-                    cx.set_global(service.clone());
-                    cx.set_global(PdfTranslationService::new(service.clone()));
+                    cx.set_global(TranslationServices::new(service.clone()));
                     cx.spawn(async move |cx| {
                         let result = cx
                             .background_spawn(async move { service.initialize_persistent_cache() })

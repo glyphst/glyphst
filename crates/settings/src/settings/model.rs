@@ -176,14 +176,13 @@ impl Settings {
             }
         }
 
-        if let Some(tabs) = document.get("tabs").and_then(KdlNode::children) {
-            if let Some(value) = tabs
+        if let Some(tabs) = document.get("tabs").and_then(KdlNode::children)
+            && let Some(value) = tabs
                 .get_arg("visibility")
                 .and_then(KdlValue::as_string)
                 .and_then(TabBarVisibility::from_str)
-            {
-                settings.tab_bar_visibility = value;
-            }
+        {
+            settings.tab_bar_visibility = value;
         }
 
         if let Some(new_tab) = document.get("new_tab").and_then(KdlNode::children)
@@ -201,7 +200,7 @@ impl Settings {
             if let Some(value) = ai
                 .get_arg("provider")
                 .and_then(KdlValue::as_string)
-                .and_then(AiProvider::from_str)
+                .and_then(AiProvider::parse)
             {
                 legacy_provider = value;
                 legacy_provider_set = true;
@@ -241,7 +240,7 @@ impl Settings {
                 if let Some(value) = quick_ask
                     .get_arg("position")
                     .and_then(KdlValue::as_string)
-                    .and_then(QuickAskPosition::from_str)
+                    .and_then(QuickAskPosition::parse)
                 {
                     settings.ai.quick_ask.position = value;
                 }
@@ -263,7 +262,7 @@ impl Settings {
                     } else {
                         Some(node.name().value())
                     };
-                    let Some(provider) = provider_name.and_then(AiProvider::from_str) else {
+                    let Some(provider) = provider_name.and_then(AiProvider::parse) else {
                         continue;
                     };
                     let Some(children) = node.children() else {
@@ -321,7 +320,7 @@ impl Settings {
                     if let Some(value) = title_model
                         .get_arg("provider")
                         .and_then(KdlValue::as_string)
-                        .and_then(AiProvider::from_str)
+                        .and_then(AiProvider::parse)
                     {
                         provider = value;
                     }
@@ -702,7 +701,7 @@ impl Settings {
             let mut providers = KdlNode::new("providers");
             let providers_children = providers.ensure_children();
             for provider in &self.ai.provider_order {
-                let Some(config) = self.ai.providers.get(&provider) else {
+                let Some(config) = self.ai.providers.get(provider) else {
                     continue;
                 };
 
