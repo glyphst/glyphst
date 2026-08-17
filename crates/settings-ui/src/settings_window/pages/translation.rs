@@ -455,7 +455,7 @@ impl SettingsWindow {
                     })
                     .danger()
                     .outline()
-                    .with_size(options.size)
+                    .with_size(options.size())
                     .loading(running)
                     .disabled(pending)
                     .on_click(move |_, window, cx| {

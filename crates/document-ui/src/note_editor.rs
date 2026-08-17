@@ -5,10 +5,10 @@ use gpui::{
     PromptButton, PromptLevel, Render, SharedString, Window, div, prelude::*, px, rgba,
 };
 use gpui_component::{
-    ActiveTheme as _, StyledExt as _,
+    ActiveTheme as _, ThemeStyled as _,
     button::{Button, ButtonVariants as _},
     dialog::{DialogFooter, DialogHeader, DialogTitle},
-    input::{Input, InputState},
+    input::{Textarea, TextareaState},
 };
 
 pub enum NoteEditorEvent {
@@ -22,7 +22,7 @@ pub enum NoteEditorEvent {
 /// Domain wrapper around gpui-component's multi-line input.
 pub struct NoteEditor {
     previous_focus_handle: FocusHandle,
-    input: Entity<InputState>,
+    input: Entity<TextareaState>,
     color: HighlightColor,
     initial_body: String,
     initial_color: HighlightColor,
@@ -40,8 +40,7 @@ impl NoteEditor {
         let content_len = content.len();
         let initial_body = content.trim().to_string();
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .rows(8)
                 .soft_wrap(true)
                 .placeholder("Write a note…")
@@ -189,7 +188,7 @@ impl Render for NoteEditor {
                     .child(DialogTitle::new().child(crate::fl!("note-title"))),
             )
             .child(
-                Input::new(&self.input)
+                Textarea::new(&self.input)
                     .h(px(190.0))
                     .appearance(false)
                     .bordered(false)

@@ -102,7 +102,7 @@ impl SettingsWindow {
                         .outline()
                         .loading(loading)
                         .disabled(loading)
-                        .with_size(options.size)
+                        .with_size(options.size())
                         .on_click(move |_, _, cx| {
                             test_view.update(cx, |this, cx| {
                                 this.test_ocr_connection(provider, cx);

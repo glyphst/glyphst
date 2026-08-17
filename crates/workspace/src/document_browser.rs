@@ -14,7 +14,7 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, FocusTrapElement as _, IconName as ComponentIconName, Sizable as _,
-    StyledExt as _, ThemeColor,
+    ThemeColor, ThemeStyled as _,
     button::Button,
     input::{Input, InputEvent, InputState},
     skeleton::Skeleton,

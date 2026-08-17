@@ -12,7 +12,7 @@ use gpui::{
     SharedString, Task, Window, div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Selectable as _, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Selectable as _, Sizable as _, ThemeStyled as _,
     input::{
         Escape as ComponentInputEscape, Input, InputEvent, InputState,
         SelectAll as ComponentSelectAll,

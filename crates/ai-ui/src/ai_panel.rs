@@ -60,8 +60,9 @@ use gpui_component::{
     alert::Alert,
     button::{Button, ButtonGroup, ButtonVariants as _},
     input::{
-        CompletionMenuOptions, CompletionProvider, CompletionTriggerEvent, Escape as InputEscape,
-        Input, InputEvent, InputSpan, InputState, Paste as InputPaste, Rope, RopeExt,
+        CompletionMenuOptions, CompletionProvider, CompletionTriggerEvent, Editor, EditorState,
+        Escape as InputEscape, Input, InputEvent, InputSpan, InputState, Paste as InputPaste, Rope,
+        RopeExt,
     },
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
@@ -372,8 +373,8 @@ struct MentionCompletionProvider {
 
 pub struct AiPanel {
     focus_handle: FocusHandle,
-    composer_input: Entity<InputState>,
-    edit_input: Entity<InputState>,
+    composer_input: Entity<EditorState>,
+    edit_input: Entity<EditorState>,
     model_search_input: Entity<InputState>,
     _composer_input_subscription: Subscription,
     _edit_input_subscription: Subscription,
@@ -516,22 +517,22 @@ impl AiPanel {
         });
         let edit_provider = Rc::new(MentionCompletionProvider { panel });
         let composer_input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx)
+            let mut input = EditorState::new(window, cx)
                 .auto_grow(min_rows, max_rows)
                 .soft_wrap(true)
                 .submit_on_enter(true)
                 .passthrough_structured_paste(true)
                 .placeholder(tr("ai-ask-placeholder"));
-            input.lsp.completion_provider = Some(composer_provider.clone());
+            input.lsp_mut().completion_provider = Some(composer_provider.clone());
             input
         });
         let edit_input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx)
+            let mut input = EditorState::new(window, cx)
                 .auto_grow(1, usize::MAX)
                 .soft_wrap(true)
                 .submit_on_enter(true)
                 .passthrough_structured_paste(true);
-            input.lsp.completion_provider = Some(edit_provider.clone());
+            input.lsp_mut().completion_provider = Some(edit_provider.clone());
             input
         });
         let model_search_input = cx

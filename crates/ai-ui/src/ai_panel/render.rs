@@ -603,10 +603,9 @@ impl Render for AiPanel {
                                             .px_2()
                                             .pt_1()
                                             .child(
-                                                Input::new(&self.composer_input)
+                                                Editor::new(&self.composer_input)
                                                     .appearance(false)
                                                     .bordered(false)
-                                                    .focus_bordered(false)
                                                     .w_full(),
                                             ),
                                     )

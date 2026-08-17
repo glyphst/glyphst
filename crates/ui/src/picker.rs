@@ -6,7 +6,7 @@ use gpui::{
     WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IndexPath, StyledExt as _, ThemeColor,
+    ActiveTheme as _, IndexPath, ThemeColor, ThemeStyled as _,
     input::{Input, InputEvent, InputState},
     list::{List, ListDelegate, ListItem, ListState},
 };
@@ -194,7 +194,7 @@ impl<D: PickerDelegate> Picker<D> {
                 let query = input.read(cx).value();
                 self.delegate.update_matches(query.as_ref());
                 self.clamp_selection();
-                self.sync_list_selection(window, cx);
+                self.sync_list_selection(true, window, cx);
                 cx.notify();
             }
             InputEvent::PressEnter { .. } => self.confirm_selected(window, cx),
@@ -211,16 +211,27 @@ impl<D: PickerDelegate> Picker<D> {
             .min(self.delegate.match_count().saturating_sub(1));
     }
 
-    fn sync_list_selection(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_list_selection(&self, reveal: bool, window: &mut Window, cx: &mut Context<Self>) {
         let selected = (self.delegate.match_count() > 0).then(|| IndexPath::new(self.selected_ix));
         self.list.update(cx, |list, cx| {
             if list.selected_index() != selected {
                 list.set_selected_index(selected, window, cx);
             }
-            if let Some(selected) = selected {
+            if reveal && let Some(selected) = selected {
                 list.scroll_to_item(selected, ScrollStrategy::Center, window, cx);
             }
         });
+    }
+
+    fn select_hovered(&mut self, match_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if match_ix >= self.delegate.match_count() || self.selected_ix == match_ix {
+            return;
+        }
+
+        self.selected_ix = match_ix;
+        self.delegate.selection_changed(match_ix, cx);
+        self.sync_list_selection(false, window, cx);
+        cx.notify();
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -263,7 +274,7 @@ impl<D: PickerDelegate> Picker<D> {
         if self.selected_ix + 1 < self.delegate.match_count() {
             self.selected_ix += 1;
             self.delegate.selection_changed(self.selected_ix, cx);
-            self.sync_list_selection(window, cx);
+            self.sync_list_selection(true, window, cx);
             cx.notify();
         }
     }
@@ -272,7 +283,7 @@ impl<D: PickerDelegate> Picker<D> {
         if self.selected_ix > 0 {
             self.selected_ix -= 1;
             self.delegate.selection_changed(self.selected_ix, cx);
-            self.sync_list_selection(window, cx);
+            self.sync_list_selection(true, window, cx);
             cx.notify();
         }
     }
@@ -283,7 +294,7 @@ impl<D: PickerDelegate> Picker<D> {
             let query = self.input.read(cx).value();
             self.delegate.update_matches(query.as_ref());
             self.clamp_selection();
-            self.sync_list_selection(window, cx);
+            self.sync_list_selection(true, window, cx);
             cx.notify();
         }
     }
@@ -299,7 +310,7 @@ impl<D: PickerDelegate> Focusable for Picker<D> {
 
 impl<D: PickerDelegate> Render for Picker<D> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_list_selection(window, cx);
+        self.sync_list_selection(false, window, cx);
 
         let match_count = self.delegate.match_count();
         let list_height = if match_count == 0 {
@@ -373,18 +384,29 @@ impl<D: PickerDelegate> ListDelegate for PickerListDelegate<D> {
         cx: &mut Context<ListState<Self>>,
     ) -> Option<Self::Item> {
         let picker = self.picker.upgrade()?;
-        let picker = picker.read(cx);
         let theme = cx.theme().colors;
-        let content =
-            picker
-                .delegate
-                .render_match(ix.row, theme, &picker.previous_focus_handle, window);
+        let (content, id, row_height) = {
+            let picker = picker.read(cx);
+            (
+                picker
+                    .delegate
+                    .render_match(ix.row, theme, &picker.previous_focus_handle, window),
+                picker.delegate.match_id(ix.row),
+                picker.delegate.row_height(),
+            )
+        };
+        let match_ix = ix.row;
 
         Some(
-            ListItem::new(picker.delegate.match_id(ix.row))
-                .h(px(picker.delegate.row_height()))
+            ListItem::new(id)
+                .h(px(row_height))
                 .mx_1()
                 .rounded(cx.theme().radius)
+                .on_mouse_enter(move |_, window, cx| {
+                    _ = picker.update(cx, |picker, cx| {
+                        picker.select_hovered(match_ix, window, cx);
+                    });
+                })
                 .child(content),
         )
     }
@@ -578,11 +600,13 @@ pub fn normalize_query(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
+    use gpui::{Modifiers, TestAppContext};
     use gpui_component::Root;
+    use std::{cell::RefCell, rc::Rc};
 
     struct TestPickerDelegate {
         matches: usize,
+        selection_changes: Rc<RefCell<Vec<usize>>>,
     }
 
     impl PickerDelegate for TestPickerDelegate {
@@ -616,9 +640,15 @@ mod tests {
 
         fn update_matches(&mut self, _: &str) {}
 
-        fn render_match(&self, _: usize, _: ThemeColor, _: &FocusHandle, _: &Window) -> AnyElement {
+        fn render_match(
+            &self,
+            match_ix: usize,
+            _: ThemeColor,
+            _: &FocusHandle,
+            _: &Window,
+        ) -> AnyElement {
             div()
-                .debug_selector(|| "picker-test-row-content".to_string())
+                .debug_selector(move || format!("picker-test-row-{match_ix}"))
                 .w_full()
                 .child("Item")
                 .into_any_element()
@@ -631,6 +661,10 @@ mod tests {
             _: &mut Window,
             _: &mut Context<Picker<Self>>,
         ) {
+        }
+
+        fn selection_changed(&mut self, match_ix: usize, _: &mut Context<Picker<Self>>) {
+            self.selection_changes.borrow_mut().push(match_ix);
         }
     }
 
@@ -650,7 +684,10 @@ mod tests {
             let picker = cx.new(|cx| {
                 Picker::new(
                     previous_focus_handle.clone(),
-                    TestPickerDelegate { matches },
+                    TestPickerDelegate {
+                        matches,
+                        selection_changes: Rc::new(RefCell::new(Vec::new())),
+                    },
                     window,
                     cx,
                 )
@@ -732,10 +769,112 @@ mod tests {
 
         let list = cx.debug_bounds("picker-list").expect("picker list bounds");
         let content = cx
-            .debug_bounds("picker-test-row-content")
+            .debug_bounds("picker-test-row-0")
             .expect("picker row content bounds");
         assert_eq!(content.left(), list.left() + px(16.0));
         assert_eq!(list.size.height, px(32.0));
+    }
+
+    #[gpui::test]
+    fn hovering_a_row_makes_it_the_only_selection(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let host = cx.new(|cx| PickerFocusHost::with_matches(4, window, cx));
+            Root::new(host, window, cx)
+        });
+        let host = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<PickerFocusHost>().unwrap()
+        });
+        let picker = host.read_with(cx, |host, _| host.picker.clone());
+        let selection_changes =
+            picker.read_with(cx, |picker, _| picker.delegate.selection_changes.clone());
+
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx
+            .debug_bounds("picker-test-row-2")
+            .expect("third picker row bounds");
+
+        cx.simulate_mouse_move(row.center(), None, Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        picker.read_with(cx, |picker, cx| {
+            assert_eq!(picker.selected_ix, 2);
+            assert_eq!(
+                picker.list.read(cx).selected_index(),
+                Some(IndexPath::new(2))
+            );
+        });
+        assert_eq!(&*selection_changes.borrow(), &[2]);
+
+        cx.simulate_mouse_move(row.center(), None, Modifiers::default());
+        assert_eq!(&*selection_changes.borrow(), &[2]);
+    }
+
+    #[gpui::test]
+    fn keyboard_selection_reveals_but_hover_does_not_scroll(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let host = cx.new(|cx| PickerFocusHost::with_matches(12, window, cx));
+            Root::new(host, window, cx)
+        });
+        let host = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<PickerFocusHost>().unwrap()
+        });
+        let picker = host.read_with(cx, |host, _| host.picker.clone());
+
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| {
+            for _ in 0..6 {
+                picker.update(cx, |picker, cx| {
+                    picker.select_next(&menu::SelectNext, window, cx)
+                });
+            }
+            window.draw(cx).clear(cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let offset_before_hover = picker.read_with(cx, |picker, cx| {
+            picker.list.read(cx).scroll_handle().offset()
+        });
+        assert!(offset_before_hover.y < px(0.0));
+
+        let list_bounds = cx.debug_bounds("picker-list").expect("picker list bounds");
+        let selectors = [
+            "picker-test-row-0",
+            "picker-test-row-1",
+            "picker-test-row-2",
+            "picker-test-row-3",
+            "picker-test-row-4",
+            "picker-test-row-5",
+            "picker-test-row-6",
+            "picker-test-row-7",
+            "picker-test-row-8",
+            "picker-test-row-9",
+            "picker-test-row-10",
+            "picker-test-row-11",
+        ];
+        let (hovered_ix, hovered_bounds) = selectors
+            .into_iter()
+            .enumerate()
+            .filter(|(ix, _)| *ix != 6)
+            .filter_map(|(ix, selector)| cx.debug_bounds(selector).map(|bounds| (ix, bounds)))
+            .find(|(_, bounds)| {
+                bounds.top() >= list_bounds.top() && bounds.bottom() <= list_bounds.bottom()
+            })
+            .expect("another fully visible picker row");
+
+        cx.simulate_mouse_move(hovered_bounds.center(), None, Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        picker.read_with(cx, |picker, cx| {
+            assert_eq!(picker.selected_ix, hovered_ix);
+            assert_eq!(
+                picker.list.read(cx).scroll_handle().offset(),
+                offset_before_hover
+            );
+        });
     }
 
     #[test]

@@ -195,8 +195,8 @@ impl SettingsWindow {
             .min_w_0()
             .child(
                 Input::new(&input)
-                    .disabled(options.disabled)
-                    .with_size(options.size)
+                    .disabled(options.is_disabled())
+                    .with_size(options.size())
                     .when(masked, |input| input.mask_toggle())
                     .w_full()
                     .min_w_0(),
@@ -315,8 +315,8 @@ impl SettingsWindow {
                 .label(crate::fl!("settings-test-connection"))
                 .outline()
                 .loading(connection_loading || credentials_loading)
-                .with_size(options.size)
-                .disabled(options.disabled || connection_loading || credentials_loading)
+                .with_size(options.size())
+                .disabled(options.is_disabled() || connection_loading || credentials_loading)
                 .on_click(move |_, _, cx| {
                     test_view.update(cx, |this, cx| {
                         this.test_provider_connection(provider, cx);
@@ -835,7 +835,7 @@ impl SettingsWindow {
         let danger = cx.theme().danger;
         let active_model_drag =
             view.read(cx).active_model_drag == Some(provider) && cx.has_active_drag();
-        let disabled = options.disabled;
+        let disabled = options.is_disabled();
         let models_empty = config.models.is_empty();
         let model_chips = config.models.into_iter().map(|model| {
             let model_id = model.id.clone();
@@ -1061,14 +1061,14 @@ impl SettingsWindow {
         let picker_manual = input;
         let picker_search = search_input;
 
-        if options.disabled {
+        if options.is_disabled() {
             Button::new(SharedString::from(format!(
                 "open-provider-model-picker-{}",
                 provider.as_str()
             )))
             .label(crate::fl!("settings-add-models"))
             .outline()
-            .with_size(options.size)
+            .with_size(options.size())
             .disabled(true)
             .into_any_element()
         } else {
@@ -1095,7 +1095,7 @@ impl SettingsWindow {
                 })
                 .label(crate::fl!("settings-add-models"))
                 .outline()
-                .with_size(options.size),
+                .with_size(options.size()),
             )
             .content(move |_, window, cx| {
                 Self::provider_model_picker_panel(
@@ -1172,7 +1172,7 @@ impl SettingsWindow {
                 let picker = state.read(cx).picker.clone();
                 ColorPicker::new(&picker)
                     .anchor(Anchor::TopRight)
-                    .with_size(options.size)
+                    .with_size(options.size())
             }
         })
         .on_reset(

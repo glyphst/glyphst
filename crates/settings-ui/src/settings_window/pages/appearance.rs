@@ -214,7 +214,7 @@ impl SettingsWindow {
                 Button::new("open-user-theme-directory")
                     .label("Show Directory")
                     .outline()
-                    .with_size(options.size)
+                    .with_size(options.size())
                     .on_click(move |_, _, cx| cx.reveal_path(&path))
             }),
         );

@@ -225,7 +225,7 @@ impl AiPanel {
         )
     }
 
-    pub(super) fn active_composer_input(&self) -> Entity<InputState> {
+    pub(super) fn active_composer_input(&self) -> Entity<EditorState> {
         if self.editing_turn.is_some() {
             self.edit_input.clone()
         } else {
@@ -235,7 +235,7 @@ impl AiPanel {
 
     pub(super) fn on_composer_input_event(
         &mut self,
-        input: &Entity<InputState>,
+        input: &Entity<EditorState>,
         event: &InputEvent,
         window: &mut Window,
         cx: &mut Context<Self>,

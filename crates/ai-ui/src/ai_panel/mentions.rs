@@ -330,7 +330,7 @@ impl CompletionProvider for MentionCompletionProvider {
         offset: usize,
         _: CompletionContext,
         _: &mut Window,
-        cx: &mut Context<InputState>,
+        cx: &mut App,
     ) -> Task<Result<CompletionResponse>> {
         let Some(panel) = self.panel.upgrade() else {
             return empty_completions();
@@ -411,7 +411,7 @@ impl CompletionProvider for MentionCompletionProvider {
         text: &Rope,
         cursor: usize,
         _: CompletionTriggerEvent<'_>,
-        cx: &mut Context<InputState>,
+        cx: &mut App,
     ) -> Option<Range<usize>> {
         let panel = self.panel.upgrade()?;
         let panel = panel.read(cx);

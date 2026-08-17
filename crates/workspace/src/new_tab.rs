@@ -28,7 +28,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     dialog::Cancel,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
 };
 use image::{Frame, ImageFormat, RgbaImage};
@@ -447,7 +447,7 @@ pub struct NewTab {
     saved_view_editor_open: bool,
     tag_editor_id: Option<LibraryTagId>,
     permanent_delete_prompt_pending: bool,
-    work_note_input: Entity<InputState>,
+    work_note_input: Entity<TextareaState>,
     tag_input: Entity<InputState>,
     metadata_title_input: Entity<InputState>,
     metadata_creators_input: Entity<InputState>,
@@ -459,7 +459,7 @@ pub struct NewTab {
     metadata_arxiv_input: Entity<InputState>,
     metadata_subject_input: Entity<InputState>,
     metadata_language_input: Entity<InputState>,
-    metadata_abstract_input: Entity<InputState>,
+    metadata_abstract_input: Entity<TextareaState>,
     saved_view_name_input: Entity<InputState>,
     tag_editor_name_input: Entity<InputState>,
     folder_name_input: Entity<InputState>,
@@ -715,8 +715,7 @@ impl NewTab {
         let _search_subscription =
             cx.subscribe_in(&search_input, window, Self::on_search_input_event);
         let work_note_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .rows(10)
                 .soft_wrap(true)
                 .placeholder("Write a Markdown research note…")
@@ -741,8 +740,7 @@ impl NewTab {
         let metadata_language_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Language"));
         let metadata_abstract_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .rows(8)
                 .soft_wrap(true)
                 .placeholder("Abstract or summary")
@@ -2328,7 +2326,7 @@ impl NewTab {
 
     fn on_work_note_input_event(
         &mut self,
-        input: &Entity<InputState>,
+        input: &Entity<TextareaState>,
         event: &InputEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
@@ -3426,7 +3424,9 @@ impl NewTab {
         );
         set(&self.metadata_subject_input, item.subject);
         set(&self.metadata_language_input, item.language);
-        set(&self.metadata_abstract_input, item.abstract_text);
+        self.metadata_abstract_input.update(cx, |input, cx| {
+            input.set_value(item.abstract_text, window, cx)
+        });
         self.metadata_editor_open = true;
         let input = self.metadata_title_input.clone();
         window.defer(cx, move |window, cx| {
@@ -4449,7 +4449,7 @@ impl NewTab {
                         .border_1()
                         .border_color(theme.border)
                         .bg(theme.background)
-                        .child(Input::new(&self.work_note_input).appearance(false)),
+                        .child(Textarea::new(&self.work_note_input).appearance(false)),
                 )
                 .when(item.trashed_at.is_none(), |this| {
                     this.child(
@@ -4576,7 +4576,7 @@ impl NewTab {
                             .flex_1()
                             .min_h_0()
                             .p_3()
-                            .child(Input::new(&self.work_note_input).appearance(false)),
+                            .child(Textarea::new(&self.work_note_input).appearance(false)),
                     ),
             )
             .into_any_element()
@@ -4730,7 +4730,30 @@ impl NewTab {
                             ),
                     )
                     .child(field("Subject", &self.metadata_subject_input))
-                    .child(field("Abstract or summary", &self.metadata_abstract_input))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(ui_rems(11.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child("Abstract or summary"),
+                            )
+                            .child(
+                                div()
+                                    .min_h(px(128.0))
+                                    .rounded(cx.theme().radius)
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.background)
+                                    .child(
+                                        Textarea::new(&self.metadata_abstract_input)
+                                            .appearance(false),
+                                    ),
+                            ),
+                    )
                     .child(
                         div()
                             .flex()

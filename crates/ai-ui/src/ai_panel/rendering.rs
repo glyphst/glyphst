@@ -672,10 +672,9 @@ impl AiPanel {
                             .relative()
                             .min_h(px(32.0))
                             .child(
-                                Input::new(&self.composer_input)
+                                Editor::new(&self.composer_input)
                                     .appearance(false)
                                     .bordered(false)
-                                    .focus_bordered(false)
                                     .w_full()
                                     .px_3()
                                     .py_2(),
@@ -1108,10 +1107,9 @@ impl AiPanel {
                             })
                             .when(is_editing, |this| {
                                 this.child(
-                                    Input::new(&self.edit_input)
+                                    Editor::new(&self.edit_input)
                                         .appearance(false)
                                         .bordered(false)
-                                        .focus_bordered(false)
                                         .w_full(),
                                 )
                             })

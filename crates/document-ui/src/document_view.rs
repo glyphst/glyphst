@@ -89,7 +89,7 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, IndexPath, Selectable as _, Sizable as _,
-    StyledExt as _, ThemeColor,
+    ThemeColor, ThemeStyled as _,
     alert::Alert,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,

@@ -25,7 +25,7 @@ impl SettingsWindow {
                     Button::new("settings-export")
                         .label(crate::fl!("export"))
                         .outline()
-                        .with_size(options.size)
+                        .with_size(options.size())
                         .on_click(move |_, window, cx| {
                             view.update(cx, |this, cx| this.export(window, cx));
                         })
@@ -570,7 +570,7 @@ impl SettingsWindow {
                 Button::new("open-keymap-editor")
                     .label(crate::fl!("settings-open-keymap"))
                     .outline()
-                    .with_size(options.size)
+                    .with_size(options.size())
                     .on_click(move |_, _, cx| open_keymap(cx))
             }),
         );

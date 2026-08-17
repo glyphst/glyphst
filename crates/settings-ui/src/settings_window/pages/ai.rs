@@ -1072,7 +1072,7 @@ impl SettingsWindow {
                                 |button| button.danger(),
                             )
                             .outline()
-                            .with_size(options.size)
+                            .with_size(options.size())
                             .loading(loading || signing_in)
                             .disabled(loading || signing_in || auth.is_none())
                             .on_hover(move |hovered, _, cx| {
