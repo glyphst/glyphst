@@ -16,7 +16,7 @@ impl Render for AiPanel {
         let entity = cx.entity();
         let theme = cx.theme().colors;
         let external_drop_overlay = self.render_external_drop_overlay(theme);
-        let (ai_settings, base_text_style) = {
+        let (ai_settings, base_text_style, credentials_loading) = {
             let store = cx.global::<SettingsStore>();
             let font = &store.settings.font;
             let base_text_style = TextStyle {
@@ -26,12 +26,16 @@ impl Render for AiPanel {
                 font_weight: FontWeight(font.ui_font_weight),
                 ..Default::default()
             };
-            (store.settings.ai.clone(), base_text_style)
+            let ai_settings = store.settings.ai.clone();
+            let credentials_loading = ai_settings.main_model.is_some()
+                && store.ai_provider_credentials_loading(ai_settings.resolved_main().provider);
+            (ai_settings, base_text_style, credentials_loading)
         };
         let editing = self.editing_turn.is_some();
         let can_send = !editing
             && self.generation_failure.is_none()
             && ai_settings.main_model.is_some()
+            && !credentials_loading
             && (!self.content.trim().is_empty() || !self.composer_images.is_empty());
         let resolved_main = ai_settings.resolved_main();
         let selected_provider = resolved_main.provider;
@@ -320,7 +324,9 @@ impl Render for AiPanel {
             .primary()
             .icon(IconName::ArrowUp)
             .disabled(!can_send)
-            .tooltip(if loading {
+            .tooltip(if credentials_loading {
+                "Credentials are still loading.".to_string()
+            } else if loading {
                 tr("ai-queue-message")
             } else if can_send {
                 tr("send")

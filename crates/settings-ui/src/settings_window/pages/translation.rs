@@ -1,7 +1,7 @@
 use super::super::SettingsWindow;
 use glyphst_settings::{
-    DocumentTranslationMode, ModelRef, PdfContentReviewMode, Settings, SettingsStore,
-    TranslationBoxCorner, TranslationProvider, TranslationTargetLanguage,
+    DocumentTranslationMode, ModelRef, PdfContentReviewMode, ProviderSecretId, Settings,
+    SettingsStore, TranslationBoxCorner, TranslationProvider, TranslationTargetLanguage,
 };
 use glyphst_translation_ui::target_language_options;
 use gpui::{App, Context, SharedString};
@@ -18,6 +18,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> SettingGroup {
         let view = cx.entity();
+        let secret_id = ProviderSecretId::TranslationApiKey(provider);
         let api_key_field = Self::bound_text_field(
             format!("translation-api-key-{}", provider.as_str()),
             crate::fl!("settings-api-key-placeholder"),
@@ -33,10 +34,8 @@ impl SettingsWindow {
             {
                 let view = view.clone();
                 move |value, cx| {
-                    Self::update_text_settings(&view, cx, move |settings| {
-                        settings.translation.provider_config_mut(provider).api_key =
-                            value.to_string();
-                    });
+                    SettingsStore::update_provider_secret(secret_id, value.to_string(), cx);
+                    view.update(cx, |_, cx| cx.notify());
                 }
             },
         )
@@ -52,17 +51,13 @@ impl SettingsWindow {
             {
                 let view = view.clone();
                 move |_, cx| {
-                    Self::update_settings(&view, cx, move |settings| {
-                        settings
-                            .translation
-                            .provider_config_mut(provider)
-                            .api_key
-                            .clear();
-                    });
+                    SettingsStore::clear_provider_secret(secret_id, cx);
+                    view.update(cx, |_, cx| cx.notify());
                 }
             },
         );
-        let api_key = SettingItem::new(crate::fl!("settings-api-key"), api_key_field);
+        let api_key = SettingItem::new(crate::fl!("settings-api-key"), api_key_field)
+            .description(Self::provider_secret_description(secret_id, cx));
 
         let default_base_url = provider
             .default_base_url()

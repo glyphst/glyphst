@@ -68,20 +68,7 @@ impl Render for MessageScrollTestView {
 
 fn install_test_settings(cx: &mut App) {
     gpui_component::init(cx);
-    let settings = glyphst_settings::Settings::default();
-    let appearance = glyphst_settings::theme::ThemeAppearance::Light;
-    let theme_catalog =
-        glyphst_settings::theme::ThemeCatalog::load(std::path::Path::new("/nonexistent"));
-    let resolved_theme = theme_catalog.resolve(settings.theme.name(appearance), settings.overrides);
-    cx.set_global(SettingsStore {
-        settings,
-        theme_catalog,
-        resolved_theme,
-        system_appearance: appearance,
-        user_managed: false,
-        config_path: PathBuf::new(),
-        state_path: PathBuf::new(),
-    });
+    cx.set_global(SettingsStore::memory());
 }
 
 fn message_scroll_metrics(content_height: Pixels) -> (GpuiPoint<Pixels>, GpuiPoint<Pixels>) {

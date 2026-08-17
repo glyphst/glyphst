@@ -453,7 +453,7 @@ impl AiPanel {
         let entity = cx.entity();
         let theme = cx.theme().colors;
         let external_drop_overlay = self.render_external_drop_overlay(theme);
-        let (quick_ask, base_text_style, has_main_model) = {
+        let (quick_ask, base_text_style, has_main_model, credentials_loading) = {
             let store = cx.global::<SettingsStore>();
             let font = &store.settings.font;
             let base_text_style = TextStyle {
@@ -467,11 +467,16 @@ impl AiPanel {
                 store.settings.ai.quick_ask,
                 base_text_style,
                 store.settings.ai.main_model.is_some(),
+                store.settings.ai.main_model.is_some()
+                    && store.ai_provider_credentials_loading(
+                        store.settings.ai.resolved_main().provider,
+                    ),
             )
         };
         let loading = self.loading;
         let can_send = self.generation_failure.is_none()
             && has_main_model
+            && !credentials_loading
             && (!self.content.trim().is_empty() || !self.composer_images.is_empty());
         let answer_index = self
             .messages
@@ -575,7 +580,9 @@ impl AiPanel {
             .primary()
             .icon(IconName::ArrowUp)
             .disabled(!can_send)
-            .tooltip(if loading {
+            .tooltip(if credentials_loading {
+                "Credentials are still loading.".to_string()
+            } else if loading {
                 tr("ai-queue-message")
             } else {
                 tr("send")

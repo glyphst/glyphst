@@ -284,7 +284,24 @@ impl DocumentView {
             return;
         }
 
-        let settings = cx.global::<SettingsStore>().settings.clone();
+        let (settings, credentials_loading) = {
+            let store = cx.global::<SettingsStore>();
+            (
+                store.settings.clone(),
+                store.document_translation_credentials_loading(),
+            )
+        };
+        if credentials_loading {
+            self.document_translation_jobs.update(cx, |jobs, cx| {
+                jobs.report_preflight_error(
+                    source_path,
+                    DocumentTranslationOpenMode::Document,
+                    "Provider credentials are still loading. Try again in a moment.",
+                    cx,
+                );
+            });
+            return;
+        }
         let source_language = settings
             .translation
             .source_language
@@ -880,7 +897,23 @@ impl DocumentView {
         update_pinned: bool,
         cx: &mut Context<Self>,
     ) {
-        let settings = cx.global::<SettingsStore>().settings.clone();
+        let (settings, credentials_loading) = {
+            let store = cx.global::<SettingsStore>();
+            (
+                store.settings.clone(),
+                store.translation_credentials_loading(),
+            )
+        };
+        if credentials_loading {
+            self.set_translation_error(
+                popup_position,
+                update_pinned,
+                text,
+                "Provider credentials are still loading. Try again in a moment.".to_string(),
+                cx,
+            );
+            return;
+        }
         let target_language = match LanguageCode::new(&self.target_language) {
             Ok(language) => language,
             Err(error) => {

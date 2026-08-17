@@ -6,6 +6,7 @@ pub use glyphst_translation as service;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::{StreamExt as _, channel::mpsc};
 use glyphst_pdf::DocumentSnapshot;
@@ -26,8 +27,8 @@ use glyphst_ui::activity::{
     BackgroundTaskEntry, BackgroundTaskId, CenterAction, TaskProgress,
 };
 use gpui::{
-    ClipboardItem, Context, EventEmitter, IntoElement, ParentElement as _, SharedString, Styled,
-    Task, WeakEntity, div, prelude::*,
+    App, ClipboardItem, Context, EventEmitter, IntoElement, ParentElement as _, SharedString,
+    Styled, Task, WeakEntity, div, prelude::*,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _, Size,
@@ -356,6 +357,7 @@ pub struct DocumentTranslationJobManager {
     active_session_id: Option<DocumentTranslationJobId>,
     session_background_tasks: HashMap<DocumentTranslationJobId, BackgroundTaskId>,
     session_activity_notices: HashMap<DocumentTranslationJobId, ActivityNoticeId>,
+    credential_wait_task: Option<Task<()>>,
 }
 
 impl EventEmitter<DocumentTranslationJobEvent> for DocumentTranslationJobManager {}
@@ -389,6 +391,40 @@ impl DocumentTranslationJobManager {
             active_session_id: None,
             session_background_tasks: HashMap::new(),
             session_activity_notices: HashMap::new(),
+            credential_wait_task: None,
+        }
+    }
+
+    fn wait_for_provider_credentials(&mut self, cx: &mut Context<Self>) {
+        if self.credential_wait_task.is_some() {
+            return;
+        }
+        self.credential_wait_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                let still_loading = cx.update(|cx| {
+                    cx.has_global::<SettingsStore>()
+                        && cx
+                            .global::<SettingsStore>()
+                            .document_translation_credentials_loading()
+                });
+                if !still_loading {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.credential_wait_task = None;
+                this.start_next(cx);
+                this.start_next_session(cx);
+            });
+        }));
+    }
+
+    fn refresh_provider_secrets(settings: &mut Settings, cx: &App) {
+        if cx.has_global::<SettingsStore>() {
+            settings.copy_provider_secrets_from(&cx.global::<SettingsStore>().settings);
         }
     }
 
@@ -1308,6 +1344,14 @@ impl DocumentTranslationJobManager {
         else {
             return;
         };
+        if cx.has_global::<SettingsStore>()
+            && cx
+                .global::<SettingsStore>()
+                .document_translation_credentials_loading()
+        {
+            self.wait_for_provider_credentials(cx);
+            return;
+        }
         if !cx.has_global::<PdfTranslationService>() {
             let id = self.jobs[index].snapshot.id;
             self.jobs[index].snapshot.status = DocumentTranslationJobStatus::Failed {
@@ -1320,6 +1364,7 @@ impl DocumentTranslationJobManager {
             return;
         }
 
+        Self::refresh_provider_secrets(&mut self.jobs[index].settings, cx);
         let id = self.jobs[index].snapshot.id;
         let settings = self.jobs[index].settings.clone();
         let request = self.jobs[index].snapshot.request.clone();
@@ -1456,6 +1501,14 @@ impl DocumentTranslationJobManager {
             self.start_cached_session_restore(index, cx);
             return;
         }
+        if cx.has_global::<SettingsStore>()
+            && cx
+                .global::<SettingsStore>()
+                .document_translation_credentials_loading()
+        {
+            self.wait_for_provider_credentials(cx);
+            return;
+        }
         if !cx.has_global::<PdfTranslationService>() {
             self.sessions[index].snapshot.status = DocumentTranslationSessionStatus::Failed {
                 stage: PdfTranslationStage::Preparing,
@@ -1467,6 +1520,7 @@ impl DocumentTranslationJobManager {
             return;
         }
 
+        Self::refresh_provider_secrets(&mut self.sessions[index].settings, cx);
         let settings = self.sessions[index].settings.clone();
         let request = self.sessions[index].snapshot.request.clone();
         let source_snapshot = self.sessions[index].source_snapshot.clone();

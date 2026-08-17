@@ -60,6 +60,7 @@ mod general;
 mod model;
 mod ocr;
 mod persistence;
+mod provider_secrets;
 mod store;
 mod translation;
 
@@ -76,6 +77,7 @@ pub use general::{
 pub use model::Settings;
 pub use ocr::{OcrMode, OcrProvider, OcrSettings, PaddleOcrSettings, UnlimitedOcrSettings};
 pub use persistence::{parse_settings, user_themes_dir};
+pub use provider_secrets::{ProviderSecretId, ProviderSecretPersistence, ProviderSecretStatus};
 pub use store::{SettingsStore, setup_ui_font, sync_component_theme};
 pub use translation::{
     DocumentTranslationMode, PdfContentReviewMode, PdfContentReviewSettings,

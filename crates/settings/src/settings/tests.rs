@@ -1201,6 +1201,28 @@ ocr {
 }
 
 #[test]
+fn provider_secrets_are_redacted_from_settings_debug_output() {
+    let mut settings = Settings::default();
+    settings.ai.provider_config_mut(AiProvider::OpenAi).api_key = "secret-ai-key".to_string();
+    settings
+        .translation
+        .provider_config_mut(TranslationProvider::DeepL)
+        .api_key = "secret-translation-key".to_string();
+    settings.ocr.paddle.token = "secret-ocr-token".to_string();
+
+    let settings_debug = format!("{settings:?}");
+    let resolved_debug = format!("{:?}", settings.ai.resolved_main());
+    for secret in [
+        "secret-ai-key",
+        "secret-translation-key",
+        "secret-ocr-token",
+    ] {
+        assert!(!settings_debug.contains(secret));
+        assert!(!resolved_debug.contains(secret));
+    }
+}
+
+#[test]
 fn pinned_translation_enabled_is_transient() {
     let settings = parse_settings(
         r##"
@@ -1555,7 +1577,7 @@ fn theme_geometry_uses_modern_defaults_and_preserves_explicit_values() {
 }
 
 #[test]
-fn unmanaged_settings_persist_to_state_without_creating_config() {
+fn first_settings_edit_creates_user_config_without_creating_state() {
     let root = unique_test_dir();
     let config_path = root
         .join("config")
@@ -1578,11 +1600,12 @@ fn unmanaged_settings_persist_to_state_without_creating_config() {
 
     store.set_settings(settings.clone()).unwrap();
 
-    assert!(!config_path.exists());
+    assert!(!state_path.exists());
     assert_eq!(
-        parse_settings(&fs::read_to_string(&state_path).unwrap()).unwrap(),
+        parse_settings(&fs::read_to_string(&config_path).unwrap()).unwrap(),
         settings
     );
+    assert!(store.user_managed);
 
     fs::remove_dir_all(root).ok();
 }
@@ -1630,8 +1653,8 @@ fn failed_persistence_preserves_live_settings() {
     let mut store = test_store(
         Settings::default(),
         false,
-        root.join("config.kdl"),
         blocked_parent.join("config.kdl"),
+        root.join("state.kdl"),
     );
     let settings = Settings {
         behavior: BehaviorSettings {
@@ -1653,24 +1676,25 @@ fn persisted_settings_are_private() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let root = unique_test_dir();
-    let state_path = root.join("state").join("glyphst-reader").join("config.kdl");
+    let config_path = root
+        .join("config")
+        .join("glyphst-reader")
+        .join("config.kdl");
     let mut store = test_store(
         Settings::default(),
         false,
-        root.join("config")
-            .join("glyphst-reader")
-            .join("config.kdl"),
-        state_path.clone(),
+        config_path.clone(),
+        root.join("state").join("glyphst-reader").join("config.kdl"),
     );
 
     store.set_settings(Settings::default()).unwrap();
 
     assert_eq!(
-        fs::metadata(&state_path).unwrap().permissions().mode() & 0o777,
+        fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
         0o600
     );
     assert_eq!(
-        fs::metadata(state_path.parent().unwrap())
+        fs::metadata(config_path.parent().unwrap())
             .unwrap()
             .permissions()
             .mode()
@@ -1825,19 +1849,12 @@ fn test_store(
     config_path: PathBuf,
     state_path: PathBuf,
 ) -> SettingsStore {
-    let theme_catalog = ThemeCatalog::load(Path::new("/path/that/does/not/exist"));
-    let system_appearance = ThemeAppearance::Light;
-    let resolved_theme =
-        theme_catalog.resolve(settings.theme.name(system_appearance), settings.overrides);
-    SettingsStore {
-        settings,
-        theme_catalog,
-        resolved_theme,
-        system_appearance,
-        user_managed,
-        config_path,
-        state_path,
-    }
+    let mut store = SettingsStore::memory();
+    store.user_managed = user_managed;
+    store.config_path = config_path;
+    store.state_path = state_path;
+    store.set_settings_in_memory(settings);
+    store
 }
 
 fn unique_test_dir() -> PathBuf {

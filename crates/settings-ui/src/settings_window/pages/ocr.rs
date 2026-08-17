@@ -1,7 +1,7 @@
 use super::super::{OcrConnectionResult, SettingsWindow};
 use glyphst_settings::{
     DEFAULT_PADDLE_OCR_ENDPOINT, DEFAULT_PADDLE_OCR_MODEL, DEFAULT_UNLIMITED_OCR_ENDPOINT, OcrMode,
-    OcrProvider, Settings, SettingsStore,
+    OcrProvider, ProviderSecretId, Settings, SettingsStore,
 };
 use gpui::{App, Context, Entity, SharedString, prelude::*};
 use gpui_component::{
@@ -38,15 +38,27 @@ impl SettingsWindow {
         SettingItem::new(
             crate::fl!("settings-test-connection"),
             SettingField::render(move |options, _, cx| {
+                let credentials_loading = match provider {
+                    OcrProvider::Paddle => cx
+                        .global::<SettingsStore>()
+                        .provider_secret_is_loading(ProviderSecretId::PaddleOcrToken),
+                    OcrProvider::Unlimited => {
+                        let store = cx.global::<SettingsStore>();
+                        store.provider_secret_is_loading(ProviderSecretId::UnlimitedOcrApiKey)
+                            || store
+                                .provider_secret_is_loading(ProviderSecretId::UnlimitedOcrSecretKey)
+                    }
+                };
                 let operation = view
                     .read(cx)
                     .ocr_operation
                     .as_ref()
                     .filter(|operation| operation.provider == provider)
                     .cloned();
-                let loading = operation.as_ref().is_some_and(|operation| {
-                    matches!(operation.result, OcrConnectionResult::Testing)
-                });
+                let loading = credentials_loading
+                    || operation.as_ref().is_some_and(|operation| {
+                        matches!(operation.result, OcrConnectionResult::Testing)
+                    });
                 let status = operation.map(|operation| match operation.result {
                     OcrConnectionResult::Testing => (
                         crate::fl!("settings-ocr-connection-testing"),
@@ -210,9 +222,11 @@ impl SettingsWindow {
                 {
                     let view = view.clone();
                     move |value, cx| {
-                        Self::update_text_settings(&view, cx, move |settings| {
-                            settings.ocr.unlimited.api_key = value.to_string();
-                        });
+                        SettingsStore::update_provider_secret(
+                            ProviderSecretId::UnlimitedOcrApiKey,
+                            value.to_string(),
+                            cx,
+                        );
                         Self::clear_ocr_status(&view, cx);
                     }
                 },
@@ -229,14 +243,19 @@ impl SettingsWindow {
                 {
                     let view = view.clone();
                     move |_, cx| {
-                        Self::update_settings(&view, cx, |settings| {
-                            settings.ocr.unlimited.api_key.clear();
-                        });
+                        SettingsStore::clear_provider_secret(
+                            ProviderSecretId::UnlimitedOcrApiKey,
+                            cx,
+                        );
                         Self::clear_ocr_status(&view, cx);
                     }
                 },
             ),
-        );
+        )
+        .description(Self::provider_secret_description(
+            ProviderSecretId::UnlimitedOcrApiKey,
+            cx,
+        ));
 
         let unlimited_secret_key = SettingItem::new(
             crate::fl!("settings-ocr-unlimited-secret-key"),
@@ -256,9 +275,11 @@ impl SettingsWindow {
                 {
                     let view = view.clone();
                     move |value, cx| {
-                        Self::update_text_settings(&view, cx, move |settings| {
-                            settings.ocr.unlimited.secret_key = value.to_string();
-                        });
+                        SettingsStore::update_provider_secret(
+                            ProviderSecretId::UnlimitedOcrSecretKey,
+                            value.to_string(),
+                            cx,
+                        );
                         Self::clear_ocr_status(&view, cx);
                     }
                 },
@@ -275,14 +296,19 @@ impl SettingsWindow {
                 {
                     let view = view.clone();
                     move |_, cx| {
-                        Self::update_settings(&view, cx, |settings| {
-                            settings.ocr.unlimited.secret_key.clear();
-                        });
+                        SettingsStore::clear_provider_secret(
+                            ProviderSecretId::UnlimitedOcrSecretKey,
+                            cx,
+                        );
                         Self::clear_ocr_status(&view, cx);
                     }
                 },
             ),
-        );
+        )
+        .description(Self::provider_secret_description(
+            ProviderSecretId::UnlimitedOcrSecretKey,
+            cx,
+        ));
 
         let unlimited_endpoint = SettingItem::new(
             crate::fl!("settings-ocr-endpoint"),
@@ -345,9 +371,11 @@ impl SettingsWindow {
                 {
                     let view = view.clone();
                     move |value, cx| {
-                        Self::update_text_settings(&view, cx, move |settings| {
-                            settings.ocr.paddle.token = value.to_string();
-                        });
+                        SettingsStore::update_provider_secret(
+                            ProviderSecretId::PaddleOcrToken,
+                            value.to_string(),
+                            cx,
+                        );
                         Self::clear_ocr_status(&view, cx);
                     }
                 },
@@ -364,14 +392,16 @@ impl SettingsWindow {
                 {
                     let view = view.clone();
                     move |_, cx| {
-                        Self::update_settings(&view, cx, |settings| {
-                            settings.ocr.paddle.token.clear();
-                        });
+                        SettingsStore::clear_provider_secret(ProviderSecretId::PaddleOcrToken, cx);
                         Self::clear_ocr_status(&view, cx);
                     }
                 },
             ),
-        );
+        )
+        .description(Self::provider_secret_description(
+            ProviderSecretId::PaddleOcrToken,
+            cx,
+        ));
 
         let paddle_endpoint = SettingItem::new(
             crate::fl!("settings-ocr-endpoint"),

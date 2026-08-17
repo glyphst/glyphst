@@ -130,6 +130,7 @@ fn main() {
             localize::select_language(settings_store.settings.language);
             cx.set_reduce_motion(settings_store.settings.behavior.reduce_motion);
             cx.set_global(settings_store);
+            SettingsStore::initialize_provider_secrets(cx);
             glyphst_ai::chatgpt_subscription::init(cx);
             sync_component_theme(cx);
             cx.set_global(LibraryStore::load());

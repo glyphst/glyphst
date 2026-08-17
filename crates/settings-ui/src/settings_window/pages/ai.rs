@@ -1,8 +1,8 @@
 use super::super::SettingsWindow;
 use glyphst_ai::chatgpt_subscription::ChatGptSubscription;
 use glyphst_settings::{
-    AiApiStyle, AiProvider, AiThinkingLevel, PageImageQuality, PageTextFormat, QuickAskPosition,
-    Settings, SettingsStore,
+    AiApiStyle, AiProvider, AiThinkingLevel, PageImageQuality, PageTextFormat, ProviderSecretId,
+    QuickAskPosition, Settings, SettingsStore,
 };
 use glyphst_ui::icons::{Icon, IconName};
 use gpui::{
@@ -88,11 +88,22 @@ impl AddProviderDialog {
         }
         let api_key = self.api_key.read(cx).value().trim().to_string();
         let api_style = self.api_style;
-        SettingsWindow::update_settings(&self.settings_window, cx, move |settings| {
-            settings
-                .ai
-                .add_custom_provider(name, api_style, api_host, api_key);
+        let provider = self.settings_window.update(cx, |this, cx| {
+            let mut settings = cx.global::<SettingsStore>().settings.clone();
+            let provider =
+                settings
+                    .ai
+                    .add_custom_provider(name, api_style, api_host, String::new());
+            this.persist_settings(settings, cx);
+            provider
         });
+        if !api_key.is_empty() {
+            SettingsStore::update_provider_secret(
+                ProviderSecretId::AiApiKey(provider),
+                api_key,
+                cx,
+            );
+        }
         window.close_dialog(cx);
     }
 
@@ -313,7 +324,9 @@ impl SettingsWindow {
         })
     }
 
-    fn provider_api_key_item(provider: AiProvider, view: Entity<Self>) -> SettingItem {
+    fn provider_api_key_item(provider: AiProvider, view: Entity<Self>, cx: &App) -> SettingItem {
+        let secret_id = ProviderSecretId::AiApiKey(provider);
+        let description = Self::provider_secret_description(secret_id, cx);
         let field = SettingField::<SharedString>::render(move |options, window, cx| {
             let value: SharedString = cx
                 .global::<SettingsStore>()
@@ -329,9 +342,7 @@ impl SettingsWindow {
                 crate::fl!("settings-api-key-placeholder"),
                 true,
                 move |value, cx| {
-                    Self::update_text_settings(&input_view, cx, move |settings| {
-                        settings.ai.provider_config_mut(provider).api_key = value.to_string();
-                    });
+                    SettingsStore::update_provider_secret(secret_id, value.to_string(), cx);
                     input_view.update(cx, |this, cx| {
                         this.invalidate_provider_operation(provider);
                         cx.notify();
@@ -342,7 +353,7 @@ impl SettingsWindow {
                 cx,
             )
         });
-        SettingItem::new(crate::fl!("settings-api-key"), field)
+        SettingItem::new(crate::fl!("settings-api-key"), field).description(description)
     }
 
     fn provider_api_host_item(provider: AiProvider, view: Entity<Self>) -> SettingItem {
@@ -618,6 +629,10 @@ impl SettingsWindow {
                 return;
             }
             _ = this.update_in(cx, |this, _, cx| {
+                SettingsStore::delete_provider_secret_credential(
+                    ProviderSecretId::AiApiKey(provider),
+                    cx,
+                );
                 let mut settings = cx.global::<SettingsStore>().settings.clone();
                 settings.ai.remove_custom_provider(provider);
                 if this
@@ -1115,7 +1130,7 @@ impl SettingsWindow {
                 items.push(Self::provider_api_host_item(provider, view.clone()));
             }
 
-            items.push(Self::provider_api_key_item(provider, view.clone()));
+            items.push(Self::provider_api_key_item(provider, view.clone(), cx));
             items.push(Self::provider_connection_item(provider, view.clone()));
             items.push(Self::provider_divider(provider, "credentials"));
             items.push(Self::provider_models_item(provider, view.clone()));

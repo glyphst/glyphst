@@ -423,6 +423,16 @@ impl AiPanel {
             return;
         }
 
+        let credentials_loading = {
+            let store = cx.global::<SettingsStore>();
+            let provider = store.settings.ai.resolved_main().provider;
+            store.ai_provider_credentials_loading(provider)
+        };
+        if credentials_loading {
+            self.show_validation_notice("Credentials are still loading.".to_string(), window, cx);
+            return;
+        }
+
         let Some(PreparedComposerMessage {
             display_prompt,
             submitted_mentions,

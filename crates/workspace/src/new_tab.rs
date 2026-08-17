@@ -8347,7 +8347,7 @@ mod tests {
         cx.update(|cx| {
             gpui_component::init(cx);
             let mut settings = SettingsStore::memory();
-            settings.state_path = directory.join("settings.kdl");
+            settings.config_path = directory.join("settings.kdl");
             cx.set_global(settings);
             cx.set_global(LibraryStore::memory());
         });
@@ -8809,7 +8809,7 @@ mod tests {
         cx.update(|cx| {
             gpui_component::init(cx);
             let mut settings_store = SettingsStore::memory();
-            settings_store.state_path = directory.join("settings.kdl");
+            settings_store.config_path = directory.join("settings.kdl");
             let mut settings = settings_store.settings.clone();
             settings.new_tab.view_mode = NewTabViewMode::Grouped;
             settings_store.set_settings_in_memory(settings);

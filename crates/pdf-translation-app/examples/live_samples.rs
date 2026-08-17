@@ -48,14 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let settings_path = env_value("GLYPHST_SETTINGS_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let managed = app_paths::config_dir().join("config.kdl");
-            if managed.is_file() {
-                managed
-            } else {
-                app_paths::state_dir().join("config.kdl")
-            }
-        });
+        .unwrap_or_else(|| app_paths::config_dir().join("config.kdl"));
     let mut settings: Settings = parse_settings(&fs::read_to_string(&settings_path)?)?;
     if let Some(api_key) = env_value("GLYPHST_BAIDU_OCR_API_KEY") {
         settings.ocr.unlimited.api_key = api_key;

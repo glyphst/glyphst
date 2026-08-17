@@ -50,11 +50,22 @@ impl TranslationProvider {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct TranslationProviderConfig {
     pub api_key: String,
     pub base_url: Option<String>,
     pub region: Option<String>,
+}
+
+impl std::fmt::Debug for TranslationProviderConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TranslationProviderConfig")
+            .field("has_api_key", &!self.api_key.is_empty())
+            .field("base_url", &self.base_url)
+            .field("region", &self.region)
+            .finish()
+    }
 }
 
 impl TranslationProviderConfig {

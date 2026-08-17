@@ -1,6 +1,6 @@
 use super::SettingsWindow;
 use glyphst_settings::{
-    AiProvider, SettingsStore,
+    AiProvider, ProviderSecretId, SettingsStore,
     theme::{PartialTheme, Theme},
 };
 use glyphst_ui::{
@@ -269,6 +269,9 @@ impl SettingsWindow {
         options: &RenderOptions,
         cx: &mut App,
     ) -> AnyElement {
+        let credentials_loading = cx
+            .global::<SettingsStore>()
+            .provider_secret_is_loading(ProviderSecretId::AiApiKey(provider));
         let (connection_loading, connection_status, connection_failed) = {
             let connection = &view.read(cx).provider_operation;
             if connection.provider == Some(provider) {
@@ -311,9 +314,9 @@ impl SettingsWindow {
                 )))
                 .label(crate::fl!("settings-test-connection"))
                 .outline()
-                .loading(connection_loading)
+                .loading(connection_loading || credentials_loading)
                 .with_size(options.size)
-                .disabled(options.disabled || connection_loading)
+                .disabled(options.disabled || connection_loading || credentials_loading)
                 .on_click(move |_, _, cx| {
                     test_view.update(cx, |this, cx| {
                         this.test_provider_connection(provider, cx);

@@ -9,9 +9,9 @@ use glyphst_pdf_translation_app::{
     PdfTranslationService, UnlimitedClient, UnlimitedClientConfig, UnlimitedErrorCategory,
 };
 use glyphst_settings::{
-    AiModel, AiProvider, AiThinkingLevel, ModelRef, OcrProvider, OcrSettings, ResolvedAiConfig,
-    Settings, SettingsStore, WindowSettings, localize, setup_ui_font, sync_component_theme,
-    ui_rems,
+    AiModel, AiProvider, AiThinkingLevel, ModelRef, OcrProvider, OcrSettings, ProviderSecretId,
+    ResolvedAiConfig, Settings, SettingsStore, WindowSettings, localize, setup_ui_font,
+    sync_component_theme, ui_rems,
 };
 use glyphst_ui::{
     activity::{ActivityCenter, ActivityNoticeEntry, ActivityNoticeLevel, BackgroundTaskEntry},
@@ -254,6 +254,14 @@ impl SettingsWindow {
         }
     }
 
+    pub(super) fn provider_secret_description(id: ProviderSecretId, cx: &App) -> SharedString {
+        let status = cx.global::<SettingsStore>().provider_secret_status(id);
+        match status.error() {
+            Some(error) => format!("{}: {error}", status.source_label()).into(),
+            None => status.source_label().into(),
+        }
+    }
+
     pub(super) fn setting_option(
         value: impl Into<SharedString>,
         label: impl Into<SharedString>,
@@ -391,6 +399,10 @@ impl SettingsWindow {
                 let result = SettingsStore::write_snapshot(&path, contents)
                     .map_err(|error| format!("{error:#}"));
                 _ = this.update(cx, |this, cx| {
+                    if result.is_ok() {
+                        cx.global_mut::<SettingsStore>()
+                            .settings_snapshot_written(&path);
+                    }
                     this.save_error = result.err().map(Into::into);
                     cx.notify();
                 });
@@ -479,6 +491,19 @@ impl SettingsWindow {
     }
 
     pub(super) fn fetch_provider_models(&mut self, provider: AiProvider, cx: &mut Context<Self>) {
+        if cx
+            .global::<SettingsStore>()
+            .provider_secret_is_loading(ProviderSecretId::AiApiKey(provider))
+        {
+            self.model_catalog_operation = ModelCatalogOperation {
+                provider: Some(provider),
+                loading: false,
+                status: Some("Credentials are still loading.".into()),
+                ..ModelCatalogOperation::default()
+            };
+            cx.notify();
+            return;
+        }
         let config = Self::resolved_ai_config(&cx.global::<SettingsStore>().settings, provider);
         let signature = Self::model_request_signature(&config);
         self.model_catalog_operation = ModelCatalogOperation {
@@ -558,6 +583,20 @@ impl SettingsWindow {
         provider: AiProvider,
         cx: &mut Context<Self>,
     ) {
+        if cx
+            .global::<SettingsStore>()
+            .provider_secret_is_loading(ProviderSecretId::AiApiKey(provider))
+        {
+            self.provider_operation = ProviderOperation {
+                provider: Some(provider),
+                loading: false,
+                status: Some("Credentials are still loading.".into()),
+                failed: false,
+                ..ProviderOperation::default()
+            };
+            cx.notify();
+            return;
+        }
         let config = Self::resolved_ai_config(&cx.global::<SettingsStore>().settings, provider);
         let signature = Self::model_request_signature(&config);
         self.provider_operation = ProviderOperation {
@@ -702,6 +741,21 @@ impl SettingsWindow {
     }
 
     pub(super) fn test_ocr_connection(&mut self, provider: OcrProvider, cx: &mut Context<Self>) {
+        let credentials_loading = match provider {
+            OcrProvider::Paddle => cx
+                .global::<SettingsStore>()
+                .provider_secret_is_loading(ProviderSecretId::PaddleOcrToken),
+            OcrProvider::Unlimited => {
+                let store = cx.global::<SettingsStore>();
+                store.provider_secret_is_loading(ProviderSecretId::UnlimitedOcrApiKey)
+                    || store.provider_secret_is_loading(ProviderSecretId::UnlimitedOcrSecretKey)
+            }
+        };
+        if credentials_loading {
+            self.save_error = Some("Credentials are still loading.".into());
+            cx.notify();
+            return;
+        }
         let mut settings = cx.global::<SettingsStore>().settings.ocr.clone();
         settings.provider = provider;
         self.ocr_operation = Some(OcrOperation {
@@ -911,7 +965,12 @@ impl Render for SettingsWindow {
             .with_group_variant(GroupBoxVariant::Outline)
             .default_selected_index(self.initial_selection)
             .pages(self.setting_pages(cx));
-        let show_footer = self.status.is_some() || self.save_error.is_some();
+        let credential_warning = cx
+            .global::<SettingsStore>()
+            .credential_warning()
+            .map(SharedString::from);
+        let show_footer =
+            self.status.is_some() || self.save_error.is_some() || credential_warning.is_some();
         let footer = show_footer.then(|| {
             div()
                 .flex()
@@ -927,6 +986,9 @@ impl Render for SettingsWindow {
                 })
                 .when_some(self.save_error.clone(), |this, error| {
                     this.child(div().text_color(cx.theme().danger).child(error))
+                })
+                .when_some(credential_warning, |this, warning| {
+                    this.child(div().text_color(cx.theme().danger).child(warning))
                 })
         });
         let card = div()
@@ -1049,7 +1111,7 @@ mod tests {
             std::thread::current().id()
         ));
         cx.update(|cx| {
-            cx.global_mut::<SettingsStore>().state_path = path.clone();
+            cx.global_mut::<SettingsStore>().config_path = path.clone();
         });
         path
     }
@@ -1213,8 +1275,8 @@ mod tests {
         assert_eq!(api_key_field.left(), region_field.left());
         assert_eq!(api_key_field.right(), endpoint_field.right());
         assert_eq!(api_key_field.right(), region_field.right());
+        assert!(cx.debug_bounds("setting-item-description-5-5-0").is_some());
         for selector in [
-            "setting-item-description-5-5-0",
             "setting-item-description-5-5-1",
             "setting-item-description-5-5-2",
         ] {

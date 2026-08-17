@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+futures.workspace = true
 glyphst-core = { path = "../core" }
 gpui.workspace = true
 gpui_component.workspace = true

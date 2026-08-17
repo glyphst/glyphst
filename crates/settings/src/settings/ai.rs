@@ -716,7 +716,7 @@ impl ModelRef {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AiProviderConfig {
     pub name: String,
     pub api_style: AiApiStyle,
@@ -724,6 +724,20 @@ pub struct AiProviderConfig {
     pub api_key: String,
     pub base_url: Option<String>,
     pub models: Vec<AiModel>,
+}
+
+impl std::fmt::Debug for AiProviderConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiProviderConfig")
+            .field("name", &self.name)
+            .field("api_style", &self.api_style)
+            .field("enabled", &self.enabled)
+            .field("has_api_key", &!self.api_key.is_empty())
+            .field("base_url", &self.base_url)
+            .field("models", &self.models)
+            .finish()
+    }
 }
 
 impl AiProviderConfig {
@@ -879,7 +893,7 @@ impl AiProviderConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ResolvedAiConfig {
     pub provider: AiProvider,
     pub provider_name: String,
@@ -890,6 +904,23 @@ pub struct ResolvedAiConfig {
     pub base_url: String,
     pub base_url_overridden: bool,
     pub thinking_level: AiThinkingLevel,
+}
+
+impl std::fmt::Debug for ResolvedAiConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedAiConfig")
+            .field("provider", &self.provider)
+            .field("provider_name", &self.provider_name)
+            .field("api_style", &self.api_style)
+            .field("enabled", &self.enabled)
+            .field("model", &self.model)
+            .field("has_api_key", &!self.api_key.is_empty())
+            .field("base_url", &self.base_url)
+            .field("base_url_overridden", &self.base_url_overridden)
+            .field("thinking_level", &self.thinking_level)
+            .finish()
+    }
 }
 
 impl ResolvedAiConfig {
