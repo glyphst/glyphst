@@ -254,6 +254,7 @@ impl DocumentView {
             thumbnail_sidebar_current_page: 0,
             thumbnail_sidebar_selecting: false,
             thumbnail_sidebar_selection: BTreeSet::new(),
+            thumbnail_sidebar_selection_anchor: None,
             viewport_render_keys: HashSet::new(),
             thumbnail_sidebar_render_keys: SurfaceRenderKeys::default(),
             dock_snapshot: DocumentDockSnapshot::default(),
@@ -265,6 +266,7 @@ impl DocumentView {
             grid_overview_viewport_width: 0.0,
             grid_overview_selecting: false,
             grid_overview_selection: BTreeSet::new(),
+            grid_overview_selection_anchor: None,
             grid_overview_render_keys: SurfaceRenderKeys::default(),
             presentation_page: None,
             jump_back: Vec::new(),
@@ -667,6 +669,12 @@ impl DocumentView {
             .retain(|page_idx| *page_idx < self.pages.len());
         self.thumbnail_sidebar_selection
             .retain(|page_idx| *page_idx < self.pages.len());
+        self.grid_overview_selection_anchor = self
+            .grid_overview_selection_anchor
+            .filter(|page_idx| *page_idx < self.pages.len());
+        self.thumbnail_sidebar_selection_anchor = self
+            .thumbnail_sidebar_selection_anchor
+            .filter(|page_idx| *page_idx < self.pages.len());
         if self
             .context_menu_page
             .is_some_and(|page_idx| page_idx >= self.pages.len())

@@ -16,6 +16,7 @@ use chrono::{DateTime, Datelike as _, Local, Utc};
 use glyphst_core::DocumentFormat;
 use glyphst_files::path_chooser::{OpenPathOptions, PathFilter, prompt_for_paths};
 use glyphst_ui::{
+    entry_selection::apply_entry_click,
     format_user_float,
     style::{SURFACE_GAP, SURFACE_INSET},
 };
@@ -1572,22 +1573,32 @@ impl NewTab {
             return;
         }
 
-        let target_item_ix = self
+        let ordered = self
             .filtered_entries
             .iter()
-            .position(|entry_ix| self.entries[*entry_ix].path == path)
-            .unwrap_or(0);
+            .map(|entry_ix| self.entries[*entry_ix].path.clone())
+            .collect::<Vec<_>>();
 
-        if modifiers.shift {
+        if modifiers.shift || modifiers.secondary() || self.selecting {
             self.selecting = true;
-            self.extend_selection_to(target_item_ix, cx);
-        } else if modifiers.secondary() || self.selecting {
-            self.toggle_selection(path, cx);
+            self.focused_item = NewTabItemKey::Document(path.clone());
+            apply_entry_click(
+                &mut self.selection,
+                &mut self.selection_anchor,
+                &ordered,
+                path,
+                modifiers,
+            );
+            cx.notify();
         } else {
             self.focused_item = NewTabItemKey::Document(path.clone());
-            self.selection_anchor = Some(path.clone());
-            self.selection.clear();
-            self.selection.insert(path.clone());
+            apply_entry_click(
+                &mut self.selection,
+                &mut self.selection_anchor,
+                &ordered,
+                path.clone(),
+                modifiers,
+            );
             if self.host == LibraryBrowserHost::Home {
                 self.inspector_open = true;
             }
@@ -1625,28 +1636,26 @@ impl NewTab {
             return;
         }
 
-        if modifiers.shift {
+        let selection_click = modifiers.shift || modifiers.secondary() || self.selecting;
+        if selection_click {
             self.selecting = true;
-            let anchor = self.tree.anchor.or(self.tree.active).unwrap_or(node);
-            if let Some((anchor_ix, target_ix)) =
-                self.tree_node_index(anchor).zip(self.tree_node_index(node))
-            {
-                let start = anchor_ix.min(target_ix);
-                let end = anchor_ix.max(target_ix);
-                for row in &self.tree.rows[start..=end] {
-                    if let Some(node) = row.node_id(&self.entries) {
-                        self.tree.marked.insert(node);
-                    }
-                }
+            let ordered = self
+                .tree
+                .rows
+                .iter()
+                .filter_map(|row| row.node_id(&self.entries))
+                .collect::<Vec<_>>();
+            if self.tree.anchor.is_none() {
+                self.tree.anchor = self.tree.active;
             }
+            apply_entry_click(
+                &mut self.tree.marked,
+                &mut self.tree.anchor,
+                &ordered,
+                node,
+                modifiers,
+            );
             self.tree.active = Some(node);
-        } else if modifiers.secondary() {
-            self.selecting = true;
-            self.tree.active = Some(node);
-            if !self.tree.marked.remove(&node) {
-                self.tree.marked.insert(node);
-            }
-            self.tree.anchor = Some(node);
         } else {
             self.selecting = false;
             self.tree.active = Some(node);
@@ -1658,7 +1667,7 @@ impl NewTab {
         match node {
             LibraryNodeId::Collection(id) => {
                 self.inspector_open = false;
-                if !modifiers.shift && !modifiers.secondary() {
+                if !selection_click {
                     self.toggle_collection_expanded(id, cx);
                     return;
                 }
@@ -1672,7 +1681,7 @@ impl NewTab {
                     if self.host == LibraryBrowserHost::Home {
                         self.inspector_open = true;
                     }
-                    if click_count >= 2 {
+                    if click_count >= 2 && !selection_click {
                         self.open_document(path, cx);
                     }
                 }
@@ -9030,8 +9039,13 @@ mod tests {
 
             this.handle_document_pointer(paths[0].clone(), gpui::Modifiers::secondary_key(), 1, cx);
             assert_eq!(this.selection, BTreeSet::from([paths[0].clone()]));
+            this.handle_document_pointer(paths[2].clone(), gpui::Modifiers::secondary_key(), 1, cx);
+            assert_eq!(
+                this.selection,
+                BTreeSet::from([paths[0].clone(), paths[2].clone()])
+            );
             this.handle_document_pointer(
-                paths[2].clone(),
+                paths[1].clone(),
                 gpui::Modifiers {
                     shift: true,
                     ..Default::default()
@@ -9039,7 +9053,23 @@ mod tests {
                 1,
                 cx,
             );
+            assert_eq!(
+                this.selection,
+                BTreeSet::from([paths[1].clone(), paths[2].clone()])
+            );
+            this.handle_document_pointer(
+                paths[0].clone(),
+                gpui::Modifiers {
+                    shift: true,
+                    ..gpui::Modifiers::secondary_key()
+                },
+                1,
+                cx,
+            );
             assert_eq!(this.selection.len(), 3);
+            this.handle_document_pointer(paths[1].clone(), gpui::Modifiers::default(), 1, cx);
+            assert_eq!(this.selection, BTreeSet::from([paths[1].clone()]));
+            assert!(this.selecting);
             this.cancel_select(cx);
             this.focused_item = NewTabItemKey::Document(paths[0].clone());
             this.toggle_focused(cx);

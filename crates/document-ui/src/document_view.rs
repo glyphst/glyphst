@@ -70,6 +70,7 @@ use glyphst_translation_ui::{
     LiveTranslationSubmission, TargetLanguageOption, TranslationServices, target_language_options,
 };
 use glyphst_ui::{
+    entry_selection::apply_entry_click,
     format_user_float,
     icons::{Icon, toolbar_icon_button},
     markdown::{Markdown, MarkdownElement, MarkdownStyle},
@@ -81,9 +82,9 @@ use glyphst_ui::{
 use gpui::{
     Anchor, AnyElement, AsyncApp, BorderStyle, Bounds, ClickEvent, ClipboardItem, Context, Corners,
     DismissEvent, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Point as GpuiPoint, PromptButton, PromptLevel, Render, RenderImage,
-    ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
+    InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathBuilder, Pixels, Point as GpuiPoint, PromptButton, PromptLevel, Render,
+    RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
     StatefulInteractiveElement, Task, TextStyle, UniformListScrollHandle, Window, anchored, canvas,
     deferred, div, fill, hsla, linear_color_stop, linear_gradient, outline, point, prelude::*, px,
     rgb, rgba, size, transparent_black, uniform_list,
@@ -1737,6 +1738,7 @@ pub struct DocumentView {
     thumbnail_sidebar_current_page: usize,
     thumbnail_sidebar_selecting: bool,
     thumbnail_sidebar_selection: BTreeSet<usize>,
+    thumbnail_sidebar_selection_anchor: Option<usize>,
     viewport_render_keys: HashSet<RenderKey>,
     thumbnail_sidebar_render_keys: SurfaceRenderKeys,
     dock_snapshot: DocumentDockSnapshot,
@@ -1748,6 +1750,7 @@ pub struct DocumentView {
     grid_overview_viewport_width: f32,
     grid_overview_selecting: bool,
     grid_overview_selection: BTreeSet<usize>,
+    grid_overview_selection_anchor: Option<usize>,
     grid_overview_render_keys: SurfaceRenderKeys,
     presentation_page: Option<usize>,
     jump_back: Vec<JumpPosition>,

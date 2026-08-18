@@ -43,6 +43,8 @@ impl DocumentView {
 
     fn enter_grid_overview_selection(&mut self, cx: &mut Context<Self>) {
         self.grid_overview_selecting = true;
+        self.grid_overview_selection_anchor =
+            Some(self.grid_overview_cursor.min(self.last_page_index()));
         self.close_context_menu(cx);
         cx.notify();
     }
@@ -51,21 +53,42 @@ impl DocumentView {
         let changed = self.grid_overview_selecting || !self.grid_overview_selection.is_empty();
         self.grid_overview_selecting = false;
         self.grid_overview_selection.clear();
+        self.grid_overview_selection_anchor = None;
         if changed {
             cx.notify();
         }
     }
 
-    fn toggle_grid_overview_page_selection(&mut self, page_idx: usize, cx: &mut Context<Self>) {
-        self.grid_overview_cursor = page_idx.min(self.last_page_index());
-        if !self.grid_overview_selection.insert(page_idx) {
-            self.grid_overview_selection.remove(&page_idx);
+    fn select_grid_overview_page(
+        &mut self,
+        page_idx: usize,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let page_idx = page_idx.min(self.last_page_index());
+        if modifiers.shift && self.grid_overview_selection_anchor.is_none() {
+            self.grid_overview_selection_anchor =
+                Some(self.grid_overview_cursor.min(self.last_page_index()));
         }
+        self.grid_overview_cursor = page_idx;
+        self.grid_overview_selecting = true;
+        let ordered = (0..self.pages.len()).collect::<Vec<_>>();
+        apply_entry_click(
+            &mut self.grid_overview_selection,
+            &mut self.grid_overview_selection_anchor,
+            &ordered,
+            page_idx,
+            modifiers,
+        );
         cx.notify();
     }
 
     fn enter_thumbnail_sidebar_selection(&mut self, cx: &mut Context<Self>) {
         self.thumbnail_sidebar_selecting = true;
+        self.thumbnail_sidebar_selection_anchor = Some(
+            self.thumbnail_sidebar_current_page
+                .min(self.last_page_index()),
+        );
         self.close_context_menu(cx);
         cx.notify();
     }
@@ -75,15 +98,35 @@ impl DocumentView {
             self.thumbnail_sidebar_selecting || !self.thumbnail_sidebar_selection.is_empty();
         self.thumbnail_sidebar_selecting = false;
         self.thumbnail_sidebar_selection.clear();
+        self.thumbnail_sidebar_selection_anchor = None;
         if changed {
             cx.notify();
         }
     }
 
-    fn toggle_thumbnail_sidebar_page_selection(&mut self, page_idx: usize, cx: &mut Context<Self>) {
-        if !self.thumbnail_sidebar_selection.insert(page_idx) {
-            self.thumbnail_sidebar_selection.remove(&page_idx);
+    fn select_thumbnail_sidebar_page(
+        &mut self,
+        page_idx: usize,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let page_idx = page_idx.min(self.last_page_index());
+        if modifiers.shift && self.thumbnail_sidebar_selection_anchor.is_none() {
+            self.thumbnail_sidebar_selection_anchor = Some(
+                self.thumbnail_sidebar_current_page
+                    .min(self.last_page_index()),
+            );
         }
+        self.thumbnail_sidebar_current_page = page_idx;
+        self.thumbnail_sidebar_selecting = true;
+        let ordered = (0..self.pages.len()).collect::<Vec<_>>();
+        apply_entry_click(
+            &mut self.thumbnail_sidebar_selection,
+            &mut self.thumbnail_sidebar_selection_anchor,
+            &ordered,
+            page_idx,
+            modifiers,
+        );
         cx.notify();
     }
 
@@ -127,6 +170,7 @@ impl DocumentView {
             self.grid_overview_render_keys.clear();
             self.grid_overview_selecting = false;
             self.grid_overview_selection.clear();
+            self.grid_overview_selection_anchor = None;
         }
         self.update_render_cache_protection(cx);
         cx.notify();
@@ -509,10 +553,17 @@ impl DocumentView {
                                                         })
                                                         .on_mouse_down(
                                                             MouseButton::Left,
-                                                            cx.listener(move |this, _, _, cx| {
-                                                                if this.thumbnail_sidebar_selecting {
-                                                                    this.toggle_thumbnail_sidebar_page_selection(
-                                                                        page_idx, cx,
+                                                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                                                let modified = event.modifiers.shift
+                                                                    || event.modifiers.secondary();
+                                                                if page_export
+                                                                    && (this.thumbnail_sidebar_selecting
+                                                                        || modified)
+                                                                {
+                                                                    this.select_thumbnail_sidebar_page(
+                                                                        page_idx,
+                                                                        event.modifiers,
+                                                                        cx,
                                                                     );
                                                                 } else {
                                                                     cx.emit(
@@ -870,11 +921,18 @@ impl DocumentView {
                                                         })
                                                         .on_mouse_down(
                                                             MouseButton::Left,
-                                                            cx.listener(move |this, _, _, cx| {
+                                                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                                                                 this.close_context_menu(cx);
-                                                                if this.grid_overview_selecting {
-                                                                    this.toggle_grid_overview_page_selection(
-                                                                        page_idx, cx,
+                                                                let modified = event.modifiers.shift
+                                                                    || event.modifiers.secondary();
+                                                                if page_export
+                                                                    && (this.grid_overview_selecting
+                                                                        || modified)
+                                                                {
+                                                                    this.select_grid_overview_page(
+                                                                        page_idx,
+                                                                        event.modifiers,
+                                                                        cx,
                                                                     );
                                                                 } else {
                                                                     this.navigate_to_pdf_destination(
