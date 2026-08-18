@@ -69,6 +69,7 @@ use glyphst_translation_ui::{
     LiveTranslationSubmission, TargetLanguageOption, TranslationServices, target_language_options,
 };
 use glyphst_ui::{
+    format_user_float,
     icons::{Icon, toolbar_icon_button},
     markdown::{Markdown, MarkdownElement, MarkdownStyle},
     motion::{EASE_OUT, HOVER, LAYOUT, MotionSpec, ScalarTween},
@@ -139,7 +140,7 @@ pub const SIDEBAR_MIN_WIDTH: f32 = 150.0;
 const GRID_OVERVIEW_DEFAULT_ZOOM: f32 = 1.0;
 const GRID_OVERVIEW_MIN_ZOOM: f32 = 0.25;
 const GRID_OVERVIEW_MAX_ZOOM: f32 = 4.0;
-const GRID_OVERVIEW_DEFAULT_COLS: usize = 4;
+const GRID_OVERVIEW_DEFAULT_COLS: usize = 1;
 const GRID_OVERVIEW_BASE_THUMBNAIL_WIDTH: f32 = 130.0;
 const GRID_OVERVIEW_BASE_THUMBNAIL_MAX_HEIGHT: f32 = 180.0;
 const GRID_OVERVIEW_CELL_PADDING: f32 = 8.0;
@@ -1840,7 +1841,10 @@ impl AiContextProvider for DocumentViewAiContextProvider {
                     } else {
                         0.0
                     };
-                    format!("Reading progress: {:.0}%", progress.clamp(0.0, 1.0) * 100.0)
+                    format!(
+                        "Reading progress: {}%",
+                        format_user_float((progress.clamp(0.0, 1.0) * 100.0) as f64)
+                    )
                 }),
                 page_count: if document_view.capabilities.reflow {
                     0

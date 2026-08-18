@@ -38,6 +38,19 @@ pub use glyphst_actions::menu;
 pub use glyphst_settings as settings;
 pub use glyphst_settings::theme;
 
+/// Decimal precision used for floating-point values rendered to users.
+pub const USER_FLOAT_DECIMAL_PLACES: usize = 2;
+
+/// Format a floating-point value consistently for user-facing UI.
+pub fn format_user_float(value: f64) -> String {
+    let formatted = format!("{value:.precision$}", precision = USER_FLOAT_DECIMAL_PLACES);
+    if formatted == "-0.00" {
+        "0.00".to_string()
+    } else {
+        formatted
+    }
+}
+
 /// Initialize the shared Glyphst UI services for an application.
 pub fn init(cx: &mut App) {
     gpui_component::init(cx);
@@ -51,3 +64,16 @@ pub const TRANSIENT_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
 /// Shared lifetime for actionable feedback that users need time to read or
 /// interact with.
 pub const LONG_FEEDBACK_DURATION: Duration = Duration::from_secs(10);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_floats_have_two_decimal_places() {
+        assert_eq!(format_user_float(1.1_f32 as f64), "1.10");
+        assert_eq!(format_user_float(12.0), "12.00");
+        assert_eq!(format_user_float(1.236), "1.24");
+        assert_eq!(format_user_float(-0.0), "0.00");
+    }
+}

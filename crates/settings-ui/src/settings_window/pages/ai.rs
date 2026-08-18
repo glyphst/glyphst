@@ -841,6 +841,7 @@ impl SettingsWindow {
                     min: 1.0,
                     max: u32::MAX as f64,
                     step: 1.0,
+                    decimal_places: Some(0),
                 },
                 |cx: &App| cx.global::<SettingsStore>().settings.ai.page_image_limit as f64,
                 {
@@ -862,6 +863,7 @@ impl SettingsWindow {
                     min: 0.0,
                     max: 1.0,
                     step: 0.05,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| {
                     cx.global::<SettingsStore>()
@@ -920,6 +922,7 @@ impl SettingsWindow {
                     min: 8.0,
                     max: 32.0,
                     step: 1.0,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| cx.global::<SettingsStore>().settings.ai.quick_ask.text_size as f64,
                 {

@@ -288,6 +288,7 @@ impl SettingsWindow {
                     min: 6.0,
                     max: 100.0,
                     step: 1.0,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| cx.global::<SettingsStore>().settings.font.ui_font_size as f64,
                 {
@@ -309,6 +310,7 @@ impl SettingsWindow {
                     min: 100.0,
                     max: 900.0,
                     step: 100.0,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| cx.global::<SettingsStore>().settings.font.ui_font_weight as f64,
                 {
@@ -330,6 +332,7 @@ impl SettingsWindow {
                     min: 0.0,
                     max: 240.0,
                     step: 4.0,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| cx.global::<SettingsStore>().resolved_theme.page_gap as f64,
                 {

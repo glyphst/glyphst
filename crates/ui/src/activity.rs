@@ -588,7 +588,7 @@ fn render_task_card(id: BackgroundTaskId, task: BackgroundTaskEntry, cx: &App) -
                             .child(if progress.indeterminate {
                                 crate::fl!("activity-working")
                             } else {
-                                format!("{:.0}%", fraction * 100.0)
+                                format!("{}%", crate::format_user_float((fraction * 100.0) as f64))
                             }),
                     ),
             )

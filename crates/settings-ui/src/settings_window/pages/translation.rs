@@ -387,6 +387,7 @@ impl SettingsWindow {
                     min: 240.0,
                     max: 640.0,
                     step: 8.0,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| {
                     cx.global::<SettingsStore>()

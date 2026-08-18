@@ -14,7 +14,10 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Datelike as _, Local, Utc};
 use glyphst_core::DocumentFormat;
-use glyphst_ui::style::{SURFACE_GAP, SURFACE_INSET};
+use glyphst_ui::{
+    format_user_float,
+    style::{SURFACE_GAP, SURFACE_INSET},
+};
 use gpui::{
     AnyElement, App, Context, Corners, DragMoveEvent, Entity, EventEmitter, ExternalPaths,
     FocusHandle, IntoElement, ListSizingBehavior, Modifiers, MouseButton, MouseDownEvent,
@@ -6695,9 +6698,10 @@ impl NewTabEntry {
             .semantic
             .as_ref()
             .map(|position| {
-                let progress = (position.progress.clamp(0.0, 1.0) * 100.0).round() as i64;
+                let progress =
+                    format_user_float((position.progress.clamp(0.0, 1.0) * 100.0) as f64);
                 (
-                    crate::fl!("new-tab-last-read-progress", progress = progress).into(),
+                    crate::fl!("new-tab-last-read-progress", progress = progress.clone()).into(),
                     format!("{progress}%").into(),
                 )
             })
@@ -6854,11 +6858,11 @@ fn format_file_size(bytes: u64) -> String {
     const GIB: u64 = MIB * 1024;
 
     if bytes >= GIB {
-        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+        format!("{} GiB", format_user_float(bytes as f64 / GIB as f64))
     } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+        format!("{} MiB", format_user_float(bytes as f64 / MIB as f64))
     } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+        format!("{} KiB", format_user_float(bytes as f64 / KIB as f64))
     } else {
         format!("{bytes} B")
     }
@@ -8246,8 +8250,8 @@ mod tests {
     #[test]
     fn file_sizes_use_binary_units() {
         assert_eq!(format_file_size(42), "42 B");
-        assert_eq!(format_file_size(1536), "1.5 KiB");
-        assert_eq!(format_file_size(2 * 1024 * 1024), "2.0 MiB");
+        assert_eq!(format_file_size(1536), "1.50 KiB");
+        assert_eq!(format_file_size(2 * 1024 * 1024), "2.00 MiB");
     }
 
     #[test]

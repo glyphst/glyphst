@@ -3,7 +3,7 @@ use super::*;
 impl DocumentView {
     pub(super) fn render_zoom_popup(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let percentage = format!("{:.0}%", self.zoom * 100.0);
+        let percentage = format!("{}%", format_user_float((self.zoom * 100.0) as f64));
 
         div()
             .id("document-zoom-popup")
@@ -397,7 +397,7 @@ impl DocumentView {
             .child(Self::render_epub_stepper(
                 EpubStepperConfig {
                     label: crate::fl!("epub-font-size").into(),
-                    value: format!("{:.0}", preferences.font_size),
+                    value: format_user_float(preferences.font_size as f64),
                     decrease_id: "epub-font-decrease",
                     increase_id: "epub-font-increase",
                 },
@@ -409,7 +409,7 @@ impl DocumentView {
             .child(Self::render_epub_stepper(
                 EpubStepperConfig {
                     label: crate::fl!("epub-line-height").into(),
-                    value: format!("{:.1}", preferences.line_height),
+                    value: format_user_float(preferences.line_height as f64),
                     decrease_id: "epub-line-decrease",
                     increase_id: "epub-line-increase",
                 },
@@ -421,7 +421,10 @@ impl DocumentView {
             .child(Self::render_epub_stepper(
                 EpubStepperConfig {
                     label: crate::fl!("epub-horizontal-margin").into(),
-                    value: format!("{:.0} px", preferences.horizontal_margin),
+                    value: format!(
+                        "{} px",
+                        format_user_float(preferences.horizontal_margin as f64)
+                    ),
                     decrease_id: "epub-margin-decrease",
                     increase_id: "epub-margin-increase",
                 },
@@ -433,7 +436,10 @@ impl DocumentView {
             .child(Self::render_epub_stepper(
                 EpubStepperConfig {
                     label: crate::fl!("epub-max-content-width").into(),
-                    value: format!("{:.0} px", preferences.max_content_width),
+                    value: format!(
+                        "{} px",
+                        format_user_float(preferences.max_content_width as f64)
+                    ),
                     decrease_id: "epub-width-decrease",
                     increase_id: "epub-width-increase",
                 },

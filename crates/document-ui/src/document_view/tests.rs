@@ -131,6 +131,37 @@ fn page_counter_uses_generated_pages_for_any_document_format() {
     assert_eq!(DocumentView::page_counter_label(2..4, 12), "3–4 / 12");
 }
 
+#[test]
+fn grid_overview_columns_fit_inside_the_measured_pane_width() {
+    let zoom = 1.0;
+    let cell_width = DocumentView::grid_overview_cell_width(zoom);
+    let gap = super::GRID_OVERVIEW_CELL_GAP;
+    let exact_two_column_width = cell_width * 2.0 + gap * 3.0;
+
+    assert_eq!(
+        DocumentView::grid_overview_cols_for_width(exact_two_column_width - 0.01, zoom),
+        1
+    );
+    assert_eq!(
+        DocumentView::grid_overview_cols_for_width(exact_two_column_width, zoom),
+        2
+    );
+
+    for pane_width in [320.0, 480.0, 720.0, 1024.0] {
+        let cols = DocumentView::grid_overview_cols_for_width(pane_width, zoom);
+        let horizontal_gap = DocumentView::grid_overview_horizontal_gap(pane_width, cols, zoom);
+        let occupied_width = cell_width * cols as f32 + horizontal_gap * (cols + 1) as f32;
+        assert!(occupied_width <= pane_width + f32::EPSILON);
+    }
+}
+
+#[test]
+fn grid_overview_uses_a_safe_single_column_before_measurement() {
+    assert_eq!(super::GRID_OVERVIEW_DEFAULT_COLS, 1);
+    assert_eq!(DocumentView::grid_overview_cols_for_width(0.0, 1.0), 1);
+    assert_eq!(DocumentView::grid_overview_cols_for_width(f32::NAN, 1.0), 1);
+}
+
 fn layout_test_page(width: f32, height: f32) -> DocumentPage {
     DocumentPage {
         bounds: Rect::new(0.0, 0.0, width, height),

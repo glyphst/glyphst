@@ -112,6 +112,7 @@ impl SettingsWindow {
                     min: 0.25,
                     max: 8.0,
                     step: 0.05,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| cx.global::<SettingsStore>().settings.behavior.default_zoom as f64,
                 {
@@ -133,6 +134,7 @@ impl SettingsWindow {
                     min: 1.01,
                     max: 4.0,
                     step: 0.05,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| cx.global::<SettingsStore>().settings.behavior.zoom_step as f64,
                 {
@@ -266,6 +268,7 @@ impl SettingsWindow {
                     min: 8.0,
                     max: 48.0,
                     step: 1.0,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| cx.global::<SettingsStore>().settings.reading.font_size as f64,
                 {
@@ -287,6 +290,7 @@ impl SettingsWindow {
                     min: 1.0,
                     max: 3.0,
                     step: 0.1,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| cx.global::<SettingsStore>().settings.reading.line_height as f64,
                 {
@@ -308,6 +312,7 @@ impl SettingsWindow {
                     min: 0.0,
                     max: 256.0,
                     step: 4.0,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| {
                     cx.global::<SettingsStore>()
@@ -334,6 +339,7 @@ impl SettingsWindow {
                     min: 240.0,
                     max: 2048.0,
                     step: 20.0,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| {
                     cx.global::<SettingsStore>()
@@ -412,6 +418,7 @@ impl SettingsWindow {
                     min: 0.1,
                     max: 1.0,
                     step: 0.05,
+                    decimal_places: Some(2),
                 },
                 |cx: &App| cx.global::<SettingsStore>().settings.window.opacity as f64,
                 {

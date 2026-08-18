@@ -132,15 +132,6 @@ impl DocumentView {
         cx.notify();
     }
 
-    /// Compute the available content width for the grid overview by subtracting
-    /// open sidebar widths (including their 1px borders) from the window width.
-    /// This allows column count to be computed synchronously during render,
-    /// eliminating the one-frame delay from the measure-canvas approach.
-    fn available_content_width(&self, window: &Window) -> f32 {
-        let window_width = window.bounds().size.width.as_f32();
-        (window_width - self.dock_snapshot.occupied_width()).max(0.0)
-    }
-
     fn grid_overview_thumbnail_max_width(zoom: f32) -> f32 {
         GRID_OVERVIEW_BASE_THUMBNAIL_WIDTH * zoom
     }
@@ -149,7 +140,7 @@ impl DocumentView {
         GRID_OVERVIEW_BASE_THUMBNAIL_MAX_HEIGHT * zoom
     }
 
-    fn grid_overview_cell_width(zoom: f32) -> f32 {
+    pub(super) fn grid_overview_cell_width(zoom: f32) -> f32 {
         Self::grid_overview_thumbnail_max_width(zoom) + GRID_OVERVIEW_CELL_PADDING
     }
 
@@ -160,7 +151,7 @@ impl DocumentView {
             + GRID_OVERVIEW_ROW_PADDING_Y
     }
 
-    fn grid_overview_cols_for_width(viewport_width: f32, zoom: f32) -> usize {
+    pub(super) fn grid_overview_cols_for_width(viewport_width: f32, zoom: f32) -> usize {
         if !viewport_width.is_finite() || viewport_width <= 0.0 {
             return GRID_OVERVIEW_DEFAULT_COLS;
         }
@@ -171,7 +162,7 @@ impl DocumentView {
             .max(1)
     }
 
-    fn grid_overview_horizontal_gap(viewport_width: f32, cols: usize, zoom: f32) -> f32 {
+    pub(super) fn grid_overview_horizontal_gap(viewport_width: f32, cols: usize, zoom: f32) -> f32 {
         if !viewport_width.is_finite() || viewport_width <= 0.0 {
             return GRID_OVERVIEW_CELL_GAP;
         }
@@ -650,20 +641,6 @@ impl DocumentView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Compute available width synchronously from window bounds and sidebar
-        // widths, eliminating the one-frame delay of the measure-canvas approach.
-        let available_width = self.available_content_width(window);
-        if available_width.is_finite() && available_width > 0.0 {
-            let new_cols =
-                Self::grid_overview_cols_for_width(available_width, self.grid_overview_zoom);
-            let cols_changed = new_cols != self.grid_overview_cols;
-            self.grid_overview_cols = new_cols;
-            self.grid_overview_viewport_width = available_width;
-            if cols_changed {
-                self.scroll_grid_overview_cursor(ScrollStrategy::Center);
-            }
-        }
-
         let cols = self.grid_overview_cols.max(1);
         let rows = self.pages.len().div_ceil(cols);
         let zoom = self.grid_overview_zoom;
@@ -678,6 +655,8 @@ impl DocumentView {
         let measure_view = cx.entity();
         let page_export = self.capabilities.page_export;
 
+        // This canvas is sized by the overview itself, so a split pane reports
+        // its own viewport width rather than the containing window's width.
         let measure = canvas(
             {
                 let measure_view = measure_view.clone();
