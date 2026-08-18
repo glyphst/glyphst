@@ -91,12 +91,18 @@ impl DocumentView {
     }
 
     pub(super) fn thumbnail_overlays_for_page(&self, page_idx: usize) -> PageThumbnailOverlays {
+        let page_matches = self
+            .search
+            .page_matches
+            .get(page_idx)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         Self::thumbnail_overlays_for_page_data(
             page_idx,
             &self.highlights,
             &self.notes,
             &self.glyphs,
-            &self.search.matches,
+            page_matches,
             self.search.active,
         )
     }
@@ -106,7 +112,7 @@ impl DocumentView {
         highlights: &[Highlight],
         notes: &[Note],
         glyphs: &[Glyph],
-        matches: &[SearchMatch],
+        page_matches: &[PageSearchMatch],
         active_match: Option<usize>,
     ) -> PageThumbnailOverlays {
         let highlights = highlights
@@ -129,26 +135,15 @@ impl DocumentView {
             })
             .collect();
 
-        // Search matches are appended page-by-page by `recompute_search`, so
-        // binary partitioning avoids scanning every document match once per
-        // visible thumbnail.
-        let first_match = matches.partition_point(|search_match| search_match.page_idx < page_idx);
-        let end_match = first_match
-            + matches[first_match..]
-                .partition_point(|search_match| search_match.page_idx == page_idx);
         let mut search_highlights = Vec::new();
-        for (match_ix, search_match) in matches[first_match..end_match]
-            .iter()
-            .enumerate()
-            .map(|(offset, search_match)| (first_match + offset, search_match))
-        {
+        for page_match in page_matches {
             search_highlights.extend(
-                Self::highlight_rects_for_glyph_range(glyphs, search_match.range.clone())
+                Self::highlight_rects_for_glyph_range(glyphs, page_match.range.clone())
                     .into_iter()
                     .filter(|rect| rect.page_idx == page_idx)
                     .map(|rect| SearchHighlightRect {
                         rect,
-                        active: active_match == Some(match_ix),
+                        active: active_match == Some(page_match.match_ix),
                     }),
             );
         }

@@ -1300,9 +1300,27 @@ pub enum DocumentViewEvent {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchMatch {
     page_idx: usize,
     range: Range<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PageSearchMatch {
+    match_ix: usize,
+    range: Range<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SearchTextMapping {
+    byte_offset: usize,
+    glyph_ix: Option<usize>,
+}
+
+struct SearchTextIndex {
+    text: String,
+    mapping: Vec<SearchTextMapping>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1321,8 +1339,12 @@ struct PageThumbnailOverlays {
 struct SearchState {
     query: SharedString,
     matches: Vec<SearchMatch>,
+    page_matches: Vec<Vec<PageSearchMatch>>,
     active: Option<usize>,
     ignore_case: bool,
+    regex_enabled: bool,
+    regex_error: Option<SharedString>,
+    search_text: Option<SearchTextIndex>,
     reveal_after_indexing: bool,
 }
 
@@ -1331,14 +1353,33 @@ impl Default for SearchState {
         Self {
             query: "".into(),
             matches: Vec::new(),
+            page_matches: Vec::new(),
             active: None,
             ignore_case: true,
+            regex_enabled: false,
+            regex_error: None,
+            search_text: None,
             reveal_after_indexing: false,
         }
     }
 }
 
 impl SearchState {
+    fn clear_results(&mut self, page_count: usize) {
+        self.matches.clear();
+        self.active = None;
+        self.regex_error = None;
+        for page_matches in &mut self.page_matches {
+            page_matches.clear();
+        }
+        self.page_matches.truncate(page_count);
+        self.page_matches.resize_with(page_count, Vec::new);
+    }
+
+    fn invalidate_search_text(&mut self) {
+        self.search_text = None;
+    }
+
     fn update_reveal_after_indexing(&mut self, indexing: bool) {
         self.reveal_after_indexing = indexing && !self.query.is_empty();
     }

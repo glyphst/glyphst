@@ -3039,6 +3039,7 @@ dependencies = [
  "gpui-component",
  "image",
  "mupdf",
+ "regex",
  "serde_json",
  "smallvec",
  "tracing",

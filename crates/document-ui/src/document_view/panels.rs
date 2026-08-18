@@ -57,7 +57,11 @@ impl DocumentView {
         let active = self.search.active;
         let match_count = self.search.matches.len();
         let ignore_case = self.search.ignore_case;
-        let indexing = self.text_index_state.is_pending_or_indexing() && !query.is_empty();
+        let regex_enabled = self.search.regex_enabled;
+        let regex_error = self.search.regex_error.clone();
+        let indexing = regex_error.is_none()
+            && self.text_index_state.is_pending_or_indexing()
+            && !query.is_empty();
         let search_bar = cx.new(|cx| {
             SearchBar::new(
                 previous_focus_handle.clone(),
@@ -66,6 +70,8 @@ impl DocumentView {
                     active_match: active,
                     match_count,
                     ignore_case,
+                    regex_enabled,
+                    regex_error: regex_error.clone(),
                     indexing,
                 },
                 window,
@@ -84,6 +90,10 @@ impl DocumentView {
                 SearchEvent::IgnoreCaseChanged { query, ignore_case } => {
                     this.set_search_ignore_case(query.clone(), *ignore_case, cx)
                 }
+                SearchEvent::RegexChanged {
+                    query,
+                    regex_enabled,
+                } => this.set_search_regex(query.clone(), *regex_enabled, cx),
                 SearchEvent::Dismissed => this.close_search_bar(window, cx),
             },
         )
@@ -97,8 +107,7 @@ impl DocumentView {
     fn close_search_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.search_bar.take().is_some() {
             self.search.query = "".into();
-            self.search.matches.clear();
-            self.search.active = None;
+            self.search.clear_results(self.pages.len());
             self.search.cancel_reveal_after_indexing();
             self.focus_handle.focus(window, cx);
             cx.notify();

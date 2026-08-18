@@ -102,6 +102,12 @@ mod tests {
         );
         assert!(
             assets
+                .load("icons/regex.svg")
+                .expect("Glyphst regexp icon lookup")
+                .is_some()
+        );
+        assert!(
+            assets
                 .load("icons/search.svg")
                 .expect("component icon lookup")
                 .is_some()

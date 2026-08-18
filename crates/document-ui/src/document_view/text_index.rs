@@ -267,6 +267,7 @@ impl DocumentView {
             page.glyph_range = glyph_range;
         }
 
+        self.search.invalidate_search_text();
         self.refresh_annotation_geometry();
         self.refresh_notes_sidebar_entries();
         if let Some(position) = self.pending_semantic_position.take() {
@@ -342,6 +343,7 @@ impl DocumentView {
         eprintln!("failed to index PDF text: {error}");
         self.text_index_state.settle(false);
         self.search.cancel_reveal_after_indexing();
+        self.search.invalidate_search_text();
         self.recompute_search();
         self.sync_search_bar(cx);
         cx.notify();

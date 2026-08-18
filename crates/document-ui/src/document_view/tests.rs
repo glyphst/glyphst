@@ -8,8 +8,8 @@ use std::{
 use super::navigation::zoom_for_fit_extent;
 use super::translation::replace_page_text_data;
 use super::{
-    DocumentPage, DocumentView, Glyph, PreparedPageText, PrimarySelectionPress, RegionDragState,
-    RegionImageExport, RenderCache, RenderKey, SearchMatch, SearchState, Selection,
+    DocumentPage, DocumentView, Glyph, PageSearchMatch, PreparedPageText, PrimarySelectionPress,
+    RegionDragState, RegionImageExport, RenderCache, RenderKey, SearchState, Selection,
     SurfaceRenderKeys, TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY, TRANSLATION_PANEL_DEFAULT_RIGHT,
     TRANSLATION_PANEL_DEFAULT_TOP, TRANSLATION_PANEL_DOCK_DELAY,
     TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY, TRANSLATION_PANEL_EXPOSED_STRIP,
@@ -331,25 +331,27 @@ fn thumbnail_overlays_are_grouped_by_page_and_active_match() {
     glyphs[2].line_rect = Rect::new(0.0, 10.0, 4.0, 16.0);
     glyphs[3].page_idx = 1;
 
-    let matches = vec![
-        SearchMatch {
-            page_idx: 0,
+    let page_zero_matches = vec![
+        PageSearchMatch {
+            match_ix: 0,
             range: 0..3,
         },
-        SearchMatch {
-            page_idx: 0,
+        PageSearchMatch {
+            match_ix: 1,
             range: 1..2,
         },
-        SearchMatch {
-            page_idx: 1,
+    ];
+    let page_one_matches = vec![
+        PageSearchMatch {
+            match_ix: 0,
             range: 3..4,
         },
-        SearchMatch {
-            page_idx: 1,
+        PageSearchMatch {
+            match_ix: 3,
             range: 4..99,
         },
-        SearchMatch {
-            page_idx: 2,
+        PageSearchMatch {
+            match_ix: 4,
             range: 0..1,
         },
     ];
@@ -401,7 +403,7 @@ fn thumbnail_overlays_are_grouped_by_page_and_active_match() {
         &saved_highlights,
         &notes,
         &glyphs,
-        &matches,
+        &page_zero_matches,
         Some(0),
     );
     let page_one = DocumentView::thumbnail_overlays_for_page_data(
@@ -409,7 +411,7 @@ fn thumbnail_overlays_are_grouped_by_page_and_active_match() {
         &saved_highlights,
         &notes,
         &glyphs,
-        &matches,
+        &page_one_matches,
         Some(0),
     );
 
@@ -438,7 +440,7 @@ fn thumbnail_overlays_are_grouped_by_page_and_active_match() {
         2
     );
     assert!(!page_zero.search_highlights[2].active);
-    assert!(!page_one.search_highlights[0].active);
+    assert!(page_one.search_highlights[0].active);
 }
 
 #[test]

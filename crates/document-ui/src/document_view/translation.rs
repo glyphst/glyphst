@@ -720,6 +720,7 @@ impl DocumentView {
         self.pending_link = None;
         self.refresh_annotation_geometry();
         self.refresh_notes_sidebar_entries();
+        self.search.invalidate_search_text();
         self.recompute_search();
         self.search.active = self.nearest_search_match_index();
         self.sync_search_bar(cx);
@@ -742,6 +743,7 @@ impl DocumentView {
         self.hovered_link = None;
         self.pending_link = None;
         self.text_index_state = TextIndexState::Pending;
+        self.search.invalidate_search_text();
         self.recompute_search();
         self.sync_search_bar(cx);
         self.start_text_indexing(cx);

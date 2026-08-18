@@ -647,8 +647,8 @@ impl DocumentView {
         self.page_block_ranges = vec![0..0; self.pages.len()];
         self.replace_translation_document();
         self.links.clear();
-        self.search.matches.clear();
-        self.search.active = None;
+        self.search.invalidate_search_text();
+        self.search.clear_results(self.pages.len());
         self.selection = None;
         self.region_tool_active = false;
         self.region_drag = None;
