@@ -1061,10 +1061,74 @@ fn translation_viewport_anchors_match(
         && (left.viewport_y_fraction - right.viewport_y_fraction).abs() < 0.001
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Selection {
     anchor: usize,
     head: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrimarySelectionPress {
+    Empty,
+    Highlight(u64),
+    TextAnchor {
+        glyph_ix: usize,
+        highlight_id: Option<u64>,
+    },
+    Word(usize),
+}
+
+fn primary_selection_press(
+    highlight_id: Option<u64>,
+    glyph_ix: Option<usize>,
+    click_count: usize,
+) -> PrimarySelectionPress {
+    if let Some(glyph_ix) = glyph_ix {
+        if click_count == 2 {
+            PrimarySelectionPress::Word(glyph_ix)
+        } else {
+            PrimarySelectionPress::TextAnchor {
+                glyph_ix,
+                highlight_id,
+            }
+        }
+    } else if let Some(highlight_id) = highlight_id {
+        PrimarySelectionPress::Highlight(highlight_id)
+    } else {
+        PrimarySelectionPress::Empty
+    }
+}
+
+fn extend_text_selection(
+    selection: &mut Option<Selection>,
+    selected_highlight: &mut Option<u64>,
+    pending_anchor: Option<usize>,
+    head: usize,
+) -> bool {
+    let Some(mut next_selection) = (*selection).or_else(|| {
+        pending_anchor.map(|anchor| Selection {
+            anchor,
+            head: anchor,
+        })
+    }) else {
+        return false;
+    };
+
+    next_selection.head = head;
+    *selection = Some(next_selection);
+    *selected_highlight = None;
+    true
+}
+
+fn context_highlight_target(
+    highlight_id: Option<u64>,
+    pointer_in_text_selection: bool,
+) -> Option<u64> {
+    if pointer_in_text_selection {
+        None
+    } else {
+        highlight_id
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

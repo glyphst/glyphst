@@ -8,9 +8,9 @@ use std::{
 use super::navigation::zoom_for_fit_extent;
 use super::translation::replace_page_text_data;
 use super::{
-    DocumentPage, DocumentView, Glyph, PreparedPageText, RegionDragState, RegionImageExport,
-    RenderCache, RenderKey, SearchMatch, SearchState, SurfaceRenderKeys,
-    TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY, TRANSLATION_PANEL_DEFAULT_RIGHT,
+    DocumentPage, DocumentView, Glyph, PreparedPageText, PrimarySelectionPress, RegionDragState,
+    RegionImageExport, RenderCache, RenderKey, SearchMatch, SearchState, Selection,
+    SurfaceRenderKeys, TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY, TRANSLATION_PANEL_DEFAULT_RIGHT,
     TRANSLATION_PANEL_DEFAULT_TOP, TRANSLATION_PANEL_DOCK_DELAY,
     TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY, TRANSLATION_PANEL_EXPOSED_STRIP,
     TRANSLATION_PANEL_INITIAL_DOCK_DELAY, TRANSLATION_PANEL_MARGIN,
@@ -19,12 +19,13 @@ use super::{
     TRANSLATION_PANEL_SNAP_ZONE, TextBlock, TextChunk, TextFormatBlock, TextIndexState, TextLine,
     TranslationCardState, TranslationHoverAnimation, TranslationPanelSide, TranslationStatus,
     TranslationViewRole, clamp_translation_panel_edge_y, clamp_translation_panel_position,
-    clear_copied_region_selection, default_translation_panel_position,
-    page_render::should_start_viewport_render, reset_translation_cards_for_document_replacement,
-    retain_valid_annotation_id, translation_hover_interaction_bounds,
-    translation_pair_highlights_enabled, translation_panel_docked_x,
-    translation_panel_initial_dock_should_run, translation_panel_should_retain_expanded,
-    translation_panel_snap_side, translation_panel_width, translation_toolbar_enabled,
+    clear_copied_region_selection, context_highlight_target, default_translation_panel_position,
+    extend_text_selection, page_render::should_start_viewport_render, primary_selection_press,
+    reset_translation_cards_for_document_replacement, retain_valid_annotation_id,
+    translation_hover_interaction_bounds, translation_pair_highlights_enabled,
+    translation_panel_docked_x, translation_panel_initial_dock_should_run,
+    translation_panel_should_retain_expanded, translation_panel_snap_side, translation_panel_width,
+    translation_toolbar_enabled,
 };
 use glyphst_ai::ai_chat::{MentionKind, MentionReference};
 use glyphst_core::{
@@ -37,6 +38,78 @@ use gpui::{Bounds, Modifiers, ScrollWheelEvent, point, px, size};
 use image::{Frame, GenericImageView, RgbaImage};
 use mupdf::{Point, Quad, Rect};
 use smallvec::smallvec;
+
+#[test]
+fn highlighted_text_press_preserves_annotation_clicks_and_text_gestures() {
+    assert_eq!(
+        primary_selection_press(Some(7), Some(12), 1),
+        PrimarySelectionPress::TextAnchor {
+            glyph_ix: 12,
+            highlight_id: Some(7),
+        }
+    );
+    assert_eq!(
+        primary_selection_press(Some(7), Some(12), 2),
+        PrimarySelectionPress::Word(12)
+    );
+    assert_eq!(
+        primary_selection_press(Some(7), None, 1),
+        PrimarySelectionPress::Highlight(7)
+    );
+    assert_eq!(
+        primary_selection_press(None, Some(12), 1),
+        PrimarySelectionPress::TextAnchor {
+            glyph_ix: 12,
+            highlight_id: None,
+        }
+    );
+    assert_eq!(
+        primary_selection_press(None, None, 1),
+        PrimarySelectionPress::Empty
+    );
+}
+
+#[test]
+fn dragging_text_clears_the_selected_annotation() {
+    let mut selection = None;
+    let mut selected_highlight = Some(7);
+
+    assert!(extend_text_selection(
+        &mut selection,
+        &mut selected_highlight,
+        Some(12),
+        18,
+    ));
+    assert_eq!(
+        selection,
+        Some(Selection {
+            anchor: 12,
+            head: 18,
+        })
+    );
+    assert_eq!(selected_highlight, None);
+
+    assert!(extend_text_selection(
+        &mut selection,
+        &mut selected_highlight,
+        Some(12),
+        9,
+    ));
+    assert_eq!(
+        selection,
+        Some(Selection {
+            anchor: 12,
+            head: 9,
+        })
+    );
+}
+
+#[test]
+fn text_selection_owns_the_context_menu_over_a_saved_highlight() {
+    assert_eq!(context_highlight_target(Some(7), true), None);
+    assert_eq!(context_highlight_target(Some(7), false), Some(7));
+    assert_eq!(context_highlight_target(None, true), None);
+}
 
 #[test]
 fn annotation_reconciliation_clears_only_stale_ids() {

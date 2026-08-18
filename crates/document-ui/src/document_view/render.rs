@@ -392,36 +392,41 @@ impl Render for DocumentView {
                         return;
                     }
 
-                    if let Some(highlight_id) = this.highlight_at_screen(event.position) {
-                        this.selection = None;
-                        this.selected_highlight = Some(highlight_id);
-                        cx.notify();
-                        return;
-                    }
-
-                    if let Some(ix) = this.nearby_glyph_at_screen(event.position) {
-                        this.selected_highlight = None;
-                        if event.click_count == 2 {
-                            if let Some(range) = this.word_bounds_at_glyph(ix) {
+                    let highlight_id = this.highlight_at_screen(event.position);
+                    let glyph_ix = this.nearby_glyph_at_screen(event.position);
+                    match primary_selection_press(highlight_id, glyph_ix, event.click_count) {
+                        PrimarySelectionPress::Word(glyph_ix) => {
+                            this.selected_highlight = None;
+                            if let Some(range) = this.word_bounds_at_glyph(glyph_ix) {
                                 this.selection = Some(Selection {
                                     anchor: range.start,
                                     head: range.end - 1,
                                 });
                             } else {
                                 this.selection = Some(Selection {
-                                    anchor: ix,
-                                    head: ix,
+                                    anchor: glyph_ix,
+                                    head: glyph_ix,
                                 });
                                 this.dragging = true;
                             }
-                        } else {
+                        }
+                        PrimarySelectionPress::TextAnchor {
+                            glyph_ix,
+                            highlight_id,
+                        } => {
                             this.selection = None;
-                            this.pending_selection_anchor = Some(ix);
+                            this.selected_highlight = highlight_id;
+                            this.pending_selection_anchor = Some(glyph_ix);
                             this.dragging = true;
                         }
-                    } else {
-                        this.selection = None;
-                        this.selected_highlight = None;
+                        PrimarySelectionPress::Highlight(highlight_id) => {
+                            this.selection = None;
+                            this.selected_highlight = Some(highlight_id);
+                        }
+                        PrimarySelectionPress::Empty => {
+                            this.selection = None;
+                            this.selected_highlight = None;
+                        }
                     }
 
                     cx.notify();
@@ -461,7 +466,11 @@ impl Render for DocumentView {
                         return;
                     }
 
-                    this.context_menu_highlight = this.highlight_at_screen(event.position);
+                    let pointer_in_text_selection = this.point_in_text_selection(event.position);
+                    this.context_menu_highlight = context_highlight_target(
+                        this.highlight_at_screen(event.position),
+                        pointer_in_text_selection,
+                    );
                     this.context_menu_note = this.note_at_screen(event.position);
                     this.context_menu_page = this.page_at_screen(event.position);
                     if let Some(highlight_id) = this.context_menu_highlight {
@@ -552,12 +561,14 @@ impl Render for DocumentView {
 
                 this.set_hovered_link(None, cx);
                 this.set_hovered_note(None, None, cx);
-                if let Some(ix) = this.glyph_at_screen(event.position) {
-                    if let Some(selection) = this.selection.as_mut() {
-                        selection.head = ix;
-                    } else if let Some(anchor) = this.pending_selection_anchor {
-                        this.selection = Some(Selection { anchor, head: ix });
-                    }
+                if let Some(ix) = this.glyph_at_screen(event.position)
+                    && extend_text_selection(
+                        &mut this.selection,
+                        &mut this.selected_highlight,
+                        this.pending_selection_anchor,
+                        ix,
+                    )
+                {
                     cx.notify();
                 }
             }))

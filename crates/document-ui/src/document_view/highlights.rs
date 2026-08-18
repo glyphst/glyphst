@@ -52,6 +52,12 @@ impl DocumentView {
         self.highlight_bounds_for_range(start..end + 1)
     }
 
+    pub(super) fn point_in_text_selection(&self, point: GpuiPoint<Pixels>) -> bool {
+        self.selection_highlights()
+            .iter()
+            .any(|bounds| bounds.contains(&point))
+    }
+
     pub(super) fn link_highlights(&self) -> Vec<Bounds<Pixels>> {
         let Some(link_ix) = self.hovered_link else {
             return Vec::new();
