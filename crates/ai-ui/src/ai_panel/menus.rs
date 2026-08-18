@@ -214,8 +214,8 @@ impl AiPanel {
                     .icon(IconName::Image)
                     .on_click({
                         let panel = panel.clone();
-                        move |_, _, cx| {
-                            panel.update(cx, |this, cx| this.pick_user_images(cx));
+                        move |_, window, cx| {
+                            panel.update(cx, |this, cx| this.pick_user_images(window, cx));
                         }
                     }),
             )

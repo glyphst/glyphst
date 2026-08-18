@@ -22,6 +22,7 @@ macro_rules! fl {
 
 pub mod activity;
 pub mod assets;
+pub mod entry_selection;
 pub mod icons;
 pub mod markdown;
 pub mod motion;

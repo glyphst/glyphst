@@ -6,6 +6,9 @@ use std::{
 
 use anyhow::Result;
 use glyphst_ai_ui::{AiContextProvider as _, AiPanel, AiPanelEvent};
+use glyphst_files::path_chooser::{
+    OpenPathOptions, PathFilter, SavePathOptions, prompt_for_new_path, prompt_for_paths,
+};
 use glyphst_translation_ui::service::LanguageCode;
 use glyphst_translation_ui::{
     DocumentTranslationId, DocumentTranslationJobEvent, DocumentTranslationManager,
@@ -21,9 +24,8 @@ use glyphst_ui::{
 use gpui::{
     AnyElement, App, Bounds, Context, DismissEvent, DragMoveEvent, Entity, EntityId, ExternalPaths,
     FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render,
-    SharedString, WeakEntity, Window, WindowAppearance, bounds, canvas, div, fill, point,
-    prelude::*, px, size,
+    MouseUpEvent, Pixels, Point, PromptButton, PromptLevel, Render, SharedString, WeakEntity,
+    Window, WindowAppearance, bounds, canvas, div, fill, point, prelude::*, px, size,
 };
 use gpui_component::{
     ActiveTheme as _, ThemeColor, WindowExt as _, menu::PopupMenu, notification::Notification,
@@ -42,11 +44,10 @@ pub use glyphst_actions::workspace::{
 
 use crate::{
     command_palette::{CommandPalette, CommandPaletteDelegate},
-    document_browser::{DocumentBrowser, DocumentBrowserEvent},
     document_view::{
         CloseTab, DocumentSidebar, DocumentView, DocumentViewEvent, DuplicateTab, OpenFile,
-        OpenKeybindings, OpenNewTab, OpenQuickAsk, OpenSettings, OpenWithSystemPicker, ResetZoom,
-        ToggleAiPanel, ToggleBookmarkSidebar, ToggleCommandPalette, ToggleHome, ToggleNotes,
+        OpenKeybindings, OpenNewTab, OpenQuickAsk, OpenSettings, ResetZoom, ToggleAiPanel,
+        ToggleBookmarkSidebar, ToggleCommandPalette, ToggleHome, ToggleNotes,
         ToggleThumbnailSidebar, ToggleToc, ToggleTransparency, TranslationViewportAnchor, ZoomIn,
         ZoomOut,
     },
@@ -86,6 +87,22 @@ pub enum WorkspaceSurfaceMode {
     Panes,
 }
 
+fn suggested_open_directory(active_document: Option<&Path>, cx: &App) -> PathBuf {
+    active_document
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            cx.global::<crate::library::LibraryStore>()
+                .history_entries()
+                .first()
+                .and_then(|entry| entry.path.parent())
+                .map(Path::to_path_buf)
+        })
+        .or_else(dirs::document_dir)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 struct WorkspaceTranslationState {
     manager: Entity<DocumentTranslationManager>,
     pending_splits: Vec<PendingTranslationSplit>,
@@ -115,8 +132,6 @@ pub struct Workspace {
     translations: WorkspaceTranslationState,
     command_palette: Option<Entity<CommandPalette>>,
     command_palette_previous_focus_handle: Option<FocusHandle>,
-    document_browser: Option<Entity<DocumentBrowser>>,
-    document_browser_previous_focus_handle: Option<FocusHandle>,
     theme_selector: Option<Entity<ThemeSelector>>,
     theme_selector_previous_focus_handle: Option<FocusHandle>,
     title_bar_menu_expanded: bool,
@@ -425,8 +440,6 @@ impl Workspace {
             },
             command_palette: None,
             command_palette_previous_focus_handle: None,
-            document_browser: None,
-            document_browser_previous_focus_handle: None,
             theme_selector: None,
             theme_selector_previous_focus_handle: None,
             title_bar_menu_expanded: false,
@@ -717,7 +730,6 @@ impl Workspace {
             self.set_title_bar_menu_expanded(false, cx);
             self.close_command_palette(window, cx);
             self.close_theme_selector(window, cx);
-            self.close_document_browser(window, cx);
         }
 
         for path in classified.supported {
@@ -1319,9 +1331,6 @@ impl Workspace {
         self.set_title_bar_menu_expanded(false, cx);
         self.close_command_palette(window, cx);
         self.close_theme_selector(window, cx);
-        if self.document_browser.is_some() {
-            self.close_document_browser(window, cx);
-        }
         self.home_previous_focus_handle = window
             .focused(cx)
             .or_else(|| Some(self.active_pane.read(cx).focus_handle()));
@@ -1357,9 +1366,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        if self.document_browser.is_some() {
-            self.close_document_browser(window, cx);
-        }
         let path = normalize_path(&path);
         let active_pane = self.active_pane.clone();
         let replace_active_new_tab = active_pane.read(cx).active_tab_is_new_tab();
@@ -2590,71 +2596,25 @@ impl Workspace {
 
     fn open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_title_bar_menu_expanded(false, cx);
-        if let Some(browser) = self.document_browser.as_ref() {
-            browser.focus_handle(cx).focus(window, cx);
-            return;
-        }
-
         self.close_command_palette(window, cx);
         self.close_theme_selector(window, cx);
-        let previous_focus_handle = window
-            .focused(cx)
-            .unwrap_or_else(|| self.active_pane.read(cx).focus_handle());
+        let opened_from_home = self.surface_mode == WorkspaceSurfaceMode::Home;
         let active_path = self
             .active_pane
             .read(cx)
             .active_document_view()
             .map(|view| view.read(cx).path().to_path_buf());
-        let initial_dir = DocumentBrowser::suggested_directory(active_path.as_deref(), cx);
-        let browser = cx.new(|cx| DocumentBrowser::new(initial_dir, window, cx));
-        cx.subscribe_in(
-            &browser,
+        let initial_dir = suggested_open_directory(active_path.as_deref(), cx);
+        let dialog = prompt_for_paths(
             window,
-            |this, _, event: &DocumentBrowserEvent, window, cx| match event {
-                DocumentBrowserEvent::Open(path) => {
-                    let path = path.clone();
-                    let replace_active_new_tab = this.active_pane.read(cx).active_tab_is_new_tab();
-                    this.close_document_browser(window, cx);
-                    let result = if this.surface_mode == WorkspaceSurfaceMode::Home {
-                        this.open_document_in_active_pane(path, None, window, cx)
-                    } else {
-                        this.focus_or_open_document(path, None, replace_active_new_tab, window, cx)
-                    };
-                    if let Err(error) = result {
-                        eprintln!("failed to open selected document: {error:#}");
-                    }
-                }
-                DocumentBrowserEvent::Dismissed => {
-                    this.close_document_browser(window, cx);
-                }
-            },
-        )
-        .detach();
-        self.document_browser_previous_focus_handle = Some(previous_focus_handle);
-        self.document_browser = Some(browser);
-        cx.notify();
-    }
-
-    fn close_document_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.document_browser.take().is_none() {
-            return;
-        }
-        if let Some(previous_focus_handle) = self.document_browser_previous_focus_handle.take() {
-            previous_focus_handle.focus(window, cx);
-        } else {
-            self.focus_active_pane(window, cx);
-        }
-        cx.notify();
-    }
-
-    fn open_system_file_picker(&mut self, cx: &mut Context<Self>) {
-        let opened_from_home = self.surface_mode == WorkspaceSurfaceMode::Home;
-        let dialog = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some(crate::fl!("open-pdf").into()),
-        });
+            cx,
+            OpenPathOptions::files(initial_dir, crate::fl!("open-pdf"))
+                .filter(PathFilter::new(
+                    crate::fl!("external-drop-supported-hint"),
+                    ["pdf", "epub"],
+                ))
+                .allow_all_files(true),
+        );
 
         cx.spawn(async move |this, cx| match dialog.await {
             Ok(Ok(Some(paths))) => {
@@ -2663,7 +2623,6 @@ impl Workspace {
                 };
                 match this.update_in(cx, |this, window, cx| {
                     let replace_active_new_tab = this.active_pane.read(cx).active_tab_is_new_tab();
-                    this.close_document_browser(window, cx);
                     if opened_from_home {
                         this.open_document_in_active_pane(path, None, window, cx)
                     } else {
@@ -2671,7 +2630,7 @@ impl Workspace {
                     }
                 }) {
                     Ok(Ok(())) => {}
-                    Ok(Err(error)) => eprintln!("failed to open selected PDF: {error:#}"),
+                    Ok(Err(error)) => eprintln!("failed to open selected document: {error:#}"),
                     Err(error) => eprintln!("failed to update workspace: {error:#}"),
                 }
             }
@@ -2689,9 +2648,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        if self.document_browser.is_some() {
-            self.close_document_browser(window, cx);
-        }
         let path = normalize_path(&path);
         if let Some((pane, tab_ix)) = self.document_location(&path, cx) {
             self.active_pane = pane.clone();
@@ -3135,7 +3091,7 @@ impl Workspace {
             return;
         }
         if snapshot.failures.is_empty() {
-            self.choose_translation_export_path(session_id, cx);
+            self.choose_translation_export_path(session_id, window, cx);
             return;
         }
         let answer = window.prompt(
@@ -3154,8 +3110,8 @@ impl Workspace {
             if answer.await != Ok(0) {
                 return;
             }
-            _ = this.update_in(cx, |this, _, cx| {
-                this.choose_translation_export_path(session_id, cx);
+            _ = this.update_in(cx, |this, window, cx| {
+                this.choose_translation_export_path(session_id, window, cx);
             });
         })
         .detach();
@@ -3164,6 +3120,7 @@ impl Workspace {
     fn choose_translation_export_path(
         &mut self,
         session_id: DocumentTranslationId,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(snapshot) = self
@@ -3185,7 +3142,16 @@ impl Workspace {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
-        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+        let dialog = prompt_for_new_path(
+            window,
+            cx,
+            SavePathOptions::new(
+                directory,
+                crate::fl!("translation-save-pdf"),
+                suggested_name,
+            )
+            .required_extension("pdf"),
+        );
         let manager = self.translations.manager.clone();
         cx.spawn(async move |_, cx| match dialog.await {
             Ok(Ok(Some(output_path))) => {
@@ -4360,32 +4326,6 @@ impl Workspace {
             })
             .child(content)
     }
-
-    fn render_centered_overlay(
-        content: impl IntoElement + 'static,
-        close: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-        theme: ThemeColor,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.overlay)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| close(this, window, cx)),
-            )
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .child(glyphst_ui::motion::modal_in(
-                "document-browser-enter",
-                div().child(content),
-            ))
-    }
 }
 
 impl Render for Workspace {
@@ -4520,9 +4460,6 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
                 this.open_file(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &OpenWithSystemPicker, _, cx| {
-                this.open_system_file_picker(cx);
             }))
             .on_action(cx.listener(|this, _: &OpenNewTab, window, cx| {
                 this.open_new_tab(window, cx);
@@ -4674,14 +4611,6 @@ impl Render for Workspace {
                 this.child(Self::render_top_aligned_overlay(
                     selector,
                     |this, window, cx| this.close_theme_selector(window, cx),
-                    theme,
-                    cx,
-                ))
-            })
-            .when_some(self.document_browser.clone(), |this, browser| {
-                this.child(Self::render_centered_overlay(
-                    browser,
-                    |this, window, cx| this.close_document_browser(window, cx),
                     theme,
                     cx,
                 ))
@@ -7288,9 +7217,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn escape_closes_the_document_browser_after_a_blank_area_click(cx: &mut TestAppContext) {
+    fn open_shortcut_does_not_stack_the_custom_path_chooser(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
+            crate::keybindings::capture_framework_bindings(cx);
+            crate::keybindings::apply(cx, glyphst_settings::KeymapPreset::Modern, &[]);
             cx.set_global(SettingsStore::memory());
             cx.set_global(LibraryStore::memory());
             cx.set_global(RenderCache::new());
@@ -7314,33 +7245,29 @@ mod tests {
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
-        workspace.read_with(cx, |workspace, _| {
-            assert!(workspace.document_browser.is_some());
+        assert!(cx.debug_bounds("path-chooser").is_some());
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-o"
+        } else {
+            "ctrl-o"
         });
-        let browser_bounds = cx.debug_bounds("document-browser").unwrap();
-        let blank_footer_area = point(
-            browser_bounds.right() - px(80.0),
-            browser_bounds.bottom() - px(20.0),
-        );
-        cx.simulate_click(blank_footer_area, Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
         cx.simulate_keystrokes("escape");
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
-        workspace.read_with(cx, |workspace, _| {
-            assert!(workspace.document_browser.is_none());
-        });
-        assert!(cx.debug_bounds("document-browser").is_none());
+        assert!(cx.debug_bounds("path-chooser").is_none());
     }
 
     #[gpui::test]
-    fn document_browser_resize_persists_and_temporary_window_clamps_restore(
-        cx: &mut TestAppContext,
-    ) {
+    fn system_path_chooser_routes_open_file_to_native_prompt(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
-            cx.set_reduce_motion(true);
-            cx.set_global(SettingsStore::memory());
+            let mut settings = SettingsStore::memory();
+            settings.settings.path_chooser = glyphst_settings::PathChooserBackend::System;
+            cx.set_global(settings);
             cx.set_global(LibraryStore::memory());
             cx.set_global(RenderCache::new());
         });
@@ -7356,63 +7283,10 @@ mod tests {
         let workspace = root.read_with(cx, |root, _| {
             root.view().clone().downcast::<Workspace>().unwrap()
         });
-        cx.simulate_resize(size(px(1200.0), px(800.0)));
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.open_file(window, cx);
         });
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-        });
-
-        let initial = cx.debug_bounds("document-browser").unwrap();
-        assert_eq!(initial.size, size(px(680.0), px(415.0)));
-        let handle = cx
-            .debug_bounds("document-browser-resize-corner")
-            .unwrap()
-            .center();
-        let resized_pointer = point(handle.x + px(24.0), handle.y + px(20.0));
-        cx.simulate_mouse_down(handle, MouseButton::Left, Modifiers::default());
-        cx.simulate_mouse_move(
-            point(handle.x + px(8.0), handle.y + px(8.0)),
-            MouseButton::Left,
-            Modifiers::default(),
-        );
-        cx.simulate_mouse_move(resized_pointer, MouseButton::Left, Modifiers::default());
-        cx.simulate_mouse_up(resized_pointer, MouseButton::Left, Modifiers::default());
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-        });
-
-        let resized = cx.debug_bounds("document-browser").unwrap();
-        assert_eq!(resized.size, size(px(728.0), px(455.0)));
-        assert_eq!(resized.center(), initial.center());
-        cx.update(|_, cx| {
-            assert_eq!(
-                cx.global::<LibraryStore>().document_browser_size(),
-                Some(crate::library::DocumentBrowserSize {
-                    width: 728.0,
-                    height: 455.0,
-                })
-            );
-        });
-
-        cx.simulate_resize(size(px(700.0), px(440.0)));
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-        });
-        assert_eq!(
-            cx.debug_bounds("document-browser").unwrap().size,
-            size(px(668.0), px(408.0))
-        );
-
-        cx.simulate_resize(size(px(1200.0), px(800.0)));
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-        });
-        assert_eq!(
-            cx.debug_bounds("document-browser").unwrap().size,
-            size(px(728.0), px(455.0))
-        );
+        assert!(cx.did_prompt_for_paths());
     }
 
     #[gpui::test]

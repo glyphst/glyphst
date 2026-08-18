@@ -80,6 +80,7 @@ const OVERLAY_CONTEXTS: &[&str] = &[
     "Search",
     "QuickAsk",
     "DocumentBrowser",
+    "PathChooser",
     "Toc",
     "Notes",
     "History",

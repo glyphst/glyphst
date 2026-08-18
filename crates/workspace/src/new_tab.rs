@@ -14,6 +14,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Datelike as _, Local, Utc};
 use glyphst_core::DocumentFormat;
+use glyphst_files::path_chooser::{OpenPathOptions, PathFilter, prompt_for_paths};
 use glyphst_ui::{
     format_user_float,
     style::{SURFACE_GAP, SURFACE_INSET},
@@ -21,9 +22,9 @@ use glyphst_ui::{
 use gpui::{
     AnyElement, App, Context, Corners, DragMoveEvent, Entity, EventEmitter, ExternalPaths,
     FocusHandle, IntoElement, ListSizingBehavior, Modifiers, MouseButton, MouseDownEvent,
-    MouseExitEvent, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, RenderImage,
-    ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle, Window, canvas, div,
-    fill, point, prelude::*, px, rgb, transparent_black, uniform_list,
+    MouseExitEvent, Pixels, PromptButton, PromptLevel, Render, RenderImage, ScrollStrategy,
+    SharedString, Subscription, Task, UniformListScrollHandle, Window, canvas, div, fill, point,
+    prelude::*, px, rgb, transparent_black, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Selectable as _, Sizable as _, ThemeColor,
@@ -3086,25 +3087,34 @@ impl NewTab {
         .detach();
     }
 
-    fn add_files(&mut self, cx: &mut Context<Self>) {
+    fn add_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let target_collection = self.library_import_target(cx);
-        self.add_files_to(target_collection, cx);
+        self.add_files_to(target_collection, window, cx);
     }
 
     fn add_files_to(
         &mut self,
         target_collection: Option<LibraryCollectionId>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.host != LibraryBrowserHost::Home {
             return;
         }
-        let dialog = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some("Add books and papers".into()),
-        });
+        let directory = dirs::document_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let dialog = prompt_for_paths(
+            window,
+            cx,
+            OpenPathOptions::files(directory, "Add books and papers")
+                .multiple(true)
+                .filter(PathFilter::new(
+                    crate::fl!("external-drop-supported-hint"),
+                    ["pdf", "epub"],
+                ))
+                .allow_all_files(true),
+        );
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = dialog.await else {
                 return;
@@ -3541,10 +3551,17 @@ impl NewTab {
         cx.notify();
     }
 
-    fn locate_selected_attachment(&mut self, cx: &mut Context<Self>) {
+    fn locate_selected_attachment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(item_id) = self.selected_item_id() else {
             return;
         };
+        let directory = self
+            .selected_entry()
+            .and_then(|entry| entry.path.parent())
+            .map(Path::to_path_buf)
+            .or_else(dirs::document_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
         let Some(managed_root) = cx
             .global::<LibraryStore>()
             .managed_library_root()
@@ -3554,12 +3571,16 @@ impl NewTab {
             cx.notify();
             return;
         };
-        let dialog = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Locate linked book or paper".into()),
-        });
+        let dialog = prompt_for_paths(
+            window,
+            cx,
+            OpenPathOptions::files(directory, "Locate linked book or paper")
+                .filter(PathFilter::new(
+                    crate::fl!("external-drop-supported-hint"),
+                    ["pdf", "epub"],
+                ))
+                .allow_all_files(true),
+        );
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = dialog.await else {
                 return;
@@ -4373,8 +4394,8 @@ impl NewTab {
                                 .outline()
                                 .icon(IconName::LocateFixed)
                                 .label(if entry.missing { "Locate" } else { "Relink" })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.locate_selected_attachment(cx);
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.locate_selected_attachment(window, cx);
                                     cx.stop_propagation();
                                 })),
                         ),
@@ -5919,8 +5940,8 @@ impl NewTab {
                         .primary()
                         .icon(IconName::Plus)
                         .label(crate::fl!("new-tab-add-files"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.add_files_to(target_collection, cx);
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.add_files_to(target_collection, window, cx);
                             cx.stop_propagation();
                         })),
                 );
@@ -7104,8 +7125,8 @@ impl Render for NewTab {
                                         .primary()
                                         .icon(IconName::Plus)
                                         .label(crate::fl!("new-tab-add-files"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.add_files(cx);
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.add_files(window, cx);
                                             cx.stop_propagation();
                                         })),
                                 );

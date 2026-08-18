@@ -54,6 +54,7 @@ use glyphst_core::{
     DocumentRotation, EpubReaderPreferences, EpubTheme, PageIndex, PageRegion,
     RegionImageReference, SelectedPagesReference, SemanticTextAnchor,
 };
+use glyphst_files::path_chooser::{SavePathOptions, prompt_for_new_path};
 use glyphst_pdf::{
     DocumentPassword, DocumentRenderSession, DocumentSnapshot, ReloadCoordinator,
     ReloadDisposition, RetainedDisplayList,

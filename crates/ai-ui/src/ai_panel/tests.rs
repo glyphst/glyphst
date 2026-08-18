@@ -351,6 +351,8 @@ fn clicking_outside_an_edited_user_message_cancels_editing(cx: &mut TestAppConte
 fn attachment_button_opens_attachment_actions(cx: &mut TestAppContext) {
     cx.update(|cx| {
         install_test_settings(cx);
+        cx.global_mut::<SettingsStore>().settings.path_chooser =
+            glyphst_settings::PathChooserBackend::System;
         cx.set_global(LibraryStore::memory());
     });
 

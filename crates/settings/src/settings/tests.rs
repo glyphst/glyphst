@@ -189,6 +189,20 @@ session {
 }
 
 #[test]
+fn path_chooser_defaults_to_custom_and_round_trips() {
+    assert_eq!(Settings::default().path_chooser, PathChooserBackend::Custom);
+
+    let settings = parse_settings("path_chooser \"system\"").unwrap();
+    assert_eq!(settings.path_chooser, PathChooserBackend::System);
+    assert_eq!(
+        parse_settings(&settings.to_kdl_string())
+            .unwrap()
+            .path_chooser,
+        PathChooserBackend::System
+    );
+}
+
+#[test]
 fn parses_and_exports_keymap_settings() {
     let settings = parse_settings(
         r##"

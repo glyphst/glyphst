@@ -54,7 +54,7 @@ impl DocumentView {
         Ok(clipboard)
     }
 
-    pub(super) fn save_image(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn save_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((page_idx, image_idx)) = self.context_menu_image else {
             return;
         };
@@ -73,7 +73,16 @@ impl DocumentView {
             .or_else(dirs::download_dir)
             .or_else(dirs::home_dir)
             .unwrap_or_default();
-        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+        let dialog = prompt_for_new_path(
+            window,
+            cx,
+            SavePathOptions::new(
+                directory,
+                crate::fl!("pdf-context-save-image"),
+                suggested_name,
+            )
+            .required_extension("png"),
+        );
 
         cx.spawn(async move |_, cx| match dialog.await {
             Ok(Ok(Some(path))) => {
@@ -107,7 +116,7 @@ impl DocumentView {
             .with_context(|| format!("failed to save image to {}", path.display()))
     }
 
-    pub(super) fn save_page_as_image(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn save_page_as_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(page_idx) = self.context_menu_page else {
             return;
         };
@@ -130,7 +139,16 @@ impl DocumentView {
             .or_else(dirs::download_dir)
             .or_else(dirs::home_dir)
             .unwrap_or_default();
-        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+        let dialog = prompt_for_new_path(
+            window,
+            cx,
+            SavePathOptions::new(
+                directory,
+                crate::fl!("pdf-context-save-page-as-image"),
+                suggested_name,
+            )
+            .required_extension("png"),
+        );
 
         cx.spawn(async move |_, cx| match dialog.await {
             Ok(Ok(Some(path))) => {
@@ -229,7 +247,7 @@ impl DocumentView {
         .detach();
     }
 
-    pub(super) fn save_region(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn save_region(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(reference) = self.selected_region.clone() else {
             return;
         };
@@ -257,7 +275,16 @@ impl DocumentView {
             .or_else(dirs::download_dir)
             .or_else(dirs::home_dir)
             .unwrap_or_default();
-        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+        let dialog = prompt_for_new_path(
+            window,
+            cx,
+            SavePathOptions::new(
+                directory,
+                crate::fl!("pdf-context-save-region"),
+                suggested_name,
+            )
+            .required_extension("png"),
+        );
 
         cx.spawn(async move |_, cx| match dialog.await {
             Ok(Ok(Some(path))) => {
@@ -422,6 +449,7 @@ impl DocumentView {
     pub(super) fn export_selected_pages_as_text(
         &mut self,
         source: PageSelectionSource,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let page_indices = self.selected_page_indices(source);
@@ -449,7 +477,12 @@ impl DocumentView {
         let directory = dirs::download_dir()
             .or_else(dirs::home_dir)
             .unwrap_or_default();
-        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+        let dialog = prompt_for_new_path(
+            window,
+            cx,
+            SavePathOptions::new(directory, crate::fl!("pdf-export-as-text"), suggested_name)
+                .required_extension("txt"),
+        );
 
         cx.spawn(async move |_, cx| match dialog.await {
             Ok(Ok(Some(path))) => {
@@ -474,6 +507,7 @@ impl DocumentView {
     pub(super) fn export_selected_pages_as_image(
         &mut self,
         source: PageSelectionSource,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let page_indices = self.selected_page_indices(source);
@@ -520,7 +554,12 @@ impl DocumentView {
             .or_else(dirs::download_dir)
             .or_else(dirs::home_dir)
             .unwrap_or_default();
-        let dialog = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+        let dialog = prompt_for_new_path(
+            window,
+            cx,
+            SavePathOptions::new(directory, crate::fl!("pdf-export-as-image"), suggested_name)
+                .required_extension("png"),
+        );
 
         cx.spawn(async move |_, cx| match dialog.await {
             Ok(Ok(Some(path))) => {

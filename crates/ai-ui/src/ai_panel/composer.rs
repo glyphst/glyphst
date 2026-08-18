@@ -484,13 +484,22 @@ impl AiPanel {
         cx.stop_propagation();
     }
 
-    pub(super) fn pick_user_images(&mut self, cx: &mut Context<Self>) {
-        let dialog = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some(tr("ai-attach-images-prompt").into()),
-        });
+    pub(super) fn pick_user_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let directory = dirs::picture_dir()
+            .or_else(dirs::download_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let dialog = prompt_for_paths(
+            window,
+            cx,
+            OpenPathOptions::files(directory, tr("ai-attach-images-prompt"))
+                .multiple(true)
+                .filter(PathFilter::new(
+                    tr("ai-external-drop-image-hint"),
+                    ["png", "jpg", "jpeg", "gif", "webp"],
+                ))
+                .allow_all_files(true),
+        );
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = dialog.await else {
                 return;

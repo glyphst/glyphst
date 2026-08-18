@@ -27,6 +27,7 @@ use glyphst_ai::ai_chat::{
     stream_completion, thinking_level_description, title_from_response,
 };
 use glyphst_core::{DocumentFormat, RegionImageReference, SelectedPagesReference};
+use glyphst_files::path_chooser::{OpenPathOptions, PathFilter, prompt_for_paths};
 use glyphst_library::{
     AiMentionOccurrence, AiMentionReference, AiSession, AiSessionAgentPart, AiSessionImage,
     AiSessionMessage, AiSessionRole, AiSessionToolResultPart, AiSessionToolStatus, LibraryStore,
@@ -50,9 +51,9 @@ use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, Bounds, ClipboardEntry, ClipboardItem,
     Context, DismissEvent, DragMoveEvent, ElementId, Entity, EventEmitter, ExternalPaths,
     FocusHandle, Focusable, FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton,
-    MouseDownEvent, ObjectFit, PathPromptOptions, Pixels, Point as GpuiPoint, Render, ScrollDelta,
-    ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, TextStyle, WeakEntity,
-    Window, anchored, canvas, deferred, div, img, point, prelude::*, px, transparent_black,
+    MouseDownEvent, ObjectFit, Pixels, Point as GpuiPoint, Render, ScrollDelta, ScrollHandle,
+    ScrollWheelEvent, SharedString, Subscription, Task, TextStyle, WeakEntity, Window, anchored,
+    canvas, deferred, div, img, point, prelude::*, px, transparent_black,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, InteractiveElementExt as _, Selectable as _, Sizable as _,

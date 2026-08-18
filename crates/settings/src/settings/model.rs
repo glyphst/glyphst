@@ -4,6 +4,7 @@ use super::*;
 pub struct Settings {
     pub behavior: BehaviorSettings,
     pub restore_on_startup: RestoreOnStartup,
+    pub path_chooser: PathChooserBackend,
     pub reading: EpubReaderPreferences,
     pub document_theme: DocumentThemeSettings,
     pub font: FontSettings,
@@ -65,6 +66,14 @@ impl Settings {
             .and_then(KeymapPreset::from_str)
         {
             settings.keymap_preset = preset;
+        }
+
+        if let Some(backend) = document
+            .get_arg("path_chooser")
+            .and_then(KdlValue::as_string)
+            .and_then(PathChooserBackend::from_str)
+        {
+            settings.path_chooser = backend;
         }
 
         if let Some(font) = document.get("font").and_then(KdlNode::children) {
@@ -608,6 +617,7 @@ impl Settings {
         self.theme.clone().write_to_document(&mut document);
         push_value_node(&mut document, "language", self.language.as_str());
         push_value_node(&mut document, "keymap", self.keymap_preset.as_str());
+        push_value_node(&mut document, "path_chooser", self.path_chooser.as_str());
 
         let mut font = KdlNode::new("font");
         let font_children = font.ensure_children();

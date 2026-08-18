@@ -1,13 +1,13 @@
 use super::super::SettingsWindow;
 use glyphst_core::EpubTheme;
 use glyphst_settings::{
-    AppLanguage, CopyFormat, KeymapPreset, RestoreOnStartup, Settings, SettingsStore,
-    TabBarVisibility, WindowBackgroundMode,
+    AppLanguage, CopyFormat, KeymapPreset, PathChooserBackend, RestoreOnStartup, Settings,
+    SettingsStore, TabBarVisibility, WindowBackgroundMode,
 };
-use gpui::{App, Context, SharedString};
+use gpui::{App, Context, InteractiveElement as _, SharedString};
 use gpui_component::{
     Sizable as _,
-    button::Button,
+    button::{Button, ButtonVariants as _},
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage},
 };
 
@@ -23,11 +23,49 @@ impl SettingsWindow {
                 move |options, _, _| {
                     let view = view.clone();
                     Button::new("settings-export")
+                        .debug_selector(|| "settings-export-button".to_string())
                         .label(crate::fl!("export"))
                         .outline()
                         .with_size(options.size())
                         .on_click(move |_, window, cx| {
                             view.update(cx, |this, cx| this.export(window, cx));
+                        })
+                }
+            }),
+        );
+
+        let import_settings = SettingItem::new(
+            crate::fl!("settings-import"),
+            SettingField::render({
+                let view = view.clone();
+                move |options, _, _| {
+                    let view = view.clone();
+                    Button::new("settings-import")
+                        .debug_selector(|| "settings-import-button".to_string())
+                        .label(crate::fl!("import"))
+                        .outline()
+                        .with_size(options.size())
+                        .on_click(move |_, window, cx| {
+                            view.update(cx, |this, cx| this.import(window, cx));
+                        })
+                }
+            }),
+        );
+
+        let reset_all_settings = SettingItem::new(
+            crate::fl!("settings-reset-all"),
+            SettingField::render({
+                let view = view.clone();
+                move |options, _, _| {
+                    let view = view.clone();
+                    Button::new("settings-reset-all")
+                        .debug_selector(|| "settings-reset-all-button".to_string())
+                        .label(crate::fl!("reset"))
+                        .outline()
+                        .danger()
+                        .with_size(options.size())
+                        .on_click(move |_, window, cx| {
+                            view.update(cx, |this, cx| this.reset_all(window, cx));
                         })
                 }
             }),
@@ -103,6 +141,47 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.restore_on_startup.as_str().to_string()),
+        );
+
+        let path_chooser = SettingItem::new(
+            crate::fl!("settings-path-chooser"),
+            SettingField::dropdown(
+                [PathChooserBackend::Custom, PathChooserBackend::System]
+                    .into_iter()
+                    .map(|backend| {
+                        let label = match backend {
+                            PathChooserBackend::Custom => {
+                                crate::fl!("settings-path-chooser-custom")
+                            }
+                            PathChooserBackend::System => {
+                                crate::fl!("settings-path-chooser-system")
+                            }
+                        };
+                        Self::setting_option(backend.as_str(), label)
+                    })
+                    .collect(),
+                |cx: &App| {
+                    cx.global::<SettingsStore>()
+                        .settings
+                        .path_chooser
+                        .as_str()
+                        .into()
+                },
+                {
+                    let view = view.clone();
+                    move |value: SharedString, cx: &mut App| {
+                        let backend = if value.as_ref() == "system" {
+                            PathChooserBackend::System
+                        } else {
+                            PathChooserBackend::Custom
+                        };
+                        Self::update_settings(&view, cx, move |settings| {
+                            settings.path_chooser = backend;
+                        });
+                    }
+                },
+            )
+            .default_value(defaults.path_chooser.as_str().to_string()),
         );
 
         let default_zoom = SettingItem::new(
@@ -532,8 +611,11 @@ impl SettingsWindow {
                     .title(crate::fl!("settings-section-tabs"))
                     .item(tab_bar),
                 SettingGroup::new()
+                    .title(crate::fl!("settings-section-files"))
+                    .item(path_chooser),
+                SettingGroup::new()
                     .title(crate::fl!("settings-section-general"))
-                    .item(export_settings),
+                    .items([export_settings, import_settings, reset_all_settings]),
             ])
     }
 

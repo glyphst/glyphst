@@ -102,7 +102,6 @@ pub mod document_viewer {
             OpenHistory,
             OpenBookmarks,
             OpenFile,
-            OpenWithSystemPicker,
             OpenNewTab,
             ToggleHome,
             OpenQuickAsk,

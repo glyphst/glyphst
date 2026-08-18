@@ -29,6 +29,30 @@ impl RestoreOnStartup {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PathChooserBackend {
+    #[default]
+    Custom,
+    System,
+}
+
+impl PathChooserBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::System => "system",
+        }
+    }
+
+    pub(super) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "custom" => Some(Self::Custom),
+            "system" => Some(Self::System),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NewTabViewMode {
     Grid,
     Grouped,

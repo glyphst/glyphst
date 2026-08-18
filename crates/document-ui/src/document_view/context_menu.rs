@@ -128,9 +128,9 @@ impl DocumentView {
                 menu.item(
                     PopupMenuItem::new(crate::fl!("pdf-export-as-text")).on_click({
                         let view = text_view.clone();
-                        move |_, _, cx| {
+                        move |_, window, cx| {
                             view.update(cx, |this, cx| {
-                                this.export_selected_pages_as_text(source, cx);
+                                this.export_selected_pages_as_text(source, window, cx);
                             });
                         }
                     }),
@@ -138,9 +138,9 @@ impl DocumentView {
                 .item(
                     PopupMenuItem::new(crate::fl!("pdf-export-as-image")).on_click({
                         let view = image_view.clone();
-                        move |_, _, cx| {
+                        move |_, window, cx| {
                             view.update(cx, |this, cx| {
-                                this.export_selected_pages_as_image(source, cx);
+                                this.export_selected_pages_as_image(source, window, cx);
                             });
                         }
                     }),
@@ -423,7 +423,7 @@ impl DocumentView {
                 .item(Self::context_menu_item(
                     crate::fl!("pdf-context-save-image"),
                     view.clone(),
-                    |this, _, cx| this.save_image(cx),
+                    |this, window, cx| this.save_image(window, cx),
                 ))
                 .separator();
         }
@@ -438,7 +438,7 @@ impl DocumentView {
                 .item(Self::context_menu_item(
                     crate::fl!("pdf-context-save-region"),
                     view.clone(),
-                    |this, _, cx| this.save_region(cx),
+                    |this, window, cx| this.save_region(window, cx),
                 ))
                 .separator();
         }
@@ -448,7 +448,7 @@ impl DocumentView {
                 .item(Self::context_menu_item(
                     crate::fl!("pdf-context-save-page-as-image"),
                     view.clone(),
-                    |this, _, cx| this.save_page_as_image(cx),
+                    |this, window, cx| this.save_page_as_image(window, cx),
                 ))
                 .separator();
         }

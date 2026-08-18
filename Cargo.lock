@@ -2991,10 +2991,12 @@ name = "glyphst-ai-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "futures",
  "glyphst-actions",
  "glyphst-ai",
  "glyphst-core",
+ "glyphst-files",
  "glyphst-library",
  "glyphst-settings",
  "glyphst-ui",
@@ -3025,6 +3027,7 @@ dependencies = [
  "glyphst-ai",
  "glyphst-ai-ui",
  "glyphst-core",
+ "glyphst-files",
  "glyphst-library",
  "glyphst-pdf",
  "glyphst-pdf-translation-service",
@@ -3046,6 +3049,10 @@ dependencies = [
 name = "glyphst-files"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "dirs",
+ "futures",
+ "glyphst-settings",
  "glyphst-ui",
  "gpui",
  "gpui-component",
@@ -3193,6 +3200,7 @@ dependencies = [
  "glyphst-actions",
  "glyphst-ai",
  "glyphst-core",
+ "glyphst-files",
  "glyphst-keymap",
  "glyphst-pdf-translation-service",
  "glyphst-settings",
@@ -3264,6 +3272,7 @@ dependencies = [
  "glyphst-ai-ui",
  "glyphst-core",
  "glyphst-document-ui",
+ "glyphst-files",
  "glyphst-keymap",
  "glyphst-library",
  "glyphst-pdf",

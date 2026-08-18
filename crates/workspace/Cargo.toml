@@ -14,6 +14,7 @@ glyphst-actions = { path = "../actions" }
 glyphst-ai = { path = "../ai" }
 glyphst-ai-ui = { path = "../ai-ui" }
 glyphst-core = { path = "../core" }
+glyphst-files = { path = "../files" }
 glyphst-keymap = { path = "../keymap" }
 glyphst-library = { path = "../library" }
 glyphst-pdf = { path = "../pdf" }

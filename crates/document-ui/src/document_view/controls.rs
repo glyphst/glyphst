@@ -216,8 +216,8 @@ impl DocumentView {
             .child(
                 toolbar_icon_button("region-popover-save", IconName::Download)
                     .tooltip(crate::fl!("pdf-context-save-region"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.save_region(cx);
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.save_region(window, cx);
                         cx.stop_propagation();
                     })),
             )

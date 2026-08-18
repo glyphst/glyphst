@@ -3,6 +3,10 @@ mod pages;
 
 use glyphst_actions::settings_panel::PanelClose;
 use glyphst_ai::ai_client::{AiModelInfo, list_ai_models, test_ai_connection};
+use glyphst_ai::chatgpt_subscription::ChatGptSubscription;
+use glyphst_files::path_chooser::{
+    OpenPathOptions, PathFilter, SavePathOptions, prompt_for_new_path, prompt_for_paths,
+};
 use glyphst_keymap::keybindings;
 use glyphst_pdf_translation_service::{
     CancellationToken, PaddleClient, PaddleClientConfig, PaddleErrorCategory, UnlimitedClient,
@@ -10,8 +14,8 @@ use glyphst_pdf_translation_service::{
 };
 use glyphst_settings::{
     AiModel, AiProvider, AiThinkingLevel, ModelRef, OcrProvider, OcrSettings, ProviderSecretId,
-    ResolvedAiConfig, Settings, SettingsStore, WindowSettings, localize, setup_ui_font,
-    sync_component_theme, ui_rems,
+    ResolvedAiConfig, Settings, SettingsStore, WindowSettings, localize, parse_settings,
+    setup_ui_font, sync_component_theme, ui_rems,
 };
 use glyphst_translation_ui::TranslationServices;
 use glyphst_ui::{
@@ -350,6 +354,43 @@ impl SettingsWindow {
         self.status = None;
         self.save_error = result.err().map(|error| format!("{error:#}").into());
         cx.notify();
+    }
+
+    fn finish_settings_replacement(
+        &mut self,
+        before: Settings,
+        result: std::result::Result<(), String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let succeeded = result.is_ok();
+        let after = cx.global::<SettingsStore>().settings.clone();
+        if succeeded {
+            self.save_generation.fetch_add(1, Ordering::Relaxed);
+            self._provider_task.take();
+            self.provider_operation = ProviderOperation::default();
+            self.model_catalogs.clear();
+            self._model_catalog_task.take();
+            self.model_catalog_operation = ModelCatalogOperation::default();
+            self.model_picker = ModelPickerState::default();
+            self.provider_rename = None;
+            self.active_model_drag = None;
+            self._ocr_task.take();
+            self.ocr_operation = None;
+            self.font_families.push(after.font.ui_font_family.clone());
+            self.font_families
+                .extend(after.font.ui_font_fallbacks.iter().cloned());
+            self.font_families
+                .sort_by_cached_key(|font| font.to_ascii_lowercase());
+            self.font_families
+                .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        }
+        if !Self::apply_runtime_changes(&before, &after, cx) {
+            cx.refresh_windows();
+        }
+        self.status = None;
+        self.save_error = result.err().map(Into::into);
+        cx.notify();
+        succeeded
     }
 
     pub(super) fn update_settings(
@@ -893,7 +934,7 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    fn export(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    fn export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let config_path = cx.global::<SettingsStore>().config_path.clone();
         let directory = config_path
             .parent()
@@ -901,7 +942,12 @@ impl SettingsWindow {
             .filter(|path| path.exists())
             .or_else(dirs::home_dir)
             .unwrap_or_default();
-        let dialog = cx.prompt_for_new_path(&directory, Some("config.kdl"));
+        let dialog = prompt_for_new_path(
+            window,
+            cx,
+            SavePathOptions::new(directory, crate::fl!("settings-export"), "config.kdl")
+                .required_extension("kdl"),
+        );
 
         cx.spawn(async move |this, cx| {
             let result = dialog.await;
@@ -933,6 +979,145 @@ impl SettingsWindow {
             });
         })
         .detach();
+    }
+
+    fn import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let config_path = cx.global::<SettingsStore>().config_path.clone();
+        let directory = config_path
+            .parent()
+            .map(Path::to_path_buf)
+            .filter(|path| path.exists())
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        let dialog = prompt_for_paths(
+            window,
+            cx,
+            OpenPathOptions::files(directory, crate::fl!("settings-import"))
+                .filter(PathFilter::new("KDL", ["kdl"]))
+                .allow_all_files(true),
+        );
+        self.status = None;
+        self.save_error = None;
+        cx.spawn_in(window, async move |this, cx| {
+            let path = match dialog.await {
+                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                    Some(path) => path,
+                    None => return,
+                },
+                Ok(Err(error)) => {
+                    _ = this.update_in(cx, |this, _, cx| {
+                        this.save_error = Some(
+                            crate::fl!("settings-import-failed", error = format!("{error:#}"))
+                                .into(),
+                        );
+                        cx.notify();
+                    });
+                    return;
+                }
+                Ok(Ok(None)) | Err(_) => return,
+            };
+            let read_path = path.clone();
+            let parsed = cx
+                .background_spawn(async move {
+                    std::fs::read_to_string(&read_path)
+                        .map_err(|error| format!("failed to read {}: {error}", read_path.display()))
+                        .and_then(|contents| {
+                            parse_settings(&contents).map_err(|error| format!("{error:#}"))
+                        })
+                })
+                .await;
+            _ = this.update_in(cx, |this, window, cx| match parsed {
+                Ok(settings) => this.confirm_import(settings, path, window, cx),
+                Err(error) => {
+                    this.save_error =
+                        Some(crate::fl!("settings-import-failed", error = error).into());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn confirm_import(
+        &mut self,
+        settings: Settings,
+        path: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = crate::fl!("settings-import-confirm-title");
+        let detail = crate::fl!(
+            "settings-import-confirm-detail",
+            path = path.display().to_string()
+        );
+        let confirmation = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some(&detail),
+            &[
+                PromptButton::ok(crate::fl!("settings-import")),
+                PromptButton::cancel(crate::fl!("cancel")),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if confirmation.await != Ok(0) {
+                return;
+            }
+            _ = this.update_in(cx, |this, _, cx| {
+                let before = cx.global::<SettingsStore>().settings.clone();
+                let result =
+                    SettingsStore::apply_imported_settings(settings, cx).map_err(|error| {
+                        crate::fl!("settings-import-failed", error = format!("{error:#}"))
+                    });
+                if this.finish_settings_replacement(before, result, cx) {
+                    this.status = Some(
+                        crate::fl!("settings-imported-from", path = path.display().to_string())
+                            .into(),
+                    );
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn reset_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let title = crate::fl!("settings-reset-all-confirm-title");
+        let detail = crate::fl!("settings-reset-all-confirm-detail");
+        let confirmation = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some(&detail),
+            &[
+                PromptButton::ok(crate::fl!("settings-reset-all")),
+                PromptButton::cancel(crate::fl!("cancel")),
+            ],
+            cx,
+        );
+        self.status = None;
+        self.save_error = None;
+        cx.spawn_in(window, async move |this, cx| {
+            if confirmation.await != Ok(0) {
+                return;
+            }
+            _ = this.update_in(cx, |this, _, cx| {
+                let before = cx.global::<SettingsStore>().settings.clone();
+                let result = SettingsStore::reset_all_settings(cx).map_err(|error| {
+                    crate::fl!("settings-reset-all-failed", error = format!("{error:#}"))
+                });
+                if this.finish_settings_replacement(before, result, cx) {
+                    if let Some(auth) = ChatGptSubscription::global(cx) {
+                        auth.sign_out(cx);
+                    }
+                    this.status = Some(crate::fl!("settings-reset-all-complete").into());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn close(&mut self, _: &PanelClose, window: &mut Window, _: &mut Context<Self>) {
@@ -1059,7 +1244,8 @@ mod tests {
     };
     use glyphst_ai::ai_client::AiModelInfo;
     use glyphst_settings::{
-        AiApiStyle, AiModel, AiProvider, ModelRef, OcrSettings, SettingsStore, sync_component_theme,
+        AiApiStyle, AiModel, AiProvider, ModelRef, OcrSettings, Settings, SettingsStore,
+        sync_component_theme,
     };
     use gpui::{
         AppContext as _, Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext,
@@ -1147,6 +1333,193 @@ mod tests {
     settings_page_render_test!(renders_provider_page, 4, 0);
     settings_page_render_test!(renders_translation_page, 5, 6);
     settings_page_render_test!(renders_ocr_page, 6, 1);
+
+    #[gpui::test]
+    fn general_page_renders_export_import_and_reset_actions(cx: &mut TestAppContext) {
+        initialize_ui_test(cx);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let settings = cx.new(|cx| {
+                let mut settings = SettingsWindow::new(|_| {}, cx);
+                settings.initial_selection = SelectIndex {
+                    page_ix: 0,
+                    group_ix: Some(9),
+                };
+                settings
+            });
+            Root::new(settings, window, cx)
+        });
+        cx.simulate_resize(size(px(1200.0), px(2400.0)));
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("settings-export-button").is_some());
+        assert!(cx.debug_bounds("settings-import-button").is_some());
+        assert!(cx.debug_bounds("settings-reset-all-button").is_some());
+    }
+
+    #[gpui::test]
+    fn import_settings_requires_confirmation_and_applies_valid_kdl(cx: &mut TestAppContext) {
+        initialize_ui_test(cx);
+        cx.update(|cx| {
+            cx.global_mut::<SettingsStore>().settings.path_chooser =
+                glyphst_settings::PathChooserBackend::System;
+        });
+        let persistence_path = enable_ui_test_persistence(cx, "import-confirmation");
+        let import_path = persistence_path.with_extension("import");
+        let imported = Settings {
+            behavior: glyphst_settings::BehaviorSettings {
+                default_zoom: 1.5,
+                ..glyphst_settings::BehaviorSettings::default()
+            },
+            ..Settings::default()
+        };
+        std::fs::write(&import_path, imported.to_kdl_string()).unwrap();
+        let settings_view = Rc::new(RefCell::new(None));
+        let captured_settings_view = settings_view.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let settings = cx.new(|cx| SettingsWindow::new(|_| {}, cx));
+            *captured_settings_view.borrow_mut() = Some(settings.clone());
+            Root::new(settings, window, cx)
+        });
+        let settings = settings_view.borrow().as_ref().unwrap().clone();
+
+        cx.update(|window, cx| {
+            settings.update(cx, |this, cx| this.import(window, cx));
+        });
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response({
+            let import_path = import_path.clone();
+            move |options| {
+                assert!(options.files);
+                assert!(!options.directories);
+                assert!(!options.multiple);
+                Some(vec![import_path])
+            }
+        });
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer(&crate::fl!("cancel"));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.global::<SettingsStore>().settings.behavior.default_zoom,
+                Settings::default().behavior.default_zoom
+            );
+        });
+
+        cx.update(|window, cx| {
+            settings.update(cx, |this, cx| this.import(window, cx));
+        });
+        cx.simulate_path_prompt_response({
+            let import_path = import_path.clone();
+            move |_| Some(vec![import_path])
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer(&crate::fl!("settings-import"));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.global::<SettingsStore>().settings.behavior.default_zoom,
+                1.5
+            );
+            assert!(settings.read(cx).status.is_some());
+            assert!(settings.read(cx).save_error.is_none());
+        });
+
+        _ = std::fs::remove_file(import_path);
+        _ = std::fs::remove_file(persistence_path);
+    }
+
+    #[gpui::test]
+    fn invalid_import_keeps_current_settings_and_reports_an_error(cx: &mut TestAppContext) {
+        initialize_ui_test(cx);
+        cx.update(|cx| {
+            cx.global_mut::<SettingsStore>().settings.path_chooser =
+                glyphst_settings::PathChooserBackend::System;
+        });
+        let persistence_path = enable_ui_test_persistence(cx, "invalid-import");
+        let import_path = persistence_path.with_extension("invalid");
+        std::fs::write(&import_path, "settings { definitely not valid KDL").unwrap();
+        let settings_view = Rc::new(RefCell::new(None));
+        let captured_settings_view = settings_view.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let settings = cx.new(|cx| SettingsWindow::new(|_| {}, cx));
+            *captured_settings_view.borrow_mut() = Some(settings.clone());
+            Root::new(settings, window, cx)
+        });
+        let settings = settings_view.borrow().as_ref().unwrap().clone();
+
+        cx.update(|window, cx| {
+            settings.update(cx, |this, cx| this.import(window, cx));
+        });
+        cx.simulate_path_prompt_response({
+            let import_path = import_path.clone();
+            move |_| Some(vec![import_path])
+        });
+        cx.run_until_parked();
+
+        assert!(!cx.has_pending_prompt());
+        cx.update(|_, cx| {
+            let expected = Settings {
+                path_chooser: glyphst_settings::PathChooserBackend::System,
+                ..Settings::default()
+            };
+            assert_eq!(cx.global::<SettingsStore>().settings, expected);
+            assert!(settings.read(cx).status.is_none());
+            assert!(settings.read(cx).save_error.is_some());
+        });
+
+        _ = std::fs::remove_file(import_path);
+        _ = std::fs::remove_file(persistence_path);
+    }
+
+    #[gpui::test]
+    fn reset_all_settings_requires_confirmation(cx: &mut TestAppContext) {
+        initialize_ui_test(cx);
+        let persistence_path = enable_ui_test_persistence(cx, "reset-confirmation");
+        cx.update(|cx| {
+            let mut settings = Settings::default();
+            settings.behavior.default_zoom = 1.5;
+            cx.global_mut::<SettingsStore>()
+                .set_settings_in_memory(settings);
+        });
+        let settings_view = Rc::new(RefCell::new(None));
+        let captured_settings_view = settings_view.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let settings = cx.new(|cx| SettingsWindow::new(|_| {}, cx));
+            *captured_settings_view.borrow_mut() = Some(settings.clone());
+            Root::new(settings, window, cx)
+        });
+        let settings = settings_view.borrow().as_ref().unwrap().clone();
+
+        cx.update(|window, cx| {
+            settings.update(cx, |this, cx| this.reset_all(window, cx));
+        });
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer(&crate::fl!("cancel"));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.global::<SettingsStore>().settings.behavior.default_zoom,
+                1.5
+            );
+        });
+
+        cx.update(|window, cx| {
+            settings.update(cx, |this, cx| this.reset_all(window, cx));
+        });
+        cx.simulate_prompt_answer(&crate::fl!("settings-reset-all"));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(cx.global::<SettingsStore>().settings, Settings::default());
+            assert!(settings.read(cx).status.is_some());
+            assert!(settings.read(cx).save_error.is_none());
+        });
+
+        _ = std::fs::remove_file(persistence_path);
+    }
 
     #[gpui::test]
     fn settings_window_does_not_render_background_activity(cx: &mut TestAppContext) {

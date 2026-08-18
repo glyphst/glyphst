@@ -80,10 +80,12 @@ fn categories_hide_raw_predicates() {
     let predicate = KeyBindingCategory::DocumentView.predicate();
     assert!(predicate.starts_with("DocumentView && !GridOverview"));
     assert!(predicate.contains("!Search"));
+    assert!(predicate.contains("!PathChooser"));
 
     let predicate = KeyBindingCategory::PageOverview.predicate();
     assert!(predicate.starts_with("GridOverview && !CommandPalette"));
     assert!(predicate.contains("!Search"));
+    assert!(predicate.contains("!PathChooser"));
 }
 
 #[test]

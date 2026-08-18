@@ -11,6 +11,7 @@ dirs.workspace = true
 glyphst-actions = { path = "../actions" }
 glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
+glyphst-files = { path = "../files" }
 glyphst-keymap = { path = "../keymap" }
 glyphst-pdf-translation-service = { path = "../pdf-translation-service" }
 glyphst-settings = { path = "../settings" }

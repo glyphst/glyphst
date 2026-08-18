@@ -249,6 +249,106 @@ impl SettingsStore {
         Ok(())
     }
 
+    pub fn apply_imported_settings(mut settings: Settings, cx: &mut App) -> Result<()> {
+        Self::ensure_credential_worker(cx);
+        settings.sanitize();
+
+        let (imported_secrets, removed_secret_ids) = {
+            let store = cx.global_mut::<Self>();
+            let current_settings = store.settings.clone();
+            let current_secret_ids = current_settings
+                .provider_secret_ids()
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let mut imported_secrets = Vec::new();
+
+            for id in settings.provider_secret_ids() {
+                let imported_secret = settings
+                    .provider_secret(id)
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string();
+                if imported_secret.is_empty() {
+                    if let Some(current_secret) = current_settings
+                        .provider_secret(id)
+                        .filter(|secret| !secret.trim().is_empty())
+                    {
+                        settings.set_provider_secret(id, current_secret.to_string());
+                    }
+                } else {
+                    settings.set_provider_secret(id, imported_secret.clone());
+                    imported_secrets.push((id, imported_secret));
+                }
+            }
+
+            let imported_secret_ids = settings
+                .provider_secret_ids()
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let removed_secret_ids = current_secret_ids
+                .difference(&imported_secret_ids)
+                .copied()
+                .collect::<Vec<_>>();
+            let previous_config_owned_secrets = store.config_owned_secrets.clone();
+            for (id, _) in &imported_secrets {
+                store.config_owned_secrets.remove(id);
+            }
+            for id in &removed_secret_ids {
+                store.config_owned_secrets.remove(id);
+            }
+
+            if let Err(error) = store.set_settings(settings) {
+                store.config_owned_secrets = previous_config_owned_secrets;
+                return Err(error);
+            }
+
+            (imported_secrets, removed_secret_ids)
+        };
+
+        for id in removed_secret_ids {
+            Self::delete_provider_secret_credential(id, cx);
+        }
+        for (id, secret) in imported_secrets {
+            Self::update_provider_secret(id, secret, cx);
+        }
+
+        Ok(())
+    }
+
+    pub fn reset_all_settings(cx: &mut App) -> Result<()> {
+        Self::ensure_credential_worker(cx);
+        let default_secret_ids = Settings::default()
+            .provider_secret_ids()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let secret_ids = {
+            let store = cx.global_mut::<Self>();
+            let secret_ids = store
+                .settings
+                .provider_secret_ids()
+                .into_iter()
+                .chain(default_secret_ids.iter().copied())
+                .collect::<BTreeSet<_>>();
+            let previous_config_owned_secrets = store.config_owned_secrets.clone();
+            for id in &secret_ids {
+                store.config_owned_secrets.remove(id);
+            }
+
+            if let Err(error) = store.set_settings(Settings::default()) {
+                store.config_owned_secrets = previous_config_owned_secrets;
+                return Err(error);
+            }
+
+            secret_ids
+        };
+
+        for id in secret_ids {
+            Self::delete_provider_secret_credential(id, cx);
+        }
+
+        Ok(())
+    }
+
     pub fn set_settings_in_memory(&mut self, settings: Settings) {
         let mut settings = settings;
         settings.sanitize();
@@ -1597,6 +1697,185 @@ mod credential_tests {
                 }
             ));
             assert!(store.credential_warning().is_some());
+        });
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[gpui::test]
+    fn imported_settings_merge_credentials_and_remove_absent_providers(cx: &mut TestAppContext) {
+        let root = test_root("settings-import");
+        let backend = Arc::new(TestCredentialBackend::default());
+        let local_id = ProviderSecretId::AiApiKey(AiProvider::OpenAi);
+        let imported_id = ProviderSecretId::TranslationApiKey(TranslationProvider::DeepL);
+        let mut current = Settings::default();
+        current.set_provider_secret(local_id, "local-openai-key");
+        current.set_provider_secret(imported_id, "configured-deepl-key");
+        let removed_provider = current.ai.add_custom_provider(
+            "Removed Provider",
+            AiApiStyle::OpenAi,
+            "https://removed.example/v1",
+            "removed-provider-key",
+        );
+        let removed_id = ProviderSecretId::AiApiKey(removed_provider);
+        backend.seed(removed_id, "removed-provider-key");
+        let config_path = root.join("config").join("config.kdl");
+        write_kdl(&config_path, current.to_kdl_string()).unwrap();
+        let mut store = test_store(current, &root, TestSettingsSource::Config, backend.clone());
+        store.provider_secrets_initialized = true;
+        install_store(cx, store);
+
+        let mut imported = Settings::default();
+        imported.behavior.default_zoom = 1.5;
+        imported.set_provider_secret(imported_id, " imported-deepl-key ");
+        cx.update(|cx| SettingsStore::apply_imported_settings(imported, cx).unwrap());
+        finish_debounced_write(cx);
+
+        assert_eq!(
+            backend.secret(imported_id),
+            Some("imported-deepl-key".to_string())
+        );
+        assert_eq!(backend.secret(removed_id), None);
+        let persisted_text = fs::read_to_string(config_path).unwrap();
+        assert!(persisted_text.contains("local-openai-key"));
+        assert!(!persisted_text.contains("configured-deepl-key"));
+        assert!(!persisted_text.contains("imported-deepl-key"));
+        assert!(!persisted_text.contains("removed-provider-key"));
+        cx.update(|cx| {
+            let store = cx.global::<SettingsStore>();
+            assert_eq!(store.settings.behavior.default_zoom, 1.5);
+            assert_eq!(
+                store.settings.provider_secret(local_id),
+                Some("local-openai-key")
+            );
+            assert_eq!(
+                store.settings.provider_secret(imported_id),
+                Some("imported-deepl-key")
+            );
+            assert!(!store.settings.ai.providers.contains_key(&removed_provider));
+            assert!(store.provider_secret_is_config_owned(local_id));
+            assert!(!store.provider_secret_is_config_owned(imported_id));
+            assert_eq!(
+                store.provider_secret_status(imported_id),
+                ProviderSecretStatus::Keychain
+            );
+        });
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[gpui::test]
+    fn reset_all_settings_restores_defaults_and_clears_credentials(cx: &mut TestAppContext) {
+        let root = test_root("settings-reset-all");
+        let backend = Arc::new(TestCredentialBackend::default());
+        let builtin_id = ProviderSecretId::AiApiKey(AiProvider::OpenAi);
+        let mut current = Settings::default();
+        current.behavior.default_zoom = 1.5;
+        current.set_provider_secret(builtin_id, "configured-openai-key");
+        let custom_provider = current.ai.add_custom_provider(
+            "Custom Provider",
+            AiApiStyle::OpenAi,
+            "https://custom.example/v1",
+            "custom-provider-key",
+        );
+        let custom_id = ProviderSecretId::AiApiKey(custom_provider);
+        backend.seed(builtin_id, "stale-keychain-copy");
+        backend.seed(custom_id, "custom-provider-key");
+        let config_path = root.join("config").join("config.kdl");
+        write_kdl(&config_path, current.to_kdl_string()).unwrap();
+        let mut store = test_store(current, &root, TestSettingsSource::Config, backend.clone());
+        store.provider_secrets_initialized = true;
+        install_store(cx, store);
+
+        cx.update(|cx| SettingsStore::reset_all_settings(cx).unwrap());
+        cx.run_until_parked();
+
+        assert_eq!(backend.secret(builtin_id), None);
+        assert_eq!(backend.secret(custom_id), None);
+        let persisted = parse_settings(&fs::read_to_string(config_path).unwrap()).unwrap();
+        assert_eq!(persisted, Settings::default());
+        cx.update(|cx| {
+            let store = cx.global::<SettingsStore>();
+            assert_eq!(store.settings, Settings::default());
+            assert!(!store.provider_secret_is_config_owned(builtin_id));
+            assert_eq!(
+                store.provider_secret_status(builtin_id),
+                ProviderSecretStatus::Missing
+            );
+        });
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[gpui::test]
+    fn failed_import_preserves_settings_and_credential_ownership(cx: &mut TestAppContext) {
+        let root = test_root("settings-import-failure");
+        fs::create_dir_all(&root).unwrap();
+        let blocked_parent = root.join("blocked");
+        fs::write(&blocked_parent, "not a directory").unwrap();
+        let backend = Arc::new(TestCredentialBackend::default());
+        let id = ProviderSecretId::AiApiKey(AiProvider::OpenAi);
+        let mut current = Settings::default();
+        current.behavior.default_zoom = 1.5;
+        current.set_provider_secret(id, "configured-openai-key");
+        let mut store = test_store(
+            current.clone(),
+            &root,
+            TestSettingsSource::Config,
+            backend.clone(),
+        );
+        store.config_path = blocked_parent.join("config.kdl");
+        store.provider_secrets_initialized = true;
+        install_store(cx, store);
+
+        let mut imported = Settings::default();
+        imported.behavior.default_zoom = 2.0;
+        imported.set_provider_secret(id, "imported-openai-key");
+        let result = cx.update(|cx| SettingsStore::apply_imported_settings(imported, cx));
+
+        assert!(result.is_err());
+        cx.run_until_parked();
+        assert!(backend.write_urls().is_empty());
+        cx.update(|cx| {
+            let store = cx.global::<SettingsStore>();
+            assert_eq!(store.settings, current);
+            assert!(store.provider_secret_is_config_owned(id));
+        });
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[gpui::test]
+    fn failed_reset_preserves_settings_and_credentials(cx: &mut TestAppContext) {
+        let root = test_root("settings-reset-failure");
+        fs::create_dir_all(&root).unwrap();
+        let blocked_parent = root.join("blocked");
+        fs::write(&blocked_parent, "not a directory").unwrap();
+        let backend = Arc::new(TestCredentialBackend::default());
+        let id = ProviderSecretId::AiApiKey(AiProvider::OpenAi);
+        backend.seed(id, "stored-openai-key");
+        let mut current = Settings::default();
+        current.behavior.default_zoom = 1.5;
+        current.set_provider_secret(id, "configured-openai-key");
+        let mut store = test_store(
+            current.clone(),
+            &root,
+            TestSettingsSource::Config,
+            backend.clone(),
+        );
+        store.config_path = blocked_parent.join("config.kdl");
+        store.provider_secrets_initialized = true;
+        install_store(cx, store);
+
+        let result = cx.update(SettingsStore::reset_all_settings);
+
+        assert!(result.is_err());
+        cx.run_until_parked();
+        assert_eq!(backend.secret(id), Some("stored-openai-key".to_string()));
+        cx.update(|cx| {
+            let store = cx.global::<SettingsStore>();
+            assert_eq!(store.settings, current);
+            assert!(store.provider_secret_is_config_owned(id));
         });
 
         fs::remove_dir_all(root).ok();
