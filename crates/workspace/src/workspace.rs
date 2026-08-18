@@ -103,6 +103,16 @@ fn suggested_open_directory(active_document: Option<&Path>, cx: &App) -> PathBuf
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+fn open_document_options(initial_directory: PathBuf) -> OpenPathOptions {
+    OpenPathOptions::files(initial_directory, crate::fl!("open-pdf"))
+        .multiple(true)
+        .filter(PathFilter::new(
+            crate::fl!("external-drop-supported-hint"),
+            ["pdf", "epub"],
+        ))
+        .allow_all_files(true)
+}
+
 struct WorkspaceTranslationState {
     manager: Entity<DocumentTranslationManager>,
     pending_splits: Vec<PendingTranslationSplit>,
@@ -741,7 +751,7 @@ impl Workspace {
                 }
                 Err(error) => {
                     failed_count += 1;
-                    eprintln!("failed to open dropped document: {error:#}");
+                    eprintln!("failed to open document: {error:#}");
                 }
             }
         }
@@ -2598,39 +2608,23 @@ impl Workspace {
         self.set_title_bar_menu_expanded(false, cx);
         self.close_command_palette(window, cx);
         self.close_theme_selector(window, cx);
-        let opened_from_home = self.surface_mode == WorkspaceSurfaceMode::Home;
         let active_path = self
             .active_pane
             .read(cx)
             .active_document_view()
             .map(|view| view.read(cx).path().to_path_buf());
         let initial_dir = suggested_open_directory(active_path.as_deref(), cx);
-        let dialog = prompt_for_paths(
-            window,
-            cx,
-            OpenPathOptions::files(initial_dir, crate::fl!("open-pdf"))
-                .filter(PathFilter::new(
-                    crate::fl!("external-drop-supported-hint"),
-                    ["pdf", "epub"],
-                ))
-                .allow_all_files(true),
-        );
+        let dialog = prompt_for_paths(window, cx, open_document_options(initial_dir));
 
         cx.spawn(async move |this, cx| match dialog.await {
             Ok(Ok(Some(paths))) => {
-                let Some(path) = paths.into_iter().next() else {
+                if paths.is_empty() {
                     return;
-                };
+                }
                 match this.update_in(cx, |this, window, cx| {
-                    let replace_active_new_tab = this.active_pane.read(cx).active_tab_is_new_tab();
-                    if opened_from_home {
-                        this.open_document_in_active_pane(path, None, window, cx)
-                    } else {
-                        this.focus_or_open_document(path, None, replace_active_new_tab, window, cx)
-                    }
+                    this.open_external_document_paths(&paths, window, cx);
                 }) {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => eprintln!("failed to open selected document: {error:#}"),
+                    Ok(()) => {}
                     Err(error) => eprintln!("failed to update workspace: {error:#}"),
                 }
             }
@@ -4624,7 +4618,7 @@ mod tests {
     use std::{
         collections::HashSet,
         fs,
-        path::Path,
+        path::{Path, PathBuf},
         time::{Duration, Instant, SystemTime},
     };
 
@@ -4648,7 +4642,7 @@ mod tests {
         SynchronizedConnectionInvalidReason, SynchronizedConnectionTabState, ToggleZenMode,
         Workspace, WorkspaceAiContextProvider, WorkspaceCallbacks, WorkspaceMenu,
         WorkspaceSurfaceMode, WorkspaceWindowHandle, WorkspaceWindowRequest,
-        live_translation_pair_is_active,
+        live_translation_pair_is_active, open_document_options,
     };
     use crate::{
         document_view::{
@@ -7262,7 +7256,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn system_path_chooser_routes_open_file_to_native_prompt(cx: &mut TestAppContext) {
+    fn system_path_chooser_requests_multiple_files_from_native_prompt(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             let mut settings = SettingsStore::memory();
@@ -7282,6 +7276,12 @@ mod tests {
         });
         let workspace = root.read_with(cx, |root, _| {
             root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.update(|_, _| {
+            let options = open_document_options(PathBuf::from("."));
+            assert!(options.files);
+            assert!(!options.directories);
+            assert!(options.multiple);
         });
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.open_file(window, cx);

@@ -701,9 +701,7 @@ impl PathChooser {
                 entry.path,
                 modifiers,
             );
-            if event.click_count >= 2
-                && matches!(&self.mode, ChooserMode::Open(options) if !options.multiple)
-            {
+            if event.click_count >= 2 && matches!(&self.mode, ChooserMode::Open(_)) {
                 self.confirm(window, cx);
                 return;
             }
@@ -748,6 +746,21 @@ impl PathChooser {
             self.anchor = Some(entry.path);
             self.confirm(window, cx);
         }
+    }
+
+    fn is_file_only_open(&self) -> bool {
+        matches!(
+            &self.mode,
+            ChooserMode::Open(options) if options.files && !options.directories
+        )
+    }
+
+    fn activate_file_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.selected.is_empty() {
+            self.confirm(window, cx);
+            return;
+        }
+        self.activate_focused(window, cx);
     }
 
     fn toggle_focused(&mut self, cx: &mut Context<Self>) {
@@ -996,8 +1009,8 @@ impl PathChooser {
             return;
         }
         let modifiers = event.keystroke.modifiers;
-        let secondary = modifiers.platform || modifiers.control;
-        if key == "enter" && secondary {
+        let secondary = modifiers.secondary();
+        if key == "enter" && secondary && !self.is_file_only_open() {
             self.select_focused_if_needed();
             self.confirm(window, cx);
             cx.stop_propagation();
@@ -1016,8 +1029,16 @@ impl PathChooser {
                 self.go_up(window, cx);
                 true
             }
-            "right" | "enter" => {
+            "right" => {
                 self.activate_focused(window, cx);
+                true
+            }
+            "enter" => {
+                if self.is_file_only_open() {
+                    self.activate_file_open(window, cx);
+                } else {
+                    self.activate_focused(window, cx);
+                }
                 true
             }
             "tab" => {
@@ -1049,6 +1070,19 @@ impl PathChooser {
             ChooserMode::Open(options) => !self.selected.is_empty() || options.directories,
             ChooserMode::Save(_) => !self.filename_input.read(cx).value().trim().is_empty(),
         }
+    }
+
+    fn can_activate_file_open(&self) -> bool {
+        if !matches!(self.load_state, LoadState::Ready) {
+            return false;
+        }
+        if !self.selected.is_empty() {
+            return true;
+        }
+        self.visible
+            .get(self.focused)
+            .and_then(|index| self.entries.get(*index))
+            .is_some_and(|entry| entry.directory || self.is_selectable(entry))
     }
 
     fn breadcrumbs(&self) -> Vec<(SharedString, PathBuf)> {
@@ -1513,12 +1547,17 @@ impl Render for PathChooser {
             glyphst_ui::fl!("path-chooser-save")
         };
         let open_mode = matches!(&self.mode, ChooserMode::Open(_));
+        let file_only_open = self.is_file_only_open();
         let primary_modifier: SharedString = if cfg!(target_os = "macos") {
             "⌘".into()
         } else {
             "Ctrl".into()
         };
-        let can_confirm = self.can_confirm(cx);
+        let action_enabled = if file_only_open {
+            self.can_activate_file_open()
+        } else {
+            self.can_confirm(cx)
+        };
         let breadcrumbs = self.breadcrumbs();
         let last_crumb = breadcrumbs.len().saturating_sub(1);
         let filter_label = self.filter_label();
@@ -1528,6 +1567,7 @@ impl Render for PathChooser {
 
         let action = div()
             .id("path-chooser-confirm")
+            .debug_selector(|| "path-chooser-confirm".to_string())
             .h(px(22.0))
             .px(px(9.0))
             .rounded(px(5.0))
@@ -1539,20 +1579,29 @@ impl Render for PathChooser {
             .bg(theme.primary)
             .text_size(ui_rems(11.5))
             .text_color(theme.primary_foreground)
-            .when(!can_confirm, |button| button.opacity(0.55))
-            .when(can_confirm, |button| {
+            .when(!action_enabled, |button| button.opacity(0.55))
+            .when(action_enabled, |button| {
                 button
                     .cursor_pointer()
                     .hover(move |style| style.bg(theme.primary_hover))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.confirm(window, cx);
-                        cx.stop_propagation();
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                            if this.is_file_only_open() {
+                                this.activate_file_open(window, cx);
+                            } else {
+                                this.confirm(window, cx);
+                            }
+                            cx.stop_propagation();
+                        }),
+                    )
             })
-            .when(open_mode, |button| {
+            .when(file_only_open, |button| button.child("Enter"))
+            .when(open_mode && !file_only_open, |button| {
                 button
                     .child(
                         div()
+                            .debug_selector(|| "path-chooser-confirm-modifier".to_string())
                             .text_size(ui_rems(10.5))
                             .text_color(theme.primary_foreground.opacity(0.82))
                             .child(primary_modifier),
@@ -2004,6 +2053,7 @@ fn read_directory(path: &Path, show_hidden: bool) -> Result<Vec<ChooserEntry>, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::FutureExt as _;
     use glyphst_ui::settings::sync_component_theme;
     use gpui::TestAppContext;
     use gpui_component::Root;
@@ -2014,6 +2064,40 @@ mod tests {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div().children(glyphst_ui::root::render_overlays(window, cx))
         }
+    }
+
+    fn temporary_chooser_directory(label: &str, names: &[&str]) -> (PathBuf, Vec<PathBuf>) {
+        let directory = std::env::temp_dir().join(format!(
+            "glyphst-path-chooser-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let paths = names
+            .iter()
+            .map(|name| {
+                let path = directory.join(name);
+                fs::write(&path, b"test").unwrap();
+                path
+            })
+            .collect();
+        (directory, paths)
+    }
+
+    fn resolved_paths(receiver: OpenPathReceiver) -> Vec<PathBuf> {
+        receiver
+            .now_or_never()
+            .expect("chooser receiver should be ready")
+            .expect("chooser sender should remain connected")
+            .expect("chooser should succeed")
+            .expect("chooser should return selected paths")
+    }
+
+    fn remove_chooser_directory(directory: &Path, paths: &[PathBuf]) {
+        for path in paths {
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir(directory).unwrap();
     }
 
     #[test]
@@ -2170,6 +2254,7 @@ mod tests {
         assert!(new_folder.right() <= breadcrumbs.right());
         assert!(new_folder.top() >= breadcrumbs.top());
         assert!(new_folder.bottom() <= breadcrumbs.bottom());
+        assert!(cx.debug_bounds("path-chooser-confirm-modifier").is_none());
 
         cx.simulate_click(new_folder.center(), Modifiers::default());
         cx.run_until_parked();
@@ -2177,6 +2262,102 @@ mod tests {
             _ = window.draw(cx);
         });
         assert!(cx.debug_bounds("path-chooser-new-folder-row").is_some());
+    }
+
+    #[gpui::test]
+    fn open_action_activates_a_focused_file_without_prior_selection(cx: &mut TestAppContext) {
+        let (directory, paths) = temporary_chooser_directory("focused-open", &["paper.pdf"]);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let mut settings = SettingsStore::memory();
+            settings.settings.path_chooser = PathChooserBackend::Custom;
+            settings.install_theme_catalog(cx).unwrap();
+            cx.set_global(settings);
+            sync_component_theme(cx);
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let host = cx.new(|_| TestHost);
+            Root::new(host, window, cx)
+        });
+        let receiver = cx.update(|window, cx| {
+            prompt_for_paths(
+                window,
+                cx,
+                OpenPathOptions::files(directory.clone(), "Open a document").multiple(true),
+            )
+        });
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let action = cx
+            .debug_bounds("path-chooser-confirm")
+            .expect("open action bounds");
+        cx.simulate_click(action.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(resolved_paths(receiver), paths);
+        remove_chooser_directory(&directory, &paths);
+    }
+
+    #[gpui::test]
+    fn modified_pointer_selection_is_confirmed_as_a_set(cx: &mut TestAppContext) {
+        let (directory, paths) =
+            temporary_chooser_directory("multi-open", &["a.pdf", "b.pdf", "c.pdf"]);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let mut settings = SettingsStore::memory();
+            settings.settings.path_chooser = PathChooserBackend::Custom;
+            settings.install_theme_catalog(cx).unwrap();
+            cx.set_global(settings);
+            sync_component_theme(cx);
+        });
+        let (sender, receiver) = oneshot::channel();
+        let mode = ChooserMode::Open(
+            OpenPathOptions::files(directory.clone(), "Open documents").multiple(true),
+        );
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let chooser = cx.new(|cx| PathChooser::new(mode, sender, window, cx));
+            Root::new(chooser, window, cx)
+        });
+        let chooser = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<PathChooser>().unwrap()
+        });
+        cx.run_until_parked();
+        chooser.update_in(cx, |chooser, window, cx| {
+            let event = |modifiers| MouseDownEvent {
+                position: Default::default(),
+                modifiers,
+                button: MouseButton::Left,
+                click_count: 1,
+                first_mouse: false,
+            };
+            chooser.click_entry(0, &event(Modifiers::default()), window, cx);
+            chooser.click_entry(2, &event(Modifiers::secondary_key()), window, cx);
+            chooser.click_entry(
+                1,
+                &event(Modifiers {
+                    shift: true,
+                    ..Modifiers::secondary_key()
+                }),
+                window,
+                cx,
+            );
+            chooser.click_entry(1, &event(Modifiers::secondary_key()), window, cx);
+            assert_eq!(
+                chooser.selected,
+                BTreeSet::from([paths[0].clone(), paths[2].clone()])
+            );
+            chooser.activate_file_open(window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            resolved_paths(receiver),
+            vec![paths[0].clone(), paths[2].clone()]
+        );
+        remove_chooser_directory(&directory, &paths);
     }
 
     #[gpui::test]

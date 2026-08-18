@@ -58,7 +58,7 @@ external-drop-mixed-hint =
 external-drop-unsupported-title = These items can’t be opened
 external-drop-unsupported-hint = Glyphst Reader currently supports PDF and EPUB documents.
 external-drop-none-title = No supported documents
-external-drop-none-message = Drop PDF or EPUB files to open them in Glyphst Reader.
+external-drop-none-message = Choose or drop PDF or EPUB files to open them in Glyphst Reader.
 external-drop-skipped-title = Some items weren’t opened
 external-drop-skipped-message =
     { $count ->

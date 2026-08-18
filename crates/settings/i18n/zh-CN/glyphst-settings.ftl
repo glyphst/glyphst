@@ -42,7 +42,7 @@ external-drop-mixed-hint = PDF 和 EPUB 文档 · 将跳过 { $count } 个不支
 external-drop-unsupported-title = 无法打开这些项目
 external-drop-unsupported-hint = Glyphst Reader 当前支持 PDF 和 EPUB 文档。
 external-drop-none-title = 没有支持的文档
-external-drop-none-message = 拖放 PDF 或 EPUB 文件即可在 Glyphst Reader 中打开。
+external-drop-none-message = 选择或拖放 PDF 或 EPUB 文件即可在 Glyphst Reader 中打开。
 external-drop-skipped-title = 部分项目未打开
 external-drop-skipped-message = 已跳过 { $count } 个不支持的项目。
 
