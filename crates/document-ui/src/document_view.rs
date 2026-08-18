@@ -50,9 +50,9 @@ use glyphst_ai_ui::{
     AiContext, AiContextProvider, AiPageState, ResolvedPageContext, ResolvedRegionContext,
 };
 use glyphst_core::{
-    DocumentCapabilities, DocumentFormat, DocumentLayout, DocumentPageLayout, DocumentRotation,
-    EpubReaderPreferences, EpubTheme, PageIndex, PageRegion, RegionImageReference,
-    SelectedPagesReference, SemanticTextAnchor,
+    DocumentCapabilities, DocumentColors, DocumentFormat, DocumentLayout, DocumentPageLayout,
+    DocumentRotation, EpubReaderPreferences, EpubTheme, PageIndex, PageRegion,
+    RegionImageReference, SelectedPagesReference, SemanticTextAnchor,
 };
 use glyphst_pdf::{
     DocumentPassword, DocumentRenderSession, DocumentSnapshot, ReloadCoordinator,
@@ -403,8 +403,25 @@ struct RenderKey {
     page_idx: usize,
     source_revision: u64,
     rotation: DocumentRotation,
+    color_transform: Option<PdfColorTransform>,
     physical_width: u32,
     physical_height: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct PdfColorTransform {
+    background: u32,
+    foreground: u32,
+}
+
+impl From<DocumentColors> for PdfColorTransform {
+    fn from(colors: DocumentColors) -> Self {
+        let colors = colors.sanitized();
+        Self {
+            background: colors.background,
+            foreground: colors.foreground,
+        }
+    }
 }
 
 impl RenderKey {
@@ -511,19 +528,17 @@ impl RenderCache {
     fn scaled_render(
         &mut self,
         doc_id: u64,
-        page_idx: usize,
-        rotation: DocumentRotation,
+        requested: RenderKey,
         render_scale: f32,
     ) -> Option<Arc<RenderImage>> {
-        self.scaled_render_with_key(doc_id, page_idx, rotation, render_scale)
+        self.scaled_render_with_key(doc_id, requested, render_scale)
             .map(|(_, image)| image)
     }
 
     fn scaled_render_with_key(
         &mut self,
         doc_id: u64,
-        page_idx: usize,
-        rotation: DocumentRotation,
+        requested: RenderKey,
         render_scale: f32,
     ) -> Option<(RenderKey, Arc<RenderImage>)> {
         let index = self
@@ -532,8 +547,9 @@ impl RenderCache {
             .enumerate()
             .filter(|(_, cached)| {
                 cached.key.doc_id == doc_id
-                    && cached.key.page_idx == page_idx
-                    && cached.key.rotation == rotation
+                    && cached.key.page_idx == requested.page_idx
+                    && cached.key.rotation == requested.rotation
+                    && cached.key.color_transform == requested.color_transform
             })
             .min_by(|(_, a), (_, b)| {
                 (a.render_scale - render_scale)
@@ -1182,6 +1198,7 @@ pub struct PreparedDocumentOpen {
     capabilities: DocumentCapabilities,
     document_layout: DocumentLayout,
     epub_preferences: EpubReaderPreferences,
+    document_colors: Option<DocumentColors>,
     document_snapshot: Arc<DocumentSnapshot>,
     render_session: DocumentRenderSession,
     pages: Vec<DocumentPage>,
@@ -1565,6 +1582,7 @@ pub struct DocumentView {
     capabilities: DocumentCapabilities,
     document_layout: DocumentLayout,
     epub_preferences: EpubReaderPreferences,
+    document_colors: Option<DocumentColors>,
     epub_style_panel_position: Option<GpuiPoint<Pixels>>,
     document_snapshot: Arc<DocumentSnapshot>,
     render_session: DocumentRenderSession,

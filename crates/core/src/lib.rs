@@ -139,6 +139,25 @@ impl EpubTheme {
     }
 }
 
+/// Colors used to draw document content when it follows the application theme.
+///
+/// Values are encoded as `0xRRGGBB`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DocumentColors {
+    pub background: u32,
+    pub foreground: u32,
+    pub link: u32,
+}
+
+impl DocumentColors {
+    pub fn sanitized(mut self) -> Self {
+        self.background &= 0x00ff_ffff;
+        self.foreground &= 0x00ff_ffff;
+        self.link &= 0x00ff_ffff;
+        self
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EpubLayout {
     pub width: f32,
@@ -148,6 +167,8 @@ pub struct EpubLayout {
     pub horizontal_margin: f32,
     pub theme: EpubTheme,
     pub use_publisher_styles: bool,
+    #[serde(default)]
+    pub reader_colors: Option<DocumentColors>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -198,6 +219,7 @@ impl EpubReaderPreferences {
             horizontal_margin: preferences.horizontal_margin,
             theme: preferences.theme,
             use_publisher_styles: preferences.use_publisher_styles,
+            reader_colors: None,
         }
         .sanitized()
     }
@@ -213,6 +235,7 @@ impl Default for EpubLayout {
             horizontal_margin: 32.0,
             theme: EpubTheme::Light,
             use_publisher_styles: true,
+            reader_colors: None,
         }
     }
 }
@@ -231,10 +254,24 @@ impl EpubLayout {
 
     pub fn user_css(self) -> String {
         let layout = self.sanitized();
-        let (background, foreground, link) = match layout.theme {
-            EpubTheme::Light => ("#ffffff", "#1f2328", "#0969da"),
-            EpubTheme::Dark => ("#1e1e2e", "#cdd6f4", "#89b4fa"),
-            EpubTheme::Sepia => ("#f4ecd8", "#493b2a", "#8b5e34"),
+        let (background, foreground, link) = if let Some(colors) = layout.reader_colors {
+            let colors = colors.sanitized();
+            (
+                format!("#{:06x}", colors.background),
+                format!("#{:06x}", colors.foreground),
+                format!("#{:06x}", colors.link),
+            )
+        } else {
+            let (background, foreground, link) = match layout.theme {
+                EpubTheme::Light => ("#ffffff", "#1f2328", "#0969da"),
+                EpubTheme::Dark => ("#1e1e2e", "#cdd6f4", "#89b4fa"),
+                EpubTheme::Sepia => ("#f4ecd8", "#493b2a", "#8b5e34"),
+            };
+            (
+                background.to_string(),
+                foreground.to_string(),
+                link.to_string(),
+            )
         };
         format!(
             "html, body {{ background: {background}; color: {foreground}; }} \
@@ -521,6 +558,38 @@ mod tests {
             layout.horizontal_margin,
             EpubLayout::default().horizontal_margin
         );
+    }
+
+    #[test]
+    fn epub_user_css_uses_reader_colors_when_present() {
+        let layout = EpubLayout {
+            theme: EpubTheme::Sepia,
+            reader_colors: Some(DocumentColors {
+                background: 0xff102030,
+                foreground: 0xffe0d0c0,
+                link: 0xff3366cc,
+            }),
+            ..EpubLayout::default()
+        };
+
+        let css = layout.user_css();
+        assert!(css.contains("background: #102030"));
+        assert!(css.contains("color: #e0d0c0"));
+        assert!(css.contains("a { color: #3366cc; }"));
+        assert!(!css.contains("#f4ecd8"));
+    }
+
+    #[test]
+    fn epub_user_css_keeps_book_theme_without_reader_colors() {
+        let css = EpubLayout {
+            theme: EpubTheme::Dark,
+            ..EpubLayout::default()
+        }
+        .user_css();
+
+        assert!(css.contains("background: #1e1e2e"));
+        assert!(css.contains("color: #cdd6f4"));
+        assert!(css.contains("a { color: #89b4fa; }"));
     }
 
     #[test]

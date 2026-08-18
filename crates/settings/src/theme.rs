@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use glyphst_core::HighlightColor;
+use glyphst_core::{DocumentColors, HighlightColor};
 use gpui::{App, Hsla, rgb, rgba};
 use gpui_component::{
     Colorize as _, Theme as ComponentTheme, ThemeConfig as ComponentThemeConfig,
@@ -235,6 +235,8 @@ impl ThemeSelection {
 pub struct Theme {
     pub background: u32,
     pub page: u32,
+    pub page_foreground: u32,
+    pub page_link: u32,
     pub selection_highlight: u32,
     pub highlight_yellow: u32,
     pub highlight_green: u32,
@@ -253,6 +255,8 @@ impl Theme {
         Self {
             background: hsla_to_rgb(theme.background),
             page: hsla_to_rgb(theme.popover),
+            page_foreground: hsla_to_rgb(theme.foreground),
+            page_link: hsla_to_rgb(theme.primary),
             selection_highlight: hsla_to_rgba(theme.selection),
             highlight_yellow: hsla_to_rgba_with_alpha(theme.yellow, 0x66),
             highlight_green: hsla_to_rgba_with_alpha(theme.green, 0x66),
@@ -288,6 +292,12 @@ impl Theme {
 
         apply!(background);
         apply!(page);
+        if let Some(text) = partial.text {
+            self.page_foreground = text;
+        }
+        if let Some(accent) = partial.accent {
+            self.page_link = accent;
+        }
         apply!(selection_highlight);
         apply!(highlight_yellow);
         apply!(highlight_green);
@@ -317,6 +327,8 @@ impl Theme {
     pub fn sanitize(&mut self) {
         mask_rgb(&mut self.background);
         mask_rgb(&mut self.page);
+        mask_rgb(&mut self.page_foreground);
+        mask_rgb(&mut self.page_link);
         mask_rgba(&mut self.selection_highlight);
         mask_rgba(&mut self.highlight_yellow);
         mask_rgba(&mut self.highlight_green);
@@ -337,6 +349,14 @@ impl Theme {
             HighlightColor::Blue => self.highlight_blue,
             HighlightColor::Pink => self.highlight_pink,
             HighlightColor::Orange => self.highlight_orange,
+        }
+    }
+
+    pub fn document_colors(self) -> DocumentColors {
+        DocumentColors {
+            background: self.page,
+            foreground: self.page_foreground,
+            link: self.page_link,
         }
     }
 

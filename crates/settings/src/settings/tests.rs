@@ -80,6 +80,23 @@ reading {
 }
 
 #[test]
+fn document_theme_following_defaults_off_and_round_trips() {
+    assert!(!Settings::default().document_theme.follow_app_theme);
+
+    let settings = parse_settings(
+        r#"
+document_theme {
+    follow_app_theme #true
+}
+"#,
+    )
+    .unwrap();
+
+    assert!(settings.document_theme.follow_app_theme);
+    assert_eq!(parse_settings(&settings.to_kdl_string()).unwrap(), settings);
+}
+
+#[test]
 fn parses_and_exports_reduced_motion() {
     let settings = parse_settings(
         r#"
@@ -1389,6 +1406,9 @@ fn theme_resolution_layers_selected_theme_and_overrides() {
         },
         overrides: PartialTheme {
             background: Some(0x101010),
+            page: Some(0x202020),
+            text: Some(0xe0e0e0),
+            accent: Some(0x4488cc),
             page_gap: Some(48.0),
             ..PartialTheme::default()
         },
@@ -1402,6 +1422,14 @@ fn theme_resolution_layers_selected_theme_and_overrides() {
 
     assert_eq!(theme.background, 0x101010);
     assert_eq!(theme.page_gap, 48.0);
+    assert_eq!(
+        theme.document_colors(),
+        glyphst_core::DocumentColors {
+            background: 0x202020,
+            foreground: 0xe0e0e0,
+            link: 0x4488cc,
+        }
+    );
 }
 
 fn circular_hue_distance(left: u32, right: u32) -> f32 {

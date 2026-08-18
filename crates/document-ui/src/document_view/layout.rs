@@ -248,9 +248,7 @@ impl DocumentView {
         if !self.capabilities.reflow {
             return;
         }
-        let layout = self
-            .epub_preferences
-            .layout_for_viewport(viewport_width, 960.0);
+        let layout = self.epub_layout_for_viewport(self.epub_preferences, viewport_width, 960.0);
         if self.document_layout == DocumentLayout::Reflow(layout) {
             return;
         }

@@ -354,7 +354,7 @@ impl SettingsWindow {
         );
 
         let reading_theme = SettingItem::new(
-            "Reading theme",
+            crate::fl!("settings-reading-theme"),
             SettingField::dropdown(
                 [
                     Self::setting_option(EpubTheme::Light.as_str(), "Light"),
@@ -381,7 +381,8 @@ impl SettingsWindow {
                 },
             )
             .default_value(defaults.reading.theme.as_str().to_string()),
-        );
+        )
+        .description(crate::fl!("settings-reading-theme-description"));
 
         let publisher_styles = SettingItem::new(
             crate::fl!("settings-reading-publisher-styles"),

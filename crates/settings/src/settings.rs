@@ -70,9 +70,9 @@ pub use ai::{
     PageTextFormat, QuickAskPosition, QuickAskSettings, ResolvedAiConfig,
 };
 pub use general::{
-    AppLanguage, BehaviorSettings, CopyFormat, FontSettings, KeyBindingOverride, KeymapPreset,
-    NewTabSettings, NewTabViewMode, RestoreOnStartup, TabBarVisibility, WindowBackgroundMode,
-    WindowSettings, ui_rems,
+    AppLanguage, BehaviorSettings, CopyFormat, DocumentThemeSettings, FontSettings,
+    KeyBindingOverride, KeymapPreset, NewTabSettings, NewTabViewMode, RestoreOnStartup,
+    TabBarVisibility, WindowBackgroundMode, WindowSettings, ui_rems,
 };
 pub use model::Settings;
 pub use ocr::{OcrMode, OcrProvider, OcrSettings, PaddleOcrSettings, UnlimitedOcrSettings};

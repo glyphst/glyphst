@@ -333,6 +333,44 @@ impl DocumentView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let preferences = self.epub_preferences;
+        let follows_app_theme = cx
+            .global::<SettingsStore>()
+            .settings
+            .document_theme
+            .follow_app_theme;
+        let theme_control = if follows_app_theme {
+            div()
+                .text_color(theme.muted_foreground)
+                .child(crate::fl!("epub-theme-following-app"))
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(Self::render_epub_theme_option(
+                    "epub-theme-light",
+                    crate::fl!("epub-theme-light").into(),
+                    EpubTheme::Light,
+                    preferences.theme,
+                    cx,
+                ))
+                .child(Self::render_epub_theme_option(
+                    "epub-theme-sepia",
+                    crate::fl!("epub-theme-sepia").into(),
+                    EpubTheme::Sepia,
+                    preferences.theme,
+                    cx,
+                ))
+                .child(Self::render_epub_theme_option(
+                    "epub-theme-dark",
+                    crate::fl!("epub-theme-dark").into(),
+                    EpubTheme::Dark,
+                    preferences.theme,
+                    cx,
+                ))
+                .into_any_element()
+        };
         div()
             .id("epub-style-panel")
             .occlude()
@@ -415,33 +453,7 @@ impl DocumentView {
                             .text_color(theme.foreground)
                             .child(crate::fl!("epub-theme")),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(Self::render_epub_theme_option(
-                                "epub-theme-light",
-                                crate::fl!("epub-theme-light").into(),
-                                EpubTheme::Light,
-                                preferences.theme,
-                                cx,
-                            ))
-                            .child(Self::render_epub_theme_option(
-                                "epub-theme-sepia",
-                                crate::fl!("epub-theme-sepia").into(),
-                                EpubTheme::Sepia,
-                                preferences.theme,
-                                cx,
-                            ))
-                            .child(Self::render_epub_theme_option(
-                                "epub-theme-dark",
-                                crate::fl!("epub-theme-dark").into(),
-                                EpubTheme::Dark,
-                                preferences.theme,
-                                cx,
-                            )),
-                    ),
+                    .child(theme_control),
             )
             .child(
                 div()

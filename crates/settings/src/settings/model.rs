@@ -5,6 +5,7 @@ pub struct Settings {
     pub behavior: BehaviorSettings,
     pub restore_on_startup: RestoreOnStartup,
     pub reading: EpubReaderPreferences,
+    pub document_theme: DocumentThemeSettings,
     pub font: FontSettings,
     pub window: WindowSettings,
     pub tab_bar_visibility: TabBarVisibility,
@@ -142,6 +143,14 @@ impl Settings {
             {
                 settings.reading.use_publisher_styles = value;
             }
+        }
+
+        if let Some(document_theme) = document.get("document_theme").and_then(KdlNode::children)
+            && let Some(value) = document_theme
+                .get_arg("follow_app_theme")
+                .and_then(KdlValue::as_bool)
+        {
+            settings.document_theme.follow_app_theme = value;
         }
 
         if let Some(panes) = document.get("panes").and_then(KdlNode::children)
@@ -571,6 +580,15 @@ impl Settings {
             self.reading.use_publisher_styles,
         );
         document.nodes_mut().push(reading);
+
+        let mut document_theme = KdlNode::new("document_theme");
+        let document_theme_children = document_theme.ensure_children();
+        push_value_node(
+            document_theme_children,
+            "follow_app_theme",
+            self.document_theme.follow_app_theme,
+        );
+        document.nodes_mut().push(document_theme);
 
         let mut panes = KdlNode::new("panes");
         let panes_children = panes.ensure_children();

@@ -349,9 +349,33 @@ impl SettingsWindow {
             .default_value(glyphst_settings::theme::DEFAULT_PAGE_GAP as f64),
         );
 
-        let document_colors = DOCUMENT_COLORS
-            .into_iter()
-            .map(|setting| Self::color_setting_item(setting, view.clone()));
+        let follow_app_theme = SettingItem::new(
+            crate::fl!("settings-document-follow-theme"),
+            SettingField::switch(
+                |cx: &App| {
+                    cx.global::<SettingsStore>()
+                        .settings
+                        .document_theme
+                        .follow_app_theme
+                },
+                {
+                    let view = view.clone();
+                    move |value, cx| {
+                        Self::update_settings(&view, cx, move |settings| {
+                            settings.document_theme.follow_app_theme = value;
+                        });
+                    }
+                },
+            )
+            .default_value(defaults.document_theme.follow_app_theme),
+        )
+        .description(crate::fl!("settings-document-follow-theme-description"));
+
+        let document_colors = std::iter::once(follow_app_theme).chain(
+            DOCUMENT_COLORS
+                .into_iter()
+                .map(|setting| Self::color_setting_item(setting, view.clone())),
+        );
         let chrome_colors = CHROME_COLORS
             .into_iter()
             .map(|setting| Self::color_setting_item(setting, view.clone()));
@@ -371,7 +395,7 @@ impl SettingsWindow {
                 .items([font_family, font_fallbacks, font_size, font_weight]),
             SettingGroup::new().title("Document layout").item(page_gap),
             SettingGroup::new()
-                .title("Document colors")
+                .title(crate::fl!("settings-section-document-colors"))
                 .items(document_colors),
             SettingGroup::new()
                 .title("Window chrome")

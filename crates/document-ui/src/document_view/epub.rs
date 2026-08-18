@@ -1,6 +1,50 @@
 use super::*;
 
 impl DocumentView {
+    pub(super) fn epub_layout_for_viewport(
+        &self,
+        preferences: EpubReaderPreferences,
+        viewport_width: f32,
+        viewport_height: f32,
+    ) -> glyphst_core::EpubLayout {
+        let mut layout = preferences.layout_for_viewport(viewport_width, viewport_height);
+        layout.reader_colors = self.document_colors;
+        layout
+    }
+
+    pub(super) fn sync_document_colors(
+        &mut self,
+        document_colors: Option<DocumentColors>,
+        cx: &mut Context<Self>,
+    ) {
+        let document_colors = document_colors.map(DocumentColors::sanitized);
+        if self.document_colors == document_colors {
+            return;
+        }
+
+        self.document_colors = document_colors;
+        self.pending_renders.clear();
+        self.deactivate_render_cache(cx);
+
+        if self.capabilities.reflow {
+            let position = self
+                .pending_semantic_position
+                .clone()
+                .or_else(|| self.pending_initial_position.clone())
+                .filter(DocumentPosition::is_reflow)
+                .unwrap_or_else(|| self.current_document_position());
+            self.pending_initial_position = Some(position);
+            self.document_layout = DocumentLayout::Reflow(self.epub_layout_for_viewport(
+                self.epub_preferences,
+                self.viewport_width.max(240.0),
+                960.0,
+            ));
+            self.request_reload(cx);
+        }
+
+        cx.notify();
+    }
+
     fn update_epub_preferences(
         &mut self,
         update: impl FnOnce(&mut EpubReaderPreferences),
@@ -31,9 +75,11 @@ impl DocumentView {
             .unwrap_or_else(|| self.current_document_position());
         self.pending_initial_position = Some(position);
         self.pending_renders.clear();
-        self.document_layout = DocumentLayout::Reflow(
-            preferences.layout_for_viewport(self.viewport_width.max(240.0), 960.0),
-        );
+        self.document_layout = DocumentLayout::Reflow(self.epub_layout_for_viewport(
+            preferences,
+            self.viewport_width.max(240.0),
+            960.0,
+        ));
         self.request_reload(cx);
         cx.notify();
     }
@@ -105,9 +151,11 @@ impl DocumentView {
             .unwrap_or_else(|| self.current_document_position());
         self.pending_initial_position = Some(position);
         self.epub_preferences = preferences;
-        self.document_layout = DocumentLayout::Reflow(
-            preferences.layout_for_viewport(self.viewport_width.max(240.0), 960.0),
-        );
+        self.document_layout = DocumentLayout::Reflow(self.epub_layout_for_viewport(
+            preferences,
+            self.viewport_width.max(240.0),
+            960.0,
+        ));
         self.request_reload(cx);
         cx.notify();
     }

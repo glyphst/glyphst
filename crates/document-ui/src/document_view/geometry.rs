@@ -61,6 +61,11 @@ impl DocumentView {
                 .map(|source| source.revision)
                 .unwrap_or_default(),
             rotation: self.rotation,
+            color_transform: if self.capabilities.reflow {
+                None
+            } else {
+                self.document_colors.map(PdfColorTransform::from)
+            },
             physical_width: (requested_width * texture_scale)
                 .round()
                 .clamp(1.0, max_dimension) as u32,

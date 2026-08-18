@@ -9,14 +9,16 @@ impl DocumentView {
         path: impl AsRef<Path>,
         epub_preferences: EpubReaderPreferences,
         page_gap: f32,
+        document_colors: Option<DocumentColors>,
     ) -> Result<PreparedDocumentOpen> {
-        Self::prepare_open_with_password(path, epub_preferences, page_gap, None)
+        Self::prepare_open_with_password(path, epub_preferences, page_gap, document_colors, None)
     }
 
     pub fn prepare_open_with_password(
         path: impl AsRef<Path>,
         epub_preferences: EpubReaderPreferences,
         page_gap: f32,
+        document_colors: Option<DocumentColors>,
         password: Option<DocumentPassword>,
     ) -> Result<PreparedDocumentOpen> {
         let path = normalize_path(path.as_ref());
@@ -34,8 +36,11 @@ impl DocumentView {
         let document_snapshot = Arc::new(document_snapshot);
         let format = document_snapshot.format();
         let epub_preferences = epub_preferences.sanitized();
+        let document_colors = document_colors.map(DocumentColors::sanitized);
         let requested_layout = if format == DocumentFormat::Epub {
-            DocumentLayout::Reflow(epub_preferences.layout_for_viewport(720.0, 960.0))
+            let mut layout = epub_preferences.layout_for_viewport(720.0, 960.0);
+            layout.reader_colors = document_colors;
+            DocumentLayout::Reflow(layout)
         } else {
             DocumentLayout::Fixed
         };
@@ -77,6 +82,7 @@ impl DocumentView {
             capabilities,
             document_layout,
             epub_preferences,
+            document_colors,
             document_snapshot,
             render_session,
             pages: loaded.pages,
@@ -103,6 +109,7 @@ impl DocumentView {
             capabilities: self.capabilities,
             document_layout: self.document_layout,
             epub_preferences: self.epub_preferences,
+            document_colors: self.document_colors,
             document_snapshot: self.document_snapshot.clone(),
             render_session: self.render_session.clone(),
             pages: self.pages.clone(),
@@ -128,6 +135,7 @@ impl DocumentView {
             capabilities,
             document_layout,
             epub_preferences,
+            document_colors,
             document_snapshot,
             render_session,
             pages,
@@ -157,6 +165,7 @@ impl DocumentView {
             capabilities,
             document_layout,
             epub_preferences,
+            document_colors,
             epub_style_panel_position: None,
             document_snapshot,
             render_session,
@@ -300,6 +309,20 @@ impl DocumentView {
         self.bookmarks_revision = store.bookmarks_revision();
         self.bookmarks = store.bookmarks_for(&self.path);
 
+        let (page_gap, document_colors) = {
+            let store = cx.global::<SettingsStore>();
+            (
+                store.resolved_theme.page_gap,
+                store
+                    .settings
+                    .document_theme
+                    .follow_app_theme
+                    .then(|| store.resolved_theme.document_colors()),
+            )
+        };
+        self.recompute_layout(page_gap);
+        self.sync_document_colors(document_colors, cx);
+
         cx.on_release(|this, cx| {
             if cx.has_global::<RenderCache>() {
                 let mut doc_ids = Vec::with_capacity(2);
@@ -321,11 +344,22 @@ impl DocumentView {
         .detach();
 
         cx.observe_global::<SettingsStore>(|this, cx| {
-            let page_gap = cx.global::<SettingsStore>().resolved_theme.page_gap;
+            let (page_gap, document_colors) = {
+                let store = cx.global::<SettingsStore>();
+                (
+                    store.resolved_theme.page_gap,
+                    store
+                        .settings
+                        .document_theme
+                        .follow_app_theme
+                        .then(|| store.resolved_theme.document_colors()),
+                )
+            };
             this.recompute_layout(page_gap);
             if !this.capabilities.reflow {
                 this.base_scale = this.viewport_width.max(1.0) / this.max_page_width.max(1.0);
             }
+            this.sync_document_colors(document_colors, cx);
             cx.notify();
         })
         .detach();

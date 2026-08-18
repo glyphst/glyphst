@@ -1,5 +1,93 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PixelRect {
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+}
+
+fn pixel_rect_for_transformed_bounds(
+    bounds: Rect,
+    matrix: &Matrix,
+    width: usize,
+    height: usize,
+) -> Option<PixelRect> {
+    let bounds = bounds.transform(matrix);
+    if ![bounds.x0, bounds.y0, bounds.x1, bounds.y1]
+        .into_iter()
+        .all(f32::is_finite)
+    {
+        return None;
+    }
+
+    let x0 = bounds.x0.floor().clamp(0.0, width as f32) as usize;
+    let y0 = bounds.y0.floor().clamp(0.0, height as f32) as usize;
+    let x1 = bounds.x1.ceil().clamp(0.0, width as f32) as usize;
+    let y1 = bounds.y1.ceil().clamp(0.0, height as f32) as usize;
+    (x0 < x1 && y0 < y1).then_some(PixelRect { x0, y0, x1, y1 })
+}
+
+fn apply_pdf_duotone(
+    samples: &mut [u8],
+    width: usize,
+    height: usize,
+    transform: PdfColorTransform,
+    image_exclusions: &[PixelRect],
+) {
+    let mut image_exclusions = image_exclusions.to_vec();
+    image_exclusions.sort_unstable_by_key(|rect| rect.x0);
+
+    let channel = |color: u32, shift: u32| ((color >> shift) & 0xffu32) as f32;
+    let foreground = [
+        channel(transform.foreground, 16),
+        channel(transform.foreground, 8),
+        channel(transform.foreground, 0),
+    ];
+    let background = [
+        channel(transform.background, 16),
+        channel(transform.background, 8),
+        channel(transform.background, 0),
+    ];
+
+    let mut transform_range = |y: usize, x0: usize, x1: usize| {
+        let row_start = y * width * 4;
+        for x in x0..x1 {
+            let offset = row_start + x * 4;
+            let red = samples[offset] as f32;
+            let green = samples[offset + 1] as f32;
+            let blue = samples[offset + 2] as f32;
+            let luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255.0;
+            for component in 0..3 {
+                samples[offset + component] = (foreground[component] * (1.0 - luminance)
+                    + background[component] * luminance)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+            }
+        }
+    };
+
+    for y in 0..height {
+        let mut cursor = 0;
+        for rect in &image_exclusions {
+            if y < rect.y0 || y >= rect.y1 || rect.x1 <= cursor {
+                continue;
+            }
+            if rect.x0 > cursor {
+                transform_range(y, cursor, rect.x0.min(width));
+            }
+            cursor = cursor.max(rect.x1).min(width);
+            if cursor == width {
+                break;
+            }
+        }
+        if cursor < width {
+            transform_range(y, cursor, width);
+        }
+    }
+}
+
 pub(super) fn should_start_viewport_render(
     has_pending_render: bool,
     request_exact: bool,
@@ -102,17 +190,13 @@ impl DocumentView {
             pending.key.page_idx == key.page_idx
                 && pending.key.source_revision == key.source_revision
                 && pending.key.rotation == key.rotation
+                && pending.key.color_transform == key.color_transform
         });
         let (page_width, _) = self.page_dimensions(key.page_idx);
         let render_scale = key.physical_width as f32 / page_width;
         let fallback = {
             let render_cache = cx.global_mut::<RenderCache>();
-            render_cache.scaled_render_with_key(
-                self.doc_id,
-                key.page_idx,
-                key.rotation,
-                render_scale,
-            )
+            render_cache.scaled_render_with_key(self.doc_id, key, render_scale)
         };
 
         // A cached image keeps motion visually continuous, so intermediate
@@ -129,8 +213,7 @@ impl DocumentView {
         let previous = self.previous_doc_id.and_then(|previous_doc_id| {
             cx.global_mut::<RenderCache>().scaled_render_with_key(
                 previous_doc_id,
-                key.page_idx,
-                key.rotation,
+                key,
                 render_scale,
             )
         });
@@ -164,6 +247,7 @@ impl DocumentView {
             pending.key.page_idx == key.page_idx
                 && pending.key.source_revision == key.source_revision
                 && pending.key.rotation == key.rotation
+                && pending.key.color_transform == key.color_transform
         }) {
             return;
         }
@@ -202,9 +286,7 @@ impl DocumentView {
                         page_bounds,
                         source_page_width,
                         source_page_height,
-                        key.rotation,
-                        key.physical_width,
-                        key.physical_height,
+                        key,
                     )?;
                     Ok::<_, anyhow::Error>((display_list, image))
                 })
@@ -309,9 +391,9 @@ impl DocumentView {
         let (page_width, _) = self.page_dimensions(key.page_idx);
         let render_scale = key.physical_width as f32 / page_width;
         let render_cache = cx.global_mut::<RenderCache>();
-        render_cache.render(previous_key).or_else(|| {
-            render_cache.scaled_render(previous_doc_id, key.page_idx, key.rotation, render_scale)
-        })
+        render_cache
+            .render(previous_key)
+            .or_else(|| render_cache.scaled_render(previous_doc_id, key, render_scale))
     }
 
     fn start_diff_flash_task(
@@ -362,22 +444,26 @@ impl DocumentView {
         .detach();
     }
 
-    #[ztracing::instrument(skip_all, fields(physical_width, physical_height))]
+    #[ztracing::instrument(
+        skip_all,
+        fields(
+            physical_width = key.physical_width,
+            physical_height = key.physical_height
+        )
+    )]
     fn render_page(
         display_list: &DisplayList,
         page_bounds: Rect,
         source_page_width: f32,
         source_page_height: f32,
-        rotation: DocumentRotation,
-        physical_width: u32,
-        physical_height: u32,
+        key: RenderKey,
     ) -> Result<Arc<RenderImage>> {
         let (page_width, page_height) =
-            Self::rotated_dimensions(source_page_width, source_page_height, rotation);
-        let zoom_x = physical_width as f32 / page_width;
-        let zoom_y = physical_height as f32 / page_height;
-        let physical_width = physical_width as i32;
-        let physical_height = physical_height as i32;
+            Self::rotated_dimensions(source_page_width, source_page_height, key.rotation);
+        let zoom_x = key.physical_width as f32 / page_width;
+        let zoom_y = key.physical_height as f32 / page_height;
+        let physical_width = key.physical_width as i32;
+        let physical_height = key.physical_height as i32;
 
         let mut pixmap = Pixmap::new_with_w_h(
             &Colorspace::device_rgb(),
@@ -389,7 +475,7 @@ impl DocumentView {
 
         let matrix = Self::render_matrix(
             page_bounds,
-            rotation,
+            key.rotation,
             zoom_x,
             zoom_y,
             mupdf::Point { x: 0.0, y: 0.0 },
@@ -403,16 +489,37 @@ impl DocumentView {
 
         let width = pixmap.width();
         let height = pixmap.height();
-        let samples = pixmap.samples();
         let expected_len = width as usize * height as usize * 4;
-        if samples.len() != expected_len {
+        if pixmap.samples().len() != expected_len {
             bail!(
                 "unexpected pixmap sample length: got {}, expected {}",
-                samples.len(),
+                pixmap.samples().len(),
                 expected_len
             );
         }
 
+        if let Some(color_transform) = key.color_transform {
+            let image_exclusions = Self::collect_images(display_list)?
+                .into_iter()
+                .filter_map(|image| {
+                    pixel_rect_for_transformed_bounds(
+                        image.bounds,
+                        &matrix,
+                        width as usize,
+                        height as usize,
+                    )
+                })
+                .collect::<Vec<_>>();
+            apply_pdf_duotone(
+                pixmap.samples_mut(),
+                width as usize,
+                height as usize,
+                color_transform,
+                &image_exclusions,
+            );
+        }
+
+        let samples = pixmap.samples();
         let mut bgra = Vec::with_capacity(samples.len());
         for pixel in samples.chunks_exact(4) {
             bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
@@ -568,5 +675,60 @@ impl DocumentView {
                 ))
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod document_color_tests {
+    use super::*;
+
+    #[test]
+    fn duotone_maps_black_and_white_and_preserves_embedded_images() {
+        let mut samples = vec![
+            0, 0, 0, 255, // black vector content
+            255, 255, 255, 255, // white page
+            12, 34, 56, 127, // embedded image pixel
+        ];
+        let transform = PdfColorTransform {
+            background: 0x102030,
+            foreground: 0xe0d0c0,
+        };
+
+        apply_pdf_duotone(
+            &mut samples,
+            3,
+            1,
+            transform,
+            &[PixelRect {
+                x0: 2,
+                y0: 0,
+                x1: 3,
+                y1: 1,
+            }],
+        );
+
+        assert_eq!(&samples[0..4], &[0xe0, 0xd0, 0xc0, 255]);
+        assert_eq!(&samples[4..8], &[0x10, 0x20, 0x30, 255]);
+        assert_eq!(&samples[8..12], &[12, 34, 56, 127]);
+    }
+
+    #[test]
+    fn transformed_image_bounds_are_clipped_to_the_pixmap() {
+        let rect = pixel_rect_for_transformed_bounds(
+            Rect::new(-5.0, 2.0, 8.2, 12.8),
+            &Matrix::IDENTITY,
+            10,
+            10,
+        );
+
+        assert_eq!(
+            rect,
+            Some(PixelRect {
+                x0: 0,
+                y0: 2,
+                x1: 9,
+                y1: 10,
+            })
+        );
     }
 }

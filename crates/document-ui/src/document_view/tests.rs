@@ -1075,6 +1075,7 @@ fn render_cache_protects_only_the_exact_visible_render() {
         page_idx: 0,
         source_revision: 0,
         rotation: DocumentRotation::Degrees0,
+        color_transform: None,
         physical_width: 8192,
         physical_height: 8192,
     };
@@ -1099,6 +1100,7 @@ fn render_cache_resize_churn_keeps_current_viewport_and_thumbnail_sizes() {
         page_idx: 0,
         source_revision: 0,
         rotation: DocumentRotation::Degrees0,
+        color_transform: None,
         physical_width,
         physical_height,
     };
@@ -1135,6 +1137,7 @@ fn render_cache_reports_and_protects_the_texture_used_during_resize() {
         page_idx: 0,
         source_revision: 0,
         rotation: DocumentRotation::Degrees0,
+        color_transform: None,
         physical_width: 5_000,
         physical_height: 4_000,
     };
@@ -1146,7 +1149,7 @@ fn render_cache_reports_and_protects_the_texture_used_during_resize() {
     cache.insert_render(fallback, 1.0, test_render_image());
 
     let (resolved, _) = cache
-        .scaled_render_with_key(1, 0, DocumentRotation::Degrees0, 1.2)
+        .scaled_render_with_key(1, settled, 1.2)
         .expect("the previous viewport raster should be reusable");
     assert!(resolved == fallback);
 
@@ -1154,6 +1157,34 @@ fn render_cache_reports_and_protects_the_texture_used_during_resize() {
     cache.insert_render(settled, 1.2, test_render_image());
     assert!(cache.render(fallback).is_some());
     assert!(cache.render(settled).is_some());
+}
+
+#[test]
+fn render_cache_never_reuses_a_different_document_color_transform() {
+    let original = RenderKey {
+        doc_id: 1,
+        page_idx: 0,
+        source_revision: 0,
+        rotation: DocumentRotation::Degrees0,
+        color_transform: None,
+        physical_width: 1_000,
+        physical_height: 1_400,
+    };
+    let themed = RenderKey {
+        color_transform: Some(super::PdfColorTransform {
+            background: 0x202020,
+            foreground: 0xe0e0e0,
+        }),
+        ..original
+    };
+    let mut cache = RenderCache::new();
+    cache.insert_render(original, 1.0, test_render_image());
+
+    assert!(cache.scaled_render_with_key(1, themed, 1.0).is_none());
+
+    cache.insert_render(themed, 1.0, test_render_image());
+    assert!(cache.render(original).is_some());
+    assert!(cache.render(themed).is_some());
 }
 
 #[test]
@@ -1166,6 +1197,7 @@ fn surface_render_keys_keep_actual_fractional_scale_bounds_and_prune_hidden_page
         page_idx: 0,
         source_revision: 0,
         rotation: DocumentRotation::Degrees0,
+        color_transform: None,
         physical_width: 252,
         physical_height: 327,
     };
@@ -1209,6 +1241,7 @@ fn render_cache_page_boundary_keeps_actual_visible_thumbnail() {
         page_idx: 0,
         source_revision: 0,
         rotation: DocumentRotation::Degrees0,
+        color_transform: None,
         physical_width: 252,
         physical_height: 326,
     };
@@ -1217,6 +1250,7 @@ fn render_cache_page_boundary_keeps_actual_visible_thumbnail() {
         page_idx,
         source_revision: 0,
         rotation: DocumentRotation::Degrees0,
+        color_transform: None,
         physical_width: 2_770,
         physical_height: 3_585,
     };
@@ -1253,6 +1287,7 @@ fn render_cache_protection_is_independent_per_document_and_cleared_on_eviction()
         page_idx: 0,
         source_revision: 0,
         rotation: DocumentRotation::Degrees0,
+        color_transform: None,
         physical_width: 5_000,
         physical_height: 4_000,
     };

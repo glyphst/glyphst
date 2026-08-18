@@ -11,7 +11,7 @@ use std::{
 use std::sync::OnceLock;
 
 use anyhow::{Result, bail};
-use glyphst_core::DocumentFormat;
+use glyphst_core::{DocumentColors, DocumentFormat};
 use glyphst_pdf::{DocumentAuthenticationError, DocumentPassword};
 use glyphst_translation_ui::{DocumentTranslationId, DocumentTranslationManager};
 use gpui::{
@@ -158,6 +158,7 @@ struct PendingDocumentOpen {
     options: DocumentOpenOptions,
     epub_preferences: glyphst_core::EpubReaderPreferences,
     page_gap: f32,
+    document_colors: Option<DocumentColors>,
 }
 
 #[derive(Clone)]
@@ -784,9 +785,17 @@ impl Pane {
         if !Self::is_supported_document_path(&path) {
             bail!("unsupported file type: {}", path.display());
         }
-        let (behavior, document_theme) = {
+        let (behavior, page_gap, document_colors) = {
             let store = cx.global::<SettingsStore>();
-            (store.settings.behavior, store.resolved_theme)
+            (
+                store.settings.behavior,
+                store.resolved_theme.page_gap,
+                store
+                    .settings
+                    .document_theme
+                    .follow_app_theme
+                    .then(|| store.resolved_theme.document_colors()),
+            )
         };
         let annotations = DocumentAnnotations {
             highlights: cx.global::<LibraryStore>().highlights_for(&path),
@@ -818,7 +827,8 @@ impl Pane {
             behavior,
             options,
             epub_preferences,
-            page_gap: document_theme.page_gap,
+            page_gap,
+            document_colors,
         };
         let loading = cx.new(|cx| {
             LoadingDocumentView::new(
@@ -1409,9 +1419,17 @@ impl Pane {
         if !Self::is_supported_document_path(&path) {
             bail!("unsupported file type: {}", path.display());
         }
-        let (behavior, document_theme) = {
+        let (behavior, page_gap, document_colors) = {
             let store = cx.global::<SettingsStore>();
-            (store.settings.behavior, store.resolved_theme)
+            (
+                store.settings.behavior,
+                store.resolved_theme.page_gap,
+                store
+                    .settings
+                    .document_theme
+                    .follow_app_theme
+                    .then(|| store.resolved_theme.document_colors()),
+            )
         };
         let initial_position = position
             .or_else(|| cx.global::<LibraryStore>().history_position(&path))
@@ -1447,7 +1465,8 @@ impl Pane {
             behavior,
             options,
             epub_preferences,
-            page_gap: document_theme.page_gap,
+            page_gap,
+            document_colors,
         };
         let loading = cx.new(|cx| {
             LoadingDocumentView::new(
@@ -1696,7 +1715,7 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (path, epub_preferences, page_gap) = {
+        let (path, epub_preferences, page_gap, document_colors) = {
             let loading = loading.read(cx);
             let Some(pending) = loading.pending_open.as_ref() else {
                 return;
@@ -1705,6 +1724,7 @@ impl Pane {
                 loading.path.clone(),
                 pending.epub_preferences,
                 pending.page_gap,
+                pending.document_colors,
             )
         };
         loading.update(cx, |loading, cx| {
@@ -1727,6 +1747,7 @@ impl Pane {
                         path,
                         epub_preferences,
                         page_gap,
+                        document_colors,
                         password,
                     )
                     .map_err(classify_document_open_error)

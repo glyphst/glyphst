@@ -60,6 +60,11 @@ pub struct NewTabSettings {
     pub view_mode: NewTabViewMode,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DocumentThemeSettings {
+    pub follow_app_theme: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BehaviorSettings {
     pub default_zoom: f32,
