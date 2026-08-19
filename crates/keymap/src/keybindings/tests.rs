@@ -76,6 +76,11 @@ fn rotate_and_reload_bindings_do_not_collide() {
 
 #[test]
 fn categories_hide_raw_predicates() {
+    assert_eq!(
+        KeyBindingCategory::ItemNavigation.label(),
+        "Item Navigation"
+    );
+    assert_eq!(KeyBindingCategory::ItemNavigation.predicate(), "Menu");
     assert_eq!(KeyBindingCategory::DocumentView.label(), "Document Reader");
     let predicate = KeyBindingCategory::DocumentView.predicate();
     assert!(predicate.starts_with("DocumentView && !GridOverview"));
@@ -86,6 +91,59 @@ fn categories_hide_raw_predicates() {
     assert!(predicate.starts_with("GridOverview && !CommandPalette"));
     assert!(predicate.contains("!Search"));
     assert!(predicate.contains("!PathChooser"));
+}
+
+#[test]
+fn item_navigation_is_editable_and_dispatches_in_menu_contexts() {
+    for preset in [KeymapPreset::Modern, KeymapPreset::Vim] {
+        let rows = editable_bindings(preset, &[]);
+        let next = rows
+            .iter()
+            .find(|binding| {
+                binding.action == "next-item"
+                    && binding.category == KeyBindingCategory::ItemNavigation
+            })
+            .expect("next-item binding should be editable");
+        let previous = rows
+            .iter()
+            .find(|binding| {
+                binding.action == "prev-item"
+                    && binding.category == KeyBindingCategory::ItemNavigation
+            })
+            .expect("prev-item binding should be editable");
+
+        assert_eq!(next.keystrokes, ["down", "ctrl-n"]);
+        assert_eq!(next.default_keystrokes, ["down", "ctrl-n"]);
+        assert_eq!(previous.keystrokes, ["up", "ctrl-p"]);
+        assert_eq!(previous.default_keystrokes, ["up", "ctrl-p"]);
+
+        let keymap = preset_keymap(preset);
+        assert_eq!(
+            first_action_for(&keymap, "ctrl-n", &["CommandPalette Menu"]),
+            menu::SelectNext::name_for_type()
+        );
+        assert_eq!(
+            first_action_for(&keymap, "ctrl-p", &["PathChooser Menu"]),
+            menu::SelectPrev::name_for_type()
+        );
+    }
+}
+
+#[test]
+fn item_navigation_overrides_replace_all_defaults() {
+    let overrides = [KeyBindingOverride {
+        keymap: KeymapPreset::Modern,
+        action: "next-item".to_string(),
+        keystrokes: "alt-j".to_string(),
+        context: Some(KeyBindingCategory::ItemNavigation.id().to_string()),
+    }];
+
+    let next = editable_bindings(KeymapPreset::Modern, &overrides)
+        .into_iter()
+        .find(|binding| binding.action == "next-item")
+        .expect("next-item binding should remain editable");
+    assert_eq!(next.keystrokes, ["alt-j"]);
+    assert_eq!(next.default_keystrokes, ["down", "ctrl-n"]);
 }
 
 #[test]
@@ -431,6 +489,75 @@ fn action_names_for(keymap: &Keymap, keystrokes: &str, contexts: &[&str]) -> Vec
         .iter()
         .map(|binding| binding.action().name().to_string())
         .collect()
+}
+
+fn action_names_and_pending_for(
+    keymap: &Keymap,
+    keystrokes: &str,
+    contexts: &[&str],
+) -> (Vec<String>, bool) {
+    let keystrokes = expand_platform_keystroke(keystrokes);
+    let keystrokes = keystrokes
+        .split_whitespace()
+        .map(|keystroke| Keystroke::parse(keystroke).unwrap())
+        .collect::<Vec<_>>();
+    let contexts = contexts
+        .iter()
+        .map(|context| KeyContext::parse(context).unwrap())
+        .collect::<Vec<_>>();
+    let (bindings, pending) = keymap.bindings_for_input(&keystrokes, &contexts);
+
+    (
+        bindings
+            .iter()
+            .map(|binding| binding.action().name().to_string())
+            .collect(),
+        pending,
+    )
+}
+
+#[test]
+fn close_tab_defaults_do_not_overlap_the_vim_pane_prefix() {
+    let modern = preset_keymap(KeymapPreset::Modern);
+    let (modern_actions, modern_pending) =
+        action_names_and_pending_for(&modern, "primary-w", &["Workspace"]);
+    assert_eq!(
+        modern_actions.first().map(String::as_str),
+        Some(CloseTab::name_for_type())
+    );
+    assert!(
+        !modern_pending,
+        "Modern close-tab should dispatch immediately"
+    );
+
+    let vim = preset_keymap(KeymapPreset::Vim);
+    let (prefix_actions, prefix_pending) =
+        action_names_and_pending_for(&vim, "ctrl-w", &["Workspace"]);
+    assert!(
+        prefix_actions
+            .iter()
+            .all(|action| action != CloseTab::name_for_type())
+    );
+    assert!(prefix_pending, "ctrl-w should only start a Vim chord");
+
+    for chord in ["ctrl-w c", "ctrl-w ctrl-c", "ctrl-w q", "ctrl-w ctrl-q"] {
+        let (actions, pending) = action_names_and_pending_for(&vim, chord, &["Workspace"]);
+        assert_eq!(
+            actions.first().map(String::as_str),
+            Some(CloseTab::name_for_type())
+        );
+        assert!(!pending, "{chord} should dispatch immediately");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let (actions, pending) = action_names_and_pending_for(&vim, "cmd-w", &["Workspace"]);
+        assert_eq!(
+            actions.first().map(String::as_str),
+            Some(CloseTab::name_for_type())
+        );
+        assert!(!pending, "cmd-w should dispatch immediately on macOS");
+    }
 }
 
 #[test]

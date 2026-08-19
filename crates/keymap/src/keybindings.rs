@@ -97,6 +97,7 @@ const OVERLAY_CONTEXTS: &[&str] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyBindingCategory {
     Workspace,
+    ItemNavigation,
     DocumentView,
     PageOverview,
     NewTab,
@@ -107,6 +108,7 @@ impl KeyBindingCategory {
     pub fn id(self) -> &'static str {
         match self {
             Self::Workspace => "workspace",
+            Self::ItemNavigation => "item_navigation",
             Self::DocumentView => "document_view",
             Self::PageOverview => "page_overview",
             Self::NewTab => "new_tab",
@@ -117,6 +119,9 @@ impl KeyBindingCategory {
     pub fn label(self) -> String {
         match self {
             Self::Workspace => glyphst_settings::localize::tr("keybinding-category-workspace"),
+            Self::ItemNavigation => {
+                glyphst_settings::localize::tr("keybinding-category-item-navigation")
+            }
             Self::DocumentView => {
                 glyphst_settings::localize::tr("keybinding-category-document-view")
             }
@@ -134,6 +139,9 @@ impl KeyBindingCategory {
         match self {
             Self::Workspace => {
                 glyphst_settings::localize::tr("keybinding-category-workspace-description")
+            }
+            Self::ItemNavigation => {
+                glyphst_settings::localize::tr("keybinding-category-item-navigation-description")
             }
             Self::DocumentView => {
                 glyphst_settings::localize::tr("keybinding-category-document-view-description")
@@ -153,6 +161,7 @@ impl KeyBindingCategory {
     pub fn from_id(value: &str) -> Option<Self> {
         match value {
             "workspace" | "global" => Some(Self::Workspace),
+            "item_navigation" | "item-navigation" | "menu" | "menus" => Some(Self::ItemNavigation),
             "document_view" => Some(Self::DocumentView),
             "page_overview" | "grid_overview" | "overview" => Some(Self::PageOverview),
             "new_tab" | "newtab" => Some(Self::NewTab),
@@ -164,6 +173,7 @@ impl KeyBindingCategory {
     fn predicate(self) -> String {
         match self {
             Self::Workspace => context_without_overlays("Workspace"),
+            Self::ItemNavigation => "Menu".to_string(),
             Self::DocumentView => context_without_overlays("DocumentView"),
             Self::PageOverview => context_without_overlays("GridOverview"),
             Self::NewTab => format!("{} && !Input", context_without_overlays("NewTab")),
@@ -270,6 +280,7 @@ fn localized_spec_label(spec: &CommandSpec) -> String {
 pub fn editable_categories() -> &'static [KeyBindingCategory] {
     &[
         KeyBindingCategory::Workspace,
+        KeyBindingCategory::ItemNavigation,
         KeyBindingCategory::DocumentView,
         KeyBindingCategory::PageOverview,
         KeyBindingCategory::NewTab,
@@ -548,8 +559,6 @@ fn bindings_for_unknown_override(cx: &mut App, binding: &KeyBindingOverride) -> 
 fn add_internal_bindings(cx: &mut App, bindings: &mut Vec<KeyBinding>) {
     add_many::<menu::Confirm>(cx, bindings, &["enter"], "Menu");
     add_many::<menu::Cancel>(cx, bindings, &["escape"], "Menu");
-    add_many::<menu::SelectNext>(cx, bindings, &["down"], "Menu");
-    add_many::<menu::SelectPrev>(cx, bindings, &["up"], "Menu");
     add_many::<menu::Remove>(cx, bindings, &["shift-delete"], "Menu");
 
     add_many::<SearchInputConfirm>(cx, bindings, &["enter"], "Search");
@@ -650,6 +659,24 @@ fn command_specs() -> &'static [CommandSpec] {
     SPECS
         .get_or_init(|| {
             vec![
+                spec::<menu::SelectNext>(
+                    "next-item",
+                    "Next Item",
+                    KeyBindingCategory::ItemNavigation,
+                    &["down", "ctrl-n"],
+                    &["down", "ctrl-n"],
+                    &["select-next", "select-next-item"],
+                    true,
+                ),
+                spec::<menu::SelectPrev>(
+                    "prev-item",
+                    "Previous Item",
+                    KeyBindingCategory::ItemNavigation,
+                    &["up", "ctrl-p"],
+                    &["up", "ctrl-p"],
+                    &["previous-item", "select-prev", "select-previous-item"],
+                    true,
+                ),
                 spec::<ToggleCommandPalette>(
                     "toggle-command-palette",
                     "Toggle Command Palette",
@@ -691,7 +718,13 @@ fn command_specs() -> &'static [CommandSpec] {
                     "Close Tab",
                     KeyBindingCategory::Workspace,
                     &["primary-w"],
-                    &["primary-w"],
+                    &[
+                        "mac:primary-w",
+                        "ctrl-w c",
+                        "ctrl-w ctrl-c",
+                        "ctrl-w q",
+                        "ctrl-w ctrl-q",
+                    ],
                     &[],
                     true,
                 ),

@@ -600,7 +600,7 @@ pub fn normalize_query(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, TestAppContext};
+    use gpui::{KeyBinding, Modifiers, TestAppContext};
     use gpui_component::Root;
     use std::{cell::RefCell, rc::Rc};
 
@@ -611,7 +611,7 @@ mod tests {
 
     impl PickerDelegate for TestPickerDelegate {
         fn key_context(&self) -> &'static str {
-            "PickerFocusTest"
+            "PickerFocusTest Menu"
         }
 
         fn placeholder(&self) -> SharedString {
@@ -809,6 +809,36 @@ mod tests {
 
         cx.simulate_mouse_move(row.center(), None, Modifiers::default());
         assert_eq!(&*selection_changes.borrow(), &[2]);
+    }
+
+    #[gpui::test]
+    fn configurable_item_navigation_actions_move_picker_selection(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.bind_keys([
+                KeyBinding::new("ctrl-n", menu::SelectNext, Some("Menu")),
+                KeyBinding::new("ctrl-p", menu::SelectPrev, Some("Menu")),
+            ]);
+        });
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let host = cx.new(|cx| PickerFocusHost::with_matches(3, window, cx));
+            Root::new(host, window, cx)
+        });
+        let host = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<PickerFocusHost>().unwrap()
+        });
+        let picker = host.read_with(cx, |host, _| host.picker.clone());
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("ctrl-n");
+        picker.read_with(cx, |picker, _| assert_eq!(picker.selected_ix, 1));
+
+        cx.simulate_keystrokes("ctrl-p");
+        picker.read_with(cx, |picker, _| assert_eq!(picker.selected_ix, 0));
     }
 
     #[gpui::test]

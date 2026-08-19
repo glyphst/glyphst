@@ -616,8 +616,8 @@ keymap-modal-subtitle = { $action } · { $context }
 keymap-manager-subtitle = { $action } · { $context } · { $keymap }
 keymap-conflicting-bindings =
     { $count ->
-        [one] There is { $count } binding with the same keystrokes.
-       *[other] There are { $count } bindings with the same keystrokes.
+        [one] There is { $count } binding with the same or an overlapping keystroke sequence.
+       *[other] There are { $count } bindings with the same or overlapping keystroke sequences.
     }
 keymap-context = Context: { $context }
 keymap-preset-modern = Modern
@@ -649,11 +649,13 @@ thinking-level-max-description = Maximum Anthropic thinking
 ## Keybinding categories
 
 keybinding-category-workspace = Workspace
+keybinding-category-item-navigation = Item Navigation
 keybinding-category-document-view = Document Reader
 keybinding-category-page-overview = Page Overview
 keybinding-category-new-tab = New Tab
 keybinding-category-search-results = Search Results
 keybinding-category-workspace-description = App-wide commands such as files, tabs, panes, settings, and panels.
+keybinding-category-item-navigation-description = Selection movement in command palettes, pickers, and Reader file lists.
 keybinding-category-document-view-description = Reading commands for the active document.
 keybinding-category-page-overview-description = Commands used while the page overview grid is open.
 keybinding-category-new-tab-description = Commands used while the new tab view is focused.
@@ -661,6 +663,8 @@ keybinding-category-search-results-description = Commands used while the search 
 
 ## Keybinding commands
 
+keybinding-command-item-navigation-next-item = Next Item
+keybinding-command-item-navigation-prev-item = Previous Item
 keybinding-command-workspace-toggle-command-palette = Toggle Command Palette
 keybinding-command-workspace-open-file = Open File
 keybinding-command-workspace-open-new-tab = Open New Tab

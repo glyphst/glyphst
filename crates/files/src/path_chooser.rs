@@ -10,6 +10,7 @@ use futures::channel::oneshot;
 use glyphst_ui::{
     entry_selection::apply_entry_click,
     icons::{Icon, IconName},
+    menu::{SelectNext, SelectPrev},
     scrollbar::WithScrollbar as _,
     settings::{PathChooserBackend, SettingsStore, ui_rems},
 };
@@ -720,6 +721,30 @@ impl PathChooser {
         cx.notify();
     }
 
+    fn list_navigation_has_focus(&self, window: &Window, cx: &App) -> bool {
+        if self.folder_input.focus_handle(cx).is_focused(window)
+            || (matches!(self.mode, ChooserMode::Save(_))
+                && self.filename_input.focus_handle(cx).is_focused(window))
+        {
+            return false;
+        }
+
+        self.focus_handle.contains_focused(window, cx)
+            || self.search_input.focus_handle(cx).is_focused(window)
+    }
+
+    fn select_next_action(&mut self, _: &SelectNext, window: &mut Window, cx: &mut Context<Self>) {
+        if self.list_navigation_has_focus(window, cx) {
+            self.move_focus(1, cx);
+        }
+    }
+
+    fn select_prev_action(&mut self, _: &SelectPrev, window: &mut Window, cx: &mut Context<Self>) {
+        if self.list_navigation_has_focus(window, cx) {
+            self.move_focus(-1, cx);
+        }
+    }
+
     fn activate_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self
             .visible
@@ -1017,14 +1042,6 @@ impl PathChooser {
             return;
         }
         let handled = match key {
-            "up" | "p" if key == "up" || modifiers.control => {
-                self.move_focus(-1, cx);
-                true
-            }
-            "down" | "n" if key == "down" || modifiers.control => {
-                self.move_focus(1, cx);
-                true
-            }
             "left" => {
                 self.go_up(window, cx);
                 true
@@ -1926,8 +1943,10 @@ impl Render for PathChooser {
         div()
             .id("path-chooser")
             .debug_selector(|| "path-chooser".to_string())
-            .key_context("PathChooser")
+            .key_context("PathChooser Menu")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::select_next_action))
+            .on_action(cx.listener(Self::select_prev_action))
             .w_full()
             .h(px(self.mode.card_height()))
             .flex()
@@ -2055,7 +2074,7 @@ mod tests {
     use super::*;
     use futures::FutureExt as _;
     use glyphst_ui::settings::sync_component_theme;
-    use gpui::TestAppContext;
+    use gpui::{KeyBinding, TestAppContext};
     use gpui_component::Root;
 
     struct TestHost;
@@ -2185,6 +2204,61 @@ mod tests {
         assert!(!valid_child_name(""));
         assert!(!valid_child_name(".."));
         assert!(!valid_child_name("a/b"));
+    }
+
+    #[gpui::test]
+    fn shared_item_navigation_actions_move_custom_dialog_focus(cx: &mut TestAppContext) {
+        let (directory, paths) =
+            temporary_chooser_directory("item-navigation", &["a.pdf", "b.pdf"]);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.bind_keys([
+                KeyBinding::new("ctrl-n", SelectNext, Some("Menu")),
+                KeyBinding::new("ctrl-p", SelectPrev, Some("Menu")),
+            ]);
+            let mut settings = SettingsStore::memory();
+            settings.settings.path_chooser = PathChooserBackend::Custom;
+            settings.install_theme_catalog(cx).unwrap();
+            cx.set_global(settings);
+            sync_component_theme(cx);
+        });
+        let (sender, _receiver) = oneshot::channel();
+        let mode = ChooserMode::Open(OpenPathOptions::files(directory.clone(), "Open a document"));
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let chooser = cx.new(|cx| PathChooser::new(mode, sender, window, cx));
+            Root::new(chooser, window, cx)
+        });
+        let chooser = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<PathChooser>().unwrap()
+        });
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        chooser.read_with(cx, |chooser, _| {
+            assert_eq!(chooser.visible.len(), 2);
+            assert_eq!(chooser.focused, 0);
+        });
+
+        cx.simulate_keystrokes("ctrl-n");
+        chooser.read_with(cx, |chooser, _| assert_eq!(chooser.focused, 1));
+
+        cx.simulate_keystrokes("ctrl-p");
+        chooser.read_with(cx, |chooser, _| assert_eq!(chooser.focused, 0));
+
+        chooser.update_in(cx, |chooser, window, cx| {
+            chooser.creating_folder = true;
+            chooser.folder_input.focus_handle(cx).focus(window, cx);
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("ctrl-n");
+        chooser.read_with(cx, |chooser, _| assert_eq!(chooser.focused, 0));
+
+        remove_chooser_directory(&directory, &paths);
     }
 
     #[gpui::test]

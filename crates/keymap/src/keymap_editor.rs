@@ -46,6 +46,17 @@ fn format_keybinding_sequence(sequence: impl AsRef<str>) -> String {
         .join(" ")
 }
 
+fn keybinding_sequences_overlap(left: &str, right: &str) -> bool {
+    let left = left.split_whitespace().collect::<Vec<_>>();
+    let right = right.split_whitespace().collect::<Vec<_>>();
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+
+    let shared_len = left.len().min(right.len());
+    left[..shared_len] == right[..shared_len]
+}
+
 fn render_keybinding_sequence(sequence: impl AsRef<str>, cx: &App) -> AnyElement {
     div()
         .text_color(cx.theme().muted_foreground)
@@ -652,7 +663,10 @@ impl KeymapEditor {
             .filter(|binding| {
                 binding.category == category
                     && binding.action != action
-                    && binding.keystrokes.iter().any(|key| key == keystroke)
+                    && binding
+                        .keystrokes
+                        .iter()
+                        .any(|key| keybinding_sequences_overlap(key, keystroke))
             })
             .count()
     }
@@ -980,7 +994,11 @@ impl KeymapEditor {
             &editing.action,
             &keystroke,
         );
-        let view_keystroke = keystroke.clone();
+        let view_keystroke = keystroke
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string();
         let input_mode = editing.input_mode;
         let editor = cx.entity();
 
@@ -1444,6 +1462,18 @@ mod tests {
             assert_eq!(format_keybinding_sequence("ctrl-w o"), "Ctrl+W O");
             assert_eq!(format_keybinding_sequence("ctrl-w ctrl-o"), "Ctrl+W Ctrl+O");
         }
+    }
+
+    #[test]
+    fn keybinding_conflicts_include_exact_and_prefix_sequences() {
+        assert!(keybinding_sequences_overlap("ctrl-w", "ctrl-w"));
+        assert!(keybinding_sequences_overlap("ctrl-w", "ctrl-w h"));
+        assert!(keybinding_sequences_overlap("ctrl-w h", "ctrl-w"));
+        assert!(keybinding_sequences_overlap("ctrl-w h", "ctrl-w h"));
+
+        assert!(!keybinding_sequences_overlap("ctrl-w h", "ctrl-w l"));
+        assert!(!keybinding_sequences_overlap("ctrl-w", "ctrl-wheel"));
+        assert!(!keybinding_sequences_overlap("", "ctrl-w"));
     }
 
     #[test]

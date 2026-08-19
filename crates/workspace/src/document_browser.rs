@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use glyphst_actions::menu::{SelectNext, SelectPrev};
 use glyphst_core::DocumentFormat;
 use gpui::{
     AnyElement, App, Context, DragMoveEvent, Empty, EventEmitter, FocusHandle, Focusable,
@@ -505,6 +506,14 @@ impl DocumentBrowser {
         cx.notify();
     }
 
+    fn select_next_action(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_next(cx);
+    }
+
+    fn select_prev_action(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_prev(cx);
+    }
+
     fn on_keystroke(
         &mut self,
         event: &KeystrokeEvent,
@@ -529,14 +538,6 @@ impl DocumentBrowser {
         }
 
         let handled = match key {
-            "up" => {
-                self.select_prev(cx);
-                true
-            }
-            "down" => {
-                self.select_next(cx);
-                true
-            }
             "left" => {
                 self.go_up(window, cx);
                 true
@@ -1098,8 +1099,10 @@ impl Render for DocumentBrowser {
         div()
             .id("document-browser")
             .debug_selector(|| "document-browser".to_string())
-            .key_context("DocumentBrowser")
+            .key_context("DocumentBrowser Menu")
             .track_focus(&self.modal_focus_handle)
+            .on_action(cx.listener(Self::select_next_action))
+            .on_action(cx.listener(Self::select_prev_action))
             .relative()
             .w(px(actual_size.width))
             .h(px(actual_size.height))
@@ -1397,6 +1400,8 @@ mod tests {
 
         cx.update(|cx| {
             gpui_component::init(cx);
+            crate::keybindings::capture_framework_bindings(cx);
+            crate::keybindings::apply(cx, glyphst_settings::KeymapPreset::Modern, &[]);
             cx.set_global(SettingsStore::memory());
             cx.set_global(LibraryStore::memory());
         });
@@ -1425,7 +1430,7 @@ mod tests {
         let second_offset = second_label.left() - second_row.left();
         assert_eq!(first_offset, second_offset);
 
-        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("ctrl-n");
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
@@ -1446,7 +1451,7 @@ mod tests {
             second_offset
         );
 
-        cx.simulate_keystrokes("up");
+        cx.simulate_keystrokes("ctrl-p");
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });

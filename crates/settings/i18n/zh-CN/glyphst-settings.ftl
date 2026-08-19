@@ -571,7 +571,7 @@ keymap-source-user = 用户
 keymap-unbound = 未绑定
 keymap-modal-subtitle = { $action } · { $context }
 keymap-manager-subtitle = { $action } · { $context } · { $keymap }
-keymap-conflicting-bindings = 存在 { $count } 个使用相同按键的绑定。
+keymap-conflicting-bindings = 存在 { $count } 个使用相同或重叠按键序列的绑定。
 keymap-context = 上下文：{ $context }
 keymap-preset-modern = 现代
 keymap-preset-vim = Vim
@@ -602,11 +602,13 @@ thinking-level-max-description = Anthropic 最大思考
 ## Keybinding categories
 
 keybinding-category-workspace = 工作区
+keybinding-category-item-navigation = 列表导航
 keybinding-category-document-view = 文档阅读器
 keybinding-category-page-overview = 页面概览
 keybinding-category-new-tab = 新标签页
 keybinding-category-search-results = 搜索结果
 keybinding-category-workspace-description = 应用范围命令，例如文件、标签页、窗格、设置和面板。
+keybinding-category-item-navigation-description = 用于命令面板、选择器和阅读器文件列表中的选中项移动。
 keybinding-category-document-view-description = 当前文档的阅读命令。
 keybinding-category-page-overview-description = 页面概览网格打开时使用的命令。
 keybinding-category-new-tab-description = 新标签页获得焦点时使用的命令。
@@ -614,6 +616,8 @@ keybinding-category-search-results-description = 搜索框获得焦点时使用�
 
 ## Keybinding commands
 
+keybinding-command-item-navigation-next-item = 下一项
+keybinding-command-item-navigation-prev-item = 上一项
 keybinding-command-workspace-toggle-command-palette = 切换命令面板
 keybinding-command-workspace-open-file = 打开文件
 keybinding-command-workspace-open-new-tab = 打开新标签页
