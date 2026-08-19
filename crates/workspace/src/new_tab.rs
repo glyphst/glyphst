@@ -13,6 +13,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Datelike as _, Local, Utc};
+use glyphst_actions::menu::{SelectNext, SelectPrev};
 use glyphst_core::DocumentFormat;
 use glyphst_files::path_chooser::{OpenPathOptions, PathFilter, prompt_for_paths};
 use glyphst_ui::{
@@ -24,8 +25,8 @@ use gpui::{
     AnyElement, App, Context, Corners, DragMoveEvent, Entity, EventEmitter, ExternalPaths,
     FocusHandle, IntoElement, ListSizingBehavior, Modifiers, MouseButton, MouseDownEvent,
     MouseExitEvent, Pixels, PromptButton, PromptLevel, Render, RenderImage, ScrollStrategy,
-    SharedString, Subscription, Task, UniformListScrollHandle, Window, canvas, div, fill, point,
-    prelude::*, px, rgb, transparent_black, uniform_list,
+    SharedString, Subscription, Task, UniformListScrollHandle, Window, canvas, deferred, div, fill,
+    point, prelude::*, px, rgb, transparent_black, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Selectable as _, Sizable as _, ThemeColor,
@@ -712,14 +713,6 @@ impl NewTab {
         let entries = Self::entries_for_session(store, &session, None, None);
         let observed_catalog_revision = store.catalog_revision();
         let filtered_entries = (0..entries.len()).collect::<Vec<_>>();
-        let focused_item = if host == LibraryBrowserHost::QuickOpen {
-            NewTabItemKey::OpenFile
-        } else {
-            entries
-                .first()
-                .map(|entry| NewTabItemKey::Document(entry.path.clone()))
-                .unwrap_or(NewTabItemKey::OpenFile)
-        };
         let search_placeholder = Self::search_placeholder(&session.destination);
         let search_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -819,7 +812,7 @@ impl NewTab {
             inspector_open: false,
             selecting: false,
             selection: BTreeSet::new(),
-            focused_item,
+            focused_item: NewTabItemKey::OpenFile,
             selection_anchor: None,
             _search_subscription,
             _work_note_subscription,
@@ -1325,35 +1318,37 @@ impl NewTab {
                 .collect::<HashSet<_>>();
             self.tree.marked.retain(|node| visible_nodes.contains(node));
             self.tree.anchor = self.tree.anchor.filter(|node| visible_nodes.contains(node));
-            if self
-                .tree
-                .active
-                .is_none_or(|node| !visible_nodes.contains(&node))
-            {
-                self.tree.active = if self.host == LibraryBrowserHost::Home {
+            let focused_node = match &self.focused_item {
+                NewTabItemKey::OpenFile => None,
+                NewTabItemKey::Collection(id) => Some(LibraryNodeId::Collection(*id)),
+                NewTabItemKey::Document(path) => self
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == *path)
+                    .and_then(|entry| entry.item_id)
+                    .map(LibraryNodeId::Item),
+            }
+            .filter(|node| visible_nodes.contains(node));
+            self.tree.active = focused_node
+                .or_else(|| self.tree.active.filter(|node| visible_nodes.contains(node)))
+                .or_else(|| {
                     self.tree
                         .rows
                         .first()
                         .and_then(|row| row.node_id(&self.entries))
-                } else {
-                    None
-                };
-            }
+                });
             if let Some(node) = self.tree.active {
                 self.focused_item = self.new_tab_key_for_library_node(node);
-            } else if self.host == LibraryBrowserHost::QuickOpen {
+            } else {
                 self.focused_item = NewTabItemKey::OpenFile;
             }
         } else if self.item_index(&self.focused_item).is_none() {
-            self.focused_item = if self.host == LibraryBrowserHost::Home {
-                self.filtered_entries
-                    .first()
-                    .and_then(|entry_ix| self.entries.get(*entry_ix))
-                    .map(|entry| NewTabItemKey::Document(entry.path.clone()))
-                    .unwrap_or(NewTabItemKey::OpenFile)
-            } else {
-                NewTabItemKey::OpenFile
-            };
+            self.focused_item = self
+                .filtered_entries
+                .first()
+                .and_then(|entry_ix| self.entries.get(*entry_ix))
+                .map(|entry| NewTabItemKey::Document(entry.path.clone()))
+                .unwrap_or(NewTabItemKey::OpenFile);
         }
         self.selection_anchor = self.selection_anchor.take().filter(|path| {
             self.item_index(&NewTabItemKey::Document(path.clone()))
@@ -1741,8 +1736,7 @@ impl NewTab {
         if self.tree.rows.is_empty() {
             return;
         }
-        if self.host == LibraryBrowserHost::QuickOpen
-            && self.tree.active.is_none()
+        if self.tree.active.is_none()
             && matches!(
                 movement,
                 CursorMove::Up | CursorMove::Down | CursorMove::Left | CursorMove::Right
@@ -1837,8 +1831,7 @@ impl NewTab {
             return;
         }
         let mode = self.view_mode(cx);
-        if self.host == LibraryBrowserHost::QuickOpen
-            && self.item_index(&self.focused_item).is_none()
+        if self.item_index(&self.focused_item).is_none()
             && matches!(
                 movement,
                 CursorMove::Up | CursorMove::Down | CursorMove::Left | CursorMove::Right
@@ -1875,6 +1868,33 @@ impl NewTab {
             cx.notify();
         }
         self.scroll_focused(mode);
+    }
+
+    fn move_linear_cursor(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.is_library_tree() {
+            self.move_tree_cursor(
+                if forward {
+                    CursorMove::Down
+                } else {
+                    CursorMove::Up
+                },
+                false,
+                cx,
+            );
+            return;
+        }
+        if self.item_count() == 0 {
+            return;
+        }
+
+        let target = match self.item_index(&self.focused_item) {
+            Some(current) if forward => current.saturating_add(1).min(self.item_count() - 1),
+            Some(current) => current.saturating_sub(1),
+            None => 0,
+        };
+        self.set_focused_index(target);
+        self.scroll_focused(self.view_mode(cx));
+        cx.notify();
     }
 
     fn activate_focused(&mut self, cx: &mut Context<Self>) {
@@ -2218,25 +2238,16 @@ impl NewTab {
         self.selecting = false;
         self.selection.clear();
         self.selection_anchor = None;
-        if self.host == LibraryBrowserHost::QuickOpen {
-            self.focused_item = NewTabItemKey::OpenFile;
-            self.tree.active = None;
-            self.tree.marked.clear();
-            self.tree.anchor = None;
-        }
+        self.focused_item = NewTabItemKey::OpenFile;
+        self.tree.active = None;
+        self.tree.marked.clear();
+        self.tree.anchor = None;
         let search_placeholder = Self::search_placeholder(&self.session.destination);
         self.search_input.update(cx, |input, cx| {
             input.set_value("", window, cx);
             input.set_placeholder(search_placeholder, window, cx);
         });
         self.refresh_entries(cx);
-        if self.host == LibraryBrowserHost::Home {
-            self.focused_item = self
-                .entries
-                .first()
-                .map(|entry| NewTabItemKey::Document(entry.path.clone()))
-                .unwrap_or(NewTabItemKey::OpenFile);
-        }
         cx.notify();
     }
 
@@ -3767,6 +3778,7 @@ impl NewTab {
                 .border_color(theme.border)
                 .bg(theme.popover)
                 .shadow_lg()
+                .occlude()
                 .children([
                     Self::render_destination_button(
                         ReaderNewTabDestination::History,
@@ -3785,7 +3797,7 @@ impl NewTab {
                         cx,
                     ),
                 ]);
-            selector = selector.child(menu);
+            selector = selector.child(deferred(menu));
         }
         selector.into_any_element()
     }
@@ -7527,6 +7539,12 @@ impl Render for NewTab {
             .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| {
                 this.delete_selected(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &SelectNext, _, cx| {
+                this.move_linear_cursor(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectPrev, _, cx| {
+                this.move_linear_cursor(false, cx);
+            }))
             .on_action(cx.listener(|this, _: &CursorUp, _, cx| {
                 this.move_cursor(CursorMove::Up, false, cx);
             }))
@@ -7885,7 +7903,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::{AppContext as _, Focusable as _, TestAppContext};
     use gpui_component::Root;
     use image::Rgba;
 
@@ -8009,10 +8027,10 @@ mod tests {
     }
 
     #[gpui::test]
-    fn quick_open_starts_without_a_cursor_and_first_direction_focuses_item_one(
+    fn quick_open_focuses_the_first_visible_item_and_navigates_immediately(
         cx: &mut TestAppContext,
     ) {
-        let directory = temporary_directory("quick-open-initial-cursor");
+        let directory = temporary_directory("quick-open-initial-focus");
         fs::create_dir(&directory).unwrap();
         let paths = ["a.pdf", "b.pdf", "c.pdf"]
             .into_iter()
@@ -8024,6 +8042,8 @@ mod tests {
 
         cx.update(|cx| {
             gpui_component::init(cx);
+            crate::keybindings::capture_framework_bindings(cx);
+            crate::keybindings::apply(cx, glyphst_settings::KeymapPreset::Modern, &[]);
             cx.set_global(SettingsStore::memory());
             let mut library = LibraryStore::memory();
             library
@@ -8053,11 +8073,17 @@ mod tests {
             })
         });
         cx.run_until_parked();
+        view.update_in(cx, |this, window, cx| {
+            this.focus_handle.focus(window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
 
         view.update_in(cx, |this, window, cx| {
-            assert_eq!(this.focused_item, NewTabItemKey::OpenFile);
+            assert_eq!(this.focused_item, NewTabItemKey::Document(paths[0].clone()));
             assert!(this.selection.is_empty());
-            assert!(!this.item_state(0).focused);
+            assert!(this.item_state(0).focused);
             this.activate_focused(cx);
 
             for mode in [
@@ -8065,43 +8091,54 @@ mod tests {
                 NewTabViewMode::Grouped,
                 NewTabViewMode::Table,
             ] {
-                this.focused_item = NewTabItemKey::OpenFile;
                 this.set_view_mode(mode, cx);
-                assert_eq!(this.focused_item, NewTabItemKey::OpenFile);
-                for movement in [
-                    CursorMove::Up,
-                    CursorMove::Down,
-                    CursorMove::Left,
-                    CursorMove::Right,
-                ] {
-                    this.focused_item = NewTabItemKey::OpenFile;
-                    this.selection.clear();
-                    this.selection_anchor = None;
-                    this.move_cursor(movement, false, cx);
-                    assert_eq!(this.focused_item, NewTabItemKey::Document(paths[0].clone()));
-                }
+                this.set_focused_index(0);
+                this.move_linear_cursor(true, cx);
+                assert_eq!(this.focused_item, NewTabItemKey::Document(paths[1].clone()));
+                this.move_linear_cursor(false, cx);
+                assert_eq!(this.focused_item, NewTabItemKey::Document(paths[0].clone()));
             }
 
-            this.focused_item = NewTabItemKey::OpenFile;
             this.search_input.update(cx, |input, cx| {
-                input.set_value("a", window, cx);
+                input.set_value("b", window, cx);
             });
             this.update_filter(cx);
-            assert_eq!(this.focused_item, NewTabItemKey::OpenFile);
+            assert_eq!(this.focused_item, NewTabItemKey::Document(paths[1].clone()));
+            this.search_input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+            this.update_filter(cx);
+            assert_eq!(this.focused_item, NewTabItemKey::Document(paths[1].clone()));
             this.set_destination(ReaderNewTabDestination::Library, window, cx);
             assert_eq!(this.focused_item, NewTabItemKey::OpenFile);
             this.set_destination(ReaderNewTabDestination::History, window, cx);
-            assert_eq!(this.focused_item, NewTabItemKey::OpenFile);
+            assert_eq!(this.focused_item, NewTabItemKey::Document(paths[0].clone()));
         });
-        assert!(events.borrow().is_empty());
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[NewTabEvent::OpenDocument(paths[0].clone())]
+        );
+
+        cx.simulate_keystrokes("ctrl-n");
+        assert_eq!(
+            view.read_with(cx, |this, _| this.focused_item.clone()),
+            NewTabItemKey::Document(paths[1].clone())
+        );
+        cx.simulate_keystrokes("ctrl-p");
+        assert_eq!(
+            view.read_with(cx, |this, _| this.focused_item.clone()),
+            NewTabItemKey::Document(paths[0].clone())
+        );
 
         view.update_in(cx, |this, _, cx| {
-            this.focused_item = NewTabItemKey::OpenFile;
             this.handle_document_pointer(paths[1].clone(), gpui::Modifiers::default(), 1, cx);
         });
         assert_eq!(
             events.borrow().as_slice(),
-            &[NewTabEvent::OpenDocument(paths[1].clone())]
+            &[
+                NewTabEvent::OpenDocument(paths[0].clone()),
+                NewTabEvent::OpenDocument(paths[1].clone()),
+            ]
         );
 
         fs::remove_dir_all(directory).unwrap();
@@ -8159,7 +8196,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn quick_open_library_tree_starts_inactive_and_opens_items_on_one_click(
+    fn quick_open_library_tree_focuses_first_row_and_opens_items_on_one_click(
         cx: &mut TestAppContext,
     ) {
         let directory = temporary_directory("quick-open-library-tree");
@@ -8167,7 +8204,7 @@ mod tests {
         let path = directory.join("paper.pdf");
         fs::write(&path, b"document").unwrap();
 
-        let item_id = cx.update(|cx| {
+        let (collection_id, item_id) = cx.update(|cx| {
             gpui_component::init(cx);
             let mut settings_store = SettingsStore::memory();
             let mut settings = settings_store.settings.clone();
@@ -8175,6 +8212,9 @@ mod tests {
             settings_store.set_settings_in_memory(settings);
             cx.set_global(settings_store);
             let mut library = LibraryStore::memory();
+            let collection_id = library
+                .create_library_collection(None, "Reading List")
+                .unwrap();
             let outcome = library
                 .add_linked_item(&path, LibraryItemMetadata::for_path(&path))
                 .unwrap();
@@ -8184,7 +8224,7 @@ mod tests {
                 | LibraryAddOutcome::ExistingInTrash(id) => id,
             };
             cx.set_global(library);
-            item_id
+            (collection_id, item_id)
         });
         let session = ReaderNewTabSession {
             source: QuickOpenSource::Library,
@@ -8209,22 +8249,19 @@ mod tests {
 
         view.update_in(cx, |this, _, cx| {
             assert!(this.is_library_tree());
-            assert_eq!(this.tree.active, None);
-            assert_eq!(this.focused_item, NewTabItemKey::OpenFile);
-            for movement in [
-                CursorMove::Up,
-                CursorMove::Down,
-                CursorMove::Left,
-                CursorMove::Right,
-            ] {
-                this.tree.active = None;
-                this.focused_item = NewTabItemKey::OpenFile;
-                this.move_cursor(movement, false, cx);
-                assert_eq!(this.tree.active, Some(LibraryNodeId::Item(item_id)));
-                assert_eq!(this.focused_item, NewTabItemKey::Document(path.clone()));
-            }
-            this.tree.active = None;
-            this.focused_item = NewTabItemKey::OpenFile;
+            assert_eq!(
+                this.tree.active,
+                Some(LibraryNodeId::Collection(collection_id))
+            );
+            assert_eq!(this.focused_item, NewTabItemKey::Collection(collection_id));
+            this.move_linear_cursor(true, cx);
+            assert_eq!(this.tree.active, Some(LibraryNodeId::Item(item_id)));
+            assert_eq!(this.focused_item, NewTabItemKey::Document(path.clone()));
+            this.move_linear_cursor(false, cx);
+            assert_eq!(
+                this.tree.active,
+                Some(LibraryNodeId::Collection(collection_id))
+            );
             this.handle_tree_pointer(
                 LibraryNodeId::Item(item_id),
                 gpui::Modifiers::default(),
@@ -8544,6 +8581,52 @@ mod tests {
         assert!(home_cx.debug_bounds("new-tab-sort-field").is_none());
         assert!(home_cx.debug_bounds("new-tab-sort-direction").is_none());
         assert!(home_cx.debug_bounds("new-tab-source-selector").is_none());
+    }
+
+    #[gpui::test]
+    fn quick_source_menu_paints_and_receives_clicks_above_search(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+        });
+
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| NewTab::new(cx.focus_handle(), window, cx));
+            Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<NewTab>().unwrap()
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let selector = cx.debug_bounds("new-tab-source-selector").unwrap();
+        cx.simulate_click(selector.center(), gpui::Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("new-tab-source-menu").is_some());
+        let history = cx.debug_bounds("new-tab-nav-History").unwrap();
+        let search = cx.debug_bounds("new-tab-search").unwrap();
+        assert!(history.intersects(&search));
+        cx.simulate_click(
+            history.intersect(&search).center(),
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(!view.read_with(cx, |this, _| this.nav_menu_open));
+        assert!(!cx.update(|window, cx| {
+            view.read(cx)
+                .search_input
+                .focus_handle(cx)
+                .is_focused(window)
+        }));
     }
 
     #[gpui::test]

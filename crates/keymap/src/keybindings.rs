@@ -173,10 +173,10 @@ impl KeyBindingCategory {
     fn predicate(self) -> String {
         match self {
             Self::Workspace => context_without_overlays("Workspace"),
-            Self::ItemNavigation => "Menu".to_string(),
+            Self::ItemNavigation => format!("Menu || ({})", new_tab_navigation_context()),
             Self::DocumentView => context_without_overlays("DocumentView"),
             Self::PageOverview => context_without_overlays("GridOverview"),
-            Self::NewTab => format!("{} && !Input", context_without_overlays("NewTab")),
+            Self::NewTab => new_tab_navigation_context(),
             Self::SearchResults => "Search".to_string(),
         }
     }
@@ -422,6 +422,10 @@ fn context_without_overlays(base: &str) -> String {
         predicate.push_str(context);
     }
     predicate
+}
+
+fn new_tab_navigation_context() -> String {
+    format!("{} && !Input", context_without_overlays("NewTab"))
 }
 
 fn raw_default_keystrokes(spec: &CommandSpec, preset: KeymapPreset) -> &'static [&'static str] {

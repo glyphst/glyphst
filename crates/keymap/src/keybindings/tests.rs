@@ -80,7 +80,10 @@ fn categories_hide_raw_predicates() {
         KeyBindingCategory::ItemNavigation.label(),
         "Item Navigation"
     );
-    assert_eq!(KeyBindingCategory::ItemNavigation.predicate(), "Menu");
+    let item_navigation = KeyBindingCategory::ItemNavigation.predicate();
+    assert!(item_navigation.starts_with("Menu || (NewTab"));
+    assert!(item_navigation.contains("!Input"));
+    assert!(item_navigation.contains("!NewTabModal"));
     assert_eq!(KeyBindingCategory::DocumentView.label(), "Document Reader");
     let predicate = KeyBindingCategory::DocumentView.predicate();
     assert!(predicate.starts_with("DocumentView && !GridOverview"));
@@ -94,7 +97,7 @@ fn categories_hide_raw_predicates() {
 }
 
 #[test]
-fn item_navigation_is_editable_and_dispatches_in_menu_contexts() {
+fn item_navigation_is_editable_and_dispatches_in_menu_and_new_tab_contexts() {
     for preset in [KeymapPreset::Modern, KeymapPreset::Vim] {
         let rows = editable_bindings(preset, &[]);
         let next = rows
@@ -126,6 +129,16 @@ fn item_navigation_is_editable_and_dispatches_in_menu_contexts() {
             first_action_for(&keymap, "ctrl-p", &["PathChooser Menu"]),
             menu::SelectPrev::name_for_type()
         );
+        assert_eq!(
+            first_action_for(&keymap, "ctrl-n", &["NewTab"]),
+            menu::SelectNext::name_for_type()
+        );
+        assert_eq!(
+            first_action_for(&keymap, "ctrl-p", &["NewTab"]),
+            menu::SelectPrev::name_for_type()
+        );
+        assert!(action_names_for(&keymap, "ctrl-n", &["NewTab", "Input"]).is_empty());
+        assert!(action_names_for(&keymap, "ctrl-p", &["NewTab", "NewTabModal"]).is_empty());
     }
 }
 
@@ -700,6 +713,18 @@ fn new_tab_navigation_uses_native_and_vim_defaults() {
     assert_eq!(
         first_action_for(&modern, "down", &["NewTab"]),
         CursorDown::name_for_type()
+    );
+    assert_eq!(
+        first_action_for(&modern, "up", &["NewTab"]),
+        CursorUp::name_for_type()
+    );
+    assert_eq!(
+        first_action_for(&modern, "ctrl-n", &["NewTab"]),
+        menu::SelectNext::name_for_type()
+    );
+    assert_eq!(
+        first_action_for(&modern, "ctrl-p", &["NewTab"]),
+        menu::SelectPrev::name_for_type()
     );
     assert_eq!(
         first_action_for(&modern, "shift-down", &["NewTab"]),
