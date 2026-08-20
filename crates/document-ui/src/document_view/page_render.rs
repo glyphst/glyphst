@@ -257,6 +257,8 @@ impl DocumentView {
             return;
         }
 
+        let attempt_started_at = Instant::now();
+
         let page = &self.pages[key.page_idx];
         let page_bounds = page.bounds;
         let source_page_width = page.width;
@@ -275,20 +277,45 @@ impl DocumentView {
             .unwrap_or_else(|| (self.render_session.clone(), key.page_idx));
 
         let task = cx.spawn(async move |this, cx| {
-            let result = cx
+            let (result, display_list_duration, display_list_cached, raster_duration) = cx
                 .background_spawn(async move {
-                    let display_list = match cached_display_list {
-                        Some(display_list) => display_list,
-                        None => render_session.create_display_list(render_page_idx, page_bounds)?,
-                    };
+                    let (display_list, display_list_duration, display_list_cached) =
+                        match cached_display_list {
+                            Some(display_list) => (display_list, None, true),
+                            None => {
+                                let started_at = Instant::now();
+                                match render_session
+                                    .create_display_list(render_page_idx, page_bounds)
+                                {
+                                    Ok(display_list) => {
+                                        (display_list, Some(started_at.elapsed()), false)
+                                    }
+                                    Err(error) => {
+                                        return (
+                                            Err(error.into()),
+                                            Some(started_at.elapsed()),
+                                            false,
+                                            None,
+                                        );
+                                    }
+                                }
+                            }
+                        };
+                    let raster_started_at = Instant::now();
                     let image = Self::render_page(
                         &display_list,
                         page_bounds,
                         source_page_width,
                         source_page_height,
                         key,
-                    )?;
-                    Ok::<_, anyhow::Error>((display_list, image))
+                    );
+                    let raster_duration = Some(raster_started_at.elapsed());
+                    (
+                        image.map(|image| (display_list, image)),
+                        display_list_duration,
+                        display_list_cached,
+                        raster_duration,
+                    )
                 })
                 .await;
 
@@ -303,6 +330,7 @@ impl DocumentView {
                     };
                     this.pending_renders.remove(index);
 
+                    let succeeded = result.is_ok();
                     match result {
                         Ok((display_list, image)) => {
                             cx.global_mut::<RenderCache>().insert_display_list(
@@ -327,9 +355,27 @@ impl DocumentView {
                                     cx,
                                 );
                             }
-                            cx.notify();
                         }
                         Err(error) => eprintln!("failed to render PDF page: {error:#}"),
+                    }
+                    this.page_render_debug.insert(
+                        key.page_idx,
+                        PageRenderAttemptDebug {
+                            key,
+                            total: attempt_started_at.elapsed(),
+                            display_list: display_list_duration,
+                            display_list_cached,
+                            raster: raster_duration,
+                            succeeded,
+                        },
+                    );
+                    // A successful texture needs a repaint. A failure is
+                    // observed by the independently refreshed debug HUD; do
+                    // not notify the document here, because repainting an
+                    // empty page would immediately enqueue the same failing
+                    // render again in a tight loop.
+                    if succeeded {
+                        cx.notify();
                     }
                 })
                 .ok();

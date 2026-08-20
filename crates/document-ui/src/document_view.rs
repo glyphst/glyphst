@@ -421,6 +421,102 @@ impl RenderKey {
     fn pixel_count(self) -> u64 {
         self.physical_width as u64 * self.physical_height as u64
     }
+
+    fn byte_len(self) -> u64 {
+        self.pixel_count().saturating_mul(4)
+    }
+}
+
+/// Process-wide raster-cache diagnostics used by the rendering debug HUD.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenderCacheDebugSnapshot {
+    pub raster_bytes: u64,
+    pub raster_count: usize,
+    pub raster_byte_limit: u64,
+    pub protected_raster_count: usize,
+    pub display_list_count: usize,
+    pub display_list_limit: usize,
+}
+
+/// How closely the texture currently painted for a page matches the requested
+/// viewport texture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageRenderDebugStatus {
+    Exact,
+    Fallback { exact_pending: bool },
+    Pending,
+    Failed,
+    Unavailable,
+}
+
+/// Text-layer availability for the active page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextIndexDebugState {
+    Pending,
+    Indexing,
+    Ready,
+    Failed,
+}
+
+/// Exact, known allocation size for an RGBA page raster.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RasterDebugSnapshot {
+    pub physical_width: u32,
+    pub physical_height: u32,
+    pub bytes: u64,
+    pub scale: f32,
+}
+
+/// Stage timing for the last completed render attempt for a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageRenderTimingDebugSnapshot {
+    pub total: Duration,
+    pub display_list: Option<Duration>,
+    pub display_list_cached: bool,
+    pub raster: Option<Duration>,
+    pub succeeded: bool,
+}
+
+/// Rendering and content diagnostics for one active page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageRenderDebugSnapshot {
+    pub page_number: usize,
+    pub status: PageRenderDebugStatus,
+    pub requested_raster: Option<RasterDebugSnapshot>,
+    pub displayed_raster: Option<RasterDebugSnapshot>,
+    pub cached_raster_bytes: u64,
+    pub cached_raster_variants: usize,
+    pub source_revision: u64,
+    pub latest_timing: Option<PageRenderTimingDebugSnapshot>,
+    pub glyph_count: usize,
+    pub line_count: usize,
+    pub link_count: usize,
+    pub text_index_state: TextIndexDebugState,
+}
+
+/// Rendering diagnostics for the active document viewport.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocumentRenderDebugSnapshot {
+    pub page_label: String,
+    pub pages: Vec<PageRenderDebugSnapshot>,
+    pub pending_render_count: usize,
+    pub pending_render_limit: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ViewportPageRenderDebug {
+    requested: RenderKey,
+    displayed: Option<RenderKey>,
+}
+
+#[derive(Clone, Copy)]
+struct PageRenderAttemptDebug {
+    key: RenderKey,
+    total: Duration,
+    display_list: Option<Duration>,
+    display_list_cached: bool,
+    raster: Option<Duration>,
+    succeeded: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -716,6 +812,21 @@ impl RenderCache {
             .iter()
             .map(|cached| cached.key.pixel_count())
             .sum()
+    }
+
+    fn debug_snapshot(&self) -> RenderCacheDebugSnapshot {
+        RenderCacheDebugSnapshot {
+            raster_bytes: self.render_pixels().saturating_mul(4),
+            raster_count: self.renders.len(),
+            raster_byte_limit: MAX_CACHED_RENDER_PIXELS.saturating_mul(4),
+            protected_raster_count: self
+                .renders
+                .iter()
+                .filter(|cached| self.is_render_protected(cached.key))
+                .count(),
+            display_list_count: self.display_lists.len(),
+            display_list_limit: MAX_CACHED_DISPLAY_LISTS,
+        }
     }
 
     fn next_access(&mut self) -> u64 {
@@ -1708,6 +1819,8 @@ pub struct DocumentView {
     page_image_bounds: Vec<Option<Bounds<Pixels>>>,
     focus_handle: FocusHandle,
     pending_renders: Vec<PendingRender>,
+    viewport_render_debug: HashMap<usize, ViewportPageRenderDebug>,
+    page_render_debug: HashMap<usize, PageRenderAttemptDebug>,
     rotation: DocumentRotation,
     page_layout: DocumentPageLayout,
     page_gap: f32,
@@ -2045,12 +2158,15 @@ mod panels;
 mod position;
 mod region;
 mod render;
+mod render_debug;
 mod search_state;
 mod selection;
 mod sidebar;
 mod text_index;
 mod translation;
 mod viewport;
+
+pub use render_debug::render_cache_debug_snapshot;
 
 impl EventEmitter<DocumentViewEvent> for DocumentView {}
 

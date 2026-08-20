@@ -530,6 +530,8 @@ impl DocumentView {
         self.pending_renders
             .retain(|pending| !pages.contains(&pending.key.page_idx));
         for page_index in pages {
+            self.viewport_render_debug.remove(&page_index);
+            self.page_render_debug.remove(&page_index);
             let removed = cx
                 .global_mut::<RenderCache>()
                 .evict_page(self.doc_id, page_index);
@@ -617,6 +619,8 @@ impl DocumentView {
                     .insert(*page_index, replacement_source);
                 self.pending_renders
                     .retain(|pending| pending.key.page_idx != *page_index);
+                self.viewport_render_debug.remove(page_index);
+                self.page_render_debug.remove(page_index);
                 let removed = cx
                     .global_mut::<RenderCache>()
                     .evict_page(self.doc_id, *page_index);

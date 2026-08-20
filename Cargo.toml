@@ -43,6 +43,7 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "4bd1993783703e92a
 ] }
 gpui_component = { path = "dependencies/gpui-component/crates/ui", package = "gpui-component" }
 gpui_component_assets = { path = "dependencies/gpui-component/crates/assets", package = "gpui-component-assets" }
+gpui_fps = { path = "dependencies/gpui-component/crates/fps", package = "gpui-fps" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "4bd1993783703e92affb781503916d1f152f599f", package = "gpui_platform", default-features = false, features = [
     "font-kit",
     "wayland",

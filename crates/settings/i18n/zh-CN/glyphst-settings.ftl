@@ -634,6 +634,7 @@ keybinding-command-workspace-open-settings = 打开设置
 keybinding-command-workspace-open-keybindings = 打开键位绑定
 keybinding-command-workspace-toggle-full-screen = 切换全屏
 keybinding-command-workspace-toggle-zen-mode = 切换禅模式
+keybinding-command-workspace-toggle-rendering-debug = 切换渲染调试
 keybinding-command-workspace-toggle-transparency = 切换透明度
 keybinding-command-workspace-toggle-theme = 切换主题
 keybinding-command-workspace-toggle-theme-selector = 切换主题选择器

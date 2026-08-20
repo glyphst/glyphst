@@ -30,16 +30,19 @@ use gpui::{
 use gpui_component::{
     ActiveTheme as _, ThemeColor, WindowExt as _, menu::PopupMenu, notification::Notification,
 };
+use gpui_fps::{FpsMonitor, FpsOverlay};
 
 mod ai;
 mod chrome;
 mod docks;
+mod render_debug;
 
 pub use glyphst_actions::workspace::{
     ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight, ActivatePaneUp,
     ActivatePreviousPane, CloseOtherPanes, MovePaneDown, MovePaneLeft, MovePaneRight, MovePaneUp,
     ResetPaneSizes, ResizePaneDown, ResizePaneLeft, ResizePaneRight, ResizePaneUp, SwapPaneDown,
-    SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleMode, ToggleThemeSelector, ToggleZenMode,
+    SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleMode, ToggleRenderingDebug, ToggleThemeSelector,
+    ToggleZenMode,
 };
 
 use crate::{
@@ -161,6 +164,7 @@ pub struct Workspace {
     docks: WorkspaceDockState,
     transparency_enabled: bool,
     window_settings: WindowSettings,
+    rendering_debug: Option<Entity<FpsMonitor>>,
 }
 
 #[derive(Clone, Copy)]
@@ -469,6 +473,7 @@ impl Workspace {
             docks,
             transparency_enabled,
             window_settings,
+            rendering_debug: None,
         };
 
         cx.subscribe_in(
@@ -4397,6 +4402,10 @@ impl Render for Workspace {
         } else {
             self.render_body(theme, dim_inactive_panes, window, cx)
         };
+        let rendering_debug = self
+            .rendering_debug
+            .clone()
+            .map(|monitor| FpsOverlay::new(&monitor));
         div()
             .id("workspace")
             .size_full()
@@ -4602,15 +4611,20 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenKeybindings, window, cx| {
                 this.open_keymap_tab(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleRenderingDebug, window, cx| {
+                this.toggle_rendering_debug(window, cx);
+            }))
             .when_some(title_bar, |this, title_bar| this.child(title_bar))
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .child(body),
+                    .child(body)
+                    .children(rendering_debug),
             )
             .children(synchronized_connection)
             .when(self.quick_ask_visible, |this| {
@@ -4664,8 +4678,8 @@ mod tests {
     use super::{
         PaneEvent, SplitDirection, SynchronizedConnectionAnchor, SynchronizedConnectionAnchorEdge,
         SynchronizedConnectionCurve, SynchronizedConnectionGroup,
-        SynchronizedConnectionInvalidReason, SynchronizedConnectionTabState, ToggleZenMode,
-        Workspace, WorkspaceAiContextProvider, WorkspaceCallbacks, WorkspaceMenu,
+        SynchronizedConnectionInvalidReason, SynchronizedConnectionTabState, ToggleRenderingDebug,
+        ToggleZenMode, Workspace, WorkspaceAiContextProvider, WorkspaceCallbacks, WorkspaceMenu,
         WorkspaceSurfaceMode, WorkspaceWindowHandle, WorkspaceWindowRequest,
         live_translation_pair_is_active, open_document_options,
     };
@@ -5151,6 +5165,49 @@ mod tests {
         assert!(cx.debug_bounds("home-navigation-rail").is_some());
         assert!(cx.debug_bounds("workspace-home").is_some());
         assert!(cx.debug_bounds("workspace-pane-column").is_none());
+    }
+
+    #[gpui::test]
+    fn rendering_debug_toggles_a_transient_monitor_on_home(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(None, None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+
+        cx.update(|window, cx| {
+            window.dispatch_action(Box::new(ToggleRenderingDebug), cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.rendering_debug.is_some());
+        });
+
+        cx.update(|window, cx| {
+            window.dispatch_action(Box::new(ToggleRenderingDebug), cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.rendering_debug.is_none());
+        });
     }
 
     #[gpui::test]

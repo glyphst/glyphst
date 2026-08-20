@@ -214,7 +214,15 @@ impl DocumentView {
             }
         }
 
-        let image = self.cached_or_request_render(key, cx);
+        self.viewport_render_debug.clear();
+        let (image, displayed) = self.cached_or_request_viewport_render(key, true, cx);
+        self.viewport_render_debug.insert(
+            page_idx,
+            ViewportPageRenderDebug {
+                requested: key,
+                displayed,
+            },
+        );
         self.assemble_paint_data(
             vec![PaintPage {
                 bounds: image_bounds,
@@ -335,13 +343,21 @@ impl DocumentView {
             }
         }
 
+        self.viewport_render_debug.clear();
         let mut pages = Vec::with_capacity(visible_page_renders.len());
         let mut has_rendered_page = false;
-        for (_, image_bounds, key) in visible_page_renders {
+        for (page_idx, image_bounds, key) in visible_page_renders {
             let (image, fallback_key) = self.cached_or_request_viewport_render(
                 key,
                 !self.dock_snapshot.layout_motion_active,
                 cx,
+            );
+            self.viewport_render_debug.insert(
+                page_idx,
+                ViewportPageRenderDebug {
+                    requested: key,
+                    displayed: fallback_key,
+                },
             );
             if let Some(fallback_key) = fallback_key
                 && fallback_key.doc_id == self.doc_id

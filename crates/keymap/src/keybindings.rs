@@ -30,8 +30,8 @@ use glyphst_actions::{
         ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight, ActivatePaneUp,
         ActivatePreviousPane, CloseOtherPanes, MovePaneDown, MovePaneLeft, MovePaneRight,
         MovePaneUp, ResetPaneSizes, ResizePaneDown, ResizePaneLeft, ResizePaneRight, ResizePaneUp,
-        SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleMode, ToggleThemeSelector,
-        ToggleZenMode,
+        SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleMode, ToggleRenderingDebug,
+        ToggleThemeSelector, ToggleZenMode,
     },
 };
 use glyphst_settings::{KeyBindingOverride, KeymapPreset, Settings};
@@ -766,6 +766,15 @@ fn command_specs() -> &'static [CommandSpec] {
                     &[],
                     &[],
                     &["zen", "zen-mode"],
+                    true,
+                ),
+                spec::<ToggleRenderingDebug>(
+                    "toggle-rendering-debug",
+                    "Toggle Rendering Debug",
+                    KeyBindingCategory::Workspace,
+                    &[],
+                    &[],
+                    &["render-debug", "performance-hud", "fps-monitor"],
                     true,
                 ),
                 spec::<ToggleTransparency>(

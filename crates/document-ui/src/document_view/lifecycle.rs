@@ -200,6 +200,8 @@ impl DocumentView {
             page_image_bounds,
             focus_handle,
             pending_renders: Vec::new(),
+            viewport_render_debug: HashMap::new(),
+            page_render_debug: HashMap::new(),
             rotation,
             page_layout,
             page_gap,
@@ -606,6 +608,8 @@ impl DocumentView {
         self.evict_previous_document(cx);
         self.text_indexing_task = None;
         self.pending_renders.clear();
+        self.viewport_render_debug.clear();
+        self.page_render_debug.clear();
         self.diff_flash_clear_task = None;
         self.diff_flashes.clear();
 

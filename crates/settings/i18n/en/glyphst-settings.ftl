@@ -681,6 +681,7 @@ keybinding-command-workspace-open-settings = Open Settings
 keybinding-command-workspace-open-keybindings = Open Keybindings
 keybinding-command-workspace-toggle-full-screen = Toggle Full Screen
 keybinding-command-workspace-toggle-zen-mode = Toggle Zen Mode
+keybinding-command-workspace-toggle-rendering-debug = Toggle Rendering Debug
 keybinding-command-workspace-toggle-transparency = Toggle Transparency
 keybinding-command-workspace-toggle-theme = Toggle Theme
 keybinding-command-workspace-toggle-theme-selector = Toggle Theme Selector

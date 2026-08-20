@@ -153,6 +153,7 @@ pub mod workspace {
             ToggleMode,
             ToggleThemeSelector,
             ToggleZenMode,
+            ToggleRenderingDebug,
         ]
     );
 }

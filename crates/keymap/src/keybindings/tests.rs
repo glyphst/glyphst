@@ -282,6 +282,33 @@ fn zen_mode_is_unbound_by_default_and_can_be_user_bound() {
 }
 
 #[test]
+fn rendering_debug_is_unbound_by_default_and_can_be_user_bound() {
+    for preset in [KeymapPreset::Modern, KeymapPreset::Vim] {
+        let binding = editable_bindings(preset, &[])
+            .into_iter()
+            .find(|binding| {
+                binding.action == "toggle-rendering-debug"
+                    && binding.category == KeyBindingCategory::Workspace
+            })
+            .expect("rendering debug should be an editable command");
+        assert!(binding.keystrokes.is_empty());
+        assert!(binding.default_keystrokes.is_empty());
+
+        let overrides = [KeyBindingOverride {
+            keymap: preset,
+            action: "render-debug".to_string(),
+            keystrokes: "ctrl-alt-r".to_string(),
+            context: Some(KeyBindingCategory::Workspace.id().to_string()),
+        }];
+        let overridden = editable_bindings(preset, &overrides)
+            .into_iter()
+            .find(|binding| binding.action == "toggle-rendering-debug")
+            .expect("overridden rendering debug should remain editable");
+        assert_eq!(overridden.keystrokes, ["ctrl-alt-r"]);
+    }
+}
+
+#[test]
 fn nested_escape_binding_wins_before_zen_mode() {
     let mut keymap = Keymap::default();
     keymap.add_bindings([

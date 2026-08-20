@@ -1200,6 +1200,31 @@ fn render_cache_protects_only_the_exact_visible_render() {
 }
 
 #[test]
+fn render_cache_debug_snapshot_reports_exact_rgba_bytes_without_touching_lru() {
+    let key = RenderKey {
+        doc_id: 1,
+        page_idx: 0,
+        source_revision: 0,
+        rotation: DocumentRotation::Degrees0,
+        color_transform: None,
+        physical_width: 640,
+        physical_height: 480,
+    };
+    let mut cache = RenderCache::new();
+    cache.set_protected_renders(1, [key]);
+    cache.insert_render(key, 1.0, test_render_image());
+
+    let before_access = cache.access_counter;
+    let snapshot = cache.debug_snapshot();
+
+    assert_eq!(snapshot.raster_bytes, 640 * 480 * 4);
+    assert_eq!(snapshot.raster_count, 1);
+    assert_eq!(snapshot.protected_raster_count, 1);
+    assert_eq!(snapshot.raster_byte_limit, 30_000_000 * 4);
+    assert_eq!(cache.access_counter, before_access);
+}
+
+#[test]
 fn render_cache_resize_churn_keeps_current_viewport_and_thumbnail_sizes() {
     let key = |physical_width, physical_height| RenderKey {
         doc_id: 1,
