@@ -8,6 +8,14 @@ pub(super) fn document_scroll_percentage(scroll_y: f32, max_scroll_y: f32) -> u8
     ((scroll_y / max_scroll_y).clamp(0.0, 1.0) * 100.0).floor() as u8
 }
 
+fn document_bookmark_icon(bookmarked: bool) -> IconName {
+    if bookmarked {
+        IconName::BookmarkFill
+    } else {
+        IconName::Bookmark
+    }
+}
+
 impl DocumentView {
     fn document_progress_label(&self, display: DocumentProgressDisplay) -> String {
         match display {
@@ -143,8 +151,7 @@ impl DocumentView {
             .small()
             .compact()
             .ghost()
-            .selected(current_bookmarked)
-            .icon(IconName::Bookmark)
+            .icon(document_bookmark_icon(current_bookmarked))
             .w(ui_rems(CONTROL_SIZE))
             .h(ui_rems(CONTROL_SIZE))
             .tooltip(if current_bookmarked {
@@ -255,7 +262,16 @@ impl DocumentView {
 
 #[cfg(test)]
 mod tests {
-    use super::document_scroll_percentage;
+    use super::{document_bookmark_icon, document_scroll_percentage};
+
+    #[test]
+    fn bookmark_state_uses_outline_and_solid_icons() {
+        assert_eq!(document_bookmark_icon(false).path(), "icons/bookmark.svg");
+        assert_eq!(
+            document_bookmark_icon(true).path(),
+            "icons/bookmark-fill.svg"
+        );
+    }
 
     #[test]
     fn scroll_percentage_covers_top_middle_end_and_non_scrollable_documents() {

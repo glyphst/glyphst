@@ -108,6 +108,12 @@ mod tests {
         );
         assert!(
             assets
+                .load("icons/bookmark-fill.svg")
+                .expect("Glyphst filled bookmark icon lookup")
+                .is_some()
+        );
+        assert!(
+            assets
                 .load("icons/search.svg")
                 .expect("component icon lookup")
                 .is_some()
