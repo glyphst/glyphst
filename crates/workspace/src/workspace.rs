@@ -43,7 +43,7 @@ pub use glyphst_actions::workspace::{
 };
 
 use crate::{
-    command_palette::{CommandPalette, CommandPaletteDelegate},
+    command_palette::{CommandPalette, CommandPaletteEvent},
     document_view::{
         CloseTab, DocumentSidebar, DocumentView, DocumentViewEvent, DuplicateTab, OpenFile,
         OpenKeybindings, OpenNewTab, OpenQuickAsk, OpenSettings, ResetZoom, ToggleAiPanel,
@@ -4135,12 +4135,15 @@ impl Workspace {
             .into_iter()
             .filter(|action| !action.partial_eq(&ToggleCommandPalette))
             .collect::<Vec<_>>();
-        let delegate = CommandPaletteDelegate::new(actions);
-        let picker_previous_focus_handle = previous_focus_handle.clone();
-        let palette = cx.new(|cx| Picker::new(picker_previous_focus_handle, delegate, window, cx));
+        let palette_previous_focus_handle = previous_focus_handle.clone();
+        let palette =
+            cx.new(|cx| CommandPalette::new(actions, palette_previous_focus_handle, window, cx));
 
-        cx.subscribe_in(&palette, window, |this, _, _: &PickerEvent, window, cx| {
-            this.close_command_palette(window, cx);
+        cx.subscribe_in(&palette, window, |this, _, event, window, cx| match event {
+            CommandPaletteEvent::Dismissed => this.close_command_palette(window, cx),
+            CommandPaletteEvent::Confirmed(action) => {
+                this.confirm_command_palette_action(action.as_ref(), window, cx);
+            }
         })
         .detach();
 
@@ -4158,6 +4161,28 @@ impl Workspace {
             }
             cx.notify();
         }
+    }
+
+    fn confirm_command_palette_action(
+        &mut self,
+        action: &dyn gpui::Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.command_palette.take().is_none() {
+            return;
+        }
+
+        let previous_focus_handle = self
+            .command_palette_previous_focus_handle
+            .take()
+            .unwrap_or_else(|| self.active_pane.read(cx).focus_handle());
+        let action = action.boxed_clone();
+        cx.notify();
+        window.defer(cx, move |window, cx| {
+            previous_focus_handle.focus(window, cx);
+            previous_focus_handle.dispatch_action(action.as_ref(), window, cx);
+        });
     }
 
     fn toggle_theme_selector(
