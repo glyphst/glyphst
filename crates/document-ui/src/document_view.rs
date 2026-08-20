@@ -82,7 +82,7 @@ use glyphst_ui::{
 use gpui::{
     Anchor, AnyElement, AsyncApp, BorderStyle, Bounds, ClickEvent, ClipboardItem, Context, Corners,
     DismissEvent, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Hsla, InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point as GpuiPoint, PromptButton, PromptLevel, Render, RenderImage,
     ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
     StatefulInteractiveElement, Task, TextStyle, UniformListScrollHandle, Window, anchored, canvas,
@@ -90,8 +90,8 @@ use gpui::{
     rgb, rgba, size, transparent_black, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, ElementExt as _, IndexPath, Selectable as _, Sizable as _,
-    ThemeColor, ThemeStyled as _,
+    ActiveTheme as _, Disableable as _, ElementExt as _, IconName as ComponentIconName, IndexPath,
+    Selectable as _, Sizable as _, ThemeColor, ThemeStyled as _,
     alert::Alert,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
@@ -99,6 +99,7 @@ use gpui_component::{
     progress::ProgressCircle,
     searchable_list::SearchableVec,
     select::{Select, SelectEvent, SelectState},
+    spinner::Spinner,
 };
 use image::{Frame, GenericImageView as _, RgbaImage, codecs::jpeg::JpegEncoder};
 use mupdf::text_page::{TextBlockType, TextCharFlags};
@@ -122,6 +123,10 @@ const MAX_PREFETCH_RENDER_PIXELS: u64 = MAX_CACHED_RENDER_PIXELS / 3;
 const MAX_CACHED_DISPLAY_LISTS: usize = 50;
 const MAX_PENDING_PAGE_RENDERS: usize = 6;
 const MAX_RENDER_TEXTURE_DIMENSION: u32 = 8192;
+const MIN_PARALLEL_SHADE_PIXELS: u64 = 1_000_000;
+const MIN_RASTER_BAND_HEIGHT: u32 = 256;
+const MAX_RASTER_BANDS: usize = 8;
+const PAGE_LOADING_INDICATOR_SIZE: f32 = 24.0;
 const MAX_JUMP_HISTORY: usize = 128;
 const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
 const TOC_SIDEBAR_WIDTH: f32 = 280.0;
@@ -470,10 +475,17 @@ pub struct RasterDebugSnapshot {
 /// Stage timing for the last completed render attempt for a page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageRenderTimingDebugSnapshot {
+    /// Request-to-cache wall time, including executor queueing and UI handoff.
     pub total: Duration,
+    /// Page loading and display-list recording; absent when the list was cached.
     pub display_list: Option<Duration>,
     pub display_list_cached: bool,
+    /// Complete bitmap stage, including MuPDF drawing and Glyphst post-processing.
     pub raster: Option<Duration>,
+    /// Wall-clock envelope of the MuPDF display-list playback call(s).
+    pub mupdf_draw: Option<Duration>,
+    /// Number of independently rasterized horizontal bands.
+    pub raster_bands: Option<usize>,
     pub succeeded: bool,
 }
 
@@ -516,6 +528,8 @@ struct PageRenderAttemptDebug {
     display_list: Option<Duration>,
     display_list_cached: bool,
     raster: Option<Duration>,
+    mupdf_draw: Option<Duration>,
+    raster_bands: Option<usize>,
     succeeded: bool,
 }
 

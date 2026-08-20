@@ -1,4 +1,47 @@
 use super::*;
+use futures::future::try_join_all;
+use std::sync::{Arc as StdArc, atomic::AtomicBool};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RasterBandRange {
+    pub(super) y0: u32,
+    pub(super) y1: u32,
+}
+
+struct ShadeDetector {
+    found: StdArc<AtomicBool>,
+}
+
+impl mupdf::NativeDevice for ShadeDetector {
+    fn fill_shade(
+        &mut self,
+        _shade: &mupdf::Shade,
+        _matrix: Matrix,
+        _alpha: f32,
+        _color_params: ColorParams,
+    ) {
+        self.found.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+struct RasterBand {
+    range: RasterBandRange,
+    samples: Vec<u8>,
+    draw_started_at: Instant,
+    draw_finished_at: Instant,
+}
+
+pub(super) struct RasterizedSamples {
+    pub(super) samples: Vec<u8>,
+    pub(super) mupdf_draw: Duration,
+    pub(super) raster_bands: usize,
+}
+
+struct RenderedPage {
+    image: Arc<RenderImage>,
+    mupdf_draw: Duration,
+    raster_bands: usize,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PixelRect {
@@ -90,10 +133,51 @@ fn apply_pdf_duotone(
 
 pub(super) fn should_start_viewport_render(
     has_pending_render: bool,
+    has_failed_render: bool,
     request_exact: bool,
     has_fallback: bool,
 ) -> bool {
-    !has_pending_render && (request_exact || !has_fallback)
+    !has_pending_render && !has_failed_render && (request_exact || !has_fallback)
+}
+
+pub(super) fn should_show_page_loading(
+    has_pending_render: bool,
+    has_displayed_render: bool,
+) -> bool {
+    has_pending_render && !has_displayed_render
+}
+
+pub(super) fn raster_band_count(
+    has_shading: bool,
+    pixel_count: u64,
+    height: u32,
+    available_cpus: usize,
+) -> usize {
+    if !has_shading || pixel_count < MIN_PARALLEL_SHADE_PIXELS || available_cpus < 2 || height == 0
+    {
+        return 1;
+    }
+
+    let height_limited = height.div_ceil(MIN_RASTER_BAND_HEIGHT) as usize;
+    available_cpus
+        .min(MAX_RASTER_BANDS)
+        .min(height_limited)
+        .max(1)
+}
+
+pub(super) fn raster_band_ranges(height: u32, band_count: usize) -> Vec<RasterBandRange> {
+    if height == 0 || band_count == 0 {
+        return Vec::new();
+    }
+
+    (0..band_count)
+        .map(|band_idx| {
+            let y0 = (u64::from(height) * band_idx as u64 / band_count as u64) as u32;
+            let y1 = (u64::from(height) * (band_idx + 1) as u64 / band_count as u64) as u32;
+            RasterBandRange { y0, y1 }
+        })
+        .filter(|range| range.y0 < range.y1)
+        .collect()
 }
 
 impl DocumentView {
@@ -192,6 +276,7 @@ impl DocumentView {
                 && pending.key.rotation == key.rotation
                 && pending.key.color_transform == key.color_transform
         });
+        let has_failed_render = self.render_failed_for_key(key);
         let (page_width, _) = self.page_dimensions(key.page_idx);
         let render_scale = key.physical_width as f32 / page_width;
         let fallback = {
@@ -202,7 +287,12 @@ impl DocumentView {
         // A cached image keeps motion visually continuous, so intermediate
         // exact-size work can wait. With no fallback we still bootstrap one
         // render; otherwise a document opened during motion could stay blank.
-        if should_start_viewport_render(has_pending_render, request_exact, fallback.is_some()) {
+        if should_start_viewport_render(
+            has_pending_render,
+            has_failed_render,
+            request_exact,
+            fallback.is_some(),
+        ) {
             self.start_background_render(key, cx);
         }
 
@@ -239,8 +329,14 @@ impl DocumentView {
         }
     }
 
+    fn render_failed_for_key(&self, key: RenderKey) -> bool {
+        self.page_render_debug
+            .get(&key.page_idx)
+            .is_some_and(|attempt| attempt.key == key && !attempt.succeeded)
+    }
+
     fn start_background_render(&mut self, key: RenderKey, cx: &mut Context<Self>) {
-        if self.reload_task.is_some() {
+        if self.reload_task.is_some() || self.render_failed_for_key(key) {
             return;
         }
         if self.pending_renders.iter().any(|pending| {
@@ -275,9 +371,17 @@ impl DocumentView {
             .filter(|source| source.revision == key.source_revision)
             .map(|source| (source.render_session.clone(), 0))
             .unwrap_or_else(|| (self.render_session.clone(), key.page_idx));
+        let background_executor = cx.background_executor().clone();
 
         let task = cx.spawn(async move |this, cx| {
-            let (result, display_list_duration, display_list_cached, raster_duration) = cx
+            let (
+                result,
+                display_list_duration,
+                display_list_cached,
+                raster_duration,
+                mupdf_draw,
+                raster_bands,
+            ) = cx
                 .background_spawn(async move {
                     let (display_list, display_list_duration, display_list_cached) =
                         match cached_display_list {
@@ -292,9 +396,11 @@ impl DocumentView {
                                     }
                                     Err(error) => {
                                         return (
-                                            Err(error.into()),
+                                            Err(error),
                                             Some(started_at.elapsed()),
                                             false,
+                                            None,
+                                            None,
                                             None,
                                         );
                                     }
@@ -302,19 +408,27 @@ impl DocumentView {
                             }
                         };
                     let raster_started_at = Instant::now();
-                    let image = Self::render_page(
-                        &display_list,
+                    let rendered_page = Self::render_page(
+                        display_list.clone(),
                         page_bounds,
                         source_page_width,
                         source_page_height,
                         key,
-                    );
+                        background_executor,
+                    )
+                    .await;
                     let raster_duration = Some(raster_started_at.elapsed());
+                    let (mupdf_draw, raster_bands) = rendered_page
+                        .as_ref()
+                        .map(|rendered| (Some(rendered.mupdf_draw), Some(rendered.raster_bands)))
+                        .unwrap_or((None, None));
                     (
-                        image.map(|image| (display_list, image)),
+                        rendered_page.map(|rendered| (display_list, rendered.image)),
                         display_list_duration,
                         display_list_cached,
                         raster_duration,
+                        mupdf_draw,
+                        raster_bands,
                     )
                 })
                 .await;
@@ -366,23 +480,22 @@ impl DocumentView {
                             display_list: display_list_duration,
                             display_list_cached,
                             raster: raster_duration,
+                            mupdf_draw,
+                            raster_bands,
                             succeeded,
                         },
                     );
-                    // A successful texture needs a repaint. A failure is
-                    // observed by the independently refreshed debug HUD; do
-                    // not notify the document here, because repainting an
-                    // empty page would immediately enqueue the same failing
-                    // render again in a tight loop.
-                    if succeeded {
-                        cx.notify();
-                    }
+                    // Same-key failures are suppressed until the render key
+                    // changes or the document reloads, so notifying here can
+                    // safely remove a pending-page loading indicator.
+                    cx.notify();
                 })
                 .ok();
         });
 
         self.pending_renders
             .push(PendingRender { key, _task: task });
+        cx.notify();
     }
 
     pub(super) fn get_or_create_display_list(
@@ -497,28 +610,18 @@ impl DocumentView {
             physical_height = key.physical_height
         )
     )]
-    fn render_page(
-        display_list: &DisplayList,
+    async fn render_page(
+        display_list: RetainedDisplayList,
         page_bounds: Rect,
         source_page_width: f32,
         source_page_height: f32,
         key: RenderKey,
-    ) -> Result<Arc<RenderImage>> {
+        background_executor: gpui::BackgroundExecutor,
+    ) -> Result<RenderedPage> {
         let (page_width, page_height) =
             Self::rotated_dimensions(source_page_width, source_page_height, key.rotation);
         let zoom_x = key.physical_width as f32 / page_width;
         let zoom_y = key.physical_height as f32 / page_height;
-        let physical_width = key.physical_width as i32;
-        let physical_height = key.physical_height as i32;
-
-        let mut pixmap = Pixmap::new_with_w_h(
-            &Colorspace::device_rgb(),
-            physical_width,
-            physical_height,
-            true,
-        )?;
-        pixmap.samples_mut().fill(255);
-
         let matrix = Self::render_matrix(
             page_bounds,
             key.rotation,
@@ -526,16 +629,130 @@ impl DocumentView {
             zoom_y,
             mupdf::Point { x: 0.0, y: 0.0 },
         );
-        {
-            let device = Device::from_pixmap(&pixmap)?;
-            display_list
-                .run(&device, &matrix, Rect::INF)
-                .context("failed to render PDF page")?;
+
+        // Replaying ordinary display lists in bands adds scheduling and
+        // stitching overhead. Restrict parallelism to large shade-bearing
+        // rasters, where MuPDF's draw device can spend hundreds of
+        // milliseconds evaluating a single shading on one thread.
+        let candidate_band_count = raster_band_count(
+            true,
+            key.pixel_count(),
+            key.physical_height,
+            background_executor.num_cpus(),
+        );
+        let band_count = if candidate_band_count > 1 {
+            match Self::display_list_has_shading(&display_list) {
+                Ok(true) => candidate_band_count,
+                Ok(false) => 1,
+                Err(error) => {
+                    eprintln!("failed to inspect PDF page shading; rendering one band: {error:#}");
+                    1
+                }
+            }
+        } else {
+            1
+        };
+
+        let RasterizedSamples {
+            mut samples,
+            mupdf_draw,
+            raster_bands,
+        } = if band_count > 1 {
+            Self::rasterize_page_bands(
+                display_list.clone(),
+                matrix.clone(),
+                key.physical_width,
+                key.physical_height,
+                band_count,
+                background_executor,
+            )
+            .await?
+        } else {
+            Self::rasterize_page_monolithic(
+                &display_list,
+                matrix.clone(),
+                key.physical_width,
+                key.physical_height,
+            )?
+        };
+
+        if let Some(color_transform) = key.color_transform {
+            let image_exclusions = Self::collect_images(&display_list)?
+                .into_iter()
+                .filter_map(|image| {
+                    pixel_rect_for_transformed_bounds(
+                        image.bounds,
+                        &matrix,
+                        key.physical_width as usize,
+                        key.physical_height as usize,
+                    )
+                })
+                .collect::<Vec<_>>();
+            apply_pdf_duotone(
+                &mut samples,
+                key.physical_width as usize,
+                key.physical_height as usize,
+                color_transform,
+                &image_exclusions,
+            );
         }
 
-        let width = pixmap.width();
-        let height = pixmap.height();
-        let expected_len = width as usize * height as usize * 4;
+        let mut bgra = Vec::with_capacity(samples.len());
+        for pixel in samples.chunks_exact(4) {
+            bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+        }
+
+        let frame = Frame::new(
+            RgbaImage::from_raw(key.physical_width, key.physical_height, bgra)
+                .context("failed to create render image from pixmap")?,
+        );
+
+        Ok(RenderedPage {
+            image: Arc::new(RenderImage::new(smallvec![frame])),
+            mupdf_draw,
+            raster_bands,
+        })
+    }
+
+    pub(super) fn display_list_has_shading(display_list: &DisplayList) -> Result<bool> {
+        let found = StdArc::new(AtomicBool::new(false));
+        let device = Device::from_native(ShadeDetector {
+            found: found.clone(),
+        })?;
+        display_list
+            .run(&device, &Matrix::IDENTITY, Rect::INF)
+            .context("failed to inspect PDF display list")?;
+        Ok(found.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn rgba_sample_len(width: u32, height: u32) -> Result<usize> {
+        (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .context("PDF page raster dimensions overflow")
+    }
+
+    pub(super) fn rasterize_page_monolithic(
+        display_list: &DisplayList,
+        matrix: Matrix,
+        width: u32,
+        height: u32,
+    ) -> Result<RasterizedSamples> {
+        let width_i32 = i32::try_from(width).context("PDF page raster is too wide")?;
+        let height_i32 = i32::try_from(height).context("PDF page raster is too tall")?;
+        let mut pixmap =
+            Pixmap::new_with_w_h(&Colorspace::device_rgb(), width_i32, height_i32, true)?;
+        pixmap.samples_mut().fill(255);
+
+        let device = Device::from_pixmap(&pixmap)?;
+        let draw_started_at = Instant::now();
+        display_list
+            .run(&device, &matrix, Rect::INF)
+            .context("failed to render PDF page")?;
+        let mupdf_draw = draw_started_at.elapsed();
+        drop(device);
+
+        let expected_len = Self::rgba_sample_len(width, height)?;
         if pixmap.samples().len() != expected_len {
             bail!(
                 "unexpected pixmap sample length: got {}, expected {}",
@@ -544,39 +761,125 @@ impl DocumentView {
             );
         }
 
-        if let Some(color_transform) = key.color_transform {
-            let image_exclusions = Self::collect_images(display_list)?
-                .into_iter()
-                .filter_map(|image| {
-                    pixel_rect_for_transformed_bounds(
-                        image.bounds,
-                        &matrix,
-                        width as usize,
-                        height as usize,
-                    )
+        Ok(RasterizedSamples {
+            samples: pixmap.samples().to_vec(),
+            mupdf_draw,
+            raster_bands: 1,
+        })
+    }
+
+    pub(super) async fn rasterize_page_bands(
+        display_list: RetainedDisplayList,
+        matrix: Matrix,
+        width: u32,
+        height: u32,
+        band_count: usize,
+        background_executor: gpui::BackgroundExecutor,
+    ) -> Result<RasterizedSamples> {
+        let tasks = raster_band_ranges(height, band_count)
+            .into_iter()
+            .map(|range| {
+                let display_list = display_list.clone();
+                let matrix = matrix.clone();
+                background_executor.spawn(async move {
+                    Self::rasterize_page_band(display_list, matrix, width, range)
                 })
-                .collect::<Vec<_>>();
-            apply_pdf_duotone(
-                pixmap.samples_mut(),
-                width as usize,
-                height as usize,
-                color_transform,
-                &image_exclusions,
+            })
+            .collect::<Vec<_>>();
+        let mut bands = try_join_all(tasks)
+            .await
+            .context("failed to render PDF page bands")?;
+        bands.sort_unstable_by_key(|band| band.range.y0);
+
+        let draw_started_at = bands
+            .iter()
+            .map(|band| band.draw_started_at)
+            .min()
+            .context("PDF page band renderer produced no bands")?;
+        let draw_finished_at = bands
+            .iter()
+            .map(|band| band.draw_finished_at)
+            .max()
+            .context("PDF page band renderer produced no bands")?;
+        let raster_bands = bands.len();
+        let mut samples = vec![255; Self::rgba_sample_len(width, height)?];
+        let row_len = width as usize * 4;
+        let mut next_y = 0u32;
+
+        for band in bands {
+            if band.range.y0 != next_y {
+                bail!(
+                    "PDF page bands are not contiguous: expected row {next_y}, got {}",
+                    band.range.y0
+                );
+            }
+            let expected_band_len = (band.range.y1 - band.range.y0) as usize * row_len;
+            if band.samples.len() != expected_band_len {
+                bail!(
+                    "unexpected PDF band sample length: got {}, expected {}",
+                    band.samples.len(),
+                    expected_band_len
+                );
+            }
+            let start = band.range.y0 as usize * row_len;
+            let end = band.range.y1 as usize * row_len;
+            samples[start..end].copy_from_slice(&band.samples);
+            next_y = band.range.y1;
+        }
+        if next_y != height {
+            bail!("PDF page bands ended at row {next_y}, expected {height}");
+        }
+
+        Ok(RasterizedSamples {
+            samples,
+            mupdf_draw: draw_finished_at.saturating_duration_since(draw_started_at),
+            raster_bands,
+        })
+    }
+
+    fn rasterize_page_band(
+        display_list: RetainedDisplayList,
+        matrix: Matrix,
+        width: u32,
+        range: RasterBandRange,
+    ) -> Result<RasterBand> {
+        let width_i32 = i32::try_from(width).context("PDF page raster is too wide")?;
+        let y0 = i32::try_from(range.y0).context("PDF page band origin is too large")?;
+        let band_height =
+            i32::try_from(range.y1 - range.y0).context("PDF page band height is too large")?;
+        let mut pixmap = Pixmap::new(
+            &Colorspace::device_rgb(),
+            0,
+            y0,
+            width_i32,
+            band_height,
+            true,
+        )?;
+        pixmap.samples_mut().fill(255);
+
+        let device = Device::from_pixmap(&pixmap)?;
+        let draw_started_at = Instant::now();
+        display_list
+            .run(&device, &matrix, Rect::INF)
+            .context("failed to render PDF page band")?;
+        let draw_finished_at = Instant::now();
+        drop(device);
+
+        let expected_len = Self::rgba_sample_len(width, range.y1 - range.y0)?;
+        if pixmap.samples().len() != expected_len {
+            bail!(
+                "unexpected PDF band sample length: got {}, expected {}",
+                pixmap.samples().len(),
+                expected_len
             );
         }
 
-        let samples = pixmap.samples();
-        let mut bgra = Vec::with_capacity(samples.len());
-        for pixel in samples.chunks_exact(4) {
-            bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
-        }
-
-        let frame = Frame::new(
-            RgbaImage::from_raw(width, height, bgra)
-                .context("failed to create render image from pixmap")?,
-        );
-
-        Ok(Arc::new(RenderImage::new(smallvec![frame])))
+        Ok(RasterBand {
+            range,
+            samples: pixmap.samples().to_vec(),
+            draw_started_at,
+            draw_finished_at,
+        })
     }
 
     fn arm_diff_flash_clear(&mut self, cx: &mut Context<Self>) {

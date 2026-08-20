@@ -1,4 +1,66 @@
+use super::page_render::should_show_page_loading;
 use super::*;
+
+impl DocumentView {
+    fn page_loading_indicators(&self, color: Hsla, reduce_motion: bool) -> Vec<AnyElement> {
+        let indicator_size = px(PAGE_LOADING_INDICATOR_SIZE);
+        let viewport_bounds = Bounds::new(
+            self.viewport_origin,
+            size(px(self.viewport_width), px(self.viewport_height)),
+        );
+        self.viewport_render_debug
+            .iter()
+            .filter_map(|(page_idx, viewport)| {
+                let has_pending_render = self.pending_renders.iter().any(|pending| {
+                    pending.key.page_idx == viewport.requested.page_idx
+                        && pending.key.source_revision == viewport.requested.source_revision
+                        && pending.key.rotation == viewport.requested.rotation
+                        && pending.key.color_transform == viewport.requested.color_transform
+                });
+                if !should_show_page_loading(has_pending_render, viewport.displayed.is_some()) {
+                    return None;
+                }
+
+                let bounds = self.page_image_bounds.get(*page_idx)?.as_ref()?;
+                let center = bounds.intersect(&viewport_bounds).center();
+                let indicator = if reduce_motion {
+                    Icon::new(ComponentIconName::Loader)
+                        .with_size(indicator_size)
+                        .text_color(color)
+                        .into_any_element()
+                } else {
+                    Spinner::new()
+                        .with_size(indicator_size)
+                        .color(color)
+                        .into_any_element()
+                };
+
+                Some(
+                    deferred(
+                        anchored()
+                            .position(point(center.x, center.y - indicator_size / 2.0))
+                            .anchor(Anchor::TopCenter)
+                            .child(
+                                div()
+                                    .id(("document-page-loading", *page_idx))
+                                    .debug_selector({
+                                        let page_number = *page_idx + 1;
+                                        move || format!("document-page-loading-{page_number}")
+                                    })
+                                    .size(indicator_size)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(indicator),
+                            ),
+                    )
+                    .with_priority(0)
+                    .into_any_element(),
+                )
+            })
+            .collect()
+    }
+}
 
 impl Render for DocumentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -12,6 +74,9 @@ impl Render for DocumentView {
         let prepaint_view = view.clone();
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let ui_theme = cx.theme().colors;
+        let reduce_motion = cx.global::<SettingsStore>().settings.behavior.reduce_motion;
+        let page_loading_indicators =
+            self.page_loading_indicators(ui_theme.muted_foreground, reduce_motion);
         if !self.diff_flashes.is_empty() {
             window.request_animation_frame();
         }
@@ -835,6 +900,7 @@ impl Render for DocumentView {
                         this.child(self.render_grid_overview(ui_theme, window, cx))
                     }),
             )
+            .children(page_loading_indicators)
             .when(!self.is_presentation_mode(), |this| {
                 this.child(self.render_document_footer(ui_theme, cx))
             })

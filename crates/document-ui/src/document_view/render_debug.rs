@@ -85,6 +85,8 @@ impl DocumentView {
                 display_list: attempt.display_list,
                 display_list_cached: attempt.display_list_cached,
                 raster: attempt.raster,
+                mupdf_draw: attempt.mupdf_draw,
+                raster_bands: attempt.raster_bands,
                 succeeded: attempt.succeeded,
             });
         let (cached_raster_bytes, cached_raster_variants) = cache.map_or((0, 0), |cache| {

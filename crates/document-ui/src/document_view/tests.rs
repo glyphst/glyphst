@@ -20,12 +20,16 @@ use super::{
     TranslationCardState, TranslationHoverAnimation, TranslationPanelSide, TranslationStatus,
     TranslationViewRole, clamp_translation_panel_edge_y, clamp_translation_panel_position,
     clear_copied_region_selection, context_highlight_target, default_translation_panel_position,
-    extend_text_selection, page_render::should_start_viewport_render, primary_selection_press,
-    reset_translation_cards_for_document_replacement, retain_valid_annotation_id,
-    translation_hover_interaction_bounds, translation_pair_highlights_enabled,
-    translation_panel_docked_x, translation_panel_initial_dock_should_run,
-    translation_panel_should_retain_expanded, translation_panel_snap_side, translation_panel_width,
-    translation_toolbar_enabled,
+    extend_text_selection,
+    page_render::{
+        raster_band_count, raster_band_ranges, should_show_page_loading,
+        should_start_viewport_render,
+    },
+    primary_selection_press, reset_translation_cards_for_document_replacement,
+    retain_valid_annotation_id, translation_hover_interaction_bounds,
+    translation_pair_highlights_enabled, translation_panel_docked_x,
+    translation_panel_initial_dock_should_run, translation_panel_should_retain_expanded,
+    translation_panel_snap_side, translation_panel_width, translation_toolbar_enabled,
 };
 use glyphst_ai::ai_chat::{MentionKind, MentionReference};
 use glyphst_core::{
@@ -33,11 +37,99 @@ use glyphst_core::{
     PageRegion, RegionImageReference,
 };
 use glyphst_library::{Highlight, HighlightRect, Note};
+use glyphst_pdf::{DocumentRenderSession, DocumentSnapshot};
 use glyphst_translation::LanguageCode;
 use gpui::{Bounds, Modifiers, ScrollWheelEvent, point, px, size};
 use image::{Frame, GenericImageView, RgbaImage};
 use mupdf::{Point, Quad, Rect};
 use smallvec::smallvec;
+
+fn append_pdf_object(pdf: &mut Vec<u8>, offsets: &mut Vec<usize>, id: usize, body: &[u8]) {
+    offsets.push(pdf.len());
+    pdf.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+    pdf.extend_from_slice(body);
+    pdf.extend_from_slice(b"\nendobj\n");
+}
+
+fn device_n_shading_pdf() -> Vec<u8> {
+    let page_content = b"/Sh1 sh\n";
+    let tint_program = b"{ 0 3 1 roll 0 }\n";
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+
+    append_pdf_object(
+        &mut pdf,
+        &mut offsets,
+        1,
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+    );
+    append_pdf_object(
+        &mut pdf,
+        &mut offsets,
+        2,
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    );
+    append_pdf_object(
+        &mut pdf,
+        &mut offsets,
+        3,
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400] \
+          /Resources << /Shading << /Sh1 5 0 R >> >> /Contents 4 0 R >>",
+    );
+    append_pdf_object(
+        &mut pdf,
+        &mut offsets,
+        4,
+        format!(
+            "<< /Length {} >>\nstream\n{}endstream",
+            page_content.len(),
+            String::from_utf8_lossy(page_content)
+        )
+        .as_bytes(),
+    );
+    append_pdf_object(
+        &mut pdf,
+        &mut offsets,
+        5,
+        b"<< /ShadingType 2 /ColorSpace 6 0 R /Coords [0 0 400 0] \
+          /Function 7 0 R /Extend [true true] >>",
+    );
+    append_pdf_object(
+        &mut pdf,
+        &mut offsets,
+        6,
+        b"[/DeviceN [/Magenta /Yellow] /DeviceCMYK 8 0 R]",
+    );
+    append_pdf_object(
+        &mut pdf,
+        &mut offsets,
+        7,
+        b"<< /FunctionType 2 /Domain [0 1] /C0 [0 0] /C1 [1 1] /N 1 >>",
+    );
+    append_pdf_object(
+        &mut pdf,
+        &mut offsets,
+        8,
+        format!(
+            "<< /FunctionType 4 /Domain [0 1 0 1] \
+             /Range [0 1 0 1 0 1 0 1] /Length {} >>\nstream\n{}endstream",
+            tint_program.len(),
+            String::from_utf8_lossy(tint_program)
+        )
+        .as_bytes(),
+    );
+
+    let xref_offset = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", offsets.len() + 1).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!("trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n").as_bytes(),
+    );
+    pdf
+}
 
 #[test]
 fn highlighted_text_press_preserves_annotation_clicks_and_text_gestures() {
@@ -1255,10 +1347,107 @@ fn render_cache_resize_churn_keeps_current_viewport_and_thumbnail_sizes() {
 
 #[test]
 fn dock_motion_reuses_a_fallback_then_requests_the_settled_size() {
-    assert!(!should_start_viewport_render(false, false, true));
-    assert!(should_start_viewport_render(false, true, true));
-    assert!(should_start_viewport_render(false, false, false));
-    assert!(!should_start_viewport_render(true, true, true));
+    assert!(!should_start_viewport_render(false, false, false, true));
+    assert!(should_start_viewport_render(false, false, true, true));
+    assert!(should_start_viewport_render(false, false, false, false));
+    assert!(!should_start_viewport_render(true, false, true, true));
+    assert!(!should_start_viewport_render(false, true, true, false));
+}
+
+#[test]
+fn page_loader_requires_pending_work_without_a_displayed_fallback() {
+    assert!(should_show_page_loading(true, false));
+    assert!(!should_show_page_loading(false, false));
+    assert!(!should_show_page_loading(true, true));
+}
+
+#[test]
+fn shade_band_parallelism_is_bounded_and_only_used_for_large_rasters() {
+    assert_eq!(raster_band_count(false, 4_000_000, 2_000, 8), 1);
+    assert_eq!(raster_band_count(true, 999_999, 2_000, 8), 1);
+    assert_eq!(raster_band_count(true, 4_000_000, 2_000, 1), 1);
+    assert_eq!(raster_band_count(true, 4_000_000, 2_000, 4), 4);
+    assert_eq!(raster_band_count(true, 4_000_000, 2_000, 32), 8);
+    assert_eq!(raster_band_count(true, 4_000_000, 300, 8), 2);
+}
+
+#[test]
+fn raster_bands_cover_every_row_once() {
+    let ranges = raster_band_ranges(2_006, 8);
+    assert_eq!(ranges.len(), 8);
+    assert_eq!(ranges.first().map(|range| range.y0), Some(0));
+    assert_eq!(ranges.last().map(|range| range.y1), Some(2_006));
+    for adjacent in ranges.windows(2) {
+        assert_eq!(adjacent[0].y1, adjacent[1].y0);
+    }
+    assert!(ranges.iter().all(|range| range.y0 < range.y1));
+}
+
+#[gpui::test]
+async fn banded_device_n_shading_matches_monolithic_render(cx: &mut gpui::TestAppContext) {
+    let snapshot = Arc::new(DocumentSnapshot::from_pdf_bytes(
+        "device-n-shading.pdf",
+        device_n_shading_pdf(),
+    ));
+    let session = DocumentRenderSession::open(snapshot, DocumentLayout::Fixed).unwrap();
+    let page_bounds = Rect::new(0.0, 0.0, 400.0, 400.0);
+    let display_list = session.create_display_list(0, page_bounds).unwrap();
+    assert!(DocumentView::display_list_has_shading(&display_list).unwrap());
+
+    let width = 512;
+    let height = 512;
+    for rotation in [
+        DocumentRotation::Degrees0,
+        DocumentRotation::Degrees90,
+        DocumentRotation::Degrees180,
+        DocumentRotation::Degrees270,
+    ] {
+        let matrix = DocumentView::render_matrix(
+            page_bounds,
+            rotation,
+            width as f32 / 400.0,
+            height as f32 / 400.0,
+            Point { x: 0.0, y: 0.0 },
+        );
+        let monolithic =
+            DocumentView::rasterize_page_monolithic(&display_list, matrix.clone(), width, height)
+                .unwrap();
+        let banded = DocumentView::rasterize_page_bands(
+            display_list.clone(),
+            matrix,
+            width,
+            height,
+            4,
+            cx.background_executor.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(monolithic.raster_bands, 1);
+        assert_eq!(banded.raster_bands, 4);
+        assert_eq!(banded.samples.len(), monolithic.samples.len());
+        assert!(monolithic.mupdf_draw > Duration::ZERO);
+        assert!(banded.mupdf_draw > Duration::ZERO);
+
+        let mut changed_channels = 0usize;
+        let mut max_delta = 0u8;
+        let mut total_delta = 0u64;
+        for (expected, actual) in monolithic.samples.iter().zip(&banded.samples) {
+            let delta = expected.abs_diff(*actual);
+            changed_channels += usize::from(delta != 0);
+            max_delta = max_delta.max(delta);
+            total_delta += u64::from(delta);
+        }
+        assert!(
+            max_delta <= 2,
+            "{rotation:?} band seams changed a channel by {max_delta}"
+        );
+        assert!(
+            total_delta * 10 <= monolithic.samples.len() as u64,
+            "{rotation:?} changed {changed_channels} of {} channels with total delta {total_delta}",
+            monolithic.samples.len(),
+        );
+    }
 }
 
 #[test]

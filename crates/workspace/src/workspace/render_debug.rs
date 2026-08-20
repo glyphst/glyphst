@@ -173,7 +173,7 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
     if let Some(timing) = page.latest_timing {
         section = section
             .child(reading(
-                "LOAD",
+                "TOTAL",
                 format_duration(timing.total),
                 if timing.succeeded { FOREGROUND } else { BAD },
             ))
@@ -195,6 +195,10 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             ));
         if let Some(raster) = timing.raster {
             section = section.child(reading("RASTER", format_duration(raster), FOREGROUND));
+        }
+        if let Some(mupdf_draw) = timing.mupdf_draw {
+            let value = format_draw_duration(mupdf_draw, timing.raster_bands);
+            section = section.child(reading("DRAW", value, FOREGROUND));
         }
     }
 
@@ -256,6 +260,13 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
+fn format_draw_duration(duration: Duration, bands: Option<usize>) -> String {
+    match bands {
+        Some(bands) if bands > 1 => format!("{} ×{bands}", format_duration(duration)),
+        _ => format_duration(duration),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +277,13 @@ mod tests {
         assert_eq!(format_bytes(1536), "1.5 KiB");
         assert_eq!(format_duration(Duration::from_micros(850)), "850 µs");
         assert_eq!(format_duration(Duration::from_micros(12_250)), "12.2 ms");
+        assert_eq!(
+            format_draw_duration(Duration::from_micros(12_250), Some(8)),
+            "12.2 ms ×8"
+        );
+        assert_eq!(
+            format_draw_duration(Duration::from_micros(12_250), Some(1)),
+            "12.2 ms"
+        );
     }
 }
