@@ -108,7 +108,7 @@ impl DocumentView {
         self.toc_sidebar_entries_dirty = false;
     }
 
-    fn render_document_toolbar_icon_button(
+    fn render_document_footer_icon_button(
         id: &'static str,
         icon: IconName,
         open: bool,
@@ -126,13 +126,12 @@ impl DocumentView {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.close_epub_style_panel(cx);
                 handler(this, window, cx);
-                this.show_document_toolbar(cx);
                 cx.stop_propagation();
             }))
     }
 
     pub(super) fn render_grid_overview_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::render_document_toolbar_icon_button(
+        Self::render_document_footer_icon_button(
             "document-toolbar-grid-overview",
             IconName::LayoutGrid,
             self.grid_overview_open,
@@ -142,7 +141,7 @@ impl DocumentView {
     }
 
     pub(super) fn render_two_column_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::render_document_toolbar_icon_button(
+        Self::render_document_footer_icon_button(
             "document-toolbar-two-column",
             IconName::BookOpen,
             self.is_two_column_layout(),
@@ -184,7 +183,7 @@ impl DocumentView {
     }
 
     pub(super) fn render_region_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::render_document_toolbar_icon_button(
+        Self::render_document_footer_icon_button(
             "document-toolbar-region-selection",
             IconName::Scan,
             self.region_tool_active,

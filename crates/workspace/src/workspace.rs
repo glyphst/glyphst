@@ -4744,16 +4744,23 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pulled_bookmark_ribbon_is_top_anchored_and_opens_the_title_editor(cx: &mut TestAppContext) {
-        let document_path = temporary_pdf_path("bookmark-ribbon");
-        write_minimal_pdf(&document_path);
+    fn document_footer_reserves_layout_and_exposes_progress_and_bookmark_actions(
+        cx: &mut TestAppContext,
+    ) {
+        let document_path = temporary_pdf_path("document-footer");
+        let settings_path = document_path.with_extension("settings.kdl");
+        let library_path = document_path.with_extension("library.redb");
+        let managed_library_path = library_path.with_extension("managed-library");
+        write_minimal_pdf_with_height(&document_path, 5_000);
         cx.update(|cx| {
             gpui_component::init(cx);
             crate::keybindings::capture_framework_bindings(cx);
             crate::keybindings::apply(cx, glyphst_settings::KeymapPreset::Modern, &[]);
             cx.set_reduce_motion(true);
-            cx.set_global(SettingsStore::memory());
-            cx.set_global(LibraryStore::memory());
+            let mut settings = SettingsStore::memory();
+            settings.config_path = settings_path.clone();
+            cx.set_global(settings);
+            cx.set_global(LibraryStore::open_for_test(library_path.clone()).unwrap());
             cx.set_global(RenderCache::new());
         });
         let callbacks = WorkspaceCallbacks {
@@ -4771,77 +4778,105 @@ mod tests {
             _ = window.draw(cx);
         });
 
-        let hover_zone = cx.debug_bounds("document-toolbar-hover-zone").unwrap();
-        assert_eq!(hover_zone.size.height, px(44.0));
+        let root = cx.debug_bounds("document-view-root").unwrap();
+        let viewport = cx.debug_bounds("document-viewport").unwrap();
+        let footer = cx.debug_bounds("document-footer").unwrap();
+        assert_eq!(footer.size.height, px(32.0));
+        assert_eq!(viewport.top(), root.top());
+        assert_eq!(viewport.bottom(), footer.top());
+        assert_eq!(footer.bottom(), root.bottom());
+        assert!(cx.debug_bounds("document-toolbar-hover-zone").is_none());
 
-        cx.simulate_mouse_move(
-            point(hover_zone.center().x, hover_zone.top() + px(2.0)),
-            None,
-            Modifiers::default(),
-        );
+        cx.update(|window, cx| {
+            window.dispatch_action(
+                Box::new(glyphst_actions::document_viewer::TogglePresentationMode),
+                cx,
+            );
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("document-footer").is_none());
+        cx.update(|window, cx| {
+            window.dispatch_action(
+                Box::new(glyphst_actions::document_viewer::TogglePresentationMode),
+                cx,
+            );
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("document-footer").is_some());
+
+        let progress = cx.debug_bounds("document-footer-progress").unwrap();
+        cx.simulate_mouse_down(progress.center(), MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
-        let toolbar = cx.debug_bounds("document-hover-toolbar").unwrap();
-        assert_eq!(toolbar, hover_zone);
+        cx.simulate_mouse_up(progress.center(), MouseButton::Right, Modifiers::default());
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            assert_eq!(
+                cx.global::<SettingsStore>()
+                    .settings
+                    .document_view
+                    .progress_display,
+                glyphst_settings::DocumentProgressDisplay::Percentage
+            );
+        });
 
-        let bookmark_control = cx
-            .debug_bounds("document-toolbar-bookmark-control")
-            .unwrap();
-        assert_eq!(bookmark_control.size, size(px(28.0), px(44.0)));
-        let resting_ribbon = cx.debug_bounds("document-toolbar-bookmark-ribbon").unwrap();
-        assert_eq!(resting_ribbon.top(), toolbar.top());
-        assert_eq!(resting_ribbon.size, size(px(20.0), px(36.0)));
-        assert!(
-            cx.debug_bounds("document-toolbar-bookmark-ribbon-outline")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("document-toolbar-bookmark-button")
-                .is_some()
-        );
-
-        cx.simulate_mouse_down(toolbar.center(), MouseButton::Right, Modifiers::default());
+        let progress = cx.debug_bounds("document-footer-progress").unwrap();
+        cx.simulate_click(progress.center(), Modifiers::default());
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
-        assert!(cx.debug_bounds("popup-menu").is_none());
-        cx.simulate_mouse_up(toolbar.center(), MouseButton::Right, Modifiers::default());
-
-        let pull_end = point(
-            bookmark_control.center().x,
-            bookmark_control.center().y + px(70.0),
-        );
-        cx.simulate_mouse_down(
-            bookmark_control.center(),
-            MouseButton::Left,
-            Modifiers::default(),
-        );
-        cx.simulate_mouse_move(pull_end, MouseButton::Left, Modifiers::default());
+        assert!(cx.debug_bounds("picker-input-row").is_some());
+        cx.simulate_keystrokes("escape");
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
-        let ribbon = cx.debug_bounds("document-toolbar-bookmark-ribbon").unwrap();
-        assert_eq!(ribbon.top(), toolbar.top());
-        assert!(ribbon.bottom() > toolbar.bottom());
-        assert!(
-            cx.debug_bounds("document-toolbar-bookmark-ribbon-filled")
-                .is_some()
-        );
 
-        cx.simulate_mouse_up(pull_end, MouseButton::Left, Modifiers::default());
+        let bookmark = cx.debug_bounds("document-footer-bookmark").unwrap();
+        cx.simulate_mouse_down(bookmark.center(), MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
-        let resting_ribbon = cx.debug_bounds("document-toolbar-bookmark-ribbon").unwrap();
-        assert_eq!(resting_ribbon.size, size(px(20.0), px(36.0)));
-        assert!(
-            cx.debug_bounds("document-toolbar-bookmark-ribbon-outline")
-                .is_some()
-        );
+        assert!(cx.debug_bounds("bookmark-title-editor").is_some());
+        cx.update(|_, cx| {
+            assert!(
+                cx.global::<LibraryStore>()
+                    .bookmarks_for(&document_path)
+                    .is_empty()
+            );
+        });
+        cx.simulate_mouse_up(bookmark.center(), MouseButton::Right, Modifiers::default());
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        cx.simulate_click(bookmark.center(), Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            assert_eq!(
+                cx.global::<LibraryStore>()
+                    .bookmarks_for(&document_path)
+                    .len(),
+                1
+            );
+        });
+        cx.simulate_mouse_down(bookmark.center(), MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
         assert!(cx.debug_bounds("bookmark-title-editor").is_some());
 
         fs::remove_file(document_path).unwrap();
+        fs::remove_file(settings_path).unwrap();
+        cx.update(|_, cx| cx.set_global(LibraryStore::memory()));
+        fs::remove_file(library_path).unwrap();
+        fs::remove_dir_all(managed_library_path).unwrap();
     }
 
     fn write_minimal_pdf_with_height(path: &Path, height: u32) {
@@ -5630,7 +5665,7 @@ mod tests {
         assert!(cx.debug_bounds("workspace-left-dock").is_none());
         assert!(cx.debug_bounds("workspace-ai-dock").is_none());
         assert!(cx.debug_bounds("workspace-pane-footbar").is_none());
-        assert!(cx.debug_bounds("document-toolbar-hover-zone").is_some());
+        assert!(cx.debug_bounds("document-footer").is_some());
         cx.update(|window, _| assert_eq!(window.is_fullscreen(), fullscreen_before));
 
         cx.simulate_keystrokes("tab");
@@ -5703,7 +5738,7 @@ mod tests {
         assert!(cx.debug_bounds("workspace-left-dock").is_some());
         assert!(cx.debug_bounds("workspace-ai-dock").is_some());
         assert!(cx.debug_bounds("workspace-pane-footbar").is_none());
-        assert!(cx.debug_bounds("document-toolbar-hover-zone").is_some());
+        assert!(cx.debug_bounds("document-footer").is_some());
 
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.enter_home(window, cx);

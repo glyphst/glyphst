@@ -1,158 +1,208 @@
-use super::bookmarks::{
-    bookmark_ribbon_height, bookmark_ribbon_is_filled, bookmark_ribbon_notch_y,
-};
 use super::*;
 
+pub(super) fn document_scroll_percentage(scroll_y: f32, max_scroll_y: f32) -> u8 {
+    if !max_scroll_y.is_finite() || max_scroll_y <= f32::EPSILON {
+        return 100;
+    }
+    let scroll_y = if scroll_y.is_finite() { scroll_y } else { 0.0 };
+    ((scroll_y / max_scroll_y).clamp(0.0, 1.0) * 100.0).floor() as u8
+}
+
 impl DocumentView {
-    pub(super) fn render_document_bookmark_ribbon(
-        &self,
-        theme: ThemeColor,
-        window: &mut Window,
+    fn document_progress_label(&self, display: DocumentProgressDisplay) -> String {
+        match display {
+            DocumentProgressDisplay::Pages => {
+                Self::page_counter_label(self.current_page_range(), self.pages.len())
+            }
+            DocumentProgressDisplay::Percentage => format!(
+                "{}%",
+                document_scroll_percentage(self.scroll_y_doc, self.max_scroll_y_doc())
+            ),
+        }
+    }
+
+    fn set_document_progress_display(
+        &mut self,
+        display: DocumentProgressDisplay,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let current_bookmarked = self.current_bookmark().is_some();
-        let now = Instant::now();
-        let drag_offset = self.bookmark_drag_offset(now);
-        let drag_armed = self.bookmark_drag_armed();
-        if self.bookmark_ribbon_animating(now) {
-            window.request_animation_frame();
+    ) {
+        if cx
+            .global::<SettingsStore>()
+            .settings
+            .document_view
+            .progress_display
+            == display
+        {
+            return;
         }
 
-        let ribbon_height = bookmark_ribbon_height(drag_offset);
-        let ribbon_filled = bookmark_ribbon_is_filled(current_bookmarked, drag_armed);
-        let ribbon_color = if ribbon_filled {
-            theme.primary
+        let mut settings = cx.global::<SettingsStore>().settings.clone();
+        settings.document_view.progress_display = display;
+        if let Err(error) = cx.global_mut::<SettingsStore>().set_settings(settings) {
+            eprintln!("failed to save document progress display: {error:#}");
+            return;
+        }
+        cx.refresh_windows();
+    }
+
+    fn open_document_progress_menu(
+        &mut self,
+        position: GpuiPoint<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_context_menu(cx);
+        self.focus_handle.focus(window, cx);
+        self.context_menu_position = Some(position);
+
+        let selected = cx
+            .global::<SettingsStore>()
+            .settings
+            .document_view
+            .progress_display;
+        let view = cx.entity();
+        let pages_view = view.clone();
+        let percentage_view = view;
+        let popup = PopupMenu::build(window, cx, move |menu, _, _| {
+            menu.item(
+                PopupMenuItem::new(crate::fl!("settings-document-progress-pages"))
+                    .checked(selected == DocumentProgressDisplay::Pages)
+                    .on_click(move |_, _, cx| {
+                        pages_view.update(cx, |this, cx| {
+                            this.set_document_progress_display(DocumentProgressDisplay::Pages, cx);
+                            this.close_context_menu(cx);
+                        });
+                    }),
+            )
+            .item(
+                PopupMenuItem::new(crate::fl!("settings-document-progress-percentage"))
+                    .checked(selected == DocumentProgressDisplay::Percentage)
+                    .on_click(move |_, _, cx| {
+                        percentage_view.update(cx, |this, cx| {
+                            this.set_document_progress_display(
+                                DocumentProgressDisplay::Percentage,
+                                cx,
+                            );
+                            this.close_context_menu(cx);
+                        });
+                    }),
+            )
+        });
+        cx.subscribe_in(&popup, window, |this, popup, _: &DismissEvent, _, cx| {
+            if this.context_menu_popup.as_ref() == Some(popup) {
+                this.close_context_menu(cx);
+            }
+        })
+        .detach();
+        self.context_menu_popup = Some(popup.clone());
+        popup.focus_handle(cx).focus(window, cx);
+        window.prevent_default();
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn render_document_progress(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let display = cx
+            .global::<SettingsStore>()
+            .settings
+            .document_view
+            .progress_display;
+        let tooltip = if self.capabilities.reflow {
+            crate::fl!("document-progress-read-only-tooltip")
         } else {
-            theme.foreground.opacity(0.72)
-        };
-        let ribbon_state_selector = if ribbon_filled {
-            "document-toolbar-bookmark-ribbon-filled"
-        } else {
-            "document-toolbar-bookmark-ribbon-outline"
+            crate::fl!("document-progress-tooltip")
         };
 
-        let ribbon = div()
-            .id("document-toolbar-bookmark-ribbon")
-            .debug_selector(|| "document-toolbar-bookmark-ribbon".to_string())
-            .absolute()
-            .top_0()
-            .left(px((CONTROL_SIZE - BOOKMARK_RIBBON_WIDTH) / 2.0))
-            .w(px(BOOKMARK_RIBBON_WIDTH))
-            .h(px(ribbon_height))
-            .child(
-                div()
-                    .id(ribbon_state_selector)
-                    .debug_selector(move || ribbon_state_selector.to_string())
-                    .size_full()
-                    .child(
-                        canvas(
-                            |_, _, _| {},
-                            move |bounds, _, window, _| {
-                                let inset = if ribbon_filled {
-                                    0.0
-                                } else {
-                                    BOOKMARK_RIBBON_STROKE_PX / 2.0
-                                };
-                                let left = bounds.left() + px(inset);
-                                let right = bounds.right() - px(inset);
-                                let top = bounds.top() + px(inset);
-                                let bottom = bounds.bottom() - px(inset);
-                                let center_x = left + (right - left) / 2.0;
-                                let notch_y =
-                                    top + px(bookmark_ribbon_notch_y((bottom - top).as_f32()));
-                                let mut path = if ribbon_filled {
-                                    PathBuilder::fill()
-                                } else {
-                                    PathBuilder::stroke(px(BOOKMARK_RIBBON_STROKE_PX))
-                                };
-                                path.move_to(point(left, top));
-                                path.line_to(point(right, top));
-                                path.line_to(point(right, bottom));
-                                path.line_to(point(center_x, notch_y));
-                                path.line_to(point(left, bottom));
-                                path.close();
-                                if let Ok(path) = path.build() {
-                                    window.paint_path(path, ribbon_color);
-                                }
-                            },
-                        )
-                        .size_full(),
-                    ),
-            );
+        Button::new("document-footer-progress")
+            .debug_selector(|| "document-footer-progress".to_string())
+            .small()
+            .compact()
+            .ghost()
+            .label(self.document_progress_label(display))
+            .h(ui_rems(CONTROL_SIZE))
+            .px_2()
+            .tooltip(tooltip)
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.open_document_progress_menu(event.position, window, cx);
+                }),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                if !this.capabilities.reflow {
+                    this.toggle_go_to_page_prompt(window, cx);
+                }
+                cx.stop_propagation();
+            }))
+    }
 
-        let bookmark_button = Button::new("document-toolbar-bookmark")
-            .debug_selector(|| "document-toolbar-bookmark-button".to_string())
-            .custom(ButtonCustomVariant::new(cx))
-            .absolute()
-            .top_0()
-            .left_0()
-            .w(px(CONTROL_SIZE))
-            .h(px(DOCUMENT_TOOLBAR_HEIGHT))
-            .p_0()
-            .cursor_pointer()
-            .toggled(current_bookmarked)
+    fn render_document_bookmark_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current_bookmarked = self.current_bookmark().is_some();
+        Button::new("document-footer-bookmark")
+            .debug_selector(|| "document-footer-bookmark".to_string())
+            .small()
+            .compact()
+            .ghost()
+            .selected(current_bookmarked)
+            .icon(IconName::Bookmark)
+            .w(ui_rems(CONTROL_SIZE))
+            .h(ui_rems(CONTROL_SIZE))
             .tooltip(if current_bookmarked {
                 crate::fl!("bookmark-remove-current")
             } else {
                 crate::fl!("bookmark-add-current")
             })
             .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    this.begin_bookmark_drag(event.position, cx);
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| {
+                    this.close_context_menu(cx);
+                    this.open_current_bookmark_title_editor(window, cx);
+                    window.prevent_default();
                     cx.stop_propagation();
                 }),
             )
             .on_click(cx.listener(|this, _, _, cx| {
-                if this.activate_bookmark_button(cx) {
-                    cx.stop_propagation();
-                }
-            }));
-
-        div()
-            .id("document-toolbar-bookmark-control")
-            .debug_selector(|| "document-toolbar-bookmark-control".to_string())
-            .absolute()
-            .top_0()
-            .right(px(BOOKMARK_RIBBON_RIGHT_INSET))
-            .w(px(CONTROL_SIZE))
-            .h(px(DOCUMENT_TOOLBAR_HEIGHT))
-            .child(ribbon)
-            .when(self.document_toolbar_visible, |this| {
-                this.child(bookmark_button)
-            })
-            .into_any_element()
+                this.toggle_current_bookmark(cx);
+                cx.stop_propagation();
+            }))
     }
 
-    pub(super) fn render_document_toolbar(
+    pub(super) fn render_document_footer(
         &self,
         theme: ThemeColor,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let document_background = rgb(cx.global::<SettingsStore>().resolved_theme.background);
-
-        let toolbar = div()
-            .id("document-hover-toolbar")
-            .debug_selector(|| "document-hover-toolbar".to_string())
+        div()
+            .id("document-footer")
+            .debug_selector(|| "document-footer".to_string())
+            .flex_none()
+            .w_full()
+            .h(px(DOCUMENT_FOOTER_HEIGHT))
             .flex()
             .items_center()
             .justify_between()
-            .w_full()
-            .h(px(DOCUMENT_TOOLBAR_HEIGHT))
-            .px_2()
-            .bg(document_background)
+            .border_t(px(1.0))
+            .border_color(theme.status_bar_border)
+            .bg(theme.status_bar)
             .text_size(ui_rems(12.0))
             .text_color(theme.muted_foreground)
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
+            .cursor_default()
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
+                    .h_full()
+                    .pl_2()
+                    .overflow_hidden()
                     .flex()
                     .items_center()
                     .gap_1()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right, |_, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
                     .when(self.capabilities.two_column_layout, |this| {
                         this.child(self.render_two_column_button(cx))
                     })
@@ -170,27 +220,50 @@ impl DocumentView {
             .child(
                 div()
                     .flex_none()
-                    .px_3()
-                    .text_color(theme.muted_foreground)
-                    .child(Self::page_counter_label(
-                        self.current_page_range(),
-                        self.pages.len(),
-                    )),
+                    .h_full()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right, |_, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .child(self.render_document_progress(cx)),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
                     .h_full()
-                    .items_start()
-                    .justify_end(),
-            );
+                    .pr_2()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right, |_, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .child(self.render_document_bookmark_button(cx)),
+            )
+            .into_any_element()
+    }
+}
 
-        if cx.reduce_motion() {
-            toolbar.into_any_element()
-        } else {
-            glyphst_ui::motion::fade_in("document-hover-toolbar-reveal", toolbar).into_any_element()
-        }
+#[cfg(test)]
+mod tests {
+    use super::document_scroll_percentage;
+
+    #[test]
+    fn scroll_percentage_covers_top_middle_end_and_non_scrollable_documents() {
+        assert_eq!(document_scroll_percentage(0.0, 100.0), 0);
+        assert_eq!(document_scroll_percentage(49.9, 100.0), 49);
+        assert_eq!(document_scroll_percentage(100.0, 100.0), 100);
+        assert_eq!(document_scroll_percentage(120.0, 100.0), 100);
+        assert_eq!(document_scroll_percentage(-20.0, 100.0), 0);
+        assert_eq!(document_scroll_percentage(0.0, 0.0), 100);
     }
 }

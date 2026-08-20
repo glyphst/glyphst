@@ -97,6 +97,47 @@ document_theme {
 }
 
 #[test]
+fn document_progress_display_defaults_to_pages_and_round_trips() {
+    assert_eq!(
+        Settings::default().document_view.progress_display,
+        DocumentProgressDisplay::Pages
+    );
+
+    let percentage = parse_settings(
+        r#"
+document_view {
+    progress_display "percentage"
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        percentage.document_view.progress_display,
+        DocumentProgressDisplay::Percentage
+    );
+    assert_eq!(
+        parse_settings(&percentage.to_kdl_string())
+            .unwrap()
+            .document_view
+            .progress_display,
+        DocumentProgressDisplay::Percentage
+    );
+
+    let invalid = parse_settings(
+        r#"
+document_view {
+    progress_display "unknown"
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        invalid.document_view.progress_display,
+        DocumentProgressDisplay::Pages
+    );
+}
+
+#[test]
 fn parses_and_exports_reduced_motion() {
     let settings = parse_settings(
         r#"

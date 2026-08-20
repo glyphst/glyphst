@@ -30,8 +30,8 @@ use crate::picker::{Picker, PickerEvent};
 use crate::scrollbar::{ManualScrollHandle, ScrollbarHandle, WithScrollbar as _};
 use crate::search::{SearchBar, SearchBarSnapshot, SearchEvent};
 use crate::settings::{
-    BehaviorSettings, CopyFormat, PageImageQuality, PageTextFormat, SettingsStore,
-    TranslationBoxCorner, ui_rems,
+    BehaviorSettings, CopyFormat, DocumentProgressDisplay, PageImageQuality, PageTextFormat,
+    SettingsStore, TranslationBoxCorner, ui_rems,
 };
 use crate::smooth_scroll::advance_toward;
 use crate::theme::Theme;
@@ -83,8 +83,8 @@ use gpui::{
     Anchor, AnyElement, AsyncApp, BorderStyle, Bounds, ClickEvent, ClipboardItem, Context, Corners,
     DismissEvent, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PathBuilder, Pixels, Point as GpuiPoint, PromptButton, PromptLevel, Render,
-    RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
+    MouseUpEvent, Pixels, Point as GpuiPoint, PromptButton, PromptLevel, Render, RenderImage,
+    ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
     StatefulInteractiveElement, Task, TextStyle, UniformListScrollHandle, Window, anchored, canvas,
     deferred, div, fill, hsla, linear_color_stop, linear_gradient, outline, point, prelude::*, px,
     rgb, rgba, size, transparent_black, uniform_list,
@@ -93,7 +93,7 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, IndexPath, Selectable as _, Sizable as _,
     ThemeColor, ThemeStyled as _,
     alert::Alert,
-    button::{Button, ButtonCustomVariant, ButtonVariants as _},
+    button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     progress::ProgressCircle,
@@ -162,22 +162,12 @@ const DIFF_FLASH_TILE_SIZE: u32 = 24;
 const DIFF_FLASH_PIXEL_THRESHOLD: u16 = 32;
 const DIFF_FLASH_MAX_RECTS: usize = 64;
 const COMPACT_CONTROL_HEIGHT: f32 = 20.0;
-const DOCUMENT_TOOLBAR_HEIGHT: f32 = 44.0;
-const DOCUMENT_TOOLBAR_HOVER_HEIGHT: f32 = DOCUMENT_TOOLBAR_HEIGHT;
-const BOOKMARK_DRAG_ACTIVATION_PX: f32 = 8.0;
-const BOOKMARK_DRAG_COMMIT_PX: f32 = 56.0;
-const BOOKMARK_DRAG_DAMPING: f32 = 0.35;
-const BOOKMARK_DRAG_MAX_PX: f32 = 84.0;
-const BOOKMARK_RIBBON_WIDTH: f32 = 20.0;
-const BOOKMARK_RIBBON_REST_HEIGHT: f32 = 36.0;
-const BOOKMARK_RIBBON_NOTCH_PX: f32 = 6.0;
-const BOOKMARK_RIBBON_STROKE_PX: f32 = 2.0;
-const BOOKMARK_RIBBON_RIGHT_INSET: f32 = 8.0;
-const BOOKMARK_RIBBON_RETRACT: MotionSpec = MotionSpec::new(180, EASE_OUT);
+const DOCUMENT_FOOTER_HEIGHT: f32 = 32.0;
+const DOCUMENT_TOP_POPUP_CLEARANCE: f32 = 44.0;
 const TRANSLATION_PANEL_PREFERRED_WIDTH: f32 = 390.0;
 const TRANSLATION_PANEL_MARGIN: f32 = 8.0;
 const TRANSLATION_PANEL_DEFAULT_RIGHT: f32 = 8.0;
-const TRANSLATION_PANEL_DEFAULT_TOP: f32 = DOCUMENT_TOOLBAR_HEIGHT + 10.0;
+const TRANSLATION_PANEL_DEFAULT_TOP: f32 = DOCUMENT_TOP_POPUP_CLEARANCE + 10.0;
 const TRANSLATION_PANEL_COMPACT_BREAKPOINT: f32 = 300.0;
 const TRANSLATION_PANEL_DEFAULT_HEIGHT: f32 = 40.0;
 const TRANSLATION_PANEL_SNAP_ZONE: f32 = 12.0;
@@ -1476,13 +1466,6 @@ struct BookmarkTitleEdit {
     initially_automatic: bool,
 }
 
-#[derive(Clone, Copy)]
-struct BookmarkDragState {
-    origin: GpuiPoint<Pixels>,
-    current: GpuiPoint<Pixels>,
-    active: bool,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocumentSidebar {
     Thumbnails,
@@ -1751,15 +1734,6 @@ pub struct DocumentView {
     bookmark_title_edit: Option<BookmarkTitleEdit>,
     bookmarks: Vec<Bookmark>,
     bookmark_sidebar_scroll: UniformListScrollHandle,
-    bookmark_drag: Option<BookmarkDragState>,
-    bookmark_ribbon_retract: Option<ScalarTween>,
-    bookmark_ribbon_retract_generation: u64,
-    bookmark_ribbon_retract_task: Option<Task<()>>,
-    suppress_bookmark_click: bool,
-    document_toolbar_visible: bool,
-    document_toolbar_hovered: bool,
-    document_toolbar_hide_generation: u64,
-    document_toolbar_hide_task: Option<Task<()>>,
     go_to_page_prompt: Option<Entity<GoToPagePrompt>>,
     note_editor: Option<Entity<NoteEditor>>,
     note_target: Option<NoteTarget>,

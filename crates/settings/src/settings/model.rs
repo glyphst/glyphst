@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub behavior: BehaviorSettings,
+    pub document_view: DocumentViewSettings,
     pub restore_on_startup: RestoreOnStartup,
     pub path_chooser: PathChooserBackend,
     pub reading: EpubReaderPreferences,
@@ -124,6 +125,15 @@ impl Settings {
                 .and_then(RestoreOnStartup::from_str)
         {
             settings.restore_on_startup = value;
+        }
+
+        if let Some(document_view) = document.get("document_view").and_then(KdlNode::children)
+            && let Some(value) = document_view
+                .get_arg("progress_display")
+                .and_then(KdlValue::as_string)
+                .and_then(DocumentProgressDisplay::from_str)
+        {
+            settings.document_view.progress_display = value;
         }
 
         if let Some(reading) = document.get("reading").and_then(KdlNode::children) {
@@ -563,6 +573,15 @@ impl Settings {
             self.restore_on_startup.as_str(),
         );
         document.nodes_mut().push(session);
+
+        let mut document_view = KdlNode::new("document_view");
+        let document_view_children = document_view.ensure_children();
+        push_value_node(
+            document_view_children,
+            "progress_display",
+            self.document_view.progress_display.as_str(),
+        );
+        document.nodes_mut().push(document_view);
 
         let mut reading = KdlNode::new("reading");
         let reading_children = reading.ensure_children();

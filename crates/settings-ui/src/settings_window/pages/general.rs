@@ -1,8 +1,8 @@
 use super::super::SettingsWindow;
 use glyphst_core::EpubTheme;
 use glyphst_settings::{
-    AppLanguage, CopyFormat, KeymapPreset, PathChooserBackend, RestoreOnStartup, Settings,
-    SettingsStore, TabBarVisibility, WindowBackgroundMode,
+    AppLanguage, CopyFormat, DocumentProgressDisplay, KeymapPreset, PathChooserBackend,
+    RestoreOnStartup, Settings, SettingsStore, TabBarVisibility, WindowBackgroundMode,
 };
 use gpui::{App, Context, InteractiveElement as _, SharedString};
 use gpui_component::{
@@ -340,6 +340,46 @@ impl SettingsWindow {
             .default_value(defaults.behavior.semantic_copy),
         );
 
+        let progress_display = SettingItem::new(
+            crate::fl!("settings-document-progress-display"),
+            SettingField::dropdown(
+                [
+                    Self::setting_option(
+                        DocumentProgressDisplay::Pages.as_str(),
+                        crate::fl!("settings-document-progress-pages"),
+                    ),
+                    Self::setting_option(
+                        DocumentProgressDisplay::Percentage.as_str(),
+                        crate::fl!("settings-document-progress-percentage"),
+                    ),
+                ]
+                .into(),
+                |cx: &App| {
+                    cx.global::<SettingsStore>()
+                        .settings
+                        .document_view
+                        .progress_display
+                        .as_str()
+                        .into()
+                },
+                {
+                    let view = view.clone();
+                    move |value: SharedString, cx: &mut App| {
+                        let display = if value.as_ref() == "percentage" {
+                            DocumentProgressDisplay::Percentage
+                        } else {
+                            DocumentProgressDisplay::Pages
+                        };
+                        Self::update_settings(&view, cx, move |settings| {
+                            settings.document_view.progress_display = display;
+                        });
+                    }
+                },
+            )
+            .default_value(defaults.document_view.progress_display.as_str().to_string()),
+        )
+        .description(crate::fl!("settings-document-progress-display-description"));
+
         let reading_font_size = SettingItem::new(
             crate::fl!("settings-reading-font-size"),
             SettingField::number_input(
@@ -594,6 +634,9 @@ impl SettingsWindow {
                 SettingGroup::new()
                     .title(crate::fl!("settings-section-copy"))
                     .items([copy_format, semantic_copy]),
+                SettingGroup::new()
+                    .title(crate::fl!("settings-section-document-view"))
+                    .item(progress_display),
                 SettingGroup::new()
                     .title(crate::fl!("settings-section-reading"))
                     .items([

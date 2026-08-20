@@ -1,4 +1,3 @@
-use super::bookmarks::bookmark_ribbon_should_render;
 use super::*;
 
 impl Render for DocumentView {
@@ -13,12 +12,6 @@ impl Render for DocumentView {
         let prepaint_view = view.clone();
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let ui_theme = cx.theme().colors;
-        let bookmark_ribbon_visible = bookmark_ribbon_should_render(
-            self.document_toolbar_visible,
-            self.current_bookmark().is_some(),
-            self.bookmark_drag_offset(Instant::now()),
-        );
-
         if !self.diff_flashes.is_empty() {
             window.request_animation_frame();
         }
@@ -40,7 +33,7 @@ impl Render for DocumentView {
                     anchored()
                         .snap_to_window_with_margin(px(8.0))
                         .position(position)
-                        .anchor(Anchor::TopLeft)
+                        .anchor(Anchor::BottomLeft)
                         .child(popup),
                 )
                 .with_priority(1)
@@ -114,14 +107,18 @@ impl Render for DocumentView {
             let card = self.render_translation_card(state, true, cx.theme().colors, window, cx);
             let mut container = div().absolute().m(px(16.0));
             container = match corner {
-                TranslationBoxCorner::TopLeft => {
-                    container.top(px(DOCUMENT_TOOLBAR_HEIGHT)).left(px(0.0))
+                TranslationBoxCorner::TopLeft => container
+                    .top(px(DOCUMENT_TOP_POPUP_CLEARANCE))
+                    .left(px(0.0)),
+                TranslationBoxCorner::TopRight => container
+                    .top(px(DOCUMENT_TOP_POPUP_CLEARANCE))
+                    .right(px(0.0)),
+                TranslationBoxCorner::BottomLeft => {
+                    container.bottom(px(DOCUMENT_FOOTER_HEIGHT)).left(px(0.0))
                 }
-                TranslationBoxCorner::TopRight => {
-                    container.top(px(DOCUMENT_TOOLBAR_HEIGHT)).right(px(0.0))
+                TranslationBoxCorner::BottomRight => {
+                    container.bottom(px(DOCUMENT_FOOTER_HEIGHT)).right(px(0.0))
                 }
-                TranslationBoxCorner::BottomLeft => container.bottom(px(0.0)).left(px(0.0)),
-                TranslationBoxCorner::BottomRight => container.bottom(px(0.0)).right(px(0.0)),
             };
             container.child(card)
         });
@@ -134,6 +131,7 @@ impl Render for DocumentView {
 
         div()
             .id("document-view-root")
+            .debug_selector(|| "document-view-root".to_string())
             .size_full()
             .relative()
             .flex()
@@ -483,10 +481,6 @@ impl Render for DocumentView {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                if this.update_bookmark_drag(event.position, event.dragging(), cx) {
-                    cx.stop_propagation();
-                    return;
-                }
                 if this.update_translation_panel_drag(event.position, cx) {
                     cx.stop_propagation();
                     return;
@@ -517,11 +511,6 @@ impl Render for DocumentView {
                     ) {
                         this.mark_manual_navigation();
                     }
-                    return;
-                }
-
-                if this.document_toolbar_hovered {
-                    this.clear_document_content_hover(cx);
                     return;
                 }
 
@@ -574,11 +563,7 @@ impl Render for DocumentView {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                    if this.finish_bookmark_drag(event.position, window, cx) {
-                        cx.stop_propagation();
-                        return;
-                    }
+                cx.listener(|this, event: &MouseUpEvent, _, cx| {
                     if this.finish_translation_panel_drag(event.position, cx) {
                         cx.stop_propagation();
                         return;
@@ -611,11 +596,7 @@ impl Render for DocumentView {
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                    if this.finish_bookmark_drag(event.position, window, cx) {
-                        cx.stop_propagation();
-                        return;
-                    }
+                cx.listener(|this, event: &MouseUpEvent, _, cx| {
                     if this.finish_translation_panel_drag(event.position, cx) {
                         cx.stop_propagation();
                     }
@@ -632,11 +613,15 @@ impl Render for DocumentView {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .flex()
                     .flex_col()
+                    .overflow_hidden()
                     .bg(rgb(theme.background))
                     .child(
                         div()
+                            .id("document-viewport")
+                            .debug_selector(|| "document-viewport".to_string())
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
@@ -837,13 +822,21 @@ impl Render for DocumentView {
                             .when(
                                 !self.is_presentation_mode() && !self.grid_overview_open,
                                 |this| {
-                                    this.vertical_scrollbar_for(&self.document_scroll, window, cx)
+                                    this.vertical_scrollbar_for_with_id(
+                                        &self.document_scroll,
+                                        "document-scrollbar",
+                                        window,
+                                        cx,
+                                    )
                                 },
                             ),
-                    ),
+                    )
+                    .when(self.grid_overview_open, |this| {
+                        this.child(self.render_grid_overview(ui_theme, window, cx))
+                    }),
             )
-            .when(self.grid_overview_open, |this| {
-                this.child(self.render_grid_overview(ui_theme, window, cx))
+            .when(!self.is_presentation_mode(), |this| {
+                this.child(self.render_document_footer(ui_theme, cx))
             })
             .when(
                 self.zoom_popup_visible
@@ -921,59 +914,11 @@ impl Render for DocumentView {
                     cx,
                 ))
             })
-            .when(
-                !self.is_presentation_mode()
-                    && self.search_bar.is_none()
-                    && !self.zoom_popup_visible
-                    && self.toc_palette.is_none()
-                    && self.notes_palette.is_none()
-                    && self.history_palette.is_none()
-                    && self.bookmark_palette.is_none()
-                    && self.go_to_page_prompt.is_none()
-                    && self.note_editor.is_none(),
-                |this| {
-                    this.child(
-                        div()
-                            .id("document-toolbar-hover-zone")
-                            .debug_selector(|| "document-toolbar-hover-zone".to_string())
-                            .occlude()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .h(px(DOCUMENT_TOOLBAR_HOVER_HEIGHT))
-                            .flex()
-                            .items_start()
-                            .cursor_default()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_mouse_down(MouseButton::Middle, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_mouse_down(MouseButton::Right, |_, window, cx| {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                            })
-                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                                this.set_document_toolbar_hovered(*hovered, cx);
-                            }))
-                            .when(self.document_toolbar_visible, |this| {
-                                this.child(self.render_document_toolbar(ui_theme, cx))
-                            })
-                            .when(bookmark_ribbon_visible, |this| {
-                                this.child(
-                                    self.render_document_bookmark_ribbon(ui_theme, window, cx),
-                                )
-                            }),
-                    )
-                },
-            )
             .when_some(self.bookmark_title_editor.clone(), |this, editor| {
                 this.child(
                     div()
                         .absolute()
-                        .top(px(DOCUMENT_TOOLBAR_HEIGHT + 8.0))
+                        .bottom(px(DOCUMENT_FOOTER_HEIGHT + 8.0))
                         .left(px(12.0))
                         .right(px(12.0))
                         .flex()

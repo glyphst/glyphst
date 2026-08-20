@@ -6,6 +6,9 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
 glyphst-core = { path = "../core" }

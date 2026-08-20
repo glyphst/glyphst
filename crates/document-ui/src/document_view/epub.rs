@@ -169,18 +169,14 @@ impl DocumentView {
             self.close_context_menu(cx);
             self.epub_style_panel_position = Some(point(
                 position.x,
-                position.y + px(DOCUMENT_TOOLBAR_HEIGHT / 2.0),
+                position.y - px(DOCUMENT_FOOTER_HEIGHT / 2.0 + 4.0),
             ));
-            self.show_document_toolbar(cx);
-        } else {
-            self.show_document_toolbar(cx);
         }
         cx.notify();
     }
 
     pub(super) fn close_epub_style_panel(&mut self, cx: &mut Context<Self>) {
         if self.epub_style_panel_position.take().is_some() {
-            self.schedule_document_toolbar_hide(cx);
             cx.notify();
         }
     }

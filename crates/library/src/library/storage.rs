@@ -59,6 +59,12 @@ impl LibraryStore {
         Self::open_with_root(path, managed_root)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn open_for_test(path: PathBuf) -> Result<Self> {
+        Self::open(path)
+    }
+
     fn open_with_root(path: PathBuf, managed_library_root: PathBuf) -> Result<Self> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()

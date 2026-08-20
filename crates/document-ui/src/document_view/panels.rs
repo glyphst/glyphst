@@ -2,7 +2,6 @@ use super::*;
 
 impl DocumentView {
     pub(super) fn close_all_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.document_toolbar_hovered = false;
         self.close_search_bar(window, cx);
         self.close_toc_palette(window, cx);
         self.close_notes_palette(window, cx);
@@ -11,7 +10,6 @@ impl DocumentView {
         self.close_bookmark_title_editor(window, cx);
         self.close_go_to_page_prompt(window, cx);
         self.close_epub_style_panel(cx);
-        self.schedule_document_toolbar_hide(cx);
     }
 
     pub(super) fn toggle_presentation_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -89,6 +89,35 @@ pub struct DocumentThemeSettings {
     pub follow_app_theme: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DocumentProgressDisplay {
+    #[default]
+    Pages,
+    Percentage,
+}
+
+impl DocumentProgressDisplay {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pages => "pages",
+            Self::Percentage => "percentage",
+        }
+    }
+
+    pub(super) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "pages" => Some(Self::Pages),
+            "percentage" => Some(Self::Percentage),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DocumentViewSettings {
+    pub progress_display: DocumentProgressDisplay,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BehaviorSettings {
     pub default_zoom: f32,
