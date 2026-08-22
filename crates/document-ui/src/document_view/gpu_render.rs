@@ -2,6 +2,8 @@ use super::*;
 
 const MAX_RETAINED_GPU_PAGES: usize = 8;
 const MAX_RETAINED_GPU_DIAGNOSTICS: usize = 64;
+const MAX_RETAINED_GPU_SURFACE_BYTES: u64 = 256 * 1024 * 1024;
+const GPU_MOTION_SETTLE_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Default)]
 pub(super) struct GpuPdfState {
@@ -14,10 +16,16 @@ pub(super) struct GpuPdfState {
     renderer_error: Option<String>,
     pages: HashMap<u32, GpuPageState>,
     rendered: HashMap<u32, RenderedGpuPage>,
+    presented_pages: HashSet<u32>,
+    visible_pages: HashSet<u32>,
+    surface_failures: HashMap<u32, String>,
     page_last_used: HashMap<u32, u64>,
     page_usage_clock: u64,
     preparation_generation: u64,
     render_generation: u64,
+    motion_generation: u64,
+    motion_active: bool,
+    motion_settle_task: Option<Task<()>>,
 }
 
 enum GpuPageState {
@@ -49,10 +57,16 @@ impl GpuPdfState {
         self.renderer_error = None;
         self.pages.clear();
         self.rendered.clear();
+        self.presented_pages.clear();
+        self.visible_pages.clear();
+        self.surface_failures.clear();
         self.page_last_used.clear();
         self.page_usage_clock = 0;
         self.preparation_generation = 0;
         self.render_generation = 0;
+        self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
+        self.motion_active = false;
+        self.motion_settle_task = None;
     }
 
     fn reset_device(&mut self) {
@@ -62,10 +76,16 @@ impl GpuPdfState {
         self.renderer_error = None;
         self.pages.clear();
         self.rendered.clear();
+        self.presented_pages.clear();
+        self.visible_pages.clear();
+        self.surface_failures.clear();
         self.page_last_used.clear();
         self.page_usage_clock = 0;
         self.preparation_generation = 0;
         self.render_generation = 0;
+        self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
+        self.motion_active = false;
+        self.motion_settle_task = None;
     }
 
     fn cancel_page_tasks(&mut self) {
@@ -93,6 +113,8 @@ impl GpuPdfState {
     }
 
     fn prune(&mut self, visible: &HashSet<u32>) {
+        self.visible_pages.clone_from(visible);
+        self.presented_pages.clear();
         let stale_preparations = self
             .pages
             .iter()
@@ -107,6 +129,8 @@ impl GpuPdfState {
             }
             self.page_last_used.remove(&page);
             self.rendered.remove(&page);
+            self.presented_pages.remove(&page);
+            self.surface_failures.remove(&page);
         }
 
         let incoming_visible = visible
@@ -124,6 +148,9 @@ impl GpuPdfState {
             .retain(|page, _| self.pages.contains_key(page));
         self.page_last_used
             .retain(|page, _| self.pages.contains_key(page));
+        self.surface_failures
+            .retain(|page, _| self.pages.contains_key(page));
+        self.prune_surface_cache();
     }
 
     fn prune_states(
@@ -152,6 +179,59 @@ impl GpuPdfState {
             self.pages.remove(&page);
             self.page_last_used.remove(&page);
             self.rendered.remove(&page);
+            self.presented_pages.remove(&page);
+            self.surface_failures.remove(&page);
+        }
+    }
+
+    fn surface_bytes(&self) -> u64 {
+        self.rendered
+            .values()
+            .map(|rendered| rendered.texture.byte_len())
+            .sum()
+    }
+
+    fn prune_surface_cache(&mut self) {
+        while self.surface_bytes() > MAX_RETAINED_GPU_SURFACE_BYTES {
+            let Some(page) = self
+                .rendered
+                .keys()
+                .filter(|page| !self.visible_pages.contains(page))
+                .min_by_key(|page| self.page_last_used.get(page).copied().unwrap_or_default())
+                .copied()
+            else {
+                break;
+            };
+            self.rendered.remove(&page);
+        }
+    }
+
+    fn reserve_surface(&mut self, page: u32, bytes: u64) -> Result<(), u64> {
+        loop {
+            let retained = self
+                .rendered
+                .iter()
+                .filter(|(candidate, _)| **candidate != page)
+                .map(|(_, rendered)| rendered.texture.byte_len())
+                .sum::<u64>();
+            if retained.saturating_add(bytes) <= MAX_RETAINED_GPU_SURFACE_BYTES {
+                return Ok(());
+            }
+            let Some(candidate) = self
+                .rendered
+                .keys()
+                .filter(|candidate| **candidate != page && !self.visible_pages.contains(candidate))
+                .min_by_key(|candidate| {
+                    self.page_last_used
+                        .get(candidate)
+                        .copied()
+                        .unwrap_or_default()
+                })
+                .copied()
+            else {
+                return Err(retained.saturating_add(bytes));
+            };
+            self.rendered.remove(&candidate);
         }
     }
 
@@ -175,7 +255,102 @@ impl Drop for GpuPdfState {
     }
 }
 
+fn visible_gpu_region(
+    key: RenderKey,
+    image_bounds: Bounds<Pixels>,
+    viewport_bounds: Bounds<Pixels>,
+) -> Option<GpuPageRegion> {
+    let image_x0 = image_bounds.origin.x.as_f32();
+    let image_y0 = image_bounds.origin.y.as_f32();
+    let image_width = image_bounds.size.width.as_f32();
+    let image_height = image_bounds.size.height.as_f32();
+    if image_width <= 0.0 || image_height <= 0.0 {
+        return None;
+    }
+    let x0 = image_x0.max(viewport_bounds.origin.x.as_f32());
+    let y0 = image_y0.max(viewport_bounds.origin.y.as_f32());
+    let x1 = (image_x0 + image_width)
+        .min(viewport_bounds.origin.x.as_f32() + viewport_bounds.size.width.as_f32());
+    let y1 = (image_y0 + image_height)
+        .min(viewport_bounds.origin.y.as_f32() + viewport_bounds.size.height.as_f32());
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+
+    let page_width = key.physical_width as f32;
+    let page_height = key.physical_height as f32;
+    let physical_x0 = (((x0 - image_x0) / image_width) * page_width)
+        .floor()
+        .clamp(0.0, page_width) as u32;
+    let physical_y0 = (((y0 - image_y0) / image_height) * page_height)
+        .floor()
+        .clamp(0.0, page_height) as u32;
+    let physical_x1 = (((x1 - image_x0) / image_width) * page_width)
+        .ceil()
+        .clamp(0.0, page_width) as u32;
+    let physical_y1 = (((y1 - image_y0) / image_height) * page_height)
+        .ceil()
+        .clamp(0.0, page_height) as u32;
+    (physical_x1 > physical_x0 && physical_y1 > physical_y0).then_some(GpuPageRegion {
+        x: physical_x0,
+        y: physical_y0,
+        width: physical_x1 - physical_x0,
+        height: physical_y1 - physical_y0,
+    })
+}
+
+fn gpu_surface_bounds(
+    key: RenderKey,
+    image_bounds: Bounds<Pixels>,
+    region: GpuPageRegion,
+) -> Bounds<Pixels> {
+    let page_width = key.physical_width.max(1) as f32;
+    let page_height = key.physical_height.max(1) as f32;
+    let logical_width = image_bounds.size.width.as_f32();
+    let logical_height = image_bounds.size.height.as_f32();
+    Bounds::new(
+        point(
+            image_bounds.origin.x + px(region.x as f32 / page_width * logical_width),
+            image_bounds.origin.y + px(region.y as f32 / page_height * logical_height),
+        ),
+        size(
+            px(region.width as f32 / page_width * logical_width),
+            px(region.height as f32 / page_height * logical_height),
+        ),
+    )
+}
+
+fn gpu_paint_texture(
+    key: RenderKey,
+    image_bounds: Bounds<Pixels>,
+    texture: GpuPageTexture,
+) -> GpuPaintTexture {
+    GpuPaintTexture {
+        bounds: gpu_surface_bounds(key, image_bounds, texture.region()),
+        texture,
+    }
+}
+
 impl DocumentView {
+    pub(super) fn mark_native_gpu_motion(&mut self, cx: &mut Context<Self>) {
+        self.gpu_pdf.motion_generation = self.gpu_pdf.motion_generation.wrapping_add(1).max(1);
+        self.gpu_pdf.motion_active = true;
+        let generation = self.gpu_pdf.motion_generation;
+        self.gpu_pdf.motion_settle_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(GPU_MOTION_SETTLE_DELAY)
+                .await;
+            _ = this.update(cx, |this, cx| {
+                if this.gpu_pdf.motion_generation != generation {
+                    return;
+                }
+                this.gpu_pdf.motion_active = false;
+                this.gpu_pdf.motion_settle_task = None;
+                cx.notify();
+            });
+        }));
+    }
+
     pub(super) fn native_gpu_key_enabled(&self, key: RenderKey, engine: PdfRenderEngine) -> bool {
         engine != PdfRenderEngine::MuPdf
             && self.format == DocumentFormat::Pdf
@@ -186,9 +361,11 @@ impl DocumentView {
     pub(super) fn native_gpu_texture(
         &mut self,
         key: RenderKey,
+        image_bounds: Bounds<Pixels>,
+        viewport_bounds: Bounds<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<GpuPageTexture> {
+    ) -> Option<GpuPaintTexture> {
         let engine = cx
             .global::<SettingsStore>()
             .settings
@@ -207,6 +384,7 @@ impl DocumentView {
         if !self.native_gpu_key_enabled(key, engine) {
             return None;
         }
+        let visible_region = visible_gpu_region(key, image_bounds, viewport_bounds)?;
 
         let document = match self.gpu_pdf.document.clone() {
             Some(document) => document,
@@ -281,24 +459,62 @@ impl DocumentView {
             }
         }?;
 
+        let settled = !self.dock_snapshot.layout_motion_active
+            && self.panning.is_none()
+            && !self.gpu_pdf.motion_active
+            && (self.scroll_x_doc - self.target_scroll_x_doc).abs() <= 0.01
+            && (self.scroll_y_doc - self.target_scroll_y_doc).abs() <= 0.01;
+        self.gpu_pdf.render_generation = self.gpu_pdf.render_generation.wrapping_add(1).max(1);
+        let request = GpuPaintRequest {
+            page_size: [key.physical_width, key.physical_height],
+            visible_region,
+            rotation: key.rotation,
+            background: [1.0, 1.0, 1.0, 1.0],
+            settled,
+            generation: self.gpu_pdf.render_generation,
+        };
+        let surface_region = match request.surface_region() {
+            Ok(region) => region,
+            Err(error) => {
+                self.gpu_pdf
+                    .surface_failures
+                    .insert(page, format!("{error:#}"));
+                return None;
+            }
+        };
+
         if let Some(rendered) = self.gpu_pdf.rendered.get(&page)
             && rendered.key == key
             && rendered.texture.token() == renderer.token()
+            && rendered.texture.region() == surface_region
+            && (!settled || !rendered.texture.refinement_pending())
         {
-            return Some(rendered.texture.clone());
+            let texture = rendered.texture.clone();
+            self.gpu_pdf.presented_pages.insert(page);
+            self.gpu_pdf.surface_failures.remove(&page);
+            return Some(gpu_paint_texture(key, image_bounds, texture));
         }
 
+        if let Err(required) = self
+            .gpu_pdf
+            .reserve_surface(page, surface_region.byte_len())
+        {
+            self.gpu_pdf.surface_failures.insert(
+                page,
+                format!(
+                    "visible native PDF surfaces require {} bytes, exceeding the {}-byte cache limit",
+                    required, MAX_RETAINED_GPU_SURFACE_BYTES
+                ),
+            );
+            return None;
+        }
+        self.gpu_pdf.surface_failures.remove(&page);
         let previous = self.gpu_pdf.rendered.remove(&page);
-        let reusable = previous.as_ref().map(|rendered| rendered.texture.clone());
-        self.gpu_pdf.render_generation = self.gpu_pdf.render_generation.wrapping_add(1).max(1);
-        let request = GpuPaintRequest {
-            target_size: [key.physical_width, key.physical_height],
-            rotation: key.rotation,
-            background: [1.0, 1.0, 1.0, 1.0],
-            settled: !self.dock_snapshot.layout_motion_active && self.panning.is_none(),
-            generation: self.gpu_pdf.render_generation,
-        };
-        match renderer.render_page(&prepared, request, reusable) {
+        match renderer.render_page(
+            &prepared,
+            request,
+            previous.as_ref().map(|rendered| &rendered.texture),
+        ) {
             Ok((texture, stats)) => {
                 self.gpu_pdf.rendered.insert(
                     page,
@@ -308,7 +524,9 @@ impl DocumentView {
                         stats,
                     },
                 );
-                Some(texture)
+                self.gpu_pdf.prune_surface_cache();
+                self.gpu_pdf.presented_pages.insert(page);
+                Some(gpu_paint_texture(key, image_bounds, texture))
             }
             Err(error) => {
                 if let Some(previous) = previous {
@@ -483,6 +701,9 @@ impl DocumentView {
 
     pub(super) fn native_gpu_render(&self, page: usize) -> Option<(RenderKey, GpuRenderStats)> {
         let page = u32::try_from(page).ok()?;
+        if !self.gpu_pdf.presented_pages.contains(&page) {
+            return None;
+        }
         self.gpu_pdf
             .rendered
             .get(&page)
@@ -517,11 +738,17 @@ impl DocumentView {
             prepared_pages: prepared.len(),
             prepared_page_limit: MAX_RETAINED_GPU_PAGES,
             resident_bytes: prepared.iter().map(|stats| stats.resident_bytes).sum(),
+            surface_count: self.gpu_pdf.rendered.len(),
+            surface_bytes: self.gpu_pdf.surface_bytes(),
+            surface_byte_limit: MAX_RETAINED_GPU_SURFACE_BYTES,
         }
     }
 
     pub(super) fn native_gpu_failure(&self, page: usize) -> Option<&str> {
         let page = u32::try_from(page).ok()?;
+        if let Some(error) = self.gpu_pdf.surface_failures.get(&page) {
+            return Some(error);
+        }
         match self.gpu_pdf.pages.get(&page) {
             Some(GpuPageState::Failed(error)) => Some(error),
             _ => self
@@ -541,5 +768,54 @@ impl DocumentView {
                 self.gpu_pdf.pages.get(&page),
                 Some(GpuPageState::Preparing { .. })
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render_key() -> RenderKey {
+        RenderKey {
+            doc_id: 1,
+            page_idx: 0,
+            source_revision: 0,
+            rotation: DocumentRotation::Degrees0,
+            color_transform: None,
+            physical_width: 1_000,
+            physical_height: 2_000,
+        }
+    }
+
+    #[test]
+    fn viewport_intersection_maps_outward_to_page_pixels() {
+        let image = Bounds::new(point(px(100.0), px(50.0)), size(px(500.0), px(1_000.0)));
+        let viewport = Bounds::new(point(px(200.0), px(300.0)), size(px(300.0), px(400.0)));
+        assert_eq!(
+            visible_gpu_region(render_key(), image, viewport),
+            Some(GpuPageRegion {
+                x: 200,
+                y: 500,
+                width: 600,
+                height: 800,
+            })
+        );
+    }
+
+    #[test]
+    fn clipped_surface_maps_back_to_its_page_destination() {
+        let image = Bounds::new(point(px(100.0), px(50.0)), size(px(500.0), px(1_000.0)));
+        let bounds = gpu_surface_bounds(
+            render_key(),
+            image,
+            GpuPageRegion {
+                x: 200,
+                y: 500,
+                width: 600,
+                height: 800,
+            },
+        );
+        assert_eq!(bounds.origin, point(px(200.0), px(300.0)));
+        assert_eq!(bounds.size, size(px(300.0), px(400.0)));
     }
 }

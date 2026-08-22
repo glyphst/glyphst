@@ -38,6 +38,7 @@ impl DocumentView {
         let center_doc = self.scroll_y_doc + self.viewport_height / (2.0 * old_scale);
 
         self.zoom = zoom;
+        self.mark_native_gpu_motion(cx);
 
         let new_scale = self.effective_scale();
         self.scroll_y_doc = center_doc - self.viewport_height / (2.0 * new_scale);

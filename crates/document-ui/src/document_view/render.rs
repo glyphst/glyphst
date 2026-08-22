@@ -723,12 +723,12 @@ impl Render for DocumentView {
                                                 if let Some(texture) = page.gpu_texture
                                                     && let Err(error) =
                                                         window.paint_external_texture(
-                                                            page.bounds,
+                                                            texture.bounds,
                                                             Bounds::new(
                                                                 point(0.0, 0.0),
                                                                 size(1.0, 1.0),
                                                             ),
-                                                            texture.handle().clone(),
+                                                            texture.texture.handle().clone(),
                                                             1.0,
                                                             ExternalTextureFilter::Linear,
                                                             ExternalTextureColorSpace::LinearSrgb,

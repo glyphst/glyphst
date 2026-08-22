@@ -61,7 +61,7 @@ use glyphst_pdf::{
 };
 use glyphst_pdf_gpu::{
     CancellationToken as GpuCancellationToken, GpuFallbackDiagnostic, GpuFallbackSource,
-    GpuPageRoute, GpuPageTexture, GpuPaintRequest, GpuPdfDocument, GpuPdfRenderer,
+    GpuPageRegion, GpuPageRoute, GpuPageTexture, GpuPaintRequest, GpuPdfDocument, GpuPdfRenderer,
     GpuPreparationStats, GpuRenderStats, PreparedGpuPage,
 };
 use glyphst_pdf_translation_service::{
@@ -516,6 +516,9 @@ pub struct GpuPageRenderDebugSnapshot {
     pub gradient_draws: u64,
     pub image_draws: u64,
     pub reused_tiles: u64,
+    pub rendered_tiles: u64,
+    pub dirty_tiles: u64,
+    pub refinement_pending: bool,
     pub selected_vector_lod: u32,
     pub frame_pool_reused: bool,
     pub clip_state_changes: u64,
@@ -559,6 +562,9 @@ pub struct GpuCacheDebugSnapshot {
     pub prepared_pages: usize,
     pub prepared_page_limit: usize,
     pub resident_bytes: u64,
+    pub surface_count: usize,
+    pub surface_bytes: u64,
+    pub surface_byte_limit: u64,
 }
 
 /// One exact semantic or capability reason for routing the whole page to MuPDF.
@@ -988,7 +994,13 @@ impl mupdf::NativeDevice for ImageCollector {
 struct PaintPage {
     bounds: Bounds<Pixels>,
     image: Option<Arc<RenderImage>>,
-    gpu_texture: Option<GpuPageTexture>,
+    gpu_texture: Option<GpuPaintTexture>,
+}
+
+#[derive(Clone)]
+struct GpuPaintTexture {
+    bounds: Bounds<Pixels>,
+    texture: GpuPageTexture,
 }
 
 type HighlightOverlay = (Bounds<Pixels>, HighlightColor);

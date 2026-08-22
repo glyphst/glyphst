@@ -12,11 +12,11 @@ use glyphst_pdf::DocumentSnapshot;
 pub use glyphst_pdf_engine::CancellationToken;
 use glyphst_pdf_engine::{
     CompileOptions, CompiledPage, DiagnosticSeverity, Document, DocumentSource, Engine, FeatureId,
-    LayerConfiguration, OpenOptions, PageIndex, Password, SupportDiagnostic, Transform,
+    LayerConfiguration, OpenOptions, PageIndex, Password, Rect, SupportDiagnostic, Transform,
 };
 use glyphst_pdf_render_wgpu::{
-    DeviceToken, GpuPage, GpuRenderer, PrepareError, RenderConfig, RenderError, RenderRequest,
-    RenderSupportIssue, RendererInitError,
+    ANALYTIC_TILE_SIZE, DeviceToken, GpuPage, GpuRenderer, IncrementalRenderState, PrepareError,
+    RenderConfig, RenderError, RenderRequest, RenderSupportIssue, RendererInitError,
 };
 pub use glyphst_pdf_render_wgpu::{
     PreparationStats as GpuPreparationStats, RenderStats as GpuRenderStats,
@@ -388,12 +388,16 @@ impl GpuPdfRenderer {
         })))
     }
 
-    /// Render a prepared complete page into a reusable same-device texture.
+    /// Render a prepared complete page into a clipped same-device texture.
+    ///
+    /// `previous` remains untouched and can continue to be presented if this
+    /// call fails. A successful render inherits its incremental exactness map
+    /// and samples the prior texture only when the engine proves reuse safe.
     pub fn render_page(
         &self,
         page: &PreparedGpuPage,
         request: GpuPaintRequest,
-        reusable: Option<GpuPageTexture>,
+        previous: Option<&GpuPageTexture>,
     ) -> Result<(GpuPageTexture, GpuRenderStats)> {
         if self.is_device_lost() {
             bail!("the active GPUI WGPU device is lost");
@@ -401,7 +405,8 @@ impl GpuPdfRenderer {
         if page.device_token() != self.token() {
             bail!("the prepared PDF page belongs to a stale GPU generation");
         }
-        let [width, height] = request.target_size;
+        let surface_region = request.surface_region()?;
+        let [width, height] = surface_region.size();
         if width == 0 || height == 0 {
             bail!("native PDF render target must be non-empty");
         }
@@ -410,27 +415,46 @@ impl GpuPdfRenderer {
             bail!("native PDF render target {width}x{height} exceeds device limit {limit}");
         }
 
-        let texture = match reusable {
-            Some(texture)
-                if texture.size == request.target_size && texture.token == self.token() =>
-            {
-                texture
-            }
-            _ => self.create_texture(request.target_size),
+        let mut texture = self.create_texture(surface_region);
+        let page_transform =
+            page_transform(page.gpu.page_bounds(), request.rotation, request.page_size)?;
+        let surface_translation = Transform::new([
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            -f64::from(surface_region.x),
+            -f64::from(surface_region.y),
+        ])
+        .context("failed to construct native PDF surface translation")?;
+        let root_transform = surface_translation.compose(page_transform);
+        let visible = request.visible_region.clamp(request.page_size)?;
+        let visible_local = Rect {
+            x0: f64::from(visible.x.saturating_sub(surface_region.x)),
+            y0: f64::from(visible.y.saturating_sub(surface_region.y)),
+            x1: f64::from(visible.right().saturating_sub(surface_region.x)),
+            y1: f64::from(visible.bottom().saturating_sub(surface_region.y)),
         };
-        let root_transform = page_transform(
-            page.gpu.page_bounds(),
-            request.rotation,
-            request.target_size,
-        )?;
+        let viewport = root_transform
+            .inverse()
+            .context("failed to invert native PDF surface transform")?
+            .map_rect(visible_local);
+        let mut incremental = previous
+            .filter(|texture| texture.token == self.token())
+            .map(|texture| texture.incremental.clone())
+            .unwrap_or_default();
         let stats = self
             .renderer
-            .render(
+            .render_incremental(
                 &page.gpu,
+                &mut incremental,
+                previous
+                    .filter(|texture| texture.token == self.token())
+                    .map(|texture| texture.view.as_ref()),
                 RenderRequest {
                     root_transform,
-                    viewport: page.gpu.page_bounds(),
-                    target_size: request.target_size,
+                    viewport,
+                    target_size: surface_region.size(),
                     background: request.background,
                     settled: request.settled,
                     generation: request.generation,
@@ -438,10 +462,12 @@ impl GpuPdfRenderer {
                 &texture.view,
             )
             .map_err(render_error)?;
+        texture.incremental = incremental;
         Ok((texture, stats))
     }
 
-    fn create_texture(&self, size: [u32; 2]) -> GpuPageTexture {
+    fn create_texture(&self, region: GpuPageRegion) -> GpuPageTexture {
+        let size = region.size();
         let texture = Arc::new(
             self.context
                 .device()
@@ -468,7 +494,9 @@ impl GpuPdfRenderer {
             view,
             handle,
             size,
+            region,
             token: self.token(),
+            incremental: IncrementalRenderState::default(),
         }
     }
 }
@@ -481,14 +509,84 @@ fn render_error(error: RenderError) -> anyhow::Error {
     anyhow!(error).context("failed to execute native PDF GPU render")
 }
 
-/// Parameters for one full-page render.
+/// A non-empty physical-pixel region in full-page coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuPageRegion {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl GpuPageRegion {
+    pub const fn size(self) -> [u32; 2] {
+        [self.width, self.height]
+    }
+
+    pub const fn right(self) -> u32 {
+        self.x.saturating_add(self.width)
+    }
+
+    pub const fn bottom(self) -> u32 {
+        self.y.saturating_add(self.height)
+    }
+
+    pub fn byte_len(self) -> u64 {
+        u64::from(self.width)
+            .saturating_mul(u64::from(self.height))
+            .saturating_mul(4)
+    }
+
+    fn clamp(self, page_size: [u32; 2]) -> Result<Self> {
+        if page_size.contains(&0) {
+            bail!("native PDF page target must be non-empty");
+        }
+        let x0 = self.x.min(page_size[0]);
+        let y0 = self.y.min(page_size[1]);
+        let x1 = self.right().min(page_size[0]);
+        let y1 = self.bottom().min(page_size[1]);
+        if x1 <= x0 || y1 <= y0 {
+            bail!("native PDF visible region is empty or outside the page");
+        }
+        Ok(Self {
+            x: x0,
+            y: y0,
+            width: x1 - x0,
+            height: y1 - y0,
+        })
+    }
+
+    fn with_gutter(self, page_size: [u32; 2], gutter: u32) -> Result<Self> {
+        let visible = self.clamp(page_size)?;
+        let x0 = visible.x.saturating_sub(gutter);
+        let y0 = visible.y.saturating_sub(gutter);
+        let x1 = visible.right().saturating_add(gutter).min(page_size[0]);
+        let y1 = visible.bottom().saturating_add(gutter).min(page_size[1]);
+        Ok(Self {
+            x: x0,
+            y: y0,
+            width: x1 - x0,
+            height: y1 - y0,
+        })
+    }
+}
+
+/// Parameters for one visible-region render.
 #[derive(Clone, Copy, Debug)]
 pub struct GpuPaintRequest {
-    pub target_size: [u32; 2],
+    pub page_size: [u32; 2],
+    pub visible_region: GpuPageRegion,
     pub rotation: DocumentRotation,
     pub background: [f64; 4],
     pub settled: bool,
     pub generation: u64,
+}
+
+impl GpuPaintRequest {
+    pub fn surface_region(self) -> Result<GpuPageRegion> {
+        self.visible_region
+            .with_gutter(self.page_size, ANALYTIC_TILE_SIZE)
+    }
 }
 
 /// Reusable render target and GPUI presentation handle.
@@ -498,7 +596,9 @@ pub struct GpuPageTexture {
     view: Arc<wgpu::TextureView>,
     handle: ExternalTextureHandle,
     size: [u32; 2],
+    region: GpuPageRegion,
     token: ExternalGpuDeviceToken,
+    incremental: IncrementalRenderState,
 }
 
 impl fmt::Debug for GpuPageTexture {
@@ -507,6 +607,7 @@ impl fmt::Debug for GpuPageTexture {
             .debug_struct("GpuPageTexture")
             .field("handle", &self.handle)
             .field("size", &self.size)
+            .field("region", &self.region)
             .field("token", &self.token)
             .finish_non_exhaustive()
     }
@@ -519,6 +620,18 @@ impl GpuPageTexture {
 
     pub const fn size(&self) -> [u32; 2] {
         self.size
+    }
+
+    pub const fn region(&self) -> GpuPageRegion {
+        self.region
+    }
+
+    pub fn byte_len(&self) -> u64 {
+        self.region.byte_len()
+    }
+
+    pub fn refinement_pending(&self) -> bool {
+        self.incremental.refinement_pending()
     }
 
     pub const fn token(&self) -> ExternalGpuDeviceToken {
@@ -649,6 +762,7 @@ trailer <</Root 1 0 R>>\n%%EOF"[..],
         assert_send_sync::<PreparedGpuPage>();
         assert_send_sync::<GpuPdfRenderer>();
         assert_send_sync::<GpuPageTexture>();
+        assert_send_sync::<GpuPageRegion>();
     }
 
     #[test]
@@ -699,5 +813,50 @@ trailer <</Root 1 0 R>>\n%%EOF"[..],
             assert!((mapped.x1 - 600.0).abs() < 1e-8);
             assert!((mapped.y1 - 300.0).abs() < 1e-8);
         }
+    }
+
+    #[test]
+    fn visible_regions_are_clamped_and_expanded_by_one_analytic_tile() {
+        let request = GpuPaintRequest {
+            page_size: [1_000, 2_000],
+            visible_region: GpuPageRegion {
+                x: 200,
+                y: 500,
+                width: 300,
+                height: 400,
+            },
+            rotation: DocumentRotation::Degrees0,
+            background: [1.0; 4],
+            settled: false,
+            generation: 1,
+        };
+        assert_eq!(
+            request.surface_region().unwrap(),
+            GpuPageRegion {
+                x: 72,
+                y: 372,
+                width: 556,
+                height: 656,
+            }
+        );
+
+        let edge = GpuPaintRequest {
+            visible_region: GpuPageRegion {
+                x: 950,
+                y: 1_950,
+                width: 100,
+                height: 100,
+            },
+            ..request
+        };
+        assert_eq!(
+            edge.surface_region().unwrap(),
+            GpuPageRegion {
+                x: 822,
+                y: 1_822,
+                width: 178,
+                height: 178,
+            }
+        );
     }
 }

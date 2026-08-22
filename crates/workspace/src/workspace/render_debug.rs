@@ -114,6 +114,16 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
             "GPU RESIDENT",
             format_bytes(document.gpu_cache.resident_bytes),
             FOREGROUND,
+        ))
+        .child(reading(
+            "GPU SURFACES",
+            format!(
+                "{} / {}  ×{}",
+                format_bytes(document.gpu_cache.surface_bytes),
+                format_bytes(document.gpu_cache.surface_byte_limit),
+                document.gpu_cache.surface_count
+            ),
+            FOREGROUND,
         ));
 
     for page in document.pages {
@@ -353,8 +363,15 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             .child(reading(
                 "REUSE",
                 format!(
-                    "{} tiles · frame pool {} · {} clip changes · gen {}",
+                    "{} reused · {} rendered · {} dirty · refine {} · pool {} · {} clip · gen {}",
                     gpu.reused_tiles,
+                    gpu.rendered_tiles,
+                    gpu.dirty_tiles,
+                    if gpu.refinement_pending {
+                        "pending"
+                    } else {
+                        "exact"
+                    },
                     if gpu.frame_pool_reused { "yes" } else { "no" },
                     gpu.clip_state_changes,
                     gpu.generation
@@ -406,11 +423,30 @@ fn reading(label: &'static str, value: String, color: Hsla) -> Div {
     div()
         .flex()
         .w_full()
-        .justify_between()
+        .items_start()
         .gap_2()
         .py(px(1.))
-        .child(div().text_color(MUTED).child(label))
-        .child(div().text_color(color).text_right().child(value))
+        .child(div().flex_shrink_0().text_color(MUTED).child(label))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .text_color(color)
+                .text_right()
+                .child(soft_wrap_value(&value)),
+        )
+}
+
+fn soft_wrap_value(value: &str) -> String {
+    let mut wrapped = String::with_capacity(value.len());
+    for character in value.chars() {
+        wrapped.push(character);
+        if matches!(character, ':' | '-' | '/' | '_' | '.' | '·') {
+            wrapped.push('\u{200b}');
+        }
+    }
+    wrapped
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -463,6 +499,14 @@ mod tests {
         assert_eq!(
             format_draw_duration(Duration::from_micros(12_250), Some(1)),
             "12.2 ms"
+        );
+    }
+
+    #[test]
+    fn debug_values_gain_invisible_break_opportunities() {
+        assert_eq!(
+            soft_wrap_value("text-extraction:text-font-metrics-unavailable"),
+            "text-\u{200b}extraction:\u{200b}text-\u{200b}font-\u{200b}metrics-\u{200b}unavailable"
         );
     }
 }
