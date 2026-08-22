@@ -3195,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-core"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=986e4077fe86b7d2131bfb9984963d397f9be5c6#986e4077fe86b7d2131bfb9984963d397f9be5c6"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=b21ce1647b0fa0e921341b2db8a3e0671dbe7452#b21ce1647b0fa0e921341b2db8a3e0671dbe7452"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3205,7 +3205,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-engine"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=986e4077fe86b7d2131bfb9984963d397f9be5c6#986e4077fe86b7d2131bfb9984963d397f9be5c6"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=b21ce1647b0fa0e921341b2db8a3e0671dbe7452#b21ce1647b0fa0e921341b2db8a3e0671dbe7452"
 dependencies = [
  "glyphst-pdf-core",
  "glyphst-pdf-hayro",
@@ -3228,7 +3228,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-hayro"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=986e4077fe86b7d2131bfb9984963d397f9be5c6#986e4077fe86b7d2131bfb9984963d397f9be5c6"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=b21ce1647b0fa0e921341b2db8a3e0671dbe7452#b21ce1647b0fa0e921341b2db8a3e0671dbe7452"
 dependencies = [
  "blake3",
  "glyphst-pdf-core",
@@ -3242,7 +3242,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-wgpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=986e4077fe86b7d2131bfb9984963d397f9be5c6#986e4077fe86b7d2131bfb9984963d397f9be5c6"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=b21ce1647b0fa0e921341b2db8a3e0671dbe7452#b21ce1647b0fa0e921341b2db8a3e0671dbe7452"
 dependencies = [
  "bytemuck",
  "glyphst-pdf-core",
@@ -3258,7 +3258,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-scene"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=986e4077fe86b7d2131bfb9984963d397f9be5c6#986e4077fe86b7d2131bfb9984963d397f9be5c6"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=b21ce1647b0fa0e921341b2db8a3e0671dbe7452#b21ce1647b0fa0e921341b2db8a3e0671dbe7452"
 dependencies = [
  "blake3",
  "glyphst-pdf-core",
