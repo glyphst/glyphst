@@ -113,9 +113,39 @@ impl DocumentProgressDisplay {
     }
 }
 
+/// PDF reader backend selection. The GPU modes remain experimental and must
+/// preserve whole-page fallback while the standalone engine is integrated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PdfRenderEngine {
+    #[default]
+    MuPdf,
+    GlyphstGpu,
+    Auto,
+}
+
+impl PdfRenderEngine {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MuPdf => "mupdf",
+            Self::GlyphstGpu => "glyphst-gpu",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub(super) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "mupdf" => Some(Self::MuPdf),
+            "glyphst-gpu" => Some(Self::GlyphstGpu),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DocumentViewSettings {
     pub progress_display: DocumentProgressDisplay,
+    pub pdf_render_engine: PdfRenderEngine,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

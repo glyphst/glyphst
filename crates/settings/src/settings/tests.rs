@@ -138,6 +138,46 @@ document_view {
 }
 
 #[test]
+fn pdf_render_engine_is_experimental_and_opt_in() {
+    assert_eq!(
+        Settings::default().document_view.pdf_render_engine,
+        PdfRenderEngine::MuPdf
+    );
+
+    for (value, expected) in [
+        ("mupdf", PdfRenderEngine::MuPdf),
+        ("glyphst-gpu", PdfRenderEngine::GlyphstGpu),
+        ("auto", PdfRenderEngine::Auto),
+    ] {
+        let settings = parse_settings(&format!(
+            "document_view {{\n    pdf_render_engine \"{value}\"\n}}\n"
+        ))
+        .unwrap();
+        assert_eq!(settings.document_view.pdf_render_engine, expected);
+        assert_eq!(
+            parse_settings(&settings.to_kdl_string())
+                .unwrap()
+                .document_view
+                .pdf_render_engine,
+            expected
+        );
+    }
+
+    let invalid = parse_settings(
+        r#"
+document_view {
+    pdf_render_engine "unknown"
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        invalid.document_view.pdf_render_engine,
+        PdfRenderEngine::MuPdf
+    );
+}
+
+#[test]
 fn parses_and_exports_reduced_motion() {
     let settings = parse_settings(
         r#"

@@ -72,8 +72,8 @@ pub use ai::{
 pub use general::{
     AppLanguage, BehaviorSettings, CopyFormat, DocumentProgressDisplay, DocumentThemeSettings,
     DocumentViewSettings, FontSettings, KeyBindingOverride, KeymapPreset, NewTabSettings,
-    NewTabViewMode, PathChooserBackend, RestoreOnStartup, TabBarVisibility, WindowBackgroundMode,
-    WindowSettings, ui_rems,
+    NewTabViewMode, PathChooserBackend, PdfRenderEngine, RestoreOnStartup, TabBarVisibility,
+    WindowBackgroundMode, WindowSettings, ui_rems,
 };
 pub use model::Settings;
 pub use ocr::{OcrMode, OcrProvider, OcrSettings, PaddleOcrSettings, UnlimitedOcrSettings};
